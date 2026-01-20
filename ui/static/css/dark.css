@@ -1,0 +1,9 @@
+:root {
+    --bg-primary: #1a1a1a;
+    --bg-secondary: #2d2d2d;
+    --text-primary: #e9ecef;
+    --text-secondary: #adb5bd;
+    --border-color: #495057;
+    --accent: #4a9eff;
+    --accent-hover: #6bb0ff;
+}

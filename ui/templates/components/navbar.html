@@ -1,0 +1,21 @@
+{{ define "navbar" }}
+<nav x-data="{ open: false }">
+  <div class="container">
+    <div class="nav-wrapper">
+      <a href="/ui/static" class="logo">MyApp</a>
+
+      <button @click="open = !open" class="mobile-toggle">
+        Menu
+      </button>
+
+      <div class="nav-links" :class="{ 'open': open }">
+        <a href="/ui/static">Home</a>
+        <a href="/about">About</a>
+        <button @click="$store.theme.toggle()">
+          Toggle Theme
+        </button>
+      </div>
+    </div>
+  </div>
+</nav>
+{{ end }}
