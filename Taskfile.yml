@@ -72,6 +72,7 @@ tasks:
             - "HOME=/tmp/{{.cache_dir}}/home"
             - "XDG_CACHE_HOME=/tmp/{{.cache_dir}}/xdg-cache"
             - "XDG_CONFIG_HOME=/tmp/{{.cache_dir}}/xdg-config"
+            - "GOPATH=/tmp/{{.cache_dir}}/go"
             - "GOCACHE=/tmp/{{.cache_dir}}/go-build"
             - "GOMODCACHE=/tmp/{{.cache_dir}}/go/pkg/mod"
             - "GOBIN=/usr/local/bin"
