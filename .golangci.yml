@@ -11,7 +11,6 @@ linters:
     - gosimple
     - staticcheck
     - unused
-    - deadcode
     - errcheck
     - gocritic
     - typecheck
