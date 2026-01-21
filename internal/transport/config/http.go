@@ -2,6 +2,8 @@ package config
 
 import (
 	"time"
+
+	"github.com/soltiHQ/control-plane/internal/transport/middleware"
 )
 
 const (
@@ -29,7 +31,8 @@ type Timeouts struct {
 
 // HttpConfig holds common HTTP-related configuration shared by different transport surfaces.
 type HttpConfig struct {
-	Timeouts Timeouts
+	Timeouts   Timeouts
+	Middleware middleware.HttpChainConfig
 }
 
 // NewHttpConfig returns a Config initialized with the package defaults.
@@ -41,5 +44,6 @@ func NewHttpConfig() HttpConfig {
 			Write:      DefaultWriteTimeout,
 			Idle:       DefaultIdleTimeout,
 		},
+		Middleware: middleware.DefaultHttpChainConfig(),
 	}
 }

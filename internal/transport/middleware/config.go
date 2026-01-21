@@ -37,7 +37,7 @@ func DefaultHttpChainConfig() HttpChainConfig {
 		CORS: &cors.CORSConfig{
 			AllowedOrigins:   []string{"*"},
 			AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
-			AllowedHeaders:   nil, // отражаем Access-Control-Request-Headers
+			AllowedHeaders:   nil,
 			ExposedHeaders:   nil,
 			MaxAge:           10 * time.Minute,
 			AllowCredentials: false,

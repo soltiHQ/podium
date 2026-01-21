@@ -11,6 +11,7 @@ import (
 	discoverv1 "github.com/soltiHQ/control-plane/domain/gen/v1"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/transport/edgeserver/handlers"
+	"github.com/soltiHQ/control-plane/internal/transport/middleware"
 
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
@@ -41,24 +42,33 @@ func NewEdgeServer(cfg Config, logger zerolog.Logger, storage storage.Storage) *
 			mux     = http.NewServeMux()
 		)
 		mux.HandleFunc("POST /v1/sync", handler.Sync)
+
 		s.http = &http.Server{
 			ReadHeaderTimeout: cfg.configHTTP.Timeouts.ReadHeader,
 			ReadTimeout:       cfg.configHTTP.Timeouts.Read,
 			WriteTimeout:      cfg.configHTTP.Timeouts.Write,
 			IdleTimeout:       cfg.configHTTP.Timeouts.Idle,
 			Addr:              cfg.addrHTTP,
-			Handler:           mux,
+
+			Handler: middleware.HttpChain(
+				mux,
+				logger,
+				cfg.configHTTP.Middleware,
+			),
 		}
 	}
 	if cfg.addrGRPC != "" {
 		var (
 			handler = handlers.NewGrpc(logger, storage)
-			srv     = grpc.NewServer(
+			opts    = []grpc.ServerOption{
 				grpc.MaxRecvMsgSize(cfg.configGRPC.Limits.MaxRecvMsgSize),
 				grpc.MaxSendMsgSize(cfg.configGRPC.Limits.MaxSendMsgSize),
 				grpc.ConnectionTimeout(cfg.configGRPC.ConnectionTimeout),
-			)
+			}
 		)
+		opts = append(opts, middleware.GrpcUnaryOptions(logger, cfg.configGRPC.Middleware)...)
+		srv := grpc.NewServer(opts...)
+
 		discoverv1.RegisterDiscoverServiceServer(srv, handler)
 		s.grpcAddr = cfg.addrGRPC
 		s.grpc = srv

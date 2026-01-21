@@ -1,6 +1,10 @@
 package config
 
-import "time"
+import (
+	"time"
+
+	"github.com/soltiHQ/control-plane/internal/transport/middleware"
+)
 
 const (
 	// DefaultMaxRecvMsgSize limits the maximum size of incoming gRPC messages in bytes.
@@ -21,7 +25,8 @@ type Limits struct {
 
 // GrpcConfig holds a common gRPC-related configuration shared by different transport surfaces.
 type GrpcConfig struct {
-	Limits Limits
+	Limits     Limits
+	Middleware middleware.GrpcChainConfig
 	// ConnectionTimeout is how long we wait for a new connection / handshake.
 	ConnectionTimeout time.Duration
 }
@@ -33,6 +38,7 @@ func NewGrpcConfig() GrpcConfig {
 			MaxRecvMsgSize: DefaultMaxRecvMsgSize,
 			MaxSendMsgSize: DefaultMaxSendMsgSize,
 		},
+		Middleware:        middleware.DefaultGrpcChainConfig(),
 		ConnectionTimeout: DefaultConnectionTimeout,
 	}
 }
