@@ -1,0 +1,17 @@
+run:
+  timeout: 5m
+  tests: false
+
+issues:
+  exclude-use-default: false
+
+linters:
+  enable:
+    - govet
+    - gosimple
+    - staticcheck
+    - unused
+    - deadcode
+    - errcheck
+    - gocritic
+    - typecheck

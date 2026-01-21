@@ -4,6 +4,7 @@ import (
 	"time"
 
 	discoverv1 "github.com/soltiHQ/control-plane/domain/gen/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 var _ Entity[*AgentModel] = (*AgentModel)(nil)
@@ -26,7 +27,7 @@ func NewAgentModel(raw *discoverv1.SyncRequest) (*AgentModel, error) {
 	agent := &AgentModel{
 		updatedAt: time.Now(),
 		labels:    make(map[string]string),
-		raw:       raw,
+		raw:       proto.Clone(raw).(*discoverv1.SyncRequest),
 	}
 	if err := agent.validate(); err != nil {
 		return nil, err
@@ -118,24 +119,17 @@ func (a *AgentModel) LabelDelete(key string) {
 
 // Clone creates a deep copy of the agent model.
 func (a *AgentModel) Clone() *AgentModel {
-	var raw discoverv1.SyncRequest
-	raw = *a.raw
-
-	labels := make(map[string]string, len(a.labels))
+	var (
+		clonedRaw = proto.Clone(a.raw).(*discoverv1.SyncRequest)
+		labels    = make(map[string]string, len(a.labels))
+	)
 	for k, v := range a.labels {
 		labels[k] = v
-	}
-	if a.raw.Metadata != nil {
-		metadata := make(map[string]string, len(a.raw.Metadata))
-		for k, v := range a.raw.Metadata {
-			metadata[k] = v
-		}
-		raw.Metadata = metadata
 	}
 	return &AgentModel{
 		updatedAt: a.updatedAt,
 		labels:    labels,
-		raw:       &raw,
+		raw:       clonedRaw,
 	}
 }
 
