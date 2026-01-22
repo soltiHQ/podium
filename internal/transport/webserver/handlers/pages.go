@@ -6,7 +6,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// Pages represents a set of handlers for serving static pages.
+// Pages represent a set of handlers for serving static pages.
 type Pages struct {
 	logger   zerolog.Logger
 	renderer Renderer
@@ -26,7 +26,7 @@ func (p *Pages) Home(w http.ResponseWriter, _ *http.Request) {
 		Title string
 	}
 
-	if err := p.renderer.Render(w, "home.html", ViewData{
+	if err := p.renderer.Render(w, "home", ViewData{
 		Title: "Control Plane",
 	}); err != nil {
 		p.logger.Error().Err(err).Msg("failed to render home page")

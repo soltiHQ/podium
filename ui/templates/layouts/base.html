@@ -1,27 +1,20 @@
 {{ define "base" }}
 <!DOCTYPE html>
-<html lang="ru">
+<html>
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{{ block "title" . }}Default Title{{ end }}</title>
-
-  <link rel="stylesheet" href="/static/css/variables.css">
-  <link rel="stylesheet" href="/static/css/light.css" id="theme">
-  <link rel="stylesheet" href="/static/css/base.css">
-
+  <title>{{ block "title" . }}Default{{ end }}</title>
   {{ block "head" . }}{{ end }}
 </head>
 <body>
+
 {{ template "navbar" . }}
 
 <main>
   {{ block "content" . }}{{ end }}
 </main>
 
-<script defer src="/ui/js/alpine.min.js"></script>
-<script defer src="/ui/js/app.js"></script>
 {{ block "scripts" . }}{{ end }}
+
 </body>
 </html>
 {{ end }}

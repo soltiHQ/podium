@@ -12,7 +12,8 @@ func (s *WebServer) router() http.Handler {
 		handlerStatic = handlers.NewStatic(s.logger)
 		mux           = http.NewServeMux()
 	)
-	mux.Handle("/static/", handlerStatic)
+	mux.HandleFunc("GET /static/", handlerStatic.ServeHTTP)
+	mux.HandleFunc("HEAD /static/", handlerStatic.ServeHTTP)
 	mux.HandleFunc("GET /", handlerPage.Home)
 	return mux
 }

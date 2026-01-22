@@ -1,15 +1,13 @@
+{{ define "home" }}
+{{ template "base" . }}
+{{ end }}
+
 {{ define "title" }}Home Page{{ end }}
 
 {{ define "content" }}
-<div class="container" x-data="{ count: 0 }">
-  <h1>Welcome Home</h1>
-  <p>Count: <span x-text="count"></span></p>
-  <button @click="count++">Increment</button>
-</div>
+<h1>Hello</h1>
 {{ end }}
 
 {{ define "scripts" }}
-<script>
-    console.log('Home page loaded');
-</script>
+<script>console.log("hi")</script>
 {{ end }}
