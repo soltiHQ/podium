@@ -20,10 +20,11 @@ func newRenderer(logger zerolog.Logger) (*renderer, error) {
 	}
 	return &renderer{
 		tmpl:   t,
-		logger: logger.With().Str("component", "renderer").Logger(),
+		logger: logger,
 	}, nil
 }
 
+// Render writes the output of a parsed template to the provided http.ResponseWriter using the supplied data.
 func (r *renderer) Render(w http.ResponseWriter, name string, data any) error {
 	if err := r.tmpl.ExecuteTemplate(w, name, data); err != nil {
 		r.logger.Error().Err(err).

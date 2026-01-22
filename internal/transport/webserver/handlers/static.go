@@ -16,8 +16,7 @@ func NewStatic(logger zerolog.Logger) *Static {
 	fs := http.FS(ui.Static)
 
 	return &Static{
-		logger: logger.With().Str("handler", "static").Logger(),
-		// /static/* → файлы из embed.FS
+		logger:  logger.With().Str("handler", "static").Logger(),
 		handler: http.StripPrefix("/static/", http.FileServer(fs)),
 	}
 }

@@ -40,6 +40,7 @@ func NewWebServer(cfg Config, logger zerolog.Logger) *WebServer {
 			ReadTimeout:       cfg.configHTTP.Timeouts.Read,
 			WriteTimeout:      cfg.configHTTP.Timeouts.Write,
 			IdleTimeout:       cfg.configHTTP.Timeouts.Idle,
+
 			Handler: middleware.HttpChain(
 				s.router(),
 				logger,

@@ -6,11 +6,13 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// Pages represents a set of handlers for serving static pages.
 type Pages struct {
 	logger   zerolog.Logger
 	renderer Renderer
 }
 
+// NewPages creates a new Pages instance.
 func NewPages(logger zerolog.Logger, renderer Renderer) *Pages {
 	return &Pages{
 		logger:   logger.With().Str("handler", "pages").Logger(),
@@ -18,7 +20,8 @@ func NewPages(logger zerolog.Logger, renderer Renderer) *Pages {
 	}
 }
 
-func (p *Pages) Home(w http.ResponseWriter, r *http.Request) {
+// Home serves the home page.
+func (p *Pages) Home(w http.ResponseWriter, _ *http.Request) {
 	type ViewData struct {
 		Title string
 	}
