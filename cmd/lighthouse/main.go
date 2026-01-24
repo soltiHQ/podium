@@ -29,6 +29,7 @@ func main() {
 		edgeserver.NewConfig(
 			edgeserver.WithHTTPAddr(":8081"),
 			edgeserver.WithGRPCAddr(":50051"),
+			edgeserver.WithLogLevel(zerolog.DebugLevel),
 		),
 		logger,
 		store,
@@ -37,6 +38,7 @@ func main() {
 	api := apiserver.NewApiServer(
 		apiserver.NewConfig(
 			apiserver.WithHTTPAddr(":8082"),
+			apiserver.WithLogLevel(zerolog.DebugLevel),
 		),
 		logger,
 		store,
@@ -45,6 +47,7 @@ func main() {
 	web := webserver.NewWebServer(
 		webserver.NewConfig(
 			webserver.WithHTTPAddr(":8080"),
+			webserver.WithLogLevel(zerolog.DebugLevel),
 		),
 		logger,
 	)
