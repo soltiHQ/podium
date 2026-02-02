@@ -16,6 +16,8 @@ type HttpChainConfig struct {
 	Logging bool
 	// CORS, if non-nil, enables CORS middleware with provided settings.
 	CORS *cors.CORSConfig
+	// Auth enables authentication middleware.
+	Auth *AuthConfig
 }
 
 // GrpcChainConfig controls which gRPC middlewares are enabled.
@@ -26,6 +28,8 @@ type GrpcChainConfig struct {
 	Recovery bool
 	// Logging enables request logging.
 	Logging bool
+	// Auth enables authentication interceptor.
+	Auth *AuthConfig
 }
 
 // DefaultHttpChainConfig returns opinionated defaults for an HTTP middleware chain.

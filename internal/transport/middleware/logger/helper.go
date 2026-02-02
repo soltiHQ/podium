@@ -6,8 +6,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
+	
+	"github.com/rs/zerolog"
 	"google.golang.org/grpc/peer"
 )
 

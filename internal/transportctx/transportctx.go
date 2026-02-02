@@ -1,7 +1,11 @@
 // Package transportctx provides helpers for storing transport-scoped contextual values.
 package transportctx
 
-import "context"
+import (
+	"context"
+
+	"github.com/soltiHQ/control-plane/auth"
+)
 
 type key int
 
