@@ -72,7 +72,7 @@ func (s *GenericStore[T]) Get(_ context.Context, id string) (T, error) {
 //   - Invalid or corrupted cursors return storage.ErrInvalidArgument.
 //
 // All returned entities are deep clones isolated from the internal state.
-func (s *GenericStore[T]) List(_ context.Context, predicate func(T) bool, opts storage.ListOptions) (*ListResult[T], error) {
+func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts storage.ListOptions) (*ListResult[T], error) {
 	cur, err := decodeCursor(opts.Cursor)
 	if err != nil {
 		return nil, err
@@ -90,36 +90,36 @@ func (s *GenericStore[T]) List(_ context.Context, predicate func(T) bool, opts s
 			NextCursor: "",
 		}, nil
 	}
+
 	snapshot := make([]T, 0, len(s.data))
+	i := 0
 	for _, entity := range s.data {
+		if i%1000 == 0 {
+			select {
+			case <-ctx.Done():
+				s.mu.RUnlock()
+				return nil, ctx.Err()
+			default:
+			}
+		}
+		i++
+
 		if predicate == nil || predicate(entity) {
 			snapshot = append(snapshot, entity.Clone())
 		}
 	}
 	s.mu.RUnlock()
 
-	sort.Slice(snapshot, func(i, j int) bool {
-		ti, tj := snapshot[i].UpdatedAt(), snapshot[j].UpdatedAt()
-		if !ti.Equal(tj) {
-			return ti.After(tj)
-		}
-		return snapshot[i].ID() < snapshot[j].ID()
-	})
-
+	if err := sortWithContext(ctx, snapshot); err != nil {
+		return nil, err
+	}
 	start := 0
 	if opts.Cursor != "" {
-		for i, entity := range snapshot {
-			if entity.UpdatedAt().Equal(cur.UpdatedAt) && entity.ID() == cur.ID {
-				start = i + 1
-				break
-			}
-			if entity.UpdatedAt().Before(cur.UpdatedAt) {
-				start = i
-				break
-			}
+		start, err = findCursorPosition(ctx, snapshot, cur)
+		if err != nil {
+			return nil, err
 		}
 	}
-
 	end := start + limit + 1
 	if end > len(snapshot) {
 		end = len(snapshot)
@@ -157,4 +157,71 @@ func (s *GenericStore[T]) Delete(_ context.Context, id string) error {
 	}
 	delete(s.data, id)
 	return nil
+}
+
+func sortWithContext[T domain.Entity[T]](ctx context.Context, items []T) error {
+	if len(items) < 10000 {
+		sort.Slice(items, func(i, j int) bool {
+			ti, tj := items[i].UpdatedAt(), items[j].UpdatedAt()
+			if !ti.Equal(tj) {
+				return ti.After(tj)
+			}
+			return items[i].ID() < items[j].ID()
+		})
+		return nil
+	}
+	const chunkSize = 10000
+	numChunks := (len(items) + chunkSize - 1) / chunkSize
+
+	for chunk := 0; chunk < numChunks; chunk++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		var (
+			start = chunk * chunkSize
+			end   = start + chunkSize
+		)
+		if end > len(items) {
+			end = len(items)
+		}
+		sort.Slice(items[start:end], func(i, j int) bool {
+			realI, realJ := start+i, start+j
+			ti, tj := items[realI].UpdatedAt(), items[realJ].UpdatedAt()
+			if !ti.Equal(tj) {
+				return ti.After(tj)
+			}
+			return items[realI].ID() < items[realJ].ID()
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		ti, tj := items[i].UpdatedAt(), items[j].UpdatedAt()
+		if !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		return items[i].ID() < items[j].ID()
+	})
+	return nil
+}
+
+func findCursorPosition[T domain.Entity[T]](ctx context.Context, items []T, cur cursor) (int, error) {
+	for i, entity := range items {
+		if i%1000 == 0 {
+			select {
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			default:
+			}
+		}
+
+		if entity.UpdatedAt().Equal(cur.UpdatedAt) && entity.ID() == cur.ID {
+			return i + 1, nil
+		}
+		if entity.UpdatedAt().Before(cur.UpdatedAt) {
+			return i, nil
+		}
+	}
+	return 0, nil
 }
