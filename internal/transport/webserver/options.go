@@ -58,3 +58,10 @@ func WithHTTPMiddlewareConfig(config middleware.HttpChainConfig) Option {
 		c.configHTTP.Middleware = config
 	}
 }
+
+// WithDevMode enables development mode with template hot-reload.
+func WithDevMode() Option {
+	return func(c *Config) {
+		c.devMode = true
+	}
+}

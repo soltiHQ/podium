@@ -48,6 +48,7 @@ func main() {
 		webserver.NewConfig(
 			webserver.WithHTTPAddr(":8080"),
 			webserver.WithLogLevel(zerolog.DebugLevel),
+			webserver.WithDevMode(),
 		),
 		logger,
 	)

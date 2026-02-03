@@ -24,7 +24,7 @@ type WebServer struct {
 func NewWebServer(cfg Config, logger zerolog.Logger) *WebServer {
 	logger = logger.Level(cfg.logLevel)
 
-	r, err := newRenderer(logger)
+	r, err := newRenderer(logger, cfg.devMode)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("web server: renderer init failed")
 	}

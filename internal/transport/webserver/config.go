@@ -9,10 +9,10 @@ import (
 // Config represents the configuration for the api server.
 type Config struct {
 	configHTTP config.HttpConfig
+	logLevel   zerolog.Level
 
 	addrHTTP string
-
-	logLevel zerolog.Level
+	devMode  bool
 }
 
 // NewConfig creates a new configuration instance.
@@ -20,6 +20,7 @@ func NewConfig(opts ...Option) Config {
 	cfg := Config{
 		configHTTP: config.NewHttpConfig(),
 		logLevel:   zerolog.InfoLevel,
+		devMode:    false,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
