@@ -11,7 +11,6 @@ import (
 )
 
 // testEntity is a minimal implementation of domain.Entity[T] for tests.
-// It intentionally contains a map to verify deep-clone behavior.
 type testEntity struct {
 	id        string
 	updatedAt time.Time
@@ -91,8 +90,6 @@ func TestGenericStore_Upsert_StoresDeepClone(t *testing.T) {
 		meta:      map[string]string{"k": "v1"},
 	}
 	mustUpsert(t, s, orig)
-
-	// mutate original after upsert
 	orig.meta["k"] = "mutated"
 
 	got, err := s.Get(context.Background(), "e1")
@@ -113,13 +110,11 @@ func TestGenericStore_Get_ReturnsDeepClone(t *testing.T) {
 		updatedAt: now,
 		meta:      map[string]string{"k": "v1"},
 	})
-
 	got1, err := s.Get(context.Background(), "e1")
 	if err != nil {
 		t.Fatalf("Get() error: %v", err)
 	}
 
-	// mutate returned entity
 	got1.meta["k"] = "mutated"
 
 	got2, err := s.Get(context.Background(), "e1")
@@ -136,7 +131,6 @@ func TestGenericStore_Delete_Removes(t *testing.T) {
 	now := time.Now()
 
 	mustUpsert(t, s, testEntity{id: "e1", updatedAt: now})
-
 	if err := s.Delete(context.Background(), "e1"); err != nil {
 		t.Fatalf("Delete() error: %v", err)
 	}
@@ -168,11 +162,8 @@ func TestGenericStore_List_SortsByUpdatedAtDescThenIDAsc(t *testing.T) {
 
 	t0 := time.Date(2026, 2, 1, 10, 0, 0, 0, time.UTC)
 	t1 := time.Date(2026, 2, 1, 11, 0, 0, 0, time.UTC)
-
-	// same UpdatedAt -> ID asc
 	mustUpsert(t, s, testEntity{id: "b", updatedAt: t1})
 	mustUpsert(t, s, testEntity{id: "a", updatedAt: t1})
-	// older UpdatedAt -> later in list
 	mustUpsert(t, s, testEntity{id: "c", updatedAt: t0})
 
 	res, err := s.List(context.Background(), nil, storage.ListOptions{Limit: 10})
@@ -183,7 +174,6 @@ func TestGenericStore_List_SortsByUpdatedAtDescThenIDAsc(t *testing.T) {
 	for _, it := range res.Items {
 		gotIDs = append(gotIDs, it.ID())
 	}
-
 	want := []string{"a", "b", "c"}
 	if !reflect.DeepEqual(gotIDs, want) {
 		t.Fatalf("unexpected order: got=%v want=%v", gotIDs, want)
@@ -204,13 +194,10 @@ func TestGenericStore_List_PredicateFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List() error: %v", err)
 	}
-
-	gotIDs := []string{}
+	var gotIDs []string
 	for _, it := range res.Items {
 		gotIDs = append(gotIDs, it.ID())
 	}
-
-	// With same UpdatedAt, IDs asc => b, c
 	want := []string{"b", "c"}
 	if !reflect.DeepEqual(gotIDs, want) {
 		t.Fatalf("unexpected filtered IDs: got=%v want=%v", gotIDs, want)
@@ -222,13 +209,10 @@ func TestGenericStore_List_PaginationWithCursor(t *testing.T) {
 
 	t0 := time.Date(2026, 2, 1, 10, 0, 0, 0, time.UTC)
 	t1 := time.Date(2026, 2, 1, 11, 0, 0, 0, time.UTC)
-
-	// Sorted result should be: a(t1), b(t1), c(t0)
 	mustUpsert(t, s, testEntity{id: "c", updatedAt: t0})
 	mustUpsert(t, s, testEntity{id: "b", updatedAt: t1})
 	mustUpsert(t, s, testEntity{id: "a", updatedAt: t1})
 
-	// page1: limit=2 -> [a, b], nextcursor != ""
 	page1, err := s.List(context.Background(), nil, storage.ListOptions{Limit: 2})
 	if err != nil {
 		t.Fatalf("List(page1) error: %v", err)
@@ -242,8 +226,6 @@ func TestGenericStore_List_PaginationWithCursor(t *testing.T) {
 	if page1.NextCursor == "" {
 		t.Fatalf("expected non-empty NextCursor on page1")
 	}
-
-	// page2: use cursor -> [c], nextcursor empty
 	page2, err := s.List(context.Background(), nil, storage.ListOptions{
 		Limit:  2,
 		Cursor: page1.NextCursor,
@@ -267,8 +249,6 @@ func TestGenericStore_List_InvalidCursor(t *testing.T) {
 	now := time.Now()
 
 	mustUpsert(t, s, testEntity{id: "a", updatedAt: now})
-
-	// decodeCursor should reject garbage
 	_, err := s.List(context.Background(), nil, storage.ListOptions{
 		Limit:  10,
 		Cursor: "definitely-not-a-valid-cursor",
@@ -281,9 +261,7 @@ func TestGenericStore_List_InvalidCursor(t *testing.T) {
 func TestGenericStore_List_ContextCanceled_DuringSnapshot(t *testing.T) {
 	s := NewGenericStore[testEntity]()
 
-	// Ensure there is at least one item so it enters snapshot loop.
 	mustUpsert(t, s, testEntity{id: "a", updatedAt: time.Now()})
-
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -296,14 +274,11 @@ func TestGenericStore_List_ContextCanceled_DuringSnapshot(t *testing.T) {
 func TestGenericStore_List_ContextCanceled_BeforeSortChunks(t *testing.T) {
 	s := NewGenericStore[testEntity]()
 
-	// Create > 10000 items to force chunked sort path.
 	base := time.Date(2026, 2, 1, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 10001; i++ {
-		// Same UpdatedAt is fine; stable ordering handled by ID asc.
 		id := "id-" + leftPadInt(i, 5)
 		mustUpsert(t, s, testEntity{id: id, updatedAt: base})
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -315,8 +290,7 @@ func TestGenericStore_List_ContextCanceled_BeforeSortChunks(t *testing.T) {
 
 // leftPadInt is a tiny helper to make IDs lexicographically sortable (id-00001 etc).
 func leftPadInt(n int, width int) string {
-	// no fmt to keep this file dependency-light
-	s := []byte{}
+	var s []byte
 	x := n
 	if x == 0 {
 		s = append(s, '0')
