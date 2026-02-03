@@ -82,35 +82,33 @@ func (s *GenericStore[T]) List(_ context.Context, predicate func(T) bool, opts s
 	if limit <= 0 || limit > storage.MaxListLimit {
 		limit = storage.DefaultListLimit
 	}
-
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	if len(s.data) == 0 {
+		s.mu.RUnlock()
 		return &ListResult[T]{
 			Items:      nil,
 			NextCursor: "",
 		}, nil
 	}
-
-	candidates := make([]T, 0, len(s.data))
+	snapshot := make([]T, 0, len(s.data))
 	for _, entity := range s.data {
 		if predicate == nil || predicate(entity) {
-			candidates = append(candidates, entity)
+			snapshot = append(snapshot, entity.Clone())
 		}
 	}
+	s.mu.RUnlock()
 
-	sort.Slice(candidates, func(i, j int) bool {
-		ti, tj := candidates[i].UpdatedAt(), candidates[j].UpdatedAt()
+	sort.Slice(snapshot, func(i, j int) bool {
+		ti, tj := snapshot[i].UpdatedAt(), snapshot[j].UpdatedAt()
 		if !ti.Equal(tj) {
 			return ti.After(tj)
 		}
-		return candidates[i].ID() < candidates[j].ID()
+		return snapshot[i].ID() < snapshot[j].ID()
 	})
 
 	start := 0
 	if opts.Cursor != "" {
-		for i, entity := range candidates {
+		for i, entity := range snapshot {
 			if entity.UpdatedAt().Equal(cur.UpdatedAt) && entity.ID() == cur.ID {
 				start = i + 1
 				break
@@ -121,11 +119,12 @@ func (s *GenericStore[T]) List(_ context.Context, predicate func(T) bool, opts s
 			}
 		}
 	}
+
 	end := start + limit + 1
-	if end > len(candidates) {
-		end = len(candidates)
+	if end > len(snapshot) {
+		end = len(snapshot)
 	}
-	page := candidates[start:end]
+	page := snapshot[start:end]
 
 	var nextCursor string
 	if len(page) > limit {
@@ -136,13 +135,8 @@ func (s *GenericStore[T]) List(_ context.Context, predicate func(T) bool, opts s
 		})
 		page = page[:limit]
 	}
-
-	result := make([]T, len(page))
-	for i, entity := range page {
-		result[i] = entity.Clone()
-	}
 	return &ListResult[T]{
-		Items:      result,
+		Items:      page,
 		NextCursor: nextCursor,
 	}, nil
 }
