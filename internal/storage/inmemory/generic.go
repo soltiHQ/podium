@@ -86,7 +86,7 @@ func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts
 	if len(s.data) == 0 {
 		s.mu.RUnlock()
 		return &ListResult[T]{
-			Items:      nil,
+			Items:      make([]T, 0),
 			NextCursor: "",
 		}, nil
 	}
@@ -110,7 +110,7 @@ func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts
 	}
 	s.mu.RUnlock()
 
-	if err := sortWithContext(ctx, snapshot); err != nil {
+	if err = sortWithContext(ctx, snapshot); err != nil {
 		return nil, err
 	}
 	start := 0
@@ -120,6 +120,14 @@ func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts
 			return nil, err
 		}
 	}
+
+	if start >= len(snapshot) {
+		return &ListResult[T]{
+			Items:      make([]T, 0),
+			NextCursor: "",
+		}, nil
+	}
+
 	end := start + limit + 1
 	if end > len(snapshot) {
 		end = len(snapshot)
