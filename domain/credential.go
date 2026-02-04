@@ -15,17 +15,13 @@ const (
 
 // CredentialModel is a domain model that describes user authentication credentials.
 type CredentialModel struct {
-	// createdAt is when the credential was first created.
 	createdAt time.Time
-	// updatedAt is the last time the credential was modified.
 	updatedAt time.Time
-	// id is the unique identifier for this credential.
-	id string
-	// userID links this credential to a specific user.
+
 	userID string
-	// data stores type-specific authentication data (e.g., password hash).
-	data map[string]string
-	// credType defines the authentication mechanism (password, OIDC, API key).
+	id     string
+
+	data     map[string]string
 	credType CredentialType
 }
 

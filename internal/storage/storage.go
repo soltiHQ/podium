@@ -16,6 +16,9 @@ type UserListResult = ListResult[*domain.UserModel]
 // CredentialListResult contains a page of credential results with pagination support.
 type CredentialListResult = ListResult[*domain.CredentialModel]
 
+// RoleListResult contains a page of role results with pagination support.
+type RoleListResult = ListResult[*domain.RoleModel]
+
 // AgentStore defines persistence operations for agent domain objects.
 type AgentStore interface {
 	// UpsertAgent creates a new agent or replaces an existing one.
@@ -174,9 +177,73 @@ type CredentialStore interface {
 	DeleteCredential(ctx context.Context, id string) error
 }
 
+// RoleStore defines persistence operations for role domain objects.
+type RoleStore interface {
+	// UpsertRole creates a new role or replaces an existing one.
+	//
+	// If a role with the same ID exists, it is fully replaced.
+	// Otherwise, a new role record is created.
+	//
+	// Returns:
+	//   - ErrInvalidArgument if the role is nil or violates storage-level invariants.
+	//   - ErrInternal for unexpected storage failures.
+	UpsertRole(ctx context.Context, r *domain.RoleModel) error
+
+	// GetRole retrieves a role by its unique identifier.
+	//
+	// Returns:
+	//   - ErrNotFound if no role with the given ID exists.
+	//   - ErrInvalidArgument if the ID format is invalid.
+	//   - ErrInternal for unexpected storage failures.
+	GetRole(ctx context.Context, id string) (*domain.RoleModel, error)
+
+	// GetRoles retrieves roles by their IDs.
+	//
+	// Returns:
+	//   - ErrInvalidArgument if ids are empty or contain empty elements.
+	//   - ErrInternal for unexpected storage failures.
+	GetRoles(ctx context.Context, ids []string) ([]*domain.RoleModel, error)
+
+	// GetRoleByName retrieves a role by its name.
+	//
+	// Name is a human-readable identifier and should be unique within the system.
+	//
+	// Returns:
+	//   - ErrNotFound if no role with the given name exists.
+	//   - ErrInvalidArgument if the name is empty.
+	//   - ErrInternal for unexpected storage failures.
+	GetRoleByName(ctx context.Context, name string) (*domain.RoleModel, error)
+
+	// ListRoles retrieves roles matching the provided filter with pagination support.
+	//
+	// Results are ordered by (UpdatedAt DESC, ID ASC) to ensure:
+	//   - Recently updated roles appear first.
+	//   - Stable ordering when UpdatedAt values are identical.
+	//   - Cursor-based pagination works correctly across requests.
+	//
+	// The filter parameter is implementation-specific. Pass nil to retrieve all roles.
+	// Use filter constructors from the concrete storage package (e.g., inmemory.NewRoleFilter()).
+	//
+	// Pagination is cursor-based to handle large result sets safely.
+	//
+	// Returns:
+	//   - ErrInvalidArgument if a filter type is incompatible or the cursor is malformed.
+	//   - ErrInternal for unexpected storage failures.
+	ListRoles(ctx context.Context, filter RoleFilter, opts ListOptions) (*RoleListResult, error)
+
+	// DeleteRole removes a role by its unique identifier.
+	//
+	// Returns:
+	//   - ErrNotFound if no role with the given ID exists.
+	//   - ErrInvalidArgument if the ID format is invalid.
+	//   - ErrInternal for unexpected storage failures.
+	DeleteRole(ctx context.Context, id string) error
+}
+
 // Storage aggregates all domain-specific storage capabilities.
 type Storage interface {
+	CredentialStore
 	AgentStore
 	UserStore
-	CredentialStore
+	RoleStore
 }

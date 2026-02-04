@@ -9,6 +9,7 @@ import (
 var (
 	_ storage.AgentFilter = (*Filter)(nil)
 	_ storage.UserFilter  = (*UserFilter)(nil)
+	_ storage.RoleFilter  = (*RoleFilter)(nil)
 )
 
 // Filter provides predicate-based filtering for in-memory agent queries.
@@ -106,28 +107,18 @@ func (f *UserFilter) ByDisabled(disabled bool) *UserFilter {
 	return f
 }
 
-// ByRole adds a predicate matching users who have the specified role.
-func (f *UserFilter) ByRole(role domain.Role) *UserFilter {
+// ByRoleID adds a predicate matching users who have the specified role id.
+func (f *UserFilter) ByRoleID(roleID string) *UserFilter {
 	f.predicates = append(f.predicates, func(u *domain.UserModel) bool {
-		for _, r := range u.Roles() {
-			if r == role {
-				return true
-			}
-		}
-		return false
+		return u.RoleHas(roleID)
 	})
 	return f
 }
 
-// ByScope adds a predicate matching users who have the specified scope.
-func (f *UserFilter) ByScope(scope domain.Scope) *UserFilter {
+// ByPermission adds a predicate matching users who have the specified direct permission.
+func (f *UserFilter) ByPermission(p domain.Permission) *UserFilter {
 	f.predicates = append(f.predicates, func(u *domain.UserModel) bool {
-		for _, s := range u.Scopes() {
-			if s == scope {
-				return true
-			}
-		}
-		return false
+		return u.PermissionHas(p)
 	})
 	return f
 }
@@ -147,3 +138,47 @@ func (f *UserFilter) Matches(u *domain.UserModel) bool {
 
 // IsUserFilter implements the storage.UserFilter marker interface.
 func (f *UserFilter) IsUserFilter() {}
+
+// RoleFilter provides predicate-based filtering for in-memory role queries.
+//
+// Filters are composed by chaining builder methods, each adding a predicate
+// that must be satisfied for a role to match. All predicates are ANDed together.
+type RoleFilter struct {
+	predicates []func(*domain.RoleModel) bool
+}
+
+// NewRoleFilter creates a new empty filter that matches all roles.
+func NewRoleFilter() *RoleFilter {
+	return &RoleFilter{
+		predicates: make([]func(*domain.RoleModel) bool, 0),
+	}
+}
+
+// ByName adds a predicate matching roles with the specified name.
+func (f *RoleFilter) ByName(name string) *RoleFilter {
+	f.predicates = append(f.predicates, func(r *domain.RoleModel) bool {
+		return r.Name() == name
+	})
+	return f
+}
+
+// ByPermission adds a predicate matching roles that contain the specified permission.
+func (f *RoleFilter) ByPermission(p domain.Permission) *RoleFilter {
+	f.predicates = append(f.predicates, func(r *domain.RoleModel) bool {
+		return r.PermissionHas(p)
+	})
+	return f
+}
+
+// Matches evaluate whether a role satisfies all predicates in this filter.
+func (f *RoleFilter) Matches(r *domain.RoleModel) bool {
+	for _, pred := range f.predicates {
+		if !pred(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// IsRoleFilter implements the storage.RoleFilter marker interface.
+func (f *RoleFilter) IsRoleFilter() {}

@@ -11,6 +11,8 @@ var (
 	ErrInvalidURL = errors.New("invalid URL format")
 	// ErrEmptyID indicates that entity ID is empty.
 	ErrEmptyID = errors.New("id cannot be empty")
+	// ErrEmptyName indicates that the entity name is empty.
+	ErrEmptyName = errors.New("name cannot be empty")
 	// ErrInvalidSubject indicates that a subject is invalid or empty.
 	ErrInvalidSubject = errors.New("subject cannot be empty")
 )

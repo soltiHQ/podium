@@ -13,21 +13,24 @@ var (
 	_ storage.AgentStore      = (*Store)(nil)
 	_ storage.UserStore       = (*Store)(nil)
 	_ storage.CredentialStore = (*Store)(nil)
+	_ storage.RoleStore       = (*Store)(nil)
 )
 
 // Store provides an in-memory implementation of storage.Storage using GenericStore.
 type Store struct {
-	agents      *GenericStore[*domain.AgentModel]
-	users       *GenericStore[*domain.UserModel]
 	credentials *GenericStore[*domain.CredentialModel]
+	agents      *GenericStore[*domain.AgentModel]
+	roles       *GenericStore[*domain.RoleModel]
+	users       *GenericStore[*domain.UserModel]
 }
 
 // New creates a new in-memory store with an empty state.
 func New() *Store {
 	return &Store{
-		agents:      NewGenericStore[*domain.AgentModel](),
-		users:       NewGenericStore[*domain.UserModel](),
 		credentials: NewGenericStore[*domain.CredentialModel](),
+		agents:      NewGenericStore[*domain.AgentModel](),
+		roles:       NewGenericStore[*domain.RoleModel](),
+		users:       NewGenericStore[*domain.UserModel](),
 	}
 }
 
@@ -230,4 +233,120 @@ func (s *Store) ListCredentialsByUser(ctx context.Context, userID string) ([]*do
 // Returns storage.ErrNotFound if the credential doesn't exist, storage.ErrInvalidArgument for empty IDs.
 func (s *Store) DeleteCredential(ctx context.Context, id string) error {
 	return s.credentials.Delete(ctx, id)
+}
+
+// UpsertRole inserts or fully replaces a role.
+//
+// Delegates to GenericStore, which handles cloning and validation.
+// Returns storage.ErrInvalidArgument if the role is nil or has an empty ID.
+func (s *Store) UpsertRole(ctx context.Context, r *domain.RoleModel) error {
+	if r == nil {
+		return storage.ErrInvalidArgument
+	}
+	return s.roles.Upsert(ctx, r)
+}
+
+// GetRole retrieves a role by ID.
+//
+// Returns a deep clone to prevent external mutations affecting the stored state.
+// Returns storage.ErrNotFound if no role exists, storage.ErrInvalidArgument for empty IDs.
+func (s *Store) GetRole(ctx context.Context, id string) (*domain.RoleModel, error) {
+	return s.roles.Get(ctx, id)
+}
+
+// GetRoles retrieves roles by their IDs.
+//
+// Returns storage.ErrInvalidArgument if ids are empty or contain empty elements.
+// Returns storage.ErrNotFound if any role is missing.
+func (s *Store) GetRoles(ctx context.Context, ids []string) ([]*domain.RoleModel, error) {
+	if len(ids) == 0 {
+		return nil, storage.ErrInvalidArgument
+	}
+	for _, id := range ids {
+		if id == "" {
+			return nil, storage.ErrInvalidArgument
+		}
+	}
+
+	// Deduplicate but preserve order of first occurrence.
+	seen := make(map[string]struct{}, len(ids))
+	unique := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+
+	out := make([]*domain.RoleModel, 0, len(unique))
+	for _, id := range unique {
+		r, err := s.roles.Get(ctx, id)
+		if err != nil {
+			return nil, storage.ErrNotFound
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// GetRoleByName retrieves a role by its name.
+//
+// This method performs a linear scan and is O(n) - acceptable for in-memory implementation
+// with small datasets. Production implementations should use indexed lookups.
+//
+// Returns storage.ErrNotFound if no role with the name exists, storage.ErrInvalidArgument for empty name.
+func (s *Store) GetRoleByName(ctx context.Context, name string) (*domain.RoleModel, error) {
+	if name == "" {
+		return nil, storage.ErrInvalidArgument
+	}
+
+	result, err := s.roles.List(ctx, func(r *domain.RoleModel) bool {
+		return r.Name() == name
+	}, storage.ListOptions{Limit: 1})
+	if err != nil {
+		return nil, err
+	}
+	if len(result.Items) == 0 {
+		return nil, storage.ErrNotFound
+	}
+	return result.Items[0], nil
+}
+
+// ListRoles retrieves roles with filtering and cursor-based pagination.
+//
+// Filtering:
+//   - Pass nil filter to retrieve all roles.
+//   - Pass *inmemory.RoleFilter created via NewRoleFilter() for predicate-based filtering.
+//   - Passing filters from other storage implementations returns storage.ErrInvalidArgument.
+//
+// Pagination:
+//   - Results are ordered by (UpdatedAt DESC, ID ASC) for stable cursor navigation.
+//   - Cursor is an opaque base64-encoded token containing position information.
+//   - Invalid or corrupted cursors return storage.ErrInvalidArgument.
+//
+// All returned roles are deep clones isolated from the internal state.
+func (s *Store) ListRoles(ctx context.Context, filter storage.RoleFilter, opts storage.ListOptions) (*storage.RoleListResult, error) {
+	var predicate func(*domain.RoleModel) bool
+
+	if filter != nil {
+		f, ok := filter.(*RoleFilter)
+		if !ok {
+			return nil, storage.ErrInvalidArgument
+		}
+		predicate = f.Matches
+	}
+
+	result, err := s.roles.List(ctx, predicate, opts)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// DeleteRole removes a role by ID.
+//
+// Returns storage.ErrNotFound if the role doesn't exist, storage.ErrInvalidArgument for empty IDs.
+func (s *Store) DeleteRole(ctx context.Context, id string) error {
+	return s.roles.Delete(ctx, id)
 }
