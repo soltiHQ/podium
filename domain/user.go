@@ -68,19 +68,13 @@ func (u *UserModel) UpdatedAt() time.Time {
 // RoleIDsAll returns assigned role IDs.
 func (u *UserModel) RoleIDsAll() []string {
 	out := make([]string, 0, len(u.roleIDs))
-	for _, id := range u.roleIDs {
-		out = append(out, id)
-	}
-	return out
+	return append(out, u.roleIDs...)
 }
 
 // PermissionsAll returns per-user permissions.
 func (u *UserModel) PermissionsAll() []Permission {
 	out := make([]Permission, 0, len(u.permissions))
-	for _, p := range u.permissions {
-		out = append(out, p)
-	}
-	return out
+	return append(out, u.permissions...)
 }
 
 // RoleAdd assigns a role to the user.
@@ -157,14 +151,10 @@ func (u *UserModel) PermissionHas(p Permission) bool {
 
 // Clone creates a deep copy.
 func (u *UserModel) Clone() *UserModel {
-	roleIDs := make([]string, 0, len(u.roleIDs))
-	for _, id := range u.roleIDs {
-		roleIDs = append(roleIDs, id)
-	}
-	perms := make([]Permission, 0, len(u.permissions))
-	for _, p := range u.permissions {
-		perms = append(perms, p)
-	}
+	var (
+		roleIDs = make([]string, 0, len(u.roleIDs))
+		perms   = make([]Permission, 0, len(u.permissions))
+	)
 	return &UserModel{
 		id:          u.id,
 		subject:     u.subject,
@@ -172,7 +162,7 @@ func (u *UserModel) Clone() *UserModel {
 		name:        u.name,
 		disabled:    u.disabled,
 		updatedAt:   u.updatedAt,
-		roleIDs:     roleIDs,
-		permissions: perms,
+		roleIDs:     append(roleIDs, u.roleIDs...),
+		permissions: append(perms, u.permissions...),
 	}
 }

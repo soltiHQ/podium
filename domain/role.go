@@ -49,10 +49,7 @@ func (r *RoleModel) UpdatedAt() time.Time {
 // PermissionsAll returns a copy of the role permissions.
 func (r *RoleModel) PermissionsAll() []Permission {
 	out := make([]Permission, 0, len(r.permissions))
-	for _, p := range r.permissions {
-		out = append(out, p)
-	}
-	return out
+	return append(out, r.permissions...)
 }
 
 // PermissionHas checks whether the role has the given permission.
@@ -105,13 +102,10 @@ func (r *RoleModel) Rename(name string) error {
 // Clone creates a deep copy of the role model.
 func (r *RoleModel) Clone() *RoleModel {
 	out := make([]Permission, 0, len(r.permissions))
-	for _, p := range r.permissions {
-		out = append(out, p)
-	}
 	return &RoleModel{
 		id:          r.id,
 		name:        r.name,
 		updatedAt:   r.updatedAt,
-		permissions: out,
+		permissions: append(out, r.permissions...),
 	}
 }
