@@ -33,22 +33,17 @@ func (h *Http) AgentList(w http.ResponseWriter, r *http.Request) {
 		ctx    = r.Context()
 		logger = logctx.From(ctx, h.logger)
 	)
+
 	if r.Method != http.MethodGet {
-		logger.Warn().Str("method", r.Method).Msg("invalid method")
-		if err := response.NotAllowed(ctx, w, "method not supported"); err != nil {
-			logctx.Error(ctx, h.logger, err, "failed to write not-allowed response")
-		}
+		_ = response.NotAllowed(ctx, w, "method not supported")
 		return
 	}
 
-	_, err := backend.AgentList(ctx, logger, h.storage)
+	agents, err := backend.AgentList(ctx, logger, h.storage)
 	if err != nil {
-		if err = response.InternalError(ctx, w, "internal error"); err != nil {
-			logctx.Error(ctx, h.logger, err, "failed to write internal-error response")
-		}
+		logger.Error().Err(err).Msg("agent list failed")
+		response.FromError(ctx, w, err)
 		return
 	}
-	if err = response.OK(ctx, w, "mock"); err != nil {
-		logctx.Error(ctx, h.logger, err, "failed to write ok response")
-	}
+	_ = response.OK(ctx, w, agents)
 }

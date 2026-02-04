@@ -35,7 +35,7 @@ func NewApiServer(cfg Config, logger zerolog.Logger, storage storage.Storage) *A
 			handler = handlers.NewHttp(logger, storage)
 			mux     = http.NewServeMux()
 		)
-		mux.HandleFunc("GET /v1/agents/", handler.AgentList)
+		mux.HandleFunc("GET /v1/agents", handler.AgentList)
 
 		s.http = &http.Server{
 			ReadHeaderTimeout: cfg.configHTTP.Timeouts.ReadHeader,

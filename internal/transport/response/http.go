@@ -10,7 +10,7 @@ import (
 
 // ErrorResponse is an API-safe error envelope.
 type ErrorResponse struct {
-	Code      string `json:"code"`
+	Code      int    `json:"code"`
 	Message   string `json:"message,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 }
@@ -33,7 +33,7 @@ func JSON(w http.ResponseWriter, status int, data any) error {
 // Automatically includes request ID from context if available.
 func Error(ctx context.Context, w http.ResponseWriter, status int, message string) error {
 	resp := ErrorResponse{
-		Code:    http.StatusText(status),
+		Code:    status,
 		Message: message,
 	}
 	if reqID, ok := transportctx.RequestID(ctx); ok {
