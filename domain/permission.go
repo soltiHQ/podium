@@ -13,8 +13,8 @@ const (
 	PermUsersDelete Permission = "users:delete"
 )
 
-// AllPermissions is useful for bootstrap (admin) and validation.
-var AllPermissions = []Permission{
+// PermissionsAll is useful for bootstrap (admin) and validation.
+var PermissionsAll = []Permission{
 	PermAgentsGet,
 	PermAgentsEdit,
 	PermUsersGet,

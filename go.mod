@@ -6,6 +6,7 @@ require (
 	github.com/felixge/httpsnoop v1.0.4
 	github.com/rs/zerolog v1.34.0
 	github.com/segmentio/ksuid v1.0.4
+	golang.org/x/crypto v0.44.0
 	google.golang.org/grpc v1.78.0
 	google.golang.org/protobuf v1.36.11
 )
