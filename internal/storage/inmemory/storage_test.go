@@ -851,9 +851,9 @@ func TestStore_UpsertCredential_IsolatesMutations(t *testing.T) {
 func TestStore_GetCredentialByUserAndType(t *testing.T) {
 	ctx := context.Background()
 	s := New()
-
+	
 	c1 := newTestCredential(t, "c1", "user-1", domain.CredentialTypePassword, map[string]string{"hash": "h"})
-	c2 := newTestCredential(t, "c2", "user-1", domain.CredentialTypeOIDC, map[string]string{"sub": "x"})
+	c2 := newTestCredential(t, "c2", "user-1", domain.CredentialTypeAPIKey, map[string]string{"sub": "x"})
 	c3 := newTestCredential(t, "c3", "user-2", domain.CredentialTypePassword, map[string]string{"hash": "h2"})
 
 	for _, c := range []*domain.CredentialModel{c1, c2, c3} {
@@ -862,7 +862,7 @@ func TestStore_GetCredentialByUserAndType(t *testing.T) {
 		}
 	}
 
-	got, err := s.GetCredentialByUserAndType(ctx, "user-1", domain.CredentialTypeOIDC)
+	got, err := s.GetCredentialByUserAndType(ctx, "user-1", domain.CredentialTypeAPIKey)
 	if err != nil {
 		t.Fatalf("GetCredentialByUserAndType() failed: %v", err)
 	}
@@ -872,7 +872,7 @@ func TestStore_GetCredentialByUserAndType(t *testing.T) {
 	if got.UserID() != "user-1" {
 		t.Fatalf("expected user-1, got %s", got.UserID())
 	}
-	if got.Type() != domain.CredentialTypeOIDC {
+	if got.Type() != domain.CredentialTypeAPIKey {
 		t.Fatalf("expected OIDC, got %v", got.Type())
 	}
 }
@@ -901,7 +901,7 @@ func TestStore_GetCredentialByUserAndType_NotFound(t *testing.T) {
 		t.Fatalf("UpsertCredential() failed: %v", err)
 	}
 
-	_, err := s.GetCredentialByUserAndType(ctx, "user-1", domain.CredentialTypeOIDC)
+	_, err := s.GetCredentialByUserAndType(ctx, "user-1", domain.CredentialTypeAPIKey)
 	if err == nil {
 		t.Fatal("expected error for missing credential type")
 	}
@@ -916,7 +916,7 @@ func TestStore_ListCredentialsByUser(t *testing.T) {
 	s := New()
 
 	c1 := newTestCredential(t, "c1", "user-1", domain.CredentialTypePassword, map[string]string{"hash": "h"})
-	c2 := newTestCredential(t, "c2", "user-1", domain.CredentialTypeOIDC, map[string]string{"sub": "x"})
+	c2 := newTestCredential(t, "c2", "user-1", domain.CredentialTypeAPIKey, map[string]string{"sub": "x"})
 	c3 := newTestCredential(t, "c3", "user-2", domain.CredentialTypePassword, map[string]string{"hash": "h2"})
 
 	for _, c := range []*domain.CredentialModel{c1, c2, c3} {

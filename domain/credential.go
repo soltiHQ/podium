@@ -10,7 +10,6 @@ type CredentialType string
 const (
 	CredentialTypePassword CredentialType = "password"
 	CredentialTypeAPIKey   CredentialType = "api_key"
-	CredentialTypeOIDC     CredentialType = "oidc"
 )
 
 // CredentialModel is a domain model that describes user authentication credentials.
