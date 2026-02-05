@@ -12,6 +12,7 @@ func (s *WebServer) router() http.Handler {
 		handlerDemo   = handlers.NewDemo(s.logger)
 		handlerStatic = handlers.NewStatic(s.logger)
 		handlerErrors = handlers.NewErrors(s.logger)
+		hendlerAuth   = handlers.NewAuth(s.logger)
 		mux           = http.NewServeMux()
 	)
 
@@ -23,6 +24,7 @@ func (s *WebServer) router() http.Handler {
 	mux.HandleFunc("/api/demo/time", handlerDemo.Time)
 
 	// pages
+	mux.HandleFunc("/signin", hendlerAuth.SignIn)
 	mux.HandleFunc("/about", handlerPage.About)
 	mux.HandleFunc("/503", handlerErrors.ServiceUnavailable)
 
