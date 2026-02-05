@@ -70,7 +70,7 @@ func main() {
 			apiserver.WithHTTPMiddlewareConfig(func() middleware.HttpChainConfig {
 				h := middleware.DefaultHttpChainConfig()
 				h.Auth = &middleware.AuthConfig{
-					Enabled:  true,
+					Enabled:  false,
 					Verifier: jwtVerifier,
 				}
 				return h
