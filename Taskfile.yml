@@ -193,3 +193,9 @@ tasks:
     cmds:
       - tailwindcss -c tailwind.config.cjs -i ui/static/css/app.css -o ui/static/css/tailwindcss.css --watch
     silent: true
+
+  control-plane/watch:
+    desc: "Run control plane with hot reload"
+    dir: "{{.git_root}}"
+    cmds:
+      - air
