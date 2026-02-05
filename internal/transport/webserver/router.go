@@ -11,20 +11,29 @@ func (s *WebServer) router() http.Handler {
 		handlerPage   = handlers.NewPages(s.logger)
 		handlerDemo   = handlers.NewDemo(s.logger)
 		handlerStatic = handlers.NewStatic(s.logger)
+		handlerErrors = handlers.NewErrors(s.logger)
 		mux           = http.NewServeMux()
 	)
 
-	// Static assets
-	mux.HandleFunc("GET /static/", handlerStatic.ServeHTTP)
-	mux.HandleFunc("HEAD /static/", handlerStatic.ServeHTTP)
+	// static
+	mux.Handle("/static/", handlerStatic)
 
-	// Pages (templ-rendered)
-	mux.HandleFunc("GET /", handlerPage.Home)
-	mux.HandleFunc("GET /about", handlerPage.About)
+	// api
+	mux.HandleFunc("/api/demo/status", handlerDemo.Status)
+	mux.HandleFunc("/api/demo/time", handlerDemo.Time)
 
-	// HTMX API endpoints
-	mux.HandleFunc("GET /api/demo/status", handlerDemo.Status)
-	mux.HandleFunc("GET /api/demo/time", handlerDemo.Time)
+	// pages
+	mux.HandleFunc("/about", handlerPage.About)
+	mux.HandleFunc("/503", handlerErrors.ServiceUnavailable)
+
+	// home + fallback 404
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			handlerErrors.NotFound(w, r)
+			return
+		}
+		handlerPage.Home(w, r)
+	})
 
 	return mux
 }
