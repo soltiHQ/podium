@@ -1,0 +1,86 @@
+package pages
+
+import "github.com/soltiHQ/control-plane/ui/components"
+
+templ Home() {
+	@components.Layout("Home - Lighthouse") {
+		<div class="max-w-4xl mx-auto space-y-8">
+			<!-- Hero section -->
+			<div class="text-center py-12">
+				<h1 class="text-5xl font-bold text-gray-900 dark:text-white mb-4">
+					Hello Main
+				</h1>
+				<p class="text-xl text-gray-600 dark:text-gray-300">
+					Welcome to Lighthouse Control Plane
+				</p>
+			</div>
+
+			<!-- Features grid -->
+			<div class="grid md:grid-cols-2 gap-6">
+				<!-- HTMX Demo Card -->
+				<div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 border border-gray-200 dark:border-gray-700">
+					<h2 class="text-2xl font-semibold mb-4 text-gray-900 dark:text-white">
+						HTMX Demo
+					</h2>
+					<p class="text-gray-600 dark:text-gray-300 mb-4">
+						Click to load server data dynamically
+					</p>
+
+					<button
+						hx-get="/api/demo/status"
+						hx-target="#htmx-result"
+						hx-swap="innerHTML"
+						class="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 active:bg-blue-800 transition font-medium">
+						Load Status
+					</button>
+
+					<div id="htmx-result" class="mt-4 p-4 rounded bg-gray-50 dark:bg-gray-700 min-h-[60px]">
+						<span class="text-gray-500 dark:text-gray-400 text-sm">Click button to load...</span>
+					</div>
+				</div>
+
+				<!-- Alpine.js Demo Card -->
+				<div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 border border-gray-200 dark:border-gray-700">
+					<h2 class="text-2xl font-semibold mb-4 text-gray-900 dark:text-white">
+						Alpine.js Demo
+					</h2>
+					<p class="text-gray-600 dark:text-gray-300 mb-4">
+						Interactive counter with reactive state
+					</p>
+
+					<div x-data="{ count: 0 }" class="space-y-4">
+						<button
+							@click="count++"
+							class="w-full px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 active:bg-green-800 transition font-medium">
+							Increment Counter
+						</button>
+
+						<div class="p-4 rounded bg-gray-50 dark:bg-gray-700 text-center">
+							<span class="text-3xl font-bold text-gray-900 dark:text-white" x-text="count"></span>
+							<p class="text-sm text-gray-500 dark:text-gray-400 mt-1">clicks</p>
+						</div>
+
+						<button
+							@click="count = 0"
+							class="w-full px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 active:bg-gray-800 transition text-sm">
+							Reset
+						</button>
+					</div>
+				</div>
+			</div>
+
+			<!-- Tech stack info -->
+			<div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-6">
+				<h3 class="text-lg font-semibold text-blue-900 dark:text-blue-100 mb-2">
+					Tech Stack
+				</h3>
+				<ul class="space-y-1 text-blue-800 dark:text-blue-200">
+					<li>✓ <strong>Templ</strong> - Type-safe Go templating</li>
+					<li>✓ <strong>HTMX</strong> - Dynamic HTML updates</li>
+					<li>✓ <strong>Alpine.js</strong> - Lightweight reactivity</li>
+					<li>✓ <strong>Tailwind CSS</strong> - Utility-first styling</li>
+				</ul>
+			</div>
+		</div>
+	}
+}

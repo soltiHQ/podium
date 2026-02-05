@@ -83,7 +83,7 @@ tasks:
 
   alpinejs/download:
     desc: Download alpinejs min
-    dir: "{{.git_root}}/ui/js"
+    dir: "{{.git_root}}/ui/static/js"
     cmds:
       - curl -o alpine.min.js https://cdn.jsdelivr.net/npm/alpinejs@{{.alpinejs_version}}/dist/cdn.min.js
     silent: true
@@ -95,6 +95,13 @@ tasks:
       - task: _golang/tool
         vars:
           CMD: "buf generate"
+    silent: true
+
+  go/templ:
+    desc: Generate templ files
+    dir: "{{.git_root}}"
+    cmds:
+      - templ generate
     silent: true
 
   go/tidy:

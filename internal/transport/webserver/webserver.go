@@ -17,22 +17,18 @@ type WebServer struct {
 
 	logger zerolog.Logger
 	cfg    Config
-	render *renderer
+	// render больше НЕ НУЖЕН - templ сам рендерит
 }
 
 // NewWebServer creates a new web UI server instance.
 func NewWebServer(cfg Config, logger zerolog.Logger) *WebServer {
 	logger = logger.Level(cfg.logLevel)
 
-	r, err := newRenderer(logger, cfg.devMode)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("web server: renderer init failed")
-	}
 	s := &WebServer{
 		logger: logger.With().Str("server", "web").Logger(),
 		cfg:    cfg,
-		render: r,
 	}
+
 	if cfg.addrHTTP != "" {
 		s.http = &http.Server{
 			Addr:              cfg.addrHTTP,

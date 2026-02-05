@@ -1,0 +1,84 @@
+package pages
+
+import "github.com/soltiHQ/control-plane/ui/components"
+
+templ About() {
+	@components.Layout("About - Lighthouse") {
+		<div class="max-w-3xl mx-auto">
+			<div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8 border border-gray-200 dark:border-gray-700">
+				<h1 class="text-4xl font-bold text-gray-900 dark:text-white mb-6">
+					Hello About
+				</h1>
+
+				<div class="prose prose-gray dark:prose-invert max-w-none">
+					<p class="text-lg text-gray-600 dark:text-gray-300 mb-4">
+						This is the about page demonstrating the integration of:
+					</p>
+
+					<div class="space-y-4 my-6">
+						<div class="flex items-start gap-3">
+							<div class="flex-shrink-0 w-8 h-8 bg-blue-100 dark:bg-blue-900 rounded-full flex items-center justify-center">
+								<span class="text-blue-600 dark:text-blue-400 font-bold">1</span>
+							</div>
+							<div>
+								<h3 class="font-semibold text-gray-900 dark:text-white">Templ Templates</h3>
+								<p class="text-gray-600 dark:text-gray-300">Type-safe Go templating with compile-time checking</p>
+							</div>
+						</div>
+
+						<div class="flex items-start gap-3">
+							<div class="flex-shrink-0 w-8 h-8 bg-green-100 dark:bg-green-900 rounded-full flex items-center justify-center">
+								<span class="text-green-600 dark:text-green-400 font-bold">2</span>
+							</div>
+							<div>
+								<h3 class="font-semibold text-gray-900 dark:text-white">HTMX</h3>
+								<p class="text-gray-600 dark:text-gray-300">Modern interactions without heavy JavaScript frameworks</p>
+							</div>
+						</div>
+
+						<div class="flex items-start gap-3">
+							<div class="flex-shrink-0 w-8 h-8 bg-purple-100 dark:bg-purple-900 rounded-full flex items-center justify-center">
+								<span class="text-purple-600 dark:text-purple-400 font-bold">3</span>
+							</div>
+							<div>
+								<h3 class="font-semibold text-gray-900 dark:text-white">Alpine.js</h3>
+								<p class="text-gray-600 dark:text-gray-300">Lightweight reactivity for interactive components</p>
+							</div>
+						</div>
+
+						<div class="flex items-start gap-3">
+							<div class="flex-shrink-0 w-8 h-8 bg-cyan-100 dark:bg-cyan-900 rounded-full flex items-center justify-center">
+								<span class="text-cyan-600 dark:text-cyan-400 font-bold">4</span>
+							</div>
+							<div>
+								<h3 class="font-semibold text-gray-900 dark:text-white">Tailwind CSS</h3>
+								<p class="text-gray-600 dark:text-gray-300">Utility-first CSS framework for rapid UI development</p>
+							</div>
+						</div>
+					</div>
+
+					<!-- HTMX example on about page -->
+					<div class="mt-8 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
+						<h3 class="font-semibold text-gray-900 dark:text-white mb-3">Live Example</h3>
+						<button
+							hx-get="/api/demo/time"
+							hx-target="#time-display"
+							hx-swap="innerHTML"
+							class="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 transition text-sm font-medium">
+							Get Server Time
+						</button>
+						<div id="time-display" class="mt-3 p-3 bg-white dark:bg-gray-800 rounded text-sm">
+							Click to fetch...
+						</div>
+					</div>
+				</div>
+
+				<div class="mt-8 pt-6 border-t border-gray-200 dark:border-gray-700">
+					<a href="/" class="text-blue-600 dark:text-blue-400 hover:underline">
+						← Back to Home
+					</a>
+				</div>
+			</div>
+		</div>
+	}
+}

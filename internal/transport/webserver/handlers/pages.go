@@ -4,32 +4,35 @@ import (
 	"net/http"
 
 	"github.com/rs/zerolog"
+	"github.com/soltiHQ/control-plane/ui/pages"
 )
 
-// Pages represent a set of handlers for serving static pages.
+// Pages serves templ-compiled page components.
 type Pages struct {
-	logger   zerolog.Logger
-	renderer Renderer
+	logger zerolog.Logger
 }
 
-// NewPages creates a new Pages instance.
-func NewPages(logger zerolog.Logger, renderer Renderer) *Pages {
+// NewPages creates a new Pages handler.
+// NOTE: renderer is no longer needed - templ handles rendering.
+func NewPages(logger zerolog.Logger) *Pages {
 	return &Pages{
-		logger:   logger.With().Str("handler", "pages").Logger(),
-		renderer: renderer,
+		logger: logger.With().Str("handler", "pages").Logger(),
 	}
 }
 
-// Home serves the home page.
-func (p *Pages) Home(w http.ResponseWriter, _ *http.Request) {
-	type ViewData struct {
-		Title string
-	}
-
-	if err := p.renderer.Render(w, "home", ViewData{
-		Title: "Control Plane",
-	}); err != nil {
+// Home renders the home page.
+func (p *Pages) Home(w http.ResponseWriter, r *http.Request) {
+	if err := pages.Home().Render(r.Context(), w); err != nil {
 		p.logger.Error().Err(err).Msg("failed to render home page")
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+}
+
+// About renders the about page.
+func (p *Pages) About(w http.ResponseWriter, r *http.Request) {
+	if err := pages.About().Render(r.Context(), w); err != nil {
+		p.logger.Error().Err(err).Msg("failed to render about page")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
