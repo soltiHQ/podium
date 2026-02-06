@@ -1,12 +1,37 @@
 package server
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
-	// ErrRunnerExited indicates a runner exited unexpectedly.
-	ErrRunnerExited = errors.New("server: runner exited unexpectedly")
-	// ErrNoRunners indicates the server has no runners to start.
+	// ErrEmptyRunnerName indicates the runner name is empty.
+	ErrEmptyRunnerName = errors.New("server: runner has empty name")
+	// ErrNoRunners indicates the Server was created without any runners.
 	ErrNoRunners = errors.New("server: no runners configured")
-	// ErrNilContext indicates a nil context was provided.
-	ErrNilContext = errors.New("server: nil context")
+	// ErrNilRunner indicates one of the provided runners is nil.
+	ErrNilRunner = errors.New("server: nil runner")
 )
+
+// RunnerError wraps a runner-specific error with its name and phase.
+type RunnerError struct {
+	Runner string
+	Phase  string
+	Err    error
+}
+
+func (e *RunnerError) Error() string {
+	return fmt.Sprintf("server: runner %s %s: %v", e.Runner, e.Phase, e.Err)
+}
+
+func (e *RunnerError) Unwrap() error { return e.Err }
+
+// RunnerExitedError indicates a runner stopped without an explicit shutdown request.
+type RunnerExitedError struct {
+	Runner string
+}
+
+func (e *RunnerExitedError) Error() string {
+	return fmt.Sprintf("server: runner %s exited unexpectedly", e.Runner)
+}

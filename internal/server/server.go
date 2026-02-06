@@ -4,122 +4,159 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/rs/zerolog"
 )
 
+type runnerExit struct {
+	name string
+	err  error
+}
+
 // Server orchestrates the lifecycle of multiple runners.
 type Server struct {
-	cfg Config
-	log zerolog.Logger
+	logger zerolog.Logger
+	cfg    Config
 
-	runners []Runner
-	stopped atomic.Bool
+	runners      []Runner
+	shutdownOnce atomic.Bool
 }
 
-// New creates a Server. Cfg is normalized with defaults.
-func New(cfg Config, log zerolog.Logger, runners ...Runner) *Server {
-	rs := make([]Runner, len(runners))
-	copy(rs, runners)
-
-	return &Server{
-		cfg:     cfg.withDefaults(),
-		log:     log,
-		runners: rs,
+// New creates a Server.
+func New(cfg Config, logger zerolog.Logger, runners ...Runner) (*Server, error) {
+	if len(runners) == 0 {
+		return nil, ErrNoRunners
 	}
+	cfg = cfg.withDefaults()
+
+	rs := make([]Runner, 0, len(runners))
+	for _, r := range runners {
+		if r == nil {
+			return nil, ErrNilRunner
+		}
+
+		if strings.TrimSpace(r.Name()) == "" {
+			return nil, fmt.Errorf("server: runner has empty name: %w", ErrEmptyRunnerName)
+		}
+		rs = append(rs, r)
+	}
+	return &Server{
+		runners: rs,
+		cfg:     cfg,
+		logger:  logger,
+	}, nil
 }
 
-// Run starts all runners and blocks until shutdown completes.
+// Run starts all runners.
 func (s *Server) Run(ctx context.Context) error {
 	if ctx == nil {
-		return ErrNilContext
+		ctx = context.Background()
 	}
-	if len(s.runners) == 0 {
-		return ErrNoRunners
-	}
-	trigger := make(chan error, 1)
+	var (
+		runCtx, runCancel = context.WithCancel(ctx)
 
-	var wg sync.WaitGroup
+		exitCh = make(chan runnerExit, 1)
+		wg     sync.WaitGroup
+		e      error
+	)
+	defer runCancel()
+
+	wg.Add(len(s.runners))
 	for _, r := range s.runners {
-		wg.Add(1)
-		go func(r Runner) {
+		r := r
+		go func() {
 			defer wg.Done()
 
-			s.log.Info().Str("runner", r.Name()).Msg("starting")
-			err := r.Start(ctx)
+			s.logger.Info().
+				Str("runner", r.Name()).
+				Msg("runner starting")
 
-			if err != nil && !errors.Is(err, context.Canceled) {
-				s.log.Error().Err(err).Str("runner", r.Name()).Msg("exited")
-			} else {
-				s.log.Info().Str("runner", r.Name()).Msg("exited")
-			}
-
+			err := r.Start(runCtx)
 			select {
-			case trigger <- err:
+			case exitCh <- runnerExit{name: r.Name(), err: err}:
 			default:
 			}
-		}(r)
+
+			if err != nil && !errors.Is(err, context.Canceled) {
+				s.logger.Error().
+					Err(err).
+					Str("runner", r.Name()).
+					Msg("runner exited")
+				return
+			}
+			s.logger.Info().
+				Str("runner", r.Name()).
+				Msg("runner exited")
+		}()
 	}
 
-	var result error
 	select {
 	case <-ctx.Done():
-		result = ctx.Err()
-	case err := <-trigger:
-		if err != nil {
-			result = err
+		e = ctx.Err()
+	case ex := <-exitCh:
+		if ex.err == nil {
+			e = &RunnerExitedError{Runner: ex.name}
+		} else if errors.Is(ex.err, context.Canceled) {
+			e = ex.err
 		} else {
-			result = ErrRunnerExited
+			e = &RunnerError{Runner: ex.name, Phase: "start", Err: ex.err}
 		}
 	}
+	runCancel()
 
-	if err := s.Shutdown(context.Background()); err != nil {
-		s.log.Error().Err(err).Msg("shutdown completed with error")
-	}
-
+	shutdownErr := s.Shutdown(context.Background())
 	wg.Wait()
 
-	return result
+	if shutdownErr != nil {
+		return errors.Join(e, shutdownErr)
+	}
+	return e
 }
 
-// Shutdown gracefully stops all runners in reverse registration order.
-// Idempotent: only the first call performs work.
+// Shutdown gracefully stops all runners.
 func (s *Server) Shutdown(ctx context.Context) error {
 	if ctx == nil {
-		return ErrNilContext
+		ctx = context.Background()
 	}
-	if !s.stopped.CompareAndSwap(false, true) {
+	if !s.shutdownOnce.CompareAndSwap(false, true) {
 		return nil
 	}
-	return s.doShutdown(ctx)
-}
 
-func (s *Server) doShutdown(ctx context.Context) error {
-	if s.cfg.ShutdownTimeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, s.cfg.ShutdownTimeout)
-		defer cancel()
-	}
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, s.cfg.ShutdownTimeout)
+	defer cancel()
 
-	s.log.Info().
+	s.logger.Info().
 		Dur("timeout", s.cfg.ShutdownTimeout).
 		Int("runners", len(s.runners)).
-		Msg("shutting down")
+		Msg("shutdown starting")
 
 	var errs []error
-
 	for i := len(s.runners) - 1; i >= 0; i-- {
 		r := s.runners[i]
 
-		s.log.Info().Str("runner", r.Name()).Msg("stopping")
-
+		s.logger.Info().
+			Str("runner", r.Name()).
+			Msg("runner stopping")
 		if err := r.Stop(ctx); err != nil {
-			s.log.Error().Err(err).Str("runner", r.Name()).Msg("stop failed")
-			errs = append(errs, fmt.Errorf("%s: %w", r.Name(), err))
+			wrapped := &RunnerError{Runner: r.Name(), Phase: "stop", Err: err}
+			s.logger.Error().
+				Err(err).
+				Str("runner", r.Name()).
+				Msg("runner stop failed")
+			errs = append(errs, wrapped)
+		} else {
+			s.logger.Info().
+				Str("runner", r.Name()).
+				Msg("runner stopped")
 		}
 	}
-
+	s.logger.Info().
+		Dur("elapsed", time.Since(start)).
+		Msg("shutdown finished")
 	return errors.Join(errs...)
 }
