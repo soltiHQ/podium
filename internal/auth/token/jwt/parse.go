@@ -23,7 +23,6 @@ func mapClaimsFromIdentity(id *identity.Identity, now time.Time) jwtlib.MapClaim
 		return jwtlib.MapClaims{}
 	}
 
-	// Don't mutate caller-owned struct in the long run — but ok for now.
 	if id.IssuedAt.IsZero() {
 		id.IssuedAt = now
 	}
@@ -59,7 +58,6 @@ func identityFromMapClaims(mc jwtlib.MapClaims, issuer, audience string) (*ident
 	nbf := time.Unix(int64FromClaim(mc["nbf"]), 0)
 	exp := time.Unix(int64FromClaim(mc["exp"]), 0)
 
-	// REQUIRED: sub, uid, exp, sid, jti
 	if sub == "" || uid == "" || jti == "" || sid == "" || exp.IsZero() {
 		return nil, auth.ErrInvalidToken
 	}
@@ -141,16 +139,13 @@ func mapClaimsFromClaims(cl token.Claims) jwtlib.MapClaims {
 		claimSessionID: cl.SessionID,
 	}
 
-	// aud can be string or array per JWT; jwt/v5 accepts both.
 	if len(cl.Audience) == 1 {
 		mc["aud"] = cl.Audience[0]
 	} else if len(cl.Audience) > 1 {
-		// Keep as []string to avoid []any allocations.
 		mc["aud"] = cl.Audience
 	}
 
 	if len(cl.Permissions) != 0 {
-		// Encode as []string (compact, stable).
 		perms := make([]string, 0, len(cl.Permissions))
 		for _, p := range cl.Permissions {
 			if p == "" {
@@ -163,7 +158,6 @@ func mapClaimsFromClaims(cl token.Claims) jwtlib.MapClaims {
 		}
 	}
 
-	// Drop empty standard claims (optional, keeps token smaller).
 	if mc["iss"] == "" {
 		delete(mc, "iss")
 	}
