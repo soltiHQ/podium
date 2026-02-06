@@ -6,6 +6,8 @@ import (
 )
 
 var (
+	// ErrDuplicateRunnerName indicates the Server was created with duplicate runner names.
+	ErrDuplicateRunnerName = errors.New("server: duplicate runner name")
 	// ErrEmptyRunnerName indicates the runner name is empty.
 	ErrEmptyRunnerName = errors.New("server: runner has empty name")
 	// ErrNoRunners indicates the Server was created without any runners.

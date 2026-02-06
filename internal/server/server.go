@@ -33,15 +33,20 @@ func New(cfg Config, logger zerolog.Logger, runners ...Runner) (*Server, error) 
 	}
 	cfg = cfg.withDefaults()
 
+	seen := make(map[string]struct{}, len(runners))
 	rs := make([]Runner, 0, len(runners))
 	for _, r := range runners {
 		if r == nil {
 			return nil, ErrNilRunner
 		}
-
-		if strings.TrimSpace(r.Name()) == "" {
+		name := strings.TrimSpace(r.Name())
+		if name == "" {
 			return nil, fmt.Errorf("server: runner has empty name: %w", ErrEmptyRunnerName)
 		}
+		if _, dup := seen[name]; dup {
+			return nil, fmt.Errorf("%w: %q", ErrDuplicateRunnerName, name)
+		}
+		seen[name] = struct{}{}
 		rs = append(rs, r)
 	}
 	return &Server{
@@ -53,9 +58,6 @@ func New(cfg Config, logger zerolog.Logger, runners ...Runner) (*Server, error) 
 
 // Run starts all runners.
 func (s *Server) Run(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	var (
 		runCtx, runCancel = context.WithCancel(ctx)
 
@@ -119,9 +121,6 @@ func (s *Server) Run(ctx context.Context) error {
 
 // Shutdown gracefully stops all runners.
 func (s *Server) Shutdown(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if !s.shutdownOnce.CompareAndSwap(false, true) {
 		return nil
 	}
@@ -135,26 +134,39 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		Int("runners", len(s.runners)).
 		Msg("shutdown starting")
 
-	var errs []error
+	var (
+		mu   sync.Mutex
+		errs []error
+		wg   sync.WaitGroup
+	)
+
 	for i := len(s.runners) - 1; i >= 0; i-- {
 		r := s.runners[i]
 
-		s.logger.Info().
-			Str("runner", r.Name()).
-			Msg("runner stopping")
-		if err := r.Stop(ctx); err != nil {
-			wrapped := &RunnerError{Runner: r.Name(), Phase: "stop", Err: err}
-			s.logger.Error().
-				Err(err).
-				Str("runner", r.Name()).
-				Msg("runner stop failed")
-			errs = append(errs, wrapped)
-		} else {
-			s.logger.Info().
-				Str("runner", r.Name()).
-				Msg("runner stopped")
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			s.logger.Info().Str("runner", r.Name()).Msg("runner stopping")
+
+			if err := r.Stop(ctx); err != nil {
+				wrapped := &RunnerError{Runner: r.Name(), Phase: "stop", Err: err}
+
+				s.logger.Error().
+					Err(err).
+					Str("runner", r.Name()).
+					Msg("runner stop failed")
+
+				mu.Lock()
+				errs = append(errs, wrapped)
+				mu.Unlock()
+			} else {
+				s.logger.Info().Str("runner", r.Name()).Msg("runner stopped")
+			}
+		}()
 	}
+	wg.Wait()
+
 	s.logger.Info().
 		Dur("elapsed", time.Since(start)).
 		Msg("shutdown finished")

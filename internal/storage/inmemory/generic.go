@@ -185,7 +185,6 @@ func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts
 	snapshot := make([]T, 0, len(s.data))
 	i := 0
 	for _, entity := range s.data {
-		// make long scans cancellable
 		if i%1000 == 0 {
 			select {
 			case <-ctx.Done():
