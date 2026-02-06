@@ -85,6 +85,24 @@ func (c *Credential) SetSecret(key, value string) error {
 	return nil
 }
 
+// DeleteSecret removes a secret value by key and bumps UpdatedAt if it existed.
+//
+// The operation is idempotent: deleting a missing key is a no-op.
+func (c *Credential) DeleteSecret(key string) error {
+	if key == "" {
+		return domain.ErrFieldEmpty
+	}
+	if c.secrets == nil {
+		return nil
+	}
+	if _, ok := c.secrets[key]; !ok {
+		return nil
+	}
+	delete(c.secrets, key)
+	c.updatedAt = time.Now()
+	return nil
+}
+
 // Clone creates a deep copy of the credential model.
 func (c *Credential) Clone() *Credential {
 	return &Credential{
