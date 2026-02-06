@@ -1,11 +1,11 @@
 package credentials
 
 import (
-	"crypto/subtle"
 	"errors"
 
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/auth"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -33,30 +33,29 @@ func NewPasswordCredential(id, userID, plainPassword string, cost int) (*model.C
 		return nil, err
 	}
 
-	cred.SetSecret(PasswordHashKey, string(hash))
+	err = cred.SetSecret(PasswordHashKey, string(hash))
+	if err != nil {
+		return nil, err
+	}
 	return cred, nil
 }
 
 // VerifyPassword checks if the provided plaintext password matches the stored hash.
 func VerifyPassword(cred *model.Credential, plainPassword string) error {
 	if cred == nil {
-		return ErrPasswordMismatch
+		return auth.ErrPasswordMismatch
 	}
 	if cred.AuthKind() != kind.Password {
-		return ErrWrongAuthKind
+		return auth.ErrWrongAuthKind
 	}
 
 	hash, ok := cred.Secret(PasswordHashKey)
 	if !ok || hash == "" {
-		return ErrMissingPasswordHash
-	}
-
-	if subtle.ConstantTimeEq(int32(len(hash)), 0) == 1 {
-		return ErrMissingPasswordHash
+		return auth.ErrMissingPasswordHash
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(plainPassword)); err != nil {
 		if errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
-			return ErrPasswordMismatch
+			return auth.ErrPasswordMismatch
 		}
 		return err
 	}

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 
+	"github.com/soltiHQ/control-plane/internal/auth"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -22,20 +23,9 @@ func newRefreshToken() (raw string, hash []byte, err error) {
 
 func hashRefreshToken(raw string) ([]byte, error) {
 	if raw == "" {
-		return nil, ErrInvalidRefresh
+		return nil, auth.ErrInvalidRefresh
 	}
 	h := sha3.New256()
 	_, _ = h.Write([]byte(raw))
 	return h.Sum(nil), nil
-}
-
-func constantTimeEq(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	var v byte
-	for i := 0; i < len(a); i++ {
-		v |= a[i] ^ b[i]
-	}
-	return v == 0
 }

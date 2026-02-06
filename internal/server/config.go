@@ -8,7 +8,7 @@ const (
 
 // Config controls server behavior.
 type Config struct {
-	// ShutdownTimeout is the maximum time allowed for graceful shutdown.
+	// ShutdownTimeout is the maximum time allowed for a graceful shutdown.
 	ShutdownTimeout time.Duration
 }
 

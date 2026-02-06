@@ -5,73 +5,60 @@ import (
 	"errors"
 
 	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/credentials"
-	"github.com/soltiHQ/control-plane/internal/auth/identity"
-	"github.com/soltiHQ/control-plane/internal/auth/rbac"
+	"github.com/soltiHQ/control-plane/internal/auth/providers"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
-// Request contains input credentials for password authentication.
-type Request struct {
-	Subject  string
-	Password string
-}
-
-// Provider authenticates a principal using a password credential.
+// Provider authenticates.
 type Provider struct {
-	store    storage.Storage
-	resolver *rbac.Resolver
+	store storage.Storage
 }
 
-func New(store storage.Storage, resolver *rbac.Resolver) *Provider {
-	return &Provider{store: store, resolver: resolver}
+// New creates a new password provider.
+func New(store storage.Storage) *Provider {
+	return &Provider{store: store}
 }
 
-func (p *Provider) Kind() kind.Auth { return kind.Password }
+// Kind returns the provider kind.
+func (*Provider) Kind() kind.Auth { return kind.Password }
 
-// Authenticate validates subject+password and returns an identity with effective permissions.
-func (p *Provider) Authenticate(ctx context.Context, req *Request) (*identity.Identity, error) {
-	if p.store == nil || p.resolver == nil {
-		return nil, storage.ErrInvalidArgument
-	}
-	if req == nil || req.Subject == "" || req.Password == "" {
-		return nil, ErrInvalidCredentials
+// Authenticate authenticates the user.
+func (p *Provider) Authenticate(ctx context.Context, req providers.Request) (*providers.Result, error) {
+	if p.store == nil {
+		return nil, auth.ErrInvalidRequest
 	}
 
-	u, err := p.store.GetUserBySubject(ctx, req.Subject)
+	r, ok := req.(Request)
+	if !ok {
+		return nil, auth.ErrInvalidRequest
+	}
+	if r.Subject == "" || r.Password == "" {
+		return nil, auth.ErrInvalidCredentials
+	}
+
+	u, err := p.store.GetUserBySubject(ctx, r.Subject)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			return nil, ErrInvalidCredentials
+			return nil, auth.ErrInvalidCredentials
 		}
 		return nil, err
 	}
 	if u.Disabled() {
-		return nil, ErrInvalidCredentials
+		return nil, auth.ErrInvalidCredentials
 	}
 
 	cred, err := p.store.GetCredentialByUserAndAuth(ctx, u.ID(), kind.Password)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			return nil, ErrInvalidCredentials
+			return nil, auth.ErrInvalidCredentials
 		}
 		return nil, err
-	}
-	if err = credentials.VerifyPassword(cred, req.Password); err != nil {
-		return nil, ErrInvalidCredentials
 	}
 
-	perms, err := p.resolver.ResolveUserPermissions(ctx, u)
-	if err != nil {
-		if errors.Is(err, rbac.ErrUnauthorized) {
-			return nil, ErrInvalidCredentials
-		}
-		return nil, err
+	if err = credentials.VerifyPassword(cred, r.Password); err != nil {
+		return nil, auth.ErrInvalidCredentials
 	}
-	return &identity.Identity{
-		Subject:     u.Subject(),
-		Email:       u.Email(),
-		Name:        u.Name(),
-		UserID:      u.ID(),
-		Permissions: perms,
-	}, nil
+	return &providers.Result{User: u, Credential: cred}, nil
 }

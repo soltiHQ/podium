@@ -6,6 +6,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
@@ -20,13 +21,9 @@ func NewResolver(store storage.Storage) *Resolver {
 }
 
 // ResolveUserPermissions returns the effective permission set for the given user.
-//
-// Effective permissions are the union of:
-//   - permissions directly assigned to the user
-//   - permissions granted by roles assigned to the user
 func (r *Resolver) ResolveUserPermissions(ctx context.Context, u *model.User) ([]kind.Permission, error) {
 	if r == nil || r.store == nil || u == nil {
-		return nil, ErrInvalidArgument
+		return nil, auth.ErrInvalidArgument
 	}
 
 	var (
@@ -57,7 +54,7 @@ func (r *Resolver) ResolveUserPermissions(ctx context.Context, u *model.User) ([
 		}
 	}
 	if len(set) == 0 {
-		return nil, ErrUnauthorized
+		return []kind.Permission{}, nil
 	}
 
 	out := make([]kind.Permission, 0, len(set))

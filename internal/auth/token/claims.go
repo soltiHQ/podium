@@ -14,8 +14,8 @@ type Claims struct {
 
 	Issuer    string
 	Subject   string
-	UserID    string
 	TokenID   string
+	UserID    string
 	SessionID string
 
 	Audience    []string

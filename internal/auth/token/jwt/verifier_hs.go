@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	jwtlib "github.com/golang-jwt/jwt/v5"
+	"github.com/soltiHQ/control-plane/internal/auth"
 
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
@@ -34,15 +35,15 @@ func NewHSVerifier(issuer, audience string, secret []byte, clock token.Clock) *H
 // Verify parses and validates a raw JWT token string.
 func (v *HSVerifier) Verify(_ context.Context, rawToken string) (*identity.Identity, error) {
 	if rawToken == "" {
-		return nil, token.ErrInvalidToken
+		return nil, auth.ErrInvalidToken
 	}
 	if v.issuer == "" || v.audience == "" || len(v.secret) == 0 {
-		return nil, token.ErrInvalidToken
+		return nil, auth.ErrInvalidToken
 	}
 
 	parsed, err := jwtlib.Parse(rawToken, func(t *jwtlib.Token) (any, error) {
 		if t.Method == nil || t.Method.Alg() != jwtlib.SigningMethodHS256.Alg() {
-			return nil, token.ErrInvalidToken
+			return nil, auth.ErrInvalidToken
 		}
 		return v.secret, nil
 	},
@@ -55,24 +56,23 @@ func (v *HSVerifier) Verify(_ context.Context, rawToken string) (*identity.Ident
 		switch {
 		case errors.Is(err, jwtlib.ErrTokenExpired),
 			errors.Is(err, jwtlib.ErrTokenNotValidYet):
-			return nil, token.ErrExpiredToken
+			return nil, auth.ErrExpiredToken
 		default:
-			return nil, token.ErrInvalidToken
+			return nil, auth.ErrInvalidToken
 		}
 	}
 	if parsed == nil || !parsed.Valid {
-		return nil, token.ErrInvalidToken
+		return nil, auth.ErrInvalidToken
 	}
 
 	mc, ok := parsed.Claims.(jwtlib.MapClaims)
 	if !ok {
-		return nil, token.ErrInvalidToken
+		return nil, auth.ErrInvalidToken
 	}
 
 	id, err := identityFromMapClaims(mc, v.issuer, v.audience)
 	if err != nil {
 		return nil, err
 	}
-	id.RawToken = rawToken
 	return id, nil
 }
