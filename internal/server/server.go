@@ -33,8 +33,10 @@ func New(cfg Config, logger zerolog.Logger, runners ...Runner) (*Server, error) 
 	}
 	cfg = cfg.withDefaults()
 
-	seen := make(map[string]struct{}, len(runners))
-	rs := make([]Runner, 0, len(runners))
+	var (
+		seen = make(map[string]struct{}, len(runners))
+		rs   = make([]Runner, 0, len(runners))
+	)
 	for _, r := range runners {
 		if r == nil {
 			return nil, ErrNilRunner
@@ -139,7 +141,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		errs []error
 		wg   sync.WaitGroup
 	)
-
 	for i := len(s.runners) - 1; i >= 0; i-- {
 		r := s.runners[i]
 

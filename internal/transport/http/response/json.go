@@ -1,39 +1,56 @@
 package response
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 
 	"github.com/soltiHQ/control-plane/internal/transportctx"
 )
 
-// ErrorResponse is an API-safe error envelope.
-type ErrorResponse struct {
+// ErrorBody is the standard API error shape.
+type ErrorBody struct {
 	Code      int    `json:"code"`
 	Message   string `json:"message,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 }
 
-func writeJSON(w http.ResponseWriter, status int, data any) error {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
+// JSONResponder writes JSON responses.
+type JSONResponder struct{}
 
-	if data == nil {
-		return nil
+// NewJSON creates a JSONResponder.
+func NewJSON() *JSONResponder { return &JSONResponder{} }
+
+// Respond writes v.Data as a JSON body.
+func (j *JSONResponder) Respond(w http.ResponseWriter, _ *http.Request, code int, v *View) {
+	if v == nil || v.Data == nil {
+		w.WriteHeader(code)
+		return
 	}
-	return json.NewEncoder(w).Encode(data)
+	j.encode(w, code, v.Data)
 }
 
-func writeJSONError(ctx context.Context, w http.ResponseWriter, status int, message string) error {
-	resp := ErrorResponse{
-		Code:    status,
-		Message: message,
+// Error writes an ErrorBody as JSON with the request ID from context.
+func (j *JSONResponder) Error(w http.ResponseWriter, r *http.Request, code int, msg string) {
+	body := ErrorBody{
+		Code:    code,
+		Message: msg,
 	}
-	if reqID, ok := transportctx.RequestID(ctx); ok {
-		resp.RequestID = reqID
+	if rid, ok := transportctx.RequestID(r.Context()); ok {
+		body.RequestID = rid
 	}
-	return writeJSON(w, status, resp)
+	j.encode(w, code, body)
+}
+
+// encode marshals data first to avoid partial writes on encoding errors.
+func (j *JSONResponder) encode(w http.ResponseWriter, code int, data any) {
+	buf, err := json.Marshal(data)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"code":500,"message":"response encoding error"}`))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	_, _ = w.Write(buf)
 }
