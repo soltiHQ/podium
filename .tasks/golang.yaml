@@ -7,7 +7,7 @@ tasks:
     desc: Run 'buf generate'
     dir: "{{.git_root}}"
     cmds:
-      - task: :go-action
+      - task: :isolation:go-action
         vars: { CMD: "buf generate" }
 
   tidy:
@@ -15,7 +15,7 @@ tasks:
     dir: "{{.git_root}}"
     deps: [ grpcgen ]
     cmds:
-      - task: :go-action
+      - task: :isolation:go-action
         vars: { CMD: "go mod tidy" }
 
   vendor:
@@ -23,7 +23,7 @@ tasks:
     dir: "{{.git_root}}"
     deps: [ tidy ]
     cmds:
-      - task: :go-action
+      - task: :isolation:go-action
         vars: { CMD: "go mod vendor" }
 
   test:
@@ -31,7 +31,7 @@ tasks:
     dir: "{{.git_root}}"
     deps: [ vendor ]
     cmds:
-      - task: :go-action
+      - task: :isolation:go-action
         vars: { CMD: "go test ./..." }
 
   lint:
@@ -39,7 +39,7 @@ tasks:
     dir: "{{.git_root}}"
     deps: [ vendor ]
     cmds:
-      - task: :go-action
+      - task: :isolation:go-action
         vars: { CMD: "golangci-lint run" }
 
   fumpt:
@@ -47,5 +47,5 @@ tasks:
     dir: "{{.git_root}}"
     deps: [ vendor ]
     cmds:
-      - task: :go-action
+      - task: :isolation:go-action
         vars: { CMD: 'gofumpt -l -w $(git ls-files "*.go")' }
