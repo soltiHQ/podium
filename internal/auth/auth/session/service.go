@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
@@ -16,25 +17,12 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
-// RBACResolver defines the contract for resolving effective permissions
-// of an authenticated user according to the system's RBAC policy.
-//
-// Implementations are responsible for computing the union of:
-//   - permissions granted via roles associated with the user
-//   - permissions directly assigned to the user
-//
-// The resolver encapsulates authorization policy and may apply additional rules.
-//
-// Contract:
-//   - Must return a non-nil error if the user has no effective permissions or if resolution fails.
-//   - Must not perform authentication, token issuance, or session management.
-//   - Must return a deduplicated set of permissions.
-//   - Must not mutate the provided user instance.
+// RBACResolver defines the contract for resolving effective permissions.
 type RBACResolver interface {
 	ResolveUserPermissions(ctx context.Context, u *model.User) ([]kind.Permission, error)
 }
 
-// Service provides the core business logic.
+// Service provides session/token business logic.
 type Service struct {
 	store storage.Storage
 
@@ -72,38 +60,65 @@ func New(
 	}
 }
 
-// Login authenticates by (subject, password), creates a session, returns access+refresh.
-func (s *Service) Login(ctx context.Context, subject, password string) (*TokenPair, *identity.Identity, error) {
-	if s.store == nil || s.issuer == nil || s.rbac == nil {
-		return nil, nil, auth.ErrInvalidRequest
+func (s *Service) ensureReady() error {
+	if s == nil || s.store == nil || s.issuer == nil || s.rbac == nil || s.clock == nil {
+		return auth.ErrInvalidRequest
 	}
-	p := s.providers[kind.Password]
+	return nil
+}
+
+func (s *Service) provider(kind kind.Auth) (providers.Provider, error) {
+	p := s.providers[kind]
 	if p == nil {
-		return nil, nil, auth.ErrInvalidRequest
+		return nil, auth.ErrInvalidRequest
+	}
+	if p.Kind() != kind {
+		return nil, auth.ErrInvalidRequest
+	}
+	return p, nil
+}
+
+// Login authenticates using the specified auth kind, creates a session,
+// and returns access+refresh tokens.
+//
+// For password auth kind, subject/password are used.
+// Other kinds may interpret subject/password differently.
+func (s *Service) Login(ctx context.Context, authKind kind.Auth, subject, secret string) (*TokenPair, *identity.Identity, error) {
+	if err := s.ensureReady(); err != nil {
+		return nil, nil, err
+	}
+	if subject == "" || secret == "" {
+		return nil, nil, auth.ErrInvalidCredentials
 	}
 
-	res, err := p.Authenticate(ctx, passwordprovider.Request{
-		Subject:  subject,
-		Password: password,
-	})
+	p, err := s.provider(authKind)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	var (
-		u    = res.User
-		cred = res.Credential
-		now  = s.clock.Now()
-	)
-	if u == nil || cred == nil {
+	var req providers.Request
+	switch authKind {
+	case kind.Password:
+		req = passwordprovider.Request{Subject: subject, Password: secret}
+	default:
 		return nil, nil, auth.ErrInvalidRequest
 	}
 
-	perms, err := s.rbac.ResolveUserPermissions(ctx, u)
+	res, err := p.Authenticate(ctx, req)
 	if err != nil {
-		return nil, nil, auth.ErrUnauthorized
+		return nil, nil, err
 	}
-	if len(perms) == 0 {
+
+	now := s.clock.Now()
+	if res == nil || res.User == nil || res.Credential == nil {
+		return nil, nil, auth.ErrInvalidRequest
+	}
+
+	u := res.User
+	cred := res.Credential
+
+	perms, err := s.rbac.ResolveUserPermissions(ctx, u)
+	if err != nil || len(perms) == 0 {
 		return nil, nil, auth.ErrUnauthorized
 	}
 
@@ -111,7 +126,6 @@ func (s *Service) Login(ctx context.Context, subject, password string) (*TokenPa
 	if err != nil {
 		return nil, nil, err
 	}
-
 	sessionID, err := newID16()
 	if err != nil {
 		return nil, nil, err
@@ -128,7 +142,7 @@ func (s *Service) Login(ctx context.Context, subject, password string) (*TokenPa
 	if err != nil {
 		return nil, nil, err
 	}
-	if err = s.store.CreateSession(ctx, sess); err != nil {
+	if err := s.store.CreateSession(ctx, sess); err != nil {
 		return nil, nil, err
 	}
 
@@ -136,7 +150,6 @@ func (s *Service) Login(ctx context.Context, subject, password string) (*TokenPa
 	if err != nil {
 		return nil, nil, err
 	}
-
 	id := &identity.Identity{
 		IssuedAt:  now,
 		NotBefore: now,
@@ -163,8 +176,8 @@ func (s *Service) Login(ctx context.Context, subject, password string) (*TokenPa
 
 // Refresh validates refresh token against stored session and issues a new access token.
 func (s *Service) Refresh(ctx context.Context, sessionID, refreshRaw string) (*TokenPair, *identity.Identity, error) {
-	if s.store == nil || s.issuer == nil || s.rbac == nil {
-		return nil, nil, auth.ErrInvalidRequest
+	if err := s.ensureReady(); err != nil {
+		return nil, nil, err
 	}
 	if sessionID == "" || refreshRaw == "" {
 		return nil, nil, auth.ErrInvalidRefresh
@@ -200,10 +213,7 @@ func (s *Service) Refresh(ctx context.Context, sessionID, refreshRaw string) (*T
 	}
 
 	perms, err := s.rbac.ResolveUserPermissions(ctx, u)
-	if err != nil {
-		return nil, nil, auth.ErrUnauthorized
-	}
-	if len(perms) == 0 {
+	if err != nil || len(perms) == 0 {
 		return nil, nil, auth.ErrUnauthorized
 	}
 
@@ -220,7 +230,7 @@ func (s *Service) Refresh(ctx context.Context, sessionID, refreshRaw string) (*T
 		outRefresh = newRaw
 	}
 
-	tokenId, err := newID16()
+	tokenID, err := newID16()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -236,7 +246,7 @@ func (s *Service) Refresh(ctx context.Context, sessionID, refreshRaw string) (*T
 
 		Issuer:    s.cfg.Issuer,
 		Audience:  []string{s.cfg.Audience},
-		TokenID:   tokenId,
+		TokenID:   tokenID,
 		SessionID: sessionID,
 
 		Permissions: perms,
@@ -249,13 +259,19 @@ func (s *Service) Refresh(ctx context.Context, sessionID, refreshRaw string) (*T
 }
 
 func (s *Service) Revoke(ctx context.Context, sessionID string) error {
-	if s.store == nil {
-		return auth.ErrInvalidRequest
+	if err := s.ensureReady(); err != nil {
+		return err
 	}
 	if sessionID == "" {
 		return auth.ErrInvalidRequest
 	}
-	return s.store.RevokeSession(ctx, sessionID, s.clock.Now())
+	if err := s.store.RevokeSession(ctx, sessionID, s.clock.Now()); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return auth.ErrInvalidRequest
+		}
+		return err
+	}
+	return nil
 }
 
 func newID16() (string, error) {

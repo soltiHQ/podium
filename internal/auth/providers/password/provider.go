@@ -11,7 +11,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
-// Provider authenticates.
+// Provider authenticates using (subject, password).
 type Provider struct {
 	store storage.Storage
 }
@@ -24,9 +24,20 @@ func New(store storage.Storage) *Provider {
 // Kind returns the provider kind.
 func (*Provider) Kind() kind.Auth { return kind.Password }
 
-// Authenticate authenticates the user.
+// Authenticate authenticates the user by subject/password.
+//
+// Errors:
+//   - auth.ErrInvalidRequest for invalid wiring or wrong request type/kind.
+//   - auth.ErrInvalidCredentials for subject/password mismatch (no field leakage).
+//   - may return storage.ErrUnavailable / storage.ErrInternal from the backend.
 func (p *Provider) Authenticate(ctx context.Context, req providers.Request) (*providers.Result, error) {
-	if p.store == nil {
+	if p == nil || p.store == nil {
+		return nil, auth.ErrInvalidRequest
+	}
+	if req == nil {
+		return nil, auth.ErrInvalidRequest
+	}
+	if req.AuthKind() != kind.Password {
 		return nil, auth.ErrInvalidRequest
 	}
 
@@ -60,5 +71,8 @@ func (p *Provider) Authenticate(ctx context.Context, req providers.Request) (*pr
 	if err = credentials.VerifyPassword(cred, r.Password); err != nil {
 		return nil, auth.ErrInvalidCredentials
 	}
-	return &providers.Result{User: u, Credential: cred}, nil
+	return &providers.Result{
+		User:       u,
+		Credential: cred,
+	}, nil
 }
