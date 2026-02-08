@@ -31,6 +31,7 @@ tasks:
         --workdir /workspace \
         {{.IMAGE}}           \
         {{.CMD}}
+    silent: true
 
   go-action:
     internal: true
@@ -54,3 +55,4 @@ tasks:
             - "HOME=/tmp/{{.cache_dir}}/home"
             - "GOBIN=/usr/local/bin"
             - "GOTOOLCHAIN=local"
+    silent: true

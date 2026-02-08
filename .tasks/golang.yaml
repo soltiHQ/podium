@@ -1,7 +1,5 @@
 version: '3'
 
-set: [silent]
-
 tasks:
   grpcgen:
     desc: Run 'buf generate'
@@ -9,6 +7,7 @@ tasks:
     cmds:
       - task: :isolation:go-action
         vars: { CMD: "buf generate" }
+    silent: true
 
   tidy:
     desc: Run 'go mod tidy'
@@ -17,6 +16,7 @@ tasks:
     cmds:
       - task: :isolation:go-action
         vars: { CMD: "go mod tidy" }
+    silent: true
 
   vendor:
     desc: Run 'go mod vendor'
@@ -25,6 +25,7 @@ tasks:
     cmds:
       - task: :isolation:go-action
         vars: { CMD: "go mod vendor" }
+    silent: true
 
   test:
     desc: Run 'go test'
@@ -33,6 +34,7 @@ tasks:
     cmds:
       - task: :isolation:go-action
         vars: { CMD: "go test ./..." }
+    silent: true
 
   lint:
     desc: Run 'golangci-lint run'
@@ -41,6 +43,7 @@ tasks:
     cmds:
       - task: :isolation:go-action
         vars: { CMD: "golangci-lint run" }
+    silent: true
 
   fumpt:
     desc: Run 'gofumpt'
@@ -48,4 +51,5 @@ tasks:
     deps: [ vendor ]
     cmds:
       - task: :isolation:go-action
-        vars: { CMD: 'gofumpt -l -w $(git ls-files "*.go")' }
+        vars: { CMD: "sh -c 'git ls-files \"*.go\" | xargs gofumpt -l -w'" }
+    silent: true
