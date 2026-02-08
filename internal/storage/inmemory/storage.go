@@ -2,6 +2,7 @@ package inmemory
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain/kind"
@@ -111,7 +112,7 @@ func (s *Store) GetUserBySubject(ctx context.Context, subject string) (*model.Us
 			continue
 		}
 		if found != nil {
-			return nil, storage.ErrConflict
+			return nil, fmt.Errorf("%w: non-unique user subject %q", storage.ErrInternal, subject)
 		}
 		found = u
 	}
@@ -178,7 +179,7 @@ func (s *Store) GetCredentialByUserAndAuth(ctx context.Context, userID string, a
 			continue
 		}
 		if found != nil {
-			return nil, storage.ErrConflict
+			return nil, fmt.Errorf("%w: non-unique credential for user %q auth %q", storage.ErrInternal, userID, auth)
 		}
 		found = c
 	}
@@ -246,7 +247,7 @@ func (s *Store) GetVerifierByCredential(ctx context.Context, credentialID string
 			continue
 		}
 		if found != nil {
-			return nil, storage.ErrConflict
+			return nil, fmt.Errorf("%w: non-unique verifier for credential %q", storage.ErrInternal, credentialID)
 		}
 		found = v
 	}
@@ -327,8 +328,10 @@ func (s *Store) GetRoles(ctx context.Context, ids []string) ([]*model.Role, erro
 		}
 	}
 
-	seen := make(map[string]struct{}, len(ids))
-	unique := make([]string, 0, len(ids))
+	var (
+		seen   = make(map[string]struct{}, len(ids))
+		unique = make([]string, 0, len(ids))
+	)
 	for _, id := range ids {
 		if _, ok := seen[id]; ok {
 			continue
@@ -336,7 +339,24 @@ func (s *Store) GetRoles(ctx context.Context, ids []string) ([]*model.Role, erro
 		seen[id] = struct{}{}
 		unique = append(unique, id)
 	}
-	return s.roles.GetMany(ctx, unique)
+	roles, err := s.roles.GetMany(ctx, unique)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]*model.Role, len(roles))
+	for _, r := range roles {
+		byID[r.ID()] = r
+	}
+	out := make([]*model.Role, 0, len(ids))
+	for _, id := range ids {
+		r, ok := byID[id]
+		if !ok {
+			// Should not happen if GetMany succeeded, but keep it strict.
+			return nil, storage.ErrInternal
+		}
+		out = append(out, r.Clone())
+	}
+	return out, nil
 }
 
 func (s *Store) GetRoleByName(ctx context.Context, name string) (*model.Role, error) {
@@ -365,7 +385,7 @@ func (s *Store) GetRoleByName(ctx context.Context, name string) (*model.Role, er
 			continue
 		}
 		if found != nil {
-			return nil, storage.ErrConflict
+			return nil, fmt.Errorf("%w: non-unique role name %q", storage.ErrInternal, name)
 		}
 		found = r
 	}

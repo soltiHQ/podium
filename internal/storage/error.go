@@ -27,4 +27,8 @@ var (
 	//
 	// Callers should treat this as unrecoverable and typically surface it as 5xx at boundaries.
 	ErrInternal = errors.New("storage: internal error")
+	// ErrUnavailable indicates a temporary backend failure.
+	//
+	// Callers may retry with backoff (timeouts, transient network errors, leader elections, etc).
+	ErrUnavailable = errors.New("storage: unavailable")
 )

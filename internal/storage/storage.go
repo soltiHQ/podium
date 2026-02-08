@@ -1,4 +1,3 @@
-// Package storage defines persistence interfaces for control-plane domain objects.
 package storage
 
 import (

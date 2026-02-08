@@ -3,14 +3,6 @@ package inmemory
 import (
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
-	"github.com/soltiHQ/control-plane/internal/storage"
-)
-
-// Compile-time checks that filters implement their respective storage interfaces.
-var (
-	_ storage.AgentFilter = (*AgentFilter)(nil)
-	_ storage.UserFilter  = (*UserFilter)(nil)
-	_ storage.RoleFilter  = (*RoleFilter)(nil)
 )
 
 // AgentFilter provides predicate-based filtering for in-memory agent queries.
@@ -63,9 +55,6 @@ func (f *AgentFilter) Matches(a *model.Agent) bool {
 	return true
 }
 
-// IsAgentFilter marks AgentFilter as a valid storage.AgentFilter implementation.
-func (f *AgentFilter) IsAgentFilter(storage.AgentFilterSeal) {}
-
 // UserFilter provides predicate-based filtering for in-memory user queries.
 //
 // Filters are composed by chaining builder methods. All predicates are ANDed together.
@@ -113,9 +102,6 @@ func (f *UserFilter) Matches(u *model.User) bool {
 	return true
 }
 
-// IsUserFilter marks UserFilter as a valid storage.UserFilter implementation.
-func (f *UserFilter) IsUserFilter(storage.UserFilterSeal) {}
-
 // RoleFilter provides predicate-based filtering for in-memory role queries.
 //
 // Filters are composed by chaining builder methods. All predicates are ANDed together.
@@ -150,6 +136,3 @@ func (f *RoleFilter) Matches(r *model.Role) bool {
 	}
 	return true
 }
-
-// IsRoleFilter marks RoleFilter as a valid storage.RoleFilter implementation.
-func (f *RoleFilter) IsRoleFilter(storage.RoleFilterSeal) {}

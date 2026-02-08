@@ -22,21 +22,31 @@ func NewGenericStore[T domain.Entity[T]]() *GenericStore[T] {
 	return &GenericStore[T]{data: make(map[string]T)}
 }
 
-// Create inserts a new entity and fails if it already exists.
-//
-// The entity is deep-cloned before storage to prevent external mutations.
-// Returns storage.ErrInvalidArgument if the entity has empty ID.
-// Returns storage.ErrAlreadyExists if the ID already exists.
-func (s *GenericStore[T]) Create(_ context.Context, entity T) error {
+func validateEntity[T domain.Entity[T]](entity T) error {
 	var zero T
 	if any(entity) == any(zero) {
 		return storage.ErrInvalidArgument
 	}
 
-	id := entity.ID()
-	if id == "" {
+	if entity.ID() == "" {
 		return storage.ErrInvalidArgument
 	}
+	if entity.UpdatedAt().IsZero() {
+		return storage.ErrInvalidArgument
+	}
+	return nil
+}
+
+// Create inserts a new entity and fails if it already exists.
+//
+// The entity is deep-cloned before storage to prevent external mutations.
+// Returns storage.ErrInvalidArgument if the entity has empty ID or violates storage invariants.
+// Returns storage.ErrAlreadyExists if the ID already exists.
+func (s *GenericStore[T]) Create(_ context.Context, entity T) error {
+	if err := validateEntity(entity); err != nil {
+		return err
+	}
+	id := entity.ID()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -70,13 +80,10 @@ func (s *GenericStore[T]) Update(_ context.Context, id string, fn func(cur T) (T
 		return err
 	}
 
-	var zero T
-	if any(next) == any(zero) {
-		return storage.ErrInvalidArgument
+	if err = validateEntity(next); err != nil {
+		return err
 	}
-
-	nid := next.ID()
-	if nid == "" || nid != id {
+	if next.ID() != id {
 		return storage.ErrInvalidArgument
 	}
 
@@ -87,17 +94,13 @@ func (s *GenericStore[T]) Update(_ context.Context, id string, fn func(cur T) (T
 // Upsert inserts or fully replaces an entity.
 //
 // The entity is deep-cloned before storage to prevent external mutations.
-// Returns storage.ErrInvalidArgument if the entity has empty ID.
+// Returns storage.ErrInvalidArgument if the entity violates storage invariants.
 func (s *GenericStore[T]) Upsert(_ context.Context, entity T) error {
-	var zero T
-	if any(entity) == any(zero) {
-		return storage.ErrInvalidArgument
+	if err := validateEntity(entity); err != nil {
+		return err
 	}
 
 	id := entity.ID()
-	if id == "" {
-		return storage.ErrInvalidArgument
-	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
