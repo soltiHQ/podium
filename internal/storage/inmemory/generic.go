@@ -132,7 +132,7 @@ func (s *GenericStore[T]) Get(_ context.Context, id string) (T, error) {
 // GetMany retrieves multiple entities by IDs in a single read lock.
 //
 // Semantics:
-//   - Returns storage.ErrInvalidArgument if ids is empty or contains empty elements.
+//   - Returns storage.ErrInvalidArgument if ids are empty or contain empty elements.
 //   - Returns storage.ErrNotFound if any id is missing.
 //   - Preserves the order of ids (caller can deduplicate before calling).
 //   - Returns deep clones (same as Get).
@@ -167,9 +167,7 @@ func (s *GenericStore[T]) GetMany(_ context.Context, ids []string) ([]T, error) 
 //   - Pass a function that returns true for entities to include.
 //
 // Pagination ordering is (UpdatedAt DESC, ID ASC).
-// Cursor is an opaque token produced by this backend; malformed cursor returns ErrInvalidArgument.
-//
-// All returned entities are deep clones isolated from the internal state.
+// Cursor is an opaque token produced by this backend; a malformed cursor returns ErrInvalidArgument.
 func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts storage.ListOptions) (*storage.ListResult[T], error) {
 	cur, err := decodeCursor(opts.Cursor)
 	if err != nil {
@@ -272,8 +270,7 @@ func (s *GenericStore[T]) Delete(_ context.Context, id string) error {
 	return nil
 }
 
-// findCursorPosition returns the index of the first item strictly after the cursor
-// under ordering (UpdatedAt DESC, ID ASC).
+// findCursorPosition returns the index of the first item strictly after the cursor under ordering (UpdatedAt DESC, ID ASC).
 func findCursorPosition[T domain.Entity[T]](ctx context.Context, items []T, cur cursor) (int, error) {
 	for i, e := range items {
 		if i%1000 == 0 {

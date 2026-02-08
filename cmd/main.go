@@ -159,8 +159,8 @@ func bootstrap(ctx context.Context, store *inmemory.Store) error {
 	if err != nil {
 		return err
 	}
-	user.NameSet("Admin")
-	user.EmailSet("admin@local")
+	user.NameAdd("Admin")
+	user.EmailAdd("admin@local")
 	if err := user.RoleAdd("role-admin"); err != nil {
 		return err
 	}

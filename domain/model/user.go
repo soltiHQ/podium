@@ -79,8 +79,8 @@ func (u *User) CreatedAt() time.Time { return u.createdAt }
 // UpdatedAt returns the timestamp of the last modification.
 func (u *User) UpdatedAt() time.Time { return u.updatedAt }
 
-// EmailSet updates the user's email.
-func (u *User) EmailSet(email string) {
+// EmailAdd updates the user's email.
+func (u *User) EmailAdd(email string) {
 	if u.email == email {
 		return
 	}
@@ -88,8 +88,8 @@ func (u *User) EmailSet(email string) {
 	u.updatedAt = time.Now()
 }
 
-// NameSet updates the user's display name.
-func (u *User) NameSet(name string) {
+// NameAdd updates the user's display name.
+func (u *User) NameAdd(name string) {
 	if u.name == name {
 		return
 	}

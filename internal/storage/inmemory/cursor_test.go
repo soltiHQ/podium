@@ -46,7 +46,6 @@ func TestDecodeCursor_MalformedJSON(t *testing.T) {
 func TestDecodeCursor_MissingFields(t *testing.T) {
 	t.Parallel()
 
-	// Missing ID and timestamp
 	raw := map[string]any{
 		"b": cursorBackend,
 		"v": cursorVersion,
@@ -59,7 +58,6 @@ func TestDecodeCursor_MissingFields(t *testing.T) {
 		t.Fatalf("expected ErrInvalidArgument, err=%v", err)
 	}
 
-	// Has ID, missing timestamp
 	raw = map[string]any{
 		"b": cursorBackend,
 		"v": cursorVersion,
@@ -73,7 +71,6 @@ func TestDecodeCursor_MissingFields(t *testing.T) {
 		t.Fatalf("expected ErrInvalidArgument, err=%v", err)
 	}
 
-	// Has timestamp, missing ID
 	raw = map[string]any{
 		"b": cursorBackend,
 		"v": cursorVersion,
@@ -129,7 +126,6 @@ func TestEncodeCursor_RoundTripAndForcesBackendVersion(t *testing.T) {
 
 	wantU := time.Unix(123, 0).UTC().UnixNano()
 
-	// Try to sneak wrong backend/version in; encode must overwrite.
 	s, err := encodeCursor(cursor{
 		Backend:           "evil",
 		Version:           999,
