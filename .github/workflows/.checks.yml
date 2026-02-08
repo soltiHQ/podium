@@ -1,0 +1,89 @@
+name: Checks
+
+on:
+  workflow_call: {}
+
+jobs:
+  fmt:
+    runs-on: ${{ vars.RUNS_ON }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute toolchain tag
+        id: tc
+        shell: bash
+        run: |
+          GO_VERSION=$(grep '^go ' go.mod | awk '{print $2}')
+          echo "tag=${GO_VERSION}${{ vars.IMAGE_PATCH }}" >> $GITHUB_OUTPUT
+
+      - name: Get Cache
+        id: cache_get
+        uses: ./.github/actions/cache-get
+        with:
+          toolchain_tag: ${{ steps.tc.outputs.tag }}
+
+      - name: Run fmt
+        uses: soltiHQ/actions/taskfile@main
+        with:
+          command: go/fumpt
+
+      - name: Put Cache
+        uses: ./.github/actions/cache-put
+        with:
+          toolchain_tag: ${{ steps.tc.outputs.tag }}
+
+  lint:
+    runs-on: ${{ vars.RUNS_ON }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute toolchain tag
+        id: tc
+        shell: bash
+        run: |
+          GO_VERSION=$(grep '^go ' go.mod | awk '{print $2}')
+          echo "tag=${GO_VERSION}${{ vars.IMAGE_PATCH }}" >> $GITHUB_OUTPUT
+
+      - name: Get Cache
+        id: cache_get
+        uses: ./.github/actions/cache-get
+        with:
+          toolchain_tag: ${{ steps.tc.outputs.tag }}
+
+      - name: Run lint
+        uses: soltiHQ/actions/taskfile@main
+        with:
+          command: go/lint
+
+      - name: Put Cache
+        uses: ./.github/actions/cache-put
+        with:
+          toolchain_tag: ${{ steps.tc.outputs.tag }}
+
+  test:
+    runs-on: ${{ vars.RUNS_ON }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute toolchain tag
+        id: tc
+        shell: bash
+        run: |
+          GO_VERSION=$(grep '^go ' go.mod | awk '{print $2}')
+          echo "tag=${GO_VERSION}${{ vars.IMAGE_PATCH }}" >> $GITHUB_OUTPUT
+
+      - name: Get Cache
+        id: cache_get
+        uses: ./.github/actions/cache-get
+        with:
+          toolchain_tag: ${{ steps.tc.outputs.tag }}
+
+      - name: Run Job
+        uses: soltiHQ/actions/taskfile@main
+        with:
+          command: go/test
+
+      - name: Put Cache
+        uses: ./.github/actions/cache-put
+        with:
+          toolchain_tag: ${{ steps.tc.outputs.tag }}

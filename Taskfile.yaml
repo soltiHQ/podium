@@ -7,83 +7,20 @@ vars:
     sh: go env GOPATH
   go_version:
     sh: grep '^go ' {{.git_root}}/go.mod | awk '{print $2}'
-  image_patch: "-2"
+  go_image_patch: "2"
+  go_image: "ghcr.io/soltihq/golang-ci:{{.go_version}}-{{.go_image_patch}}"
+  cache_dir: ".cache"
+
+includes:
+  isolation:
+    taskfile: ./.tasks/isolation.yaml
+    dir: "{{.git_root}}"
+
+  go:
+    taskfile: ./.tasks/golang.yaml
+    dir: "{{.git_root}}"
 
 tasks:
   default:
-    desc: Default task.
     cmds:
-      - echo "Please enter a task or use '-l' or '--list-all' to list all available tasks"
-    silent: true
-
-  # ================================================#
-  # ---------------------INTERNAL-------------------#
-  # ================================================#
-
-  _docker/run:
-    desc: Internal wrapper to run task in containers.
-    internal: true
-    silent: true
-    requires:
-      vars: [ IMAGE, CMD, MOUNT_DIR ]
-    dir: "{{.git_root}}"
-    cmd: |
-      set -euo pipefail
-      
-      if ! docker image inspect "{{.IMAGE}}" >/dev/null 2>&1; then
-        echo "pulling: {{.IMAGE}}"
-      
-        docker pull -q "{{.IMAGE}}" >/dev/null 2>&1 || {
-          echo "Failed to pull image: {{.IMAGE}}"
-          exit 1
-        }
-      fi
-      docker run --rm --init --pull=never \
-        --security-opt no-new-privileges \
-        --user $(id -u):$(id -g) \
-        --cap-drop=ALL \
-        \
-        --volume "{{.git_root}}/{{.MOUNT_DIR}}:/workspace/lighthouse:rw" \
-        {{if .VOLUMES}}{{range $vol := .VOLUMES}}--volume {{$vol}} {{end}}{{end}} \
-        {{if .ENVS}}{{range $env := .ENVS}}--env "{{$env}}" {{end}}{{end}} \
-        \
-        --workdir /workspace/lighthouse \
-        {{.IMAGE}} \
-        {{.CMD}}
-
-  _golang/tool:
-    internal: true
-    silent: true
-    requires: { vars: [ CMD ] }
-    cmds:
-      - cmd: mkdir -p "{{.git_root}}/{{.cache_dir}}"
-      - task: _docker/run
-        vars:
-          IMAGE: "ghcr.io/soltihq/golang-ci:{{.go_version}}{{.image_patch}}"
-          CMD: "{{.CMD}}"
-          MOUNT_DIR: "."
-          VOLUMES:
-            - "{{.git_root}}/{{.cache_dir}}:/tmp/{{.cache_dir}}:rw"
-          ENVS:
-            - "PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
-            - "GOTOOLCHAIN=local"
-            - "HOME=/tmp/{{.cache_dir}}/home"
-            - "XDG_CACHE_HOME=/tmp/{{.cache_dir}}/xdg-cache"
-            - "XDG_CONFIG_HOME=/tmp/{{.cache_dir}}/xdg-config"
-            - "GOPATH=/tmp/{{.cache_dir}}/go"
-            - "GOCACHE=/tmp/{{.cache_dir}}/go-build"
-            - "GOMODCACHE=/tmp/{{.cache_dir}}/go/pkg/mod"
-            - "GOBIN=/usr/local/bin"
-
-  # ================================================#
-  # ----------------------PUBLIC--------------------#
-  # ================================================#
-
-  buf:
-    desc: Run 'protobuf generate'
-    dir: "{{.git_root}}"
-    cmds:
-      - task: _golang/tool
-        vars:
-          CMD: "buf generate"
-    silent: true
+      - task --list

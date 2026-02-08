@@ -1,0 +1,12 @@
+inputs:
+  toolchain_tag:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Save cache
+      uses: actions/cache/save@v4
+      with:
+        path: .cache
+        key: cache-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain_tag }}-${{ hashFiles('go.sum') }}

@@ -1,0 +1,56 @@
+version: '3'
+
+set: [silent]
+
+tasks:
+  _docker:
+    internal: true
+    dir: "{{.git_root}}"
+    requires: { vars: [ IMAGE, CMD, MOUNT_DIR ] }
+    cmd: |
+      set -euo pipefail
+      
+      if ! docker image inspect "{{.IMAGE}}" >/dev/null 2>&1; then
+        echo "pulling: {{.IMAGE}}"
+      
+        docker pull -q "{{.IMAGE}}" >/dev/null 2>&1 || {
+          echo "Failed to pull image: {{.IMAGE}}"
+          exit 1
+        }
+      fi
+      
+      docker run --rm --init --pull=never \
+        --security-opt no-new-privileges  \
+        --user $(id -u):$(id -g)          \
+        --cap-drop=ALL                    \
+        \
+        --volume "{{.git_root}}/{{.MOUNT_DIR}}:/workspace:rw"                     \
+        {{if .VOLUMES}}{{range $vol := .VOLUMES}}--volume {{$vol}} {{end}}{{end}} \
+        {{if .ENVS}}{{range $env := .ENVS}}--env "{{$env}}" {{end}}{{end}}        \
+        \
+        --workdir /workspace \
+        {{.IMAGE}}           \
+        {{.CMD}}
+
+  go-action:
+    internal: true
+    requires: { vars: [ CMD ] }
+    cmds:
+      - cmd: mkdir -p "{{.git_root}}/{{.cache_dir}}"
+      - task: _docker/run
+        vars:
+          IMAGE: "ghcr.io/soltihq/golang-ci:{{.go_version}}{{.image_patch}}"
+          CMD: "{{.CMD}}"
+          MOUNT_DIR: "."
+          VOLUMES:
+            - "{{.git_root}}/{{.cache_dir}}:/tmp/{{.cache_dir}}:rw"
+          ENVS:
+            - "PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
+            - "XDG_CONFIG_HOME=/tmp/{{.cache_dir}}/xdg-config"
+            - "XDG_CACHE_HOME=/tmp/{{.cache_dir}}/xdg-cache"
+            - "GOMODCACHE=/tmp/{{.cache_dir}}/go/pkg/mod"
+            - "GOCACHE=/tmp/{{.cache_dir}}/go-build"
+            - "GOPATH=/tmp/{{.cache_dir}}/go"
+            - "HOME=/tmp/{{.cache_dir}}/home"
+            - "GOBIN=/usr/local/bin"
+            - "GOTOOLCHAIN=local"

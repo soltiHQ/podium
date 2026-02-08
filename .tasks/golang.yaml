@@ -1,0 +1,51 @@
+version: '3'
+
+set: [silent]
+
+tasks:
+  grpcgen:
+    desc: Run 'buf generate'
+    dir: "{{.git_root}}"
+    cmds:
+      - task: :go-action
+        vars: { CMD: "buf generate" }
+
+  tidy:
+    desc: Run 'go mod tidy'
+    dir: "{{.git_root}}"
+    deps: [ grpcgen ]
+    cmds:
+      - task: :go-action
+        vars: { CMD: "go mod tidy" }
+
+  vendor:
+    desc: Run 'go mod vendor'
+    dir: "{{.git_root}}"
+    deps: [ tidy ]
+    cmds:
+      - task: :go-action
+        vars: { CMD: "go mod vendor" }
+
+  test:
+    desc: Run 'go test'
+    dir: "{{.git_root}}"
+    deps: [ vendor ]
+    cmds:
+      - task: :go-action
+        vars: { CMD: "go test ./..." }
+
+  lint:
+    desc: Run 'golangci-lint run'
+    dir: "{{.git_root}}"
+    deps: [ vendor ]
+    cmds:
+      - task: :go-action
+        vars: { CMD: "golangci-lint run" }
+
+  fumpt:
+    desc: Run 'gofumpt'
+    dir: "{{.git_root}}"
+    deps: [ vendor ]
+    cmds:
+      - task: :go-action
+        vars: { CMD: 'gofumpt -l -w $(git ls-files "*.go")' }
