@@ -6,8 +6,8 @@ import (
 	"net/http"
 
 	"github.com/soltiHQ/control-plane/domain/kind"
-	"github.com/soltiHQ/control-plane/internal/auth/auth/session"
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
+	"github.com/soltiHQ/control-plane/internal/auth/session"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 )
@@ -20,6 +20,11 @@ type Auth struct {
 	clock   token.Clock
 }
 
+type refreshRequest struct {
+	RefreshToken string `json:"refresh_token"`
+	SessionID    string `json:"session_id"`
+}
+
 // NewAuth creates an auth handler.
 func NewAuth(session *session.Service, json *response.JSONResponder, limiter *ratelimit.Limiter, clk token.Clock) *Auth {
 	return &Auth{session: session, json: json, limiter: limiter, clock: clk}
@@ -29,6 +34,7 @@ func NewAuth(session *session.Service, json *response.JSONResponder, limiter *ra
 // These routes are public — no Auth middleware required.
 func (a *Auth) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/login", a.Login)
+	mux.HandleFunc("POST /v1/refresh", a.Refresh)
 }
 
 // loginRequest is the expected JSON body for login.
@@ -41,6 +47,7 @@ type loginRequest struct {
 type loginResponse struct {
 	AccessToken  string   `json:"access_token"`
 	RefreshToken string   `json:"refresh_token"`
+	SessionID    string   `json:"session_id"`
 	ExpiresAt    int64    `json:"expires_at"`
 	Subject      string   `json:"subject"`
 	UserID       string   `json:"user_id"`
@@ -75,9 +82,46 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.limiter.Reset(key)
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session_id",
+		Value:    id.SessionID,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   r.TLS != nil,
+	})
 
 	a.limiter.Reset(key)
+
+	perms := make([]string, 0, len(id.Permissions))
+	for _, p := range id.Permissions {
+		perms = append(perms, string(p))
+	}
+
+	a.json.Respond(w, r, http.StatusOK, &response.View{
+		Data: loginResponse{
+			AccessToken:  pair.AccessToken,
+			RefreshToken: pair.RefreshToken,
+			ExpiresAt:    id.ExpiresAt.Unix(),
+			Subject:      id.Subject,
+			UserID:       id.UserID,
+			Permissions:  perms,
+		},
+	})
+}
+
+func (a *Auth) Refresh(w http.ResponseWriter, r *http.Request) {
+	var req refreshRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.json.Error(w, r, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	pair, id, err := a.session.Refresh(r.Context(), req.SessionID, req.RefreshToken)
+	if err != nil {
+		a.json.Error(w, r, http.StatusUnauthorized, "invalid refresh token")
+		return
+	}
 
 	perms := make([]string, 0, len(id.Permissions))
 	for _, p := range id.Permissions {

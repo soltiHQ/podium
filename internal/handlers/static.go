@@ -8,12 +8,13 @@ import (
 	"github.com/soltiHQ/control-plane/ui"
 )
 
+// Static serves embedded static assets (CSS, JS, images, etc.).
 type Static struct {
 	logger  zerolog.Logger
 	handler http.Handler
 }
 
-// NewStatic returns a new Static handler.
+// NewStatic initializes a Static handler backed by the embedded UI filesystem.
 func NewStatic(logger zerolog.Logger) *Static {
 	sub, err := fs.Sub(ui.Static, "static")
 	if err != nil {
@@ -25,6 +26,7 @@ func NewStatic(logger zerolog.Logger) *Static {
 	}
 }
 
+// Routes registers static file routes on the provided mux.
 func (s *Static) Routes(mux *http.ServeMux) {
 	mux.Handle("/static/", s.handler)
 

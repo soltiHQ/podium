@@ -9,17 +9,13 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
-	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
+	"github.com/soltiHQ/control-plane/internal/auth/svc"
+	"github.com/soltiHQ/control-plane/ui/pages"
 
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
-	"github.com/soltiHQ/control-plane/internal/auth/auth/session"
 	"github.com/soltiHQ/control-plane/internal/auth/credentials"
-	"github.com/soltiHQ/control-plane/internal/auth/providers"
-	passwordprovider "github.com/soltiHQ/control-plane/internal/auth/providers/password"
-	"github.com/soltiHQ/control-plane/internal/auth/rbac"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
-	"github.com/soltiHQ/control-plane/internal/auth/token/jwt"
 	"github.com/soltiHQ/control-plane/internal/handlers"
 	"github.com/soltiHQ/control-plane/internal/server"
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
@@ -47,45 +43,24 @@ func main() {
 	// ---------------------------------------------------------------
 	// Auth stack
 	// ---------------------------------------------------------------
-	jwtSecret := []byte("dev-secret-change-me-in-production")
+	jwtSecret := "dev-secret-change-me-in-production"
+
+	authSVC := svc.NewAuth(store, jwtSecret, 1*time.Minute, 7*24*time.Hour, 1*time.Minute, 2)
 	clk := token.RealClock()
-
-	issuer := jwt.NewHSIssuer(jwtSecret, clk)
-	verifier := jwt.NewHSVerifier("control-plane", "control-plane", jwtSecret, clk)
-	resolver := rbac.NewResolver(store)
-
-	sessionSvc := session.New(
-		store,
-		issuer,
-		clk,
-		session.Config{
-			AccessTTL:     15 * time.Minute,
-			RefreshTTL:    7 * 24 * time.Hour,
-			Issuer:        "control-plane",
-			Audience:      "control-plane",
-			RotateRefresh: true,
-		},
-		resolver,
-		map[kind.Auth]providers.Provider{
-			kind.Password: passwordprovider.New(store),
-		},
-	)
-
-	loginLimiter := ratelimit.New(ratelimit.Config{
-		MaxAttempts: 2,
-		BlockWindow: 10 * time.Minute,
-	})
 
 	// ---------------------------------------------------------------
 	// Responders & Handlers
 	// ---------------------------------------------------------------
 	jsonResp := response.NewJSON()
-	htmlResp := response.NewHTML(response.HTMLConfig{})
+	htmlResp := response.NewHTML(response.HTMLConfig{
+		LoginPath: "/login",
+		ErrorPage: pages.ErrorPage,
+	})
 
 	demo := handlers.NewDemo(jsonResp)
 	errHandler := handlers.NewFault()
-	authHandler := handlers.NewAuth(sessionSvc, jsonResp, loginLimiter, clk)
-	uiHandler := handlers.NewUI(logger, sessionSvc, store, htmlResp, loginLimiter, clk, errHandler)
+	authHandler := handlers.NewAuth(authSVC.Session, jsonResp, authSVC.Limiter, clk)
+	uiHandler := handlers.NewUI(logger, authSVC.Session, htmlResp, authSVC.Limiter, clk, errHandler)
 	staticHandler := handlers.NewStatic(logger)
 
 	// ---------------------------------------------------------------
@@ -99,7 +74,7 @@ func main() {
 	staticHandler.Routes(mux)
 
 	// Protected — auth required.
-	authMw := middleware.Auth(verifier)
+	authMw := middleware.Auth(authSVC.Verifier, authSVC.Session)
 	mux.Handle("GET /api/hello", authMw(http.HandlerFunc(demo.Hello)))
 
 	var handler http.Handler = errHandler.Wrap(mux)

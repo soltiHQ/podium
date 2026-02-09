@@ -9,6 +9,7 @@ import (
 	"github.com/a-h/templ"
 )
 
+// RenderMode defines how an HTTP response should be rendered.
 type RenderMode int
 
 const (

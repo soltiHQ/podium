@@ -18,7 +18,7 @@ type HTMLConfig struct {
 
 	// ErrorPage is a templ component factory for error pages.
 	// Receives code, message, and request ID.
-	ErrorPage func(code int, msg, requestID string) templ.Component
+	ErrorPage func(code int, title, message string) templ.Component
 }
 
 func (c HTMLConfig) withDefaults() HTMLConfig {

@@ -2,35 +2,35 @@ package handlers
 
 import (
 	"net/http"
+	"net/url"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
+	"github.com/soltiHQ/control-plane/internal/auth/session"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
 
-	"github.com/soltiHQ/control-plane/internal/auth/auth/session"
-	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/ui/pages"
 )
 
 // UI handles browser-facing HTML endpoints.
 type UI struct {
-	logger  zerolog.Logger
-	session *session.Service
-	store   storage.Storage
 	html    *response.HTMLResponder
 	limiter *ratelimit.Limiter
-	clock   token.Clock
-	err     *Fault
+	session *session.Service
+
+	logger zerolog.Logger
+
+	clock token.Clock
+	err   *Fault
 }
 
 // NewUI creates a UI handler.
-func NewUI(logger zerolog.Logger, session *session.Service, store storage.Storage, html *response.HTMLResponder, limiter *ratelimit.Limiter, clk token.Clock, err *Fault) *UI {
+func NewUI(logger zerolog.Logger, session *session.Service, html *response.HTMLResponder, limiter *ratelimit.Limiter, clk token.Clock, err *Fault) *UI {
 	return &UI{
 		logger:  logger,
 		session: session,
-		store:   store,
 		html:    html,
 		limiter: limiter,
 		clock:   clk,
@@ -51,6 +51,21 @@ func (u *UI) LoginPage(w http.ResponseWriter, r *http.Request) {
 	redirect := r.URL.Query().Get("redirect")
 	if redirect == "" {
 		redirect = "/"
+	}
+
+	subject := r.URL.Query().Get("subject")
+	if subject != "" {
+		key := loginKey(subject, r)
+		if u.limiter.Blocked(key, u.clock.Now()) {
+			u.html.Respond(w, r, http.StatusTooManyRequests, &response.View{
+				Component: pages.ErrorPage(
+					http.StatusTooManyRequests,
+					"Too many attempts",
+					"Account temporarily locked. Please try again in 10 minutes.",
+				),
+			})
+			return
+		}
 	}
 
 	errMsg := r.URL.Query().Get("error")
@@ -86,7 +101,7 @@ func (u *UI) LoginSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pair, _, err := u.session.Login(r.Context(), kind.Password, subject, password)
+	pair, id, err := u.session.Login(r.Context(), kind.Password, subject, password)
 	if err != nil {
 		u.limiter.RecordFailure(key, now)
 		u.logger.Warn().
@@ -94,7 +109,8 @@ func (u *UI) LoginSubmit(w http.ResponseWriter, r *http.Request) {
 			Str("subject", subject).
 			Msg("login failed")
 
-		http.Redirect(w, r, "/login?error=Invalid+credentials&redirect="+redirect, http.StatusFound)
+		http.Redirect(w, r, "/login?error=Invalid+credentials&subject="+url.QueryEscape(subject)+"&redirect="+url.QueryEscape(redirect), http.StatusFound)
+
 		return
 	}
 
@@ -104,6 +120,15 @@ func (u *UI) LoginSubmit(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "access_token",
 		Value:    pair.AccessToken,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   r.TLS != nil,
+	})
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session_id",
+		Value:    id.SessionID,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
