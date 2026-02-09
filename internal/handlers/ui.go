@@ -22,10 +22,11 @@ type UI struct {
 	html    *response.HTMLResponder
 	limiter *ratelimit.Limiter
 	clock   token.Clock
+	err     *Errors
 }
 
 // NewUI creates a UI handler.
-func NewUI(logger zerolog.Logger, session *session.Service, store storage.Storage, html *response.HTMLResponder, limiter *ratelimit.Limiter, clk token.Clock) *UI {
+func NewUI(logger zerolog.Logger, session *session.Service, store storage.Storage, html *response.HTMLResponder, limiter *ratelimit.Limiter, clk token.Clock, err *Errors) *UI {
 	return &UI{
 		logger:  logger,
 		session: session,
@@ -33,6 +34,7 @@ func NewUI(logger zerolog.Logger, session *session.Service, store storage.Storag
 		html:    html,
 		limiter: limiter,
 		clock:   clk,
+		err:     err,
 	}
 }
 
@@ -80,13 +82,7 @@ func (u *UI) LoginSubmit(w http.ResponseWriter, r *http.Request) {
 	key := loginKey(subject, r)
 	now := u.clock.Now()
 	if u.limiter.Blocked(key, now) {
-		u.html.Respond(w, r, http.StatusTooManyRequests, &response.View{
-			Component: pages.ErrorPage(
-				http.StatusTooManyRequests,
-				"Too many attempts",
-				"Account temporarily locked. Please try again in 10 minutes.",
-			),
-		})
+		u.err.ManyAuthAttempts(w, r)
 		return
 	}
 

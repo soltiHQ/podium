@@ -60,6 +60,20 @@ func (e *Errors) ServiceUnavailable(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (e *Errors) ManyAuthAttempts(w http.ResponseWriter, r *http.Request) {
+	response.FromContext(r.Context()).Respond(w, r, http.StatusTooManyRequests, &response.View{
+		Data: response.ErrorBody{
+			Code:    http.StatusTooManyRequests,
+			Message: "too many auth requests",
+		},
+		Component: pages.ErrorPage(
+			http.StatusTooManyRequests,
+			"Too many auth attempts",
+			"Account temporarily locked. Please try again later.",
+		),
+	})
+}
+
 // Wrap a handler and renders 404 for unmatched routes.
 func (e *Errors) Wrap(mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

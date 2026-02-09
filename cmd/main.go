@@ -83,10 +83,10 @@ func main() {
 	htmlResp := response.NewHTML(response.HTMLConfig{})
 
 	demo := handlers.NewDemo(jsonResp)
-	authHandler := handlers.NewAuth(sessionSvc, jsonResp, loginLimiter, clk)
-	uiHandler := handlers.NewUI(logger, sessionSvc, store, htmlResp, loginLimiter, clk)
-	staticHandler := handlers.NewStatic(logger)
 	errHandler := handlers.NewErrors()
+	authHandler := handlers.NewAuth(sessionSvc, jsonResp, loginLimiter, clk)
+	uiHandler := handlers.NewUI(logger, sessionSvc, store, htmlResp, loginLimiter, clk, errHandler)
+	staticHandler := handlers.NewStatic(logger)
 
 	// ---------------------------------------------------------------
 	// Router
