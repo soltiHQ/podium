@@ -97,6 +97,7 @@ func (u *UI) LoginSubmit(w http.ResponseWriter, r *http.Request) {
 	key := loginKey(subject, r)
 	now := u.clock.Now()
 	if u.limiter.Blocked(key, now) {
+
 		u.err.AuthRateLimit(w, r, RenderPage)
 		return
 	}
