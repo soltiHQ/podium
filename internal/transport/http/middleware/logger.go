@@ -6,6 +6,7 @@ import (
 
 	"github.com/felixge/httpsnoop"
 	"github.com/rs/zerolog"
+	"github.com/soltiHQ/control-plane/internal/transport/http/cookie"
 
 	"github.com/soltiHQ/control-plane/internal/transportctx"
 )
@@ -14,11 +15,11 @@ import (
 func Logger(logger zerolog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
-
-			m := httpsnoop.CaptureMetrics(next, w, r)
-
-			evt := logger.Info()
+			var (
+				m     = httpsnoop.CaptureMetrics(next, w, r)
+				evt   = logger.Info()
+				start = time.Now()
+			)
 			if m.Code >= 500 {
 				evt = logger.Error()
 			} else if m.Code >= 400 {
@@ -36,9 +37,11 @@ func Logger(logger zerolog.Logger) func(http.Handler) http.Handler {
 			if rid, ok := transportctx.RequestID(r.Context()); ok {
 				evt = evt.Str("request_id", rid)
 			}
-
 			if ua := r.UserAgent(); ua != "" {
 				evt = evt.Str("user_agent", ua)
+			}
+			if sid, err := cookie.GetSessionID(r); err == nil {
+				evt = evt.Str("session_id", sid.Value)
 			}
 
 			evt.Msg("http request")

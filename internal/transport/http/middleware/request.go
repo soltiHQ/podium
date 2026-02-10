@@ -6,6 +6,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transportctx"
 )
 
+// RequestID attaches a unique request ID to the request context.
 func RequestID() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -13,12 +14,8 @@ func RequestID() func(http.Handler) http.Handler {
 			if rid == "" {
 				rid = transportctx.NewRequestID()
 			}
-
-			ctx := transportctx.WithRequestID(r.Context(), rid)
-
 			w.Header().Set(transportctx.DefaultRequestIDHeader, rid)
-
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, r.WithContext(transportctx.WithRequestID(r.Context(), rid)))
 		})
 	}
 }

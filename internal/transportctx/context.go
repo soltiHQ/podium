@@ -12,6 +12,8 @@ type (
 	requestIDKey struct{}
 )
 
+const unknownRequestID = "unknown"
+
 // WithIdentity stores authenticated identity in ctx.
 // Passing nil clears the identity value (returns a derived context anyway).
 func WithIdentity(ctx context.Context, id *identity.Identity) context.Context {
@@ -26,17 +28,20 @@ func WithRequestID(ctx context.Context, requestID string) context.Context {
 
 // Identity returns identity from ctx (if any).
 func Identity(ctx context.Context) (*identity.Identity, bool) {
-	v := ctx.Value(identityKey{})
-	if v == nil {
-		return nil, false
-	}
-	id, ok := v.(*identity.Identity)
+	id, ok := ctx.Value(identityKey{}).(*identity.Identity)
 	return id, ok && id != nil
 }
 
 // RequestID returns request id from ctx (if any).
 func RequestID(ctx context.Context) (string, bool) {
-	v := ctx.Value(requestIDKey{})
-	s, ok := v.(string)
-	return s, ok && s != ""
+	rid, ok := ctx.Value(requestIDKey{}).(string)
+	return rid, ok && rid != ""
+}
+
+// TryRequestID returns request id from ctx (if any).
+func TryRequestID(ctx context.Context) string {
+	if rid, ok := RequestID(ctx); ok {
+		return rid
+	}
+	return unknownRequestID
 }

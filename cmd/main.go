@@ -9,19 +9,17 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
-	"github.com/soltiHQ/control-plane/internal/auth/svc"
-	"github.com/soltiHQ/control-plane/ui/pages"
-
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/credentials"
+	"github.com/soltiHQ/control-plane/internal/auth/svc"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
 	"github.com/soltiHQ/control-plane/internal/handlers"
 	"github.com/soltiHQ/control-plane/internal/server"
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
-	"github.com/soltiHQ/control-plane/internal/transport/http/response"
+	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 )
 
 func main() {
@@ -51,11 +49,8 @@ func main() {
 	// ---------------------------------------------------------------
 	// Responders & Handlers
 	// ---------------------------------------------------------------
-	jsonResp := response.NewJSON()
-	htmlResp := response.NewHTML(response.HTMLConfig{
-		LoginPath: "/login",
-		ErrorPage: pages.ErrorPage,
-	})
+	jsonResp := responder.NewJSON()
+	htmlResp := responder.NewHTML()
 
 	demo := handlers.NewDemo(jsonResp)
 	errHandler := handlers.NewFault()
@@ -76,9 +71,10 @@ func main() {
 	// Protected — auth required.
 	authMw := middleware.Auth(authSVC.Verifier, authSVC.Session)
 	mux.Handle("GET /api/hello", authMw(http.HandlerFunc(demo.Hello)))
+	mux.Handle("GET /hello", authMw(http.HandlerFunc(demo.Hello)))
 
 	var handler http.Handler = errHandler.Wrap(mux)
-	handler = response.Negotiate(jsonResp, htmlResp)(handler)
+	handler = middleware.Negotiate(jsonResp, htmlResp)(handler)
 	handler = middleware.Recovery(logger)(handler)
 	handler = middleware.Logger(logger)(handler)
 	handler = middleware.RequestID()(handler)

@@ -9,13 +9,13 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/auth/session"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
-	"github.com/soltiHQ/control-plane/internal/transport/http/response"
+	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 )
 
 // Auth handles authentication endpoints.
 type Auth struct {
 	session *session.Service
-	json    *response.JSONResponder
+	json    *responder.JSONResponder
 	limiter *ratelimit.Limiter
 	clock   token.Clock
 }
@@ -26,7 +26,7 @@ type refreshRequest struct {
 }
 
 // NewAuth creates an auth handler.
-func NewAuth(session *session.Service, json *response.JSONResponder, limiter *ratelimit.Limiter, clk token.Clock) *Auth {
+func NewAuth(session *session.Service, json *responder.JSONResponder, limiter *ratelimit.Limiter, clk token.Clock) *Auth {
 	return &Auth{session: session, json: json, limiter: limiter, clock: clk}
 }
 
@@ -58,12 +58,12 @@ type loginResponse struct {
 func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		a.json.Error(w, r, http.StatusBadRequest, "invalid request body")
+		//a.json.Error(w, r, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	if req.Subject == "" || req.Password == "" {
-		a.json.Error(w, r, http.StatusBadRequest, "subject and password are required")
+		//	a.json.Error(w, r, http.StatusBadRequest, "subject and password are required")
 		return
 	}
 
@@ -71,14 +71,14 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 	now := a.clock.Now()
 
 	if a.limiter.Blocked(key, now) {
-		a.json.Error(w, r, http.StatusTooManyRequests, "too many attempts, try again later")
+		//a.json.Error(w, r, http.StatusTooManyRequests, "too many attempts, try again later")
 		return
 	}
 
 	pair, id, err := a.session.Login(r.Context(), kind.Password, req.Subject, req.Password)
 	if err != nil {
 		a.limiter.RecordFailure(key, now)
-		a.json.Error(w, r, http.StatusUnauthorized, "invalid credentials")
+		//a.json.Error(w, r, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 
@@ -98,7 +98,7 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 		perms = append(perms, string(p))
 	}
 
-	a.json.Respond(w, r, http.StatusOK, &response.View{
+	a.json.Respond(w, r, http.StatusOK, &responder.View{
 		Data: loginResponse{
 			AccessToken:  pair.AccessToken,
 			RefreshToken: pair.RefreshToken,
@@ -113,13 +113,13 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 func (a *Auth) Refresh(w http.ResponseWriter, r *http.Request) {
 	var req refreshRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		a.json.Error(w, r, http.StatusBadRequest, "invalid request body")
+		//a.json.Error(w, r, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	pair, id, err := a.session.Refresh(r.Context(), req.SessionID, req.RefreshToken)
 	if err != nil {
-		a.json.Error(w, r, http.StatusUnauthorized, "invalid refresh token")
+		//a.json.Error(w, r, http.StatusUnauthorized, "invalid refresh token")
 		return
 	}
 
@@ -128,7 +128,7 @@ func (a *Auth) Refresh(w http.ResponseWriter, r *http.Request) {
 		perms = append(perms, string(p))
 	}
 
-	a.json.Respond(w, r, http.StatusOK, &response.View{
+	a.json.Respond(w, r, http.StatusOK, &responder.View{
 		Data: loginResponse{
 			AccessToken:  pair.AccessToken,
 			RefreshToken: pair.RefreshToken,

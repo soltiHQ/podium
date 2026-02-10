@@ -6,7 +6,7 @@ import (
     "github.com/soltiHQ/control-plane/ui/layout"
 )
 
-templ ErrorPage(code int, title string, message string) {
+templ ErrorPage(code int, title, message, requestID string) {
 	@layout.BlankLayout(title) {
 		<main class="flex w-screen min-h-screen max-h-full max-w-full flex-col justify-center items-center bg-gray-100">
 			<div class="flex w-[90%] h-full flex-col justify-between items-start flex-1 pt-[5%] pb-[5%]">
@@ -23,7 +23,9 @@ templ ErrorPage(code int, title string, message string) {
 					</p>
 				</div>
 
-				<div></div>
+				<div class="font-mono text-base leading-[1.5] font-normal tracking-[1px] uppercase text-black">
+                    [ { requestID } ]
+				</div>
 			</div>
 		</main>
 	}

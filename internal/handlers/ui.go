@@ -9,14 +9,15 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/auth/session"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
-
+	"github.com/soltiHQ/control-plane/internal/transport/http/cookie"
+	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/ui/pages"
 )
 
 // UI handles browser-facing HTML endpoints.
 type UI struct {
-	html    *response.HTMLResponder
+	html    *responder.HTMLResponder
 	limiter *ratelimit.Limiter
 	session *session.Service
 
@@ -27,7 +28,7 @@ type UI struct {
 }
 
 // NewUI creates a UI handler.
-func NewUI(logger zerolog.Logger, session *session.Service, html *response.HTMLResponder, limiter *ratelimit.Limiter, clk token.Clock, err *Fault) *UI {
+func NewUI(logger zerolog.Logger, session *session.Service, html *responder.HTMLResponder, limiter *ratelimit.Limiter, clk token.Clock, err *Fault) *UI {
 	return &UI{
 		logger:  logger,
 		session: session,
@@ -57,20 +58,20 @@ func (u *UI) LoginPage(w http.ResponseWriter, r *http.Request) {
 	if subject != "" {
 		key := loginKey(subject, r)
 		if u.limiter.Blocked(key, u.clock.Now()) {
-			u.html.Respond(w, r, http.StatusTooManyRequests, &response.View{
-				Component: pages.ErrorPage(
-					http.StatusTooManyRequests,
-					"Too many attempts",
-					"Account temporarily locked. Please try again in 10 minutes.",
-				),
-			})
+			//u.html.Respond(w, r, http.StatusTooManyRequests, &responder.View{
+			//	Component: pages.ErrorPage(
+			//		http.StatusTooManyRequests,
+			//		"Too many attempts",
+			//		"Account temporarily locked. Please try again in 10 minutes.",
+			//	),
+			//})
 			return
 		}
 	}
 
 	errMsg := r.URL.Query().Get("error")
 
-	u.html.Respond(w, r, http.StatusOK, &response.View{
+	u.html.Respond(w, r, http.StatusOK, &responder.View{
 		Component: pages.Login(redirect, errMsg),
 	})
 }
@@ -78,7 +79,7 @@ func (u *UI) LoginPage(w http.ResponseWriter, r *http.Request) {
 // LoginSubmit handles form POST, authenticates, sets cookie, redirects.
 func (u *UI) LoginSubmit(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
-		u.html.Error(w, r, http.StatusBadRequest, "invalid form")
+		//u.html.Error(w, r, http.StatusBadRequest, "invalid form")
 		return
 	}
 
@@ -98,7 +99,8 @@ func (u *UI) LoginSubmit(w http.ResponseWriter, r *http.Request) {
 	now := u.clock.Now()
 	if u.limiter.Blocked(key, now) {
 
-		u.err.AuthRateLimit(w, r, RenderPage)
+		response.AuthRateLimit(w, r, response.RenderPage)
+		//u.err.AuthRateLimit(w, r, RenderPage)
 		return
 	}
 
@@ -116,35 +118,6 @@ func (u *UI) LoginSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u.limiter.Reset(key)
-
-	// Set access token as HttpOnly cookie.
-	http.SetCookie(w, &http.Cookie{
-		Name:     "access_token",
-		Value:    pair.AccessToken,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
-	})
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "session_id",
-		Value:    id.SessionID,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
-	})
-
-	// Set refresh token as separate HttpOnly cookie.
-	http.SetCookie(w, &http.Cookie{
-		Name:     "refresh_token",
-		Value:    pair.RefreshToken,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-		Secure:   r.TLS != nil,
-	})
-
+	cookie.SetAuth(w, r, pair.AccessToken, pair.RefreshToken, id.SessionID)
 	http.Redirect(w, r, redirect, http.StatusFound)
 }

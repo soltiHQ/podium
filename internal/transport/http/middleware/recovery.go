@@ -7,13 +7,11 @@ import (
 
 	"github.com/felixge/httpsnoop"
 	"github.com/rs/zerolog"
-
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
 )
 
-// Recovery returns middleware that catches panics, logs them with a stack trace,
-// and writes an error response if headers haven't been sent yet.
+// Recovery catches panics and writes an error response if headers haven't been sent yet.
 func Recovery(logger zerolog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -33,13 +31,11 @@ func Recovery(logger zerolog.Logger) func(http.Handler) http.Handler {
 					}
 				},
 			})
-
 			defer func() {
 				rec := recover()
 				if rec == nil {
 					return
 				}
-
 				stack := debug.Stack()
 
 				evt := logger.Error().
@@ -61,11 +57,8 @@ func Recovery(logger zerolog.Logger) func(http.Handler) http.Handler {
 					}
 					return
 				}
-
-				resp := response.FromContext(r.Context())
-				resp.Error(w, r, http.StatusInternalServerError, "internal error")
+				response.Unavailable(w, r, response.RenderPage)
 			}()
-
 			next.ServeHTTP(wrapped, r)
 		})
 	}

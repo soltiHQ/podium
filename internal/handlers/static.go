@@ -3,34 +3,43 @@ package handlers
 import (
 	"io/fs"
 	"net/http"
+	"strings"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/ui"
 )
 
-// Static serves embedded static assets (CSS, JS, images, etc.).
 type Static struct {
-	logger  zerolog.Logger
-	handler http.Handler
+	logger zerolog.Logger
+	fs     http.FileSystem
 }
 
-// NewStatic initializes a Static handler backed by the embedded UI filesystem.
 func NewStatic(logger zerolog.Logger) *Static {
 	sub, err := fs.Sub(ui.Static, "static")
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to load static files")
 	}
 	return &Static{
-		logger:  logger,
-		handler: http.StripPrefix("/static/", http.FileServer(http.FS(sub))),
+		logger: logger,
+		fs:     http.FS(sub),
 	}
 }
 
-// Routes registers static file routes on the provided mux.
 func (s *Static) Routes(mux *http.ServeMux) {
-	mux.Handle("/static/", s.handler)
+	mux.Handle("/static/", http.StripPrefix("/static/", http.HandlerFunc(s.serve)))
 
 	mux.HandleFunc("/static", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/static/", http.StatusMovedPermanently)
 	})
+}
+
+func (s *Static) serve(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+
+	if strings.HasSuffix(r.URL.Path, "/") {
+		http.NotFound(w, r)
+		return
+	}
+	http.FileServer(s.fs).ServeHTTP(w, r)
 }
