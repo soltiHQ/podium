@@ -37,9 +37,11 @@ go.work.sum
 # OS specific
 .DS_Store
 
-# static/proto
+# static
 ui/static/js/alpine.min.js
 ui/static/js/htmx.min.js
+
+# proto
 domain/gen/
 
 # templ
