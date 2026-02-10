@@ -39,7 +39,7 @@ go.work.sum
 
 # static/proto
 ui/js/alpine.min.js
-ui/js/htmlx.min.js
+ui/js/htmx.min.js
 domain/gen/
 
 # templ
