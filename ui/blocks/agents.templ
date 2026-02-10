@@ -1,0 +1,87 @@
+package blocks
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/ui/components"
+	"github.com/soltiHQ/control-plane/ui/layout"
+)
+
+templ Agents(agents []*model.Agent) {
+	<div
+		id="agents-block"
+		hx-get="/agents"
+		hx-trigger="every 10s"
+		hx-swap="outerHTML"
+		hx-sync="this:replace"
+	>
+		@layout.Block(
+			"Agents",
+			"Connected agents discovered by control-plane",
+		) {
+			@components.List("No agents connected yet.", len(agents) > 0) {
+				for _, a := range agents {
+					@layout.Card(a.Name()) {
+						<div class="grid grid-cols-2 gap-3 text-sm">
+							<div class="text-gray-500">ID</div>
+							<div class="font-mono text-gray-800">{ a.ID() }</div>
+
+							<div class="text-gray-500">Endpoint</div>
+							<div class="text-gray-800">{ a.Endpoint() }</div>
+
+							<div class="text-gray-500">Platform</div>
+							<div>{ a.Platform() }</div>
+
+							<div class="text-gray-500">OS / Arch</div>
+							<div>{ fmt.Sprintf("%s / %s", a.OS(), a.Arch()) }</div>
+
+							<div class="text-gray-500">Uptime</div>
+							<div>{ formatUptime(a.UptimeSeconds()) }</div>
+
+							<div class="text-gray-500">Updated</div>
+							<div>{ formatTime(a.UpdatedAt()) }</div>
+						</div>
+
+						if len(a.MetadataAll()) > 0 {
+							<div class="mt-4 border-t pt-3">
+								<div class="mb-2 text-xs font-semibold uppercase text-gray-500">
+									Metadata
+								</div>
+								<div class="space-y-1 text-xs font-mono text-gray-700">
+									for k, v := range a.MetadataAll() {
+										<div>{ k }: { v }</div>
+									}
+								</div>
+							</div>
+						}
+
+						if len(a.LabelsAll()) > 0 {
+							<div class="mt-4 border-t pt-3">
+								<div class="mb-2 text-xs font-semibold uppercase text-gray-500">
+									Labels
+								</div>
+								<div class="flex flex-wrap gap-2">
+									for k, v := range a.LabelsAll() {
+										<span class="rounded bg-blue-100 px-2 py-1 text-xs text-blue-700">
+											{ k }={ v }
+										</span>
+									}
+								</div>
+							</div>
+						}
+					}
+				}
+			}
+		}
+	</div>
+}
+
+func formatUptime(sec int64) string {
+	return (time.Duration(sec) * time.Second).String()
+}
+
+func formatTime(t time.Time) string {
+	return t.Format("2006-01-02 15:04:05")
+}

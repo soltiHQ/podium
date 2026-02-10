@@ -1,0 +1,20 @@
+package layout
+
+templ Block(title string, subtitle string) {
+	<section class="space-y-4">
+		if title != "" {
+			<div class="flex items-center justify-between gap-4">
+				<div>
+					<h2 class="text-xl font-semibold text-gray-900">{ title }</h2>
+					if subtitle != "" {
+						<p class="mt-1 text-sm text-gray-500">{ subtitle }</p>
+					}
+				</div>
+			</div>
+		}
+
+		<div class="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+			{ children... }
+		</div>
+	</section>
+}

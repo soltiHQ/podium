@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"google.golang.org/grpc"
+
+	discoverv1 "github.com/soltiHQ/control-plane/domain/gen/v1"
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/credentials"
@@ -16,6 +19,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/backend"
 	"github.com/soltiHQ/control-plane/internal/handlers"
 	"github.com/soltiHQ/control-plane/internal/server"
+	"github.com/soltiHQ/control-plane/internal/server/runner/grpcserver"
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
@@ -52,12 +56,22 @@ func main() {
 	// Backend
 	loginUC := backend.NewLogin(authSVC)
 
+	// Discovery backend (важно: не store напрямую, а UC)
+	// Если у тебя конструктор называется иначе — меняешь только эту строку.
+	discoveryUC := backend.NewDiscovery(store)
+	agentsUC := backend.NewAgents(store)
+
 	// Handlers
-	uiHandler := handlers.NewUI(logger, authSVC, loginUC)
+	uiHandler := handlers.NewUI(logger, authSVC, loginUC, agentsUC)
 	apiHandler := handlers.NewAPI(logger, authSVC, loginUC)
 	staticHandler := handlers.NewStatic(logger)
 
-	// Router
+	httpDiscovery := handlers.NewHTTPDiscovery(logger, discoveryUC)
+	grpcDiscovery := handlers.NewGRPCDiscovery(logger, discoveryUC)
+
+	// ---------------------------------------------------------------
+	// UI/API HTTP :8080
+	// ---------------------------------------------------------------
 	mux := http.NewServeMux()
 
 	staticHandler.Routes(mux)
@@ -69,6 +83,7 @@ func main() {
 	// Protected
 	authMw := middleware.Auth(authSVC.Verifier, authSVC.Session)
 	mux.Handle("/", authMw(http.HandlerFunc(uiHandler.Main)))
+	mux.Handle("/agents", authMw(http.HandlerFunc(uiHandler.Agents)))
 
 	// Middleware chain (outer -> inner)
 	var handler http.Handler = mux
@@ -80,7 +95,6 @@ func main() {
 		AllowOrigins: []string{"*"},
 	})(handler)
 
-	// Server
 	httpRunner, err := httpserver.New(
 		httpserver.Config{Name: "http", Addr: ":8080"},
 		logger,
@@ -90,7 +104,50 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to create http server")
 	}
 
-	srv, err := server.New(server.Config{}, logger, httpRunner)
+	// ---------------------------------------------------------------
+	// HTTP Discovery :8082
+	// ---------------------------------------------------------------
+	discMux := http.NewServeMux()
+	discMux.HandleFunc("/api/v1/discovery/sync", httpDiscovery.Sync)
+
+	// Тут negotiate НЕ нужен: путь /api/* и так вернёт JSON,
+	// но middleware.Response у тебя опирается на Responder из ctx.
+	// Поэтому negotiate оставляем, иначе response.* будет падать в TryResponder()->NewJSON()
+	// (если тебе это норм — можешь убрать, но тогда HTMLResponder там не нужен).
+	var discHandler http.Handler = discMux
+	discHandler = middleware.Negotiate(jsonResp, htmlResp)(discHandler)
+	discHandler = middleware.Recovery(logger)(discHandler)
+	discHandler = middleware.Logger(logger)(discHandler)
+	discHandler = middleware.RequestID()(discHandler)
+
+	httpDiscoveryRunner, err := httpserver.New(
+		httpserver.Config{Name: "http-discovery", Addr: ":8082"},
+		logger,
+		discHandler,
+	)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to create http discovery server")
+	}
+
+	// ---------------------------------------------------------------
+	// gRPC Discovery :50051
+	// ---------------------------------------------------------------
+	grpcSrv := grpc.NewServer()
+	discoverv1.RegisterDiscoverServiceServer(grpcSrv, grpcDiscovery)
+
+	grpcRunner, err := grpcserver.New(
+		grpcserver.Config{Name: "grpc-discovery", Addr: ":50051"},
+		logger,
+		grpcSrv,
+	)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to create grpc server")
+	}
+
+	// ---------------------------------------------------------------
+	// Server (3 runners)
+	// ---------------------------------------------------------------
+	srv, err := server.New(server.Config{}, logger, httpRunner, httpDiscoveryRunner, grpcRunner)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create server")
 	}
@@ -99,7 +156,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	logger.Info().Msg("starting server on :8080")
+	logger.Info().Msg("starting servers: http=:8080, http-discovery=:8082, grpc=:50051")
 
 	if err := srv.Run(ctx); err != nil {
 		logger.Error().Err(err).Msg("server exited")
