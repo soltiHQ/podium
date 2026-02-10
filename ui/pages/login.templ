@@ -1,14 +1,17 @@
 package pages
 
-import "github.com/soltiHQ/control-plane/ui/layout"
+import (
+	"github.com/soltiHQ/control-plane/ui/components"
+	"github.com/soltiHQ/control-plane/ui/layout"
+)
 
 templ Login(redirectURL string, errMsg string) {
 	@layout.BlankLayout("Login") {
 		<div class="flex min-h-screen items-center justify-center px-4">
 			<div class="w-full max-w-sm space-y-6">
 				<div class="text-center">
-					<h1 class="text-2xl font-bold">Control Plane</h1>
-					<p class="mt-2 text-sm text-gray-500">Sign in to continue</p>
+					<h1 class="text-2xl font-bold">Solti</h1>
+					<p class="mt-2 text-sm text-gray-500">Let's get you signed in</p>
 				</div>
 
 				if errMsg != "" {
@@ -17,42 +20,35 @@ templ Login(redirectURL string, errMsg string) {
 					</div>
 				}
 
-				<form
-					method="POST"
-					action="/login"
-					class="space-y-4"
-				>
+				<form method="POST" action="/login" class="space-y-4">
 					<input type="hidden" name="redirect" value={ redirectURL }/>
 
-					<div>
-						<label for="subject" class="block text-sm font-medium text-gray-700">Username</label>
-						<input
-							type="text"
-							id="subject"
-							name="subject"
-							required
-							autofocus
-							class="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-						/>
-					</div>
+					@components.Input(
+						"subject",
+						"subject",
+						"Username",
+						"text",
+						"",
+						true,
+						true,
+					)
 
-					<div>
-						<label for="password" class="block text-sm font-medium text-gray-700">Password</label>
-						<input
-							type="password"
-							id="password"
-							name="password"
-							required
-							class="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-						/>
-					</div>
+					@components.Input(
+						"password",
+						"password",
+						"Password",
+						"password",
+						"",
+						true,
+						false,
+					)
 
-					<button
-						type="submit"
-						class="w-full rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-					>
-						Sign in
-					</button>
+					@components.Button(
+						"Sign in",
+						"submit",
+						true,
+						"primary",
+					)
 				</form>
 			</div>
 		</div>

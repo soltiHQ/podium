@@ -20,71 +20,57 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
-	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 )
 
 func main() {
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
 
-	// ---------------------------------------------------------------
 	// Storage
-	// ---------------------------------------------------------------
 	store := inmemory.New()
 
-	// ---------------------------------------------------------------
 	// Bootstrap admin user
-	// ---------------------------------------------------------------
 	if err := bootstrap(context.Background(), store); err != nil {
 		logger.Fatal().Err(err).Msg("failed to bootstrap")
 	}
 	logger.Info().Msg("bootstrap: admin/admin created")
 
-	// ---------------------------------------------------------------
 	// Auth stack
-	// ---------------------------------------------------------------
 	jwtSecret := "dev-secret-change-me-in-production"
-	authSVC := svc.NewAuth(store, jwtSecret, 1*time.Minute, 7*24*time.Hour, 1*time.Minute, 2)
+	authSVC := svc.NewAuth(
+		store,
+		jwtSecret,
+		1*time.Minute,
+		7*24*time.Hour,
+		1*time.Minute,
+		2,
+	)
 
-	// ---------------------------------------------------------------
 	// Responders
-	// ---------------------------------------------------------------
 	jsonResp := responder.NewJSON()
 	htmlResp := responder.NewHTML()
 
-	// ---------------------------------------------------------------
-	// Backend & Handlers (only UI + Static)
-	// ---------------------------------------------------------------
+	// Backend
 	loginUC := backend.NewLogin(authSVC)
 
+	// Handlers
 	uiHandler := handlers.NewUI(logger, authSVC, loginUC)
 	apiHandler := handlers.NewAPI(logger, authSVC, loginUC)
 	staticHandler := handlers.NewStatic(logger)
 
-	// ---------------------------------------------------------------
 	// Router
-	// ---------------------------------------------------------------
 	mux := http.NewServeMux()
 
 	staticHandler.Routes(mux)
 
-	// Login (GET/POST)
+	// Public
 	mux.HandleFunc("/login", uiHandler.Login)
 	mux.HandleFunc("/api/v1/login", apiHandler.Login)
 
-	// Home + 404 fallback
-	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/" {
-			// временно: редирект на /login (пока нет главной)
-			http.Redirect(w, r, "/login", http.StatusFound)
-			return
-		}
-		response.NotFound(w, r, response.RenderPage)
-	}))
+	// Protected
+	authMw := middleware.Auth(authSVC.Verifier, authSVC.Session)
+	mux.Handle("/", authMw(http.HandlerFunc(uiHandler.Main)))
 
-	// ---------------------------------------------------------------
-	// Middleware chain (outer → inner)
-	// CORS → RequestID → Logger → Recovery → Negotiate → Router
-	// ---------------------------------------------------------------
+	// Middleware chain (outer -> inner)
 	var handler http.Handler = mux
 	handler = middleware.Negotiate(jsonResp, htmlResp)(handler)
 	handler = middleware.Recovery(logger)(handler)
@@ -94,9 +80,7 @@ func main() {
 		AllowOrigins: []string{"*"},
 	})(handler)
 
-	// ---------------------------------------------------------------
 	// Server
-	// ---------------------------------------------------------------
 	httpRunner, err := httpserver.New(
 		httpserver.Config{Name: "http", Addr: ":8080"},
 		logger,
@@ -111,9 +95,7 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to create server")
 	}
 
-	// ---------------------------------------------------------------
 	// Run
-	// ---------------------------------------------------------------
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -129,7 +111,6 @@ func main() {
 
 // bootstrap seeds an admin user with all permissions.
 func bootstrap(ctx context.Context, store *inmemory.Store) error {
-	// Role with all permissions.
 	role, err := model.NewRole("role-admin", "admin")
 	if err != nil {
 		return err
@@ -143,7 +124,6 @@ func bootstrap(ctx context.Context, store *inmemory.Store) error {
 		return err
 	}
 
-	// User.
 	user, err := model.NewUser("user-admin", "admin")
 	if err != nil {
 		return err
@@ -157,7 +137,6 @@ func bootstrap(ctx context.Context, store *inmemory.Store) error {
 		return err
 	}
 
-	// Password credential.
 	cred, err := credentials.NewPasswordCredential("cred-admin", "user-admin", "admin", 0)
 	if err != nil {
 		return err

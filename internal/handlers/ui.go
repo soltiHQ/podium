@@ -25,6 +25,21 @@ func NewUI(logger zerolog.Logger, auth *svc.Auth, backend *backend.Login) *UI {
 	return &UI{logger: logger, auth: auth, backend: backend}
 }
 
+func (x *UI) Main(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if r.URL.Path != "/" {
+		response.NotFound(w, r, response.RenderPage)
+		return
+	}
+
+	response.OK(w, r, response.RenderPage, &responder.View{
+		Component: pages.Main(),
+	})
+}
+
 func (x *UI) Login(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		redirect := r.URL.Query().Get("redirect")

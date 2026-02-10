@@ -1,0 +1,27 @@
+package layout
+
+import "github.com/soltiHQ/control-plane/ui/components"
+
+templ PageLayout(title string) {
+	<!DOCTYPE html>
+	<html lang="ru">
+	<head>
+		<meta charset="UTF-8"/>
+		<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+
+		<link rel="stylesheet" href="/static/css/tailwindcss.css">
+
+		<script src="/static/js/htmx.min.js"></script>
+		<script src="/static/js/alpine.min.js" defer></script>
+
+		<title>{ title }</title>
+	</head>
+	<body class="bg-gray-50 text-gray-900 min-h-screen flex flex-col">
+		@components.Navbar(title)
+
+		<main class="flex-1 mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8 py-6">
+			{ children... }
+		</main>
+	</body>
+	</html>
+}

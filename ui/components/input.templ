@@ -1,0 +1,34 @@
+package components
+
+templ Input(
+	id string,
+	name string,
+	label string,
+	typ string,
+	value string,
+	required bool,
+	autofocus bool,
+) {
+	<div>
+		<label
+			for={ id }
+			class="block text-sm font-medium text-gray-700"
+		>
+			{ label }
+		</label>
+
+		<input
+			type={ typ }
+			id={ id }
+			name={ name }
+			value={ value }
+			if required {
+				required
+			}
+			if autofocus {
+				autofocus
+			}
+			class="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+		/>
+	</div>
+}

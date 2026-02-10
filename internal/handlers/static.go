@@ -34,8 +34,8 @@ func (s *Static) Routes(mux *http.ServeMux) {
 }
 
 func (s *Static) serve(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
+	//w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	//w.Header().Set("X-Content-Type-Options", "nosniff")
 
 	if strings.HasSuffix(r.URL.Path, "/") {
 		http.NotFound(w, r)
