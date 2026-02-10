@@ -38,8 +38,8 @@ go.work.sum
 .DS_Store
 
 # static/proto
-ui/js/alpine.min.js
-ui/js/htmx.min.js
+ui/static/js/alpine.min.js
+ui/static/js/htmx.min.js
 domain/gen/
 
 # templ
