@@ -178,17 +178,20 @@ func (x *UI) Users(w http.ResponseWriter, r *http.Request) {
 }
 
 // UsersList renders GET /user-list
+// UsersList renders GET /users/list (block)
 func (x *UI) UsersList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 	if r.URL.Path != "/users/list" {
-		response.NotFound(w, r, response.RenderBlock)
+		response.NotFound(w, r, response.RenderPage)
 		return
 	}
 
-	res, err := x.usersUC.List(r.Context(), 100, "")
+	cursor := r.URL.Query().Get("cursor")
+
+	res, err := x.usersUC.List(r.Context(), 5, cursor)
 	if err != nil {
 		x.logger.Error().Err(err).Msg("list users failed")
 		response.Unavailable(w, r, response.RenderBlock)
@@ -196,6 +199,31 @@ func (x *UI) UsersList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.OK(w, r, response.RenderBlock, &responder.View{
-		Component: content.UserList(res.Items),
+		Component: content.List(res.Items, res.NextCursor),
+	})
+}
+
+// UsersListRows renders GET /users/list/rows (block append + oob footer)
+func (x *UI) UsersListRows(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if r.URL.Path != "/users/list/rows" {
+		response.NotFound(w, r, response.RenderPage)
+		return
+	}
+
+	cursor := r.URL.Query().Get("cursor")
+
+	res, err := x.usersUC.List(r.Context(), 5, cursor)
+	if err != nil {
+		x.logger.Error().Err(err).Msg("list users failed")
+		response.Unavailable(w, r, response.RenderBlock)
+		return
+	}
+
+	response.OK(w, r, response.RenderBlock, &responder.View{
+		Component: content.RowsResponse(res.Items, res.NextCursor),
 	})
 }

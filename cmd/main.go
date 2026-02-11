@@ -87,6 +87,7 @@ func main() {
 	mux.Handle("/", authMw(http.HandlerFunc(uiHandler.Main)))
 	mux.Handle("/users", authMw(http.HandlerFunc(uiHandler.Users)))
 	mux.Handle("/users/list", authMw(http.HandlerFunc(uiHandler.UsersList)))
+	mux.Handle("/users/list/rows", authMw(http.HandlerFunc(uiHandler.UsersListRows)))
 	//mux.Handle("/agents", authMw(http.HandlerFunc(uiHandler.Agents)))
 
 	// Middleware chain (outer -> inner)
@@ -172,38 +173,168 @@ func main() {
 
 // bootstrap seeds an admin user with all permissions.
 func bootstrap(ctx context.Context, store *inmemory.Store) error {
-	role, err := model.NewRole("role-admin", "admin")
+	// ---------------------------------------------------
+	// ROLES
+	// ---------------------------------------------------
+
+	// admin (all permissions)
+	adminRole, err := model.NewRole("role-admin", "admin")
 	if err != nil {
 		return err
 	}
 	for _, p := range kind.All {
-		if err := role.PermissionAdd(p); err != nil {
+		if err := adminRole.PermissionAdd(p); err != nil {
 			return err
 		}
 	}
-	if err := store.UpsertRole(ctx, role); err != nil {
+	if err := store.UpsertRole(ctx, adminRole); err != nil {
 		return err
 	}
 
-	user, err := model.NewUser("user-admin", "admin")
+	// agents-read
+	agentsReadRole, err := model.NewRole("role-agents-read", "agents-read")
 	if err != nil {
 		return err
 	}
-	user.NameAdd("Admin")
-	user.EmailAdd("admin@local")
-	if err := user.RoleAdd("role-admin"); err != nil {
-		return err
-	}
-	if err := store.UpsertUser(ctx, user); err != nil {
+	_ = agentsReadRole.PermissionAdd(kind.AgentsGet)
+	if err := store.UpsertRole(ctx, agentsReadRole); err != nil {
 		return err
 	}
 
-	cred, err := credentials.NewPasswordCredential("cred-admin", "user-admin", "admin", 0)
+	// agents-editor
+	agentsEditRole, err := model.NewRole("role-agents-edit", "agents-edit")
 	if err != nil {
 		return err
 	}
-	if err := store.UpsertCredential(ctx, cred); err != nil {
+	_ = agentsEditRole.PermissionAdd(kind.AgentsGet)
+	_ = agentsEditRole.PermissionAdd(kind.AgentsEdit)
+	if err := store.UpsertRole(ctx, agentsEditRole); err != nil {
 		return err
+	}
+
+	// users-read
+	usersReadRole, err := model.NewRole("role-users-read", "users-read")
+	if err != nil {
+		return err
+	}
+	_ = usersReadRole.PermissionAdd(kind.UsersGet)
+	if err := store.UpsertRole(ctx, usersReadRole); err != nil {
+		return err
+	}
+
+	// users-manager
+	usersManagerRole, err := model.NewRole("role-users-manager", "users-manager")
+	if err != nil {
+		return err
+	}
+	_ = usersManagerRole.PermissionAdd(kind.UsersGet)
+	_ = usersManagerRole.PermissionAdd(kind.UsersAdd)
+	_ = usersManagerRole.PermissionAdd(kind.UsersEdit)
+	if err := store.UpsertRole(ctx, usersManagerRole); err != nil {
+		return err
+	}
+
+	// readonly (agents + users get)
+	readOnlyRole, err := model.NewRole("role-readonly", "readonly")
+	if err != nil {
+		return err
+	}
+	_ = readOnlyRole.PermissionAdd(kind.AgentsGet)
+	_ = readOnlyRole.PermissionAdd(kind.UsersGet)
+	if err := store.UpsertRole(ctx, readOnlyRole); err != nil {
+		return err
+	}
+
+	// ---------------------------------------------------
+	// USERS
+	// ---------------------------------------------------
+
+	type seedUser struct {
+		ID       string
+		Subject  string
+		Name     string
+		Email    string
+		RoleID   string
+		Password string
+	}
+
+	users := []seedUser{
+		{
+			ID:       "user-admin",
+			Subject:  "admin",
+			Name:     "Admin",
+			Email:    "admin@local",
+			RoleID:   "role-admin",
+			Password: "admin",
+		},
+		{
+			ID:       "user-agents-read",
+			Subject:  "agent_reader",
+			Name:     "Agent Reader",
+			Email:    "agent.reader@local",
+			RoleID:   "role-agents-read",
+			Password: "password",
+		},
+		{
+			ID:       "user-agents-edit",
+			Subject:  "agent_editor",
+			Name:     "Agent Editor",
+			Email:    "agent.editor@local",
+			RoleID:   "role-agents-edit",
+			Password: "password",
+		},
+		{
+			ID:       "user-users-read",
+			Subject:  "user_reader",
+			Name:     "User Reader",
+			Email:    "user.reader@local",
+			RoleID:   "role-users-read",
+			Password: "password",
+		},
+		{
+			ID:       "user-users-manager",
+			Subject:  "user_manager",
+			Name:     "User Manager",
+			Email:    "user.manager@local",
+			RoleID:   "role-users-manager",
+			Password: "password",
+		},
+		{
+			ID:       "user-readonly",
+			Subject:  "readonly",
+			Name:     "Read Only",
+			Email:    "readonly@local",
+			RoleID:   "role-readonly",
+			Password: "password",
+		},
+	}
+
+	for _, u := range users {
+		user, err := model.NewUser(u.ID, u.Subject)
+		if err != nil {
+			return err
+		}
+		user.NameAdd(u.Name)
+		user.EmailAdd(u.Email)
+		if err := user.RoleAdd(u.RoleID); err != nil {
+			return err
+		}
+		if err := store.UpsertUser(ctx, user); err != nil {
+			return err
+		}
+
+		cred, err := credentials.NewPasswordCredential(
+			"cred-"+u.ID,
+			u.ID,
+			u.Password,
+			0,
+		)
+		if err != nil {
+			return err
+		}
+		if err := store.UpsertCredential(ctx, cred); err != nil {
+			return err
+		}
 	}
 
 	return nil
