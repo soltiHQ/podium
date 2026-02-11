@@ -2,7 +2,7 @@ package layout
 
 templ Root(title string) {
 	<!DOCTYPE html>
-	<html lang="ru">
+	<html lang="ru" class="fonts-loading">
 	<head>
 		<meta charset="UTF-8"/>
 		<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
@@ -13,6 +13,41 @@ templ Root(title string) {
 
 		<script src="/static/js/htmx.min.js"></script>
 		<script src="/static/js/alpine.min.js" defer></script>
+
+		<!-- prevent font jump (hide text until fonts are ready) -->
+		<style>
+			/* hide text but keep layout to avoid reflow jump */
+			html.fonts-loading body { visibility: hidden; }
+			html.fonts-loaded body { visibility: visible; }
+		</style>
+
+		<script>
+			(function () {
+				// show page when fonts are ready (or after timeout)
+				var done = false;
+				function finish() {
+					if (done) return;
+					done = true;
+					var root = document.documentElement;
+					root.classList.remove("fonts-loading");
+					root.classList.add("fonts-loaded");
+				}
+
+				// fallback: don't block forever
+				setTimeout(finish, 800);
+
+				try {
+					if (document.fonts && document.fonts.ready) {
+						document.fonts.ready.then(finish).catch(finish);
+					} else {
+						// older browsers
+						window.addEventListener("load", finish, { once: true });
+					}
+				} catch (e) {
+					finish();
+				}
+			})();
+		</script>
 
 		<script>
 			(function() {
