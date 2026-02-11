@@ -57,7 +57,7 @@ templ Input(
 			/>
 		}
 
-		@if errMsg != "" {
+		if errMsg != "" {
 			<p id={ id + "-error" } class="text-xs text-danger">
 				{ errMsg }
 			</p>
