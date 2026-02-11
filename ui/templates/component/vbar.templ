@@ -5,9 +5,12 @@ import "github.com/soltiHQ/control-plane/ui/templates/asset"
 templ VBar(active string) {
 	<nav
 		class="
-			fixed z-50 bg-white border-gray-200
+			fixed z-50
+			bg-card text-fg border-border
 			left-0 top-0 h-screen w-[80px] border-r
-			max-sm:left-0 max-sm:top-auto max-sm:bottom-0 max-sm:h-[64px] max-sm:w-full max-sm:border-r-0 max-sm:border-t
+			max-sm:left-0 max-sm:top-auto max-sm:bottom-0
+			max-sm:h-[64px] max-sm:w-full
+			max-sm:border-r-0 max-sm:border-t
 		"
 	>
 		<div
@@ -26,7 +29,7 @@ templ VBar(active string) {
 			</div>
 
 			<div class="flex flex-col items-center gap-2 max-sm:flex-row max-sm:gap-1">
-				@VBarItem("theme_light", "/theme", "theme", active)
+				@ThemeToggle()
 				@VBarItem("logout", "/logout", "Logout", active)
 			</div>
 		</div>
@@ -37,7 +40,12 @@ templ VBarItem(id string, href string, label string, active string) {
 	if active == id {
 		<a
 			href={ href }
-			class="flex items-center justify-center h-12 w-12 rounded-xl bg-gray-100 max-sm:h-11 max-sm:w-11 hover:bg-gray-200"
+			class="
+				flex items-center justify-center
+                h-12 w-12 rounded-xl
+                bg-nav-bg
+                text-icon-active
+			"
 			title={ label }
 		>
 			@asset.Icon(id)
@@ -45,10 +53,42 @@ templ VBarItem(id string, href string, label string, active string) {
 	} else {
 		<a
 			href={ href }
-			class="flex items-center justify-center h-12 w-12 rounded-xl max-sm:h-11 max-sm:w-11 hover:bg-gray-100"
+			class="
+				flex items-center justify-center
+                h-12 w-12 rounded-xl
+                text-icon
+                hover:text-fg
+                hover:bg-nav-bg
+			"
 			title={ label }
 		>
 			@asset.Icon(id)
 		</a>
 	}
+}
+
+
+templ ThemeToggle() {
+	<button
+		type="button"
+		onclick="window.__toggleTheme && window.__toggleTheme()"
+		class="
+			flex items-center justify-center
+			h-12 w-12 rounded-xl
+			text-icon
+			hover:text-fg
+			hover:bg-nav-bg
+			max-sm:h-11 max-sm:w-11
+			transition-colors
+		"
+		title="Theme"
+		aria-label="Toggle theme"
+	>
+		<span class="hidden dark:block">
+			@asset.Icon("theme_light")
+		</span>
+		<span class="block dark:hidden">
+			@asset.Icon("theme_dark")
+		</span>
+	</button>
 }
