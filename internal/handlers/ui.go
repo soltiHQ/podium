@@ -6,6 +6,7 @@ import (
 	"net/url"
 
 	"github.com/rs/zerolog"
+	"github.com/soltiHQ/control-plane/ui/pages"
 
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/svc"
@@ -14,7 +15,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/ui/blocks"
-	"github.com/soltiHQ/control-plane/ui/pages"
 	my "github.com/soltiHQ/control-plane/ui/templates/page"
 )
 
@@ -63,7 +63,7 @@ func (x *UI) Login(w http.ResponseWriter, r *http.Request) {
 		errMsg := r.URL.Query().Get("error")
 
 		response.OK(w, r, response.RenderPage, &responder.View{
-			Component: pages.Login(redirect, errMsg),
+			Component: my.Login(redirect, errMsg),
 		})
 		return
 

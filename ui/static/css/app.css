@@ -38,8 +38,8 @@
         --input-border: 214 214 219;
 
         /* brand / accents */
-        --primary: 59 130 246;
-        --primary-bg: 239 246 255;
+        --primary: 24 24 27;
+        --primary-bg: 244 244 245;
         --danger: 225 29 72;
         --success: 101 228 180;
 
@@ -70,8 +70,8 @@
         --border-2: 39 39 42;
         --input-border: 255 255 255;
 
-        --primary: 36 115 245;
-        --primary-bg: 23 37 84;
+        --primary: 5 150 105;
+        --primary-bg: 5 30 24;
         --danger: 251 113 133;
 
         --nav-link-bg: 39 39 42;

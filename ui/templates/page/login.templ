@@ -1,0 +1,79 @@
+package pages
+
+import (
+	"github.com/soltiHQ/control-plane/ui/templates/component"
+	"github.com/soltiHQ/control-plane/ui/templates/layout"
+)
+
+templ Login(redirectURL string, errMsg string) {
+	@layout.Root("Login") {
+		<div class="min-h-screen bg-bg text-fg flex items-center justify-center px-4">
+			<div class="w-full max-w-sm space-y-6">
+				<div class="text-center space-y-2">
+					<div class="text-2xl font-bold tracking-tight">
+						Solti
+					</div>
+					<p class="text-sm text-muted">
+						Let's get you signed in
+					</p>
+				</div>
+
+				if errMsg != "" {
+					<div
+						class="
+							rounded-[var(--r-6)]
+							border border-danger/40
+							bg-danger/10
+							text-danger
+							px-3 py-2
+							text-sm
+						"
+						role="alert"
+					>
+						{ errMsg }
+					</div>
+				}
+
+				<form method="POST" action="/login" class="space-y-4">
+					<input type="hidden" name="redirect" value={ redirectURL }/>
+
+					@component.Input(
+						"subject",
+						"subject",
+						"Username",
+						"text",
+						"",
+						true,
+						true,
+						"",  // error (пока не подсвечиваем поле отдельно)
+						"",  // hint
+					)
+
+					@component.Input(
+						"password",
+						"password",
+						"Password",
+						"password",
+						"",
+						true,
+						false,
+						"",  // error
+						"",  // hint
+					)
+
+					@component.Button(
+						"Sign in",
+						"submit",
+						true,
+						"primary",
+						false,
+					)
+				</form>
+
+				<p class="text-xs text-muted text-center">
+					By signing in you agree to the security policy.
+				</p>
+			</div>
+		</div>
+	}
+}
