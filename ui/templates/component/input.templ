@@ -2,71 +2,38 @@ package component
 
 templ Input(
 	id string,
-	name string,
-	label string,
 	typ string,
 	value string,
+	placeholder string,
 	required bool,
 	autofocus bool,
 	errMsg string,
-	hint string,
 ) {
 	<div class="space-y-1">
-		if label != "" {
-			<label for={ id } class="block text-sm font-medium text-fg">
-				{ label }
-			</label>
-		}
+		<input
+			type={ typ }
+			id={ id }
+			name={ id }
+			value={ value }
+			placeholder={ placeholder }
+			required?={ required }
+			autofocus?={ autofocus }
+			aria-invalid?={ errMsg != "" }
+			class="
+				block w-full h-11 px-4
+				rounded-[var(--r-6)]
+				bg-card text-fg
+				border border-border/60
+				placeholder:text-muted/70
+				outline-none transition-colors
+				hover:border-border
+				focus:ring-2 focus:ring-primary/25 focus:border-primary
+				disabled:opacity-50 disabled:pointer-events-none
+			"
+		/>
 
 		if errMsg != "" {
-			<input
-				type={ typ }
-				id={ id }
-				name={ name }
-				value={ value }
-				required?={ required }
-				autofocus?={ autofocus }
-				aria-invalid="true"
-				aria-describedby={ id + "-error" }
-				class={
-					"block w-full h-10 px-3 " +
-						"rounded-[var(--r-6)] " +
-						"bg-card text-fg " +
-						"border border-danger " +
-						"placeholder:text-muted " +
-						"outline-none transition-colors " +
-						"focus:ring-2 focus:ring-danger/40 focus:border-danger " +
-						"disabled:opacity-50 disabled:pointer-events-none"
-				}
-			/>
-		} else {
-			<input
-				type={ typ }
-				id={ id }
-				name={ name }
-				value={ value }
-				required?={ required }
-				autofocus?={ autofocus }
-				aria-invalid="false"
-				class={
-					"block w-full h-10 px-3 " +
-						"rounded-[var(--r-6)] " +
-						"bg-card text-fg " +
-						"border border-border " +
-						"placeholder:text-muted " +
-						"outline-none transition-colors " +
-						"focus:ring-2 focus:ring-primary/40 focus:border-primary " +
-						"disabled:opacity-50 disabled:pointer-events-none"
-				}
-			/>
-		}
-
-		if hint != "" && errMsg == "" {
-			<p class="text-xs text-muted">{ hint }</p>
-		}
-
-		if errMsg != "" {
-			<p id={ id + "-error" } class="text-xs text-danger">{ errMsg }</p>
+			<p class="text-xs text-danger">{ errMsg }</p>
 		}
 	</div>
 }

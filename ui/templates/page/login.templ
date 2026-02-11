@@ -38,28 +38,24 @@ templ Login(redirectURL string, errMsg string) {
 					<input type="hidden" name="redirect" value={ redirectURL }/>
 
 					@component.Input(
-						"subject",
-						"subject",
-						"Username",
-						"text",
-						"",
-						true,
-						true,
-						"",  // error (пока не подсвечиваем поле отдельно)
-						"",  // hint
-					)
+                        "subject",
+                        "text",
+                        "",
+                        "Username",
+                        true,
+                        true,
+                        "",
+                    )
 
 					@component.Input(
-						"password",
-						"password",
-						"Password",
-						"password",
-						"",
-						true,
-						false,
-						"",  // error
-						"",  // hint
-					)
+                        "password",
+                        "password",
+                        "",
+                        "Password",
+                        true,
+                        false,
+                        "",
+                    )
 
 					@component.Button(
 						"Sign in",
