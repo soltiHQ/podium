@@ -8,22 +8,23 @@ import (
 
 templ Login(redirectURL string, errMsg string) {
 	@layout.Root("Login") {
-		<div class="min-h-screen bg-bg text-fg flex items-center justify-center px-4">
-			<div class="w-full max-w-sm">
+		<div class="relative min-h-screen bg-bg text-fg flex items-center justify-center px-4 overflow-hidden">
+			@component.CircleBackground()
+
+			<div class="relative w-full max-w-sm">
 				<div class="text-center space-y-3">
-                	<h1 class="flex items-center justify-center gap-3 text-3xl font-semibold tracking-tight text-fg">
-                		<span class="text-primary [&_svg]:h-10 [&_svg]:w-10">
-                			@asset.Solti()
-                		</span>
-                		<span>Solti</span>
-                	</h1>
+					<h1 class="flex items-center justify-center gap-3 text-3xl font-semibold tracking-tight text-fg">
+						<span class="text-primary [&_svg]:h-10 [&_svg]:w-10">
+							@asset.Solti()
+						</span>
+						<span>Solti</span>
+					</h1>
 
-                	<h2 class="text-lg font-medium text-fg/80">
-                		Let's get you signed in
-                	</h2>
-                </div>
+					<h2 class="text-lg font-medium text-fg/80">
+						Let's get you signed in
+					</h2>
+				</div>
 
-				<!-- Form (pulled closer to header) -->
 				<form method="POST" action="/login" class="mt-4 space-y-4">
 					<input type="hidden" name="redirect" value={ redirectURL }/>
 
@@ -56,7 +57,6 @@ templ Login(redirectURL string, errMsg string) {
 							false,
 						)
 
-						<!-- Error under button -->
 						<div class="min-h-[44px]">
 							if errMsg != "" {
 								<div

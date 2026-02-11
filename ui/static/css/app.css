@@ -20,11 +20,9 @@
 
 @layer base {
     :root {
-        /* base */
         --bg: 255 255 255;
         --fg: 24 24 27;
 
-        /* surfaces */
         --card: 255 255 255;
         --card-fg: 24 24 27;
 
@@ -32,26 +30,22 @@
         --muted: 161 161 170;
         --muted-strong: 113 113 122;
 
-        /* borders */
-        --border: 203 213 225;
-        --border-2: 226 232 240;
-        --input-border: 148 163 184;
+        --border: 228 228 231;
+        --border-2: 239 239 241;
+        --input-border: 214 214 219;
 
-        /* brand / accents */
         --primary: 24 24 27;
         --primary-bg: 244 244 245;
+
         --danger: 225 29 72;
         --success: 101 228 180;
 
-        /* nav */
         --nav-link-bg: 244 244 245;
         --nav-link-fg: 63 63 70;
 
-        /* icons */
         --icon: 82 82 91;
         --icon-active: 59 130 246;
 
-        /* radii */
         --r-6: 0.375rem;
         --r-full: 999px;
     }

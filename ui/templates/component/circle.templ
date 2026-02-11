@@ -1,0 +1,48 @@
+package component
+
+templ CircleBackground() {
+	<div
+		class="
+			pointer-events-none
+			absolute inset-0
+			- z-10
+			overflow-hidden
+		"
+	>
+		<div
+			class="
+				absolute
+				w-[900px] h-[900px]
+				rounded-full
+				bg-primary/16
+				dark:bg-primary/5
+				blur-3xl
+				top-[-300px] left-[50%] -translate-x-1/2
+			"
+		></div>
+
+		<div
+			class="
+				absolute
+				w-[600px] h-[600px]
+				rounded-full
+				bg-primary/14
+				dark:bg-primary/4
+				blur-2xl
+				bottom-[-200px] right-[-100px]
+			"
+		></div>
+
+		<div
+			class="
+				absolute
+				w-[400px] h-[400px]
+				rounded-full
+				bg-primary/20
+				dark:bg-muted/10
+				blur-2xl
+				top-[40%] left-[-150px]
+			"
+		></div>
+	</div>
+}
