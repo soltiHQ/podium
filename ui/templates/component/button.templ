@@ -15,7 +15,6 @@ templ Button(
 }
 
 templ buttonInner(label string, typ string, widthClass string, variant string, disabled bool) {
-	// base: токены + нормальный фокус
 	if variant == "primary" {
 		<button
 			type={ typ }
@@ -89,7 +88,6 @@ templ buttonInner(label string, typ string, widthClass string, variant string, d
 			{ label }
 		</button>
 	} else {
-		// fallback = secondary
 		<button
 			type={ typ }
 			disabled?={ disabled }

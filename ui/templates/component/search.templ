@@ -1,0 +1,25 @@
+package component
+
+templ Search(
+	id string,
+	name string,
+	value string,
+	placeholder string,
+	endpoint string,
+	target string,
+) {
+	<input
+		id={ id }
+		type="search"
+		name={ name }
+		value={ value }
+		placeholder={ placeholder }
+		class="block w-full h-10 px-4 rounded-[var(--r-6)] bg-card text-fg border border-input placeholder:text-muted-strong outline-none transition-colors hover:border-border focus:ring-2 focus:ring-primary/25 focus:border-primary"
+		hx-get={ endpoint }
+		hx-trigger="input changed delay:300ms, search"
+		hx-target={ target }
+		hx-select={ target }
+		hx-swap="outerHTML"
+		hx-push-url="true"
+	/>
+}

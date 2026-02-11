@@ -1,25 +1,22 @@
 package user
 
-import "github.com/soltiHQ/control-plane/domain/model"
+import (
+    "github.com/soltiHQ/control-plane/domain/model"
+    "github.com/soltiHQ/control-plane/ui/templates/component"
+)
 
 templ List(items []*model.User, nextCursor string, q string, total int) {
 	<div class="space-y-4">
 		<div class="flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
 			<div class="w-[320px] max-sm:w-full">
-				<input
-					id="users-search"
-					type="search"
-					name="q"
-					value={ q }
-					placeholder="Search users…"
-					class="block w-full h-10 px-4 rounded-[var(--r-6)] bg-card text-fg border border-input placeholder:text-muted-strong outline-none transition-colors hover:border-border focus:ring-2 focus:ring-primary/25 focus:border-primary"
-					hx-get="/users/list"
-					hx-trigger="input changed delay:300ms, search"
-					hx-target="#users-results"
-					hx-select="#users-results"
-					hx-swap="outerHTML"
-					hx-preserve="true"
-				/>
+				@component.Search(
+					"users-search",
+					"q",
+					q,
+					"Search users…",
+					"/users/list",
+					"#users-results",
+				)
 			</div>
 		</div>
 
