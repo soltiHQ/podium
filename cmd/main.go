@@ -86,8 +86,8 @@ func main() {
 	authMw := middleware.Auth(authSVC.Verifier, authSVC.Session)
 	mux.Handle("/", authMw(http.HandlerFunc(uiHandler.Main)))
 	mux.Handle("/users", authMw(http.HandlerFunc(uiHandler.Users)))
-	mux.Handle("/users/list", authMw(http.HandlerFunc(uiHandler.UsersList)))
-	mux.Handle("/users/list/rows", authMw(http.HandlerFunc(uiHandler.UsersListRows)))
+	mux.Handle("/users/list", authMw(middleware.RequireHTMX(http.HandlerFunc(uiHandler.UsersList))))
+	mux.Handle("/users/list/rows", authMw(middleware.RequireHTMX(http.HandlerFunc(uiHandler.UsersListRows))))
 	//mux.Handle("/agents", authMw(http.HandlerFunc(uiHandler.Agents)))
 
 	// Middleware chain (outer -> inner)
