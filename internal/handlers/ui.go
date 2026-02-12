@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/rs/zerolog"
+	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/svc"
 	"github.com/soltiHQ/control-plane/internal/backend"
@@ -245,4 +246,120 @@ func (x *UI) UsersListRows(w http.ResponseWriter, r *http.Request) {
 	response.OK(w, r, response.RenderBlock, &responder.View{
 		Component: content.RowsResponse(res.Items, res.NextCursor, q),
 	})
+}
+
+func (x *UI) UsersForm(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if r.URL.Path != "/users/new" {
+		response.NotFound(w, r, response.RenderPage)
+		return
+	}
+
+	id, _ := transportctx.Identity(r.Context())
+	nav := backend.BuildNav(id)
+
+	response.OK(w, r, response.RenderPage, &responder.View{
+		Component: my.UserCreate(nav, "", "", "", "", "", "", "", "", ""),
+	})
+}
+
+// UsersCreate renders GET /users/create and handles POST /users/create
+func (x *UI) UsersCreate(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/users/create" {
+		response.NotFound(w, r, response.RenderPage)
+		return
+	}
+
+	idn, _ := transportctx.Identity(r.Context())
+	nav := backend.BuildNav(idn)
+
+	// (по-хорошему это middleware RequirePermission(kind.UsersAdd), но можно и тут)
+	if idn == nil || !idn.HasPermission(kind.UsersAdd) {
+		response.Forbidden(w, r, response.RenderPage)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		response.OK(w, r, response.RenderPage, &responder.View{
+			Component: my.UserCreate(
+				nav,
+				"", "", "", "",
+				"", "", "", "",
+				"",
+			),
+		})
+		return
+
+	case http.MethodPost:
+		// ok
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		response.BadRequest(w, r, response.RenderPage)
+		return
+	}
+
+	formID := r.FormValue("id")
+	formSubject := r.FormValue("subject")
+	formName := r.FormValue("name")
+	formEmail := r.FormValue("email")
+
+	var (
+		idErr      string
+		subjectErr string
+		nameErr    string
+		emailErr   string
+		formErr    string
+	)
+
+	if formID == "" {
+		idErr = "required"
+	}
+	if formSubject == "" {
+		subjectErr = "required"
+	}
+
+	if idErr != "" || subjectErr != "" || nameErr != "" || emailErr != "" {
+		response.OK(w, r, response.RenderPage, &responder.View{
+			Component: my.UserCreate(
+				nav,
+				formID, formSubject, formName, formEmail,
+				idErr, subjectErr, nameErr, emailErr,
+				"",
+			),
+		})
+		return
+	}
+
+	_, err := x.usersUC.Create(r.Context(), formID, formSubject, formName, formEmail)
+	if err != nil {
+		switch {
+		case errors.Is(err, storage.ErrAlreadyExists):
+			formErr = "user with same id or subject already exists"
+		case errors.Is(err, storage.ErrInvalidArgument):
+			formErr = "invalid input"
+		default:
+			x.logger.Error().Err(err).Msg("create user failed")
+			formErr = "internal error"
+		}
+
+		response.OK(w, r, response.RenderPage, &responder.View{
+			Component: my.UserCreate(
+				nav,
+				formID, formSubject, formName, formEmail,
+				idErr, subjectErr, nameErr, emailErr,
+				formErr,
+			),
+		})
+		return
+	}
+
+	http.Redirect(w, r, "/users", http.StatusFound)
 }

@@ -88,6 +88,9 @@ func main() {
 	mux.Handle("/users", authMw(http.HandlerFunc(uiHandler.Users)))
 	mux.Handle("/users/list", authMw(middleware.RequireHTMX(http.HandlerFunc(uiHandler.UsersList))))
 	mux.Handle("/users/list/rows", authMw(middleware.RequireHTMX(http.HandlerFunc(uiHandler.UsersListRows))))
+	mux.Handle("/users/new", authMw(http.HandlerFunc(uiHandler.UsersForm)))
+	mux.Handle("/users/create", authMw(http.HandlerFunc(uiHandler.UsersCreate)))
+
 	//mux.Handle("/agents", authMw(http.HandlerFunc(uiHandler.Agents)))
 
 	// Middleware chain (outer -> inner)

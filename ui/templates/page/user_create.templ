@@ -1,0 +1,112 @@
+package pages
+
+import (
+	"github.com/soltiHQ/control-plane/internal/backend"
+	"github.com/soltiHQ/control-plane/ui/templates/component"
+	"github.com/soltiHQ/control-plane/ui/templates/layout"
+)
+
+templ UserCreate(
+	nav backend.Nav,
+	// values (для re-render после ошибок)
+	id string,
+	subject string,
+	name string,
+	email string,
+	// field errors
+	idErr string,
+	subjectErr string,
+	nameErr string,
+	emailErr string,
+	formErr string,
+) {
+	@layout.App("Create user", "users", nav) {
+		<div class="space-y-6 max-w-xl">
+
+			<div class="space-y-1">
+				<h1 class="text-2xl font-bold text-fg">Create user</h1>
+				<p class="text-sm text-muted">Create a new system user.</p>
+			</div>
+
+			if formErr != "" {
+				<div class="rounded-[var(--r-6)] border border-danger bg-danger/10 p-3 text-sm text-danger">
+					{ formErr }
+				</div>
+			}
+
+			<form method="post" action="/users/create" class="space-y-4">
+
+				<div class="space-y-2">
+					<div class="text-sm font-medium text-fg">ID</div>
+					@component.Input(
+						"id",
+						"text",
+						id,
+						"internal-id",
+						true,
+						true,
+						idErr,
+					)
+				</div>
+
+				<div class="space-y-2">
+					<div class="text-sm font-medium text-fg">Subject</div>
+					@component.Input(
+						"subject",
+						"text",
+						subject,
+						"auth subject (JWT sub)",
+						true,
+						false,
+						subjectErr,
+					)
+				</div>
+
+				<div class="space-y-2">
+					<div class="text-sm font-medium text-fg">Name</div>
+					@component.Input(
+						"name",
+						"text",
+						name,
+						"Display name",
+						false,
+						false,
+						nameErr,
+					)
+				</div>
+
+				<div class="space-y-2">
+					<div class="text-sm font-medium text-fg">Email</div>
+					@component.Input(
+						"email",
+						"email",
+						email,
+						"user@example.com",
+						false,
+						false,
+						emailErr,
+					)
+				</div>
+
+				<div class="flex items-center gap-2 pt-2">
+					@component.Button("Create user", "submit", false, "primary", false)
+
+					<a
+						href="/users"
+						class="
+							inline-flex items-center justify-center
+							h-10 px-4
+							rounded-[var(--r-6)]
+							bg-card text-fg border border-border
+							hover:bg-nav-bg
+							transition-colors
+						"
+					>
+						Cancel
+					</a>
+				</div>
+
+			</form>
+		</div>
+	}
+}
