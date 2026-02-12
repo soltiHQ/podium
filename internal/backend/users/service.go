@@ -81,38 +81,28 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	if id == "" {
 		return storage.ErrInvalidArgument
 	}
+
 	if err := s.store.DeleteSessionsByUser(ctx, id); err != nil {
 		return err
 	}
 
 	creds, err := s.store.ListCredentialsByUser(ctx, id)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			creds = nil
-		} else {
-			return err
-		}
+		return err
 	}
 	for _, c := range creds {
 		if c == nil {
 			continue
 		}
 
-		v, verr := s.store.GetVerifierByCredential(ctx, c.ID())
-		if verr != nil && verr != storage.ErrNotFound {
-			return verr
+		if err = s.store.DeleteVerifierByCredential(ctx, c.ID()); err != nil {
+			return err
 		}
-		if verr == nil && v != nil {
-			if err = s.store.DeleteVerifier(ctx, v.ID()); err != nil && !errors.Is(err, storage.ErrNotFound) {
-				return err
-			}
-		}
-
 		if err = s.store.DeleteCredential(ctx, c.ID()); err != nil && !errors.Is(err, storage.ErrNotFound) {
 			return err
 		}
 	}
-	if err = s.store.DeleteUser(ctx, id); err != nil && err != storage.ErrNotFound {
+	if err = s.store.DeleteUser(ctx, id); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return err
 	}
 	return nil

@@ -268,8 +268,8 @@ func (s *Store) DeleteVerifierByCredential(ctx context.Context, credentialID str
 
 	s.verifiers.mu.RLock()
 	var (
-		foundID string
-		i       int
+		ids = make([]string, 0, 1)
+		i   = 0
 	)
 	for id, v := range s.verifiers.data {
 		if i%1000 == 0 {
@@ -283,16 +283,15 @@ func (s *Store) DeleteVerifierByCredential(ctx context.Context, credentialID str
 		i++
 
 		if v.CredentialID() == credentialID {
-			foundID = id
-			break
+			ids = append(ids, id)
 		}
 	}
 	s.verifiers.mu.RUnlock()
 
-	if foundID == "" {
-		return nil
+	for _, id := range ids {
+		_ = s.verifiers.Delete(ctx, id)
 	}
-	return s.verifiers.Delete(ctx, foundID)
+	return nil
 }
 
 // --- Sessions ---
