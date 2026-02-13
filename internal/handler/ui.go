@@ -16,6 +16,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transportctx"
 	"github.com/soltiHQ/control-plane/internal/ui/policy"
 	pages "github.com/soltiHQ/control-plane/ui/templates/page"
+	"github.com/soltiHQ/control-plane/ui/templates/page/user"
 )
 
 // UI handlers
@@ -134,7 +135,7 @@ func (u *UI) Logout(w http.ResponseWriter, r *http.Request) {
 // Main handle GET /.
 func (u *UI) Main(w http.ResponseWriter, r *http.Request) {
 	u.page(w, r, http.MethodGet, "/", func(nav policy.Nav) templ.Component {
-		return pages.Main(nav)
+		return user.Main(nav)
 	})
 }
 
