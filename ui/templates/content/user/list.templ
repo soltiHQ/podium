@@ -3,13 +3,14 @@ package user
 import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/ui/templates/component"
+	"github.com/soltiHQ/control-plane/ui/templates/component/search"
 )
 
 templ List(items []*model.User, nextCursor string, q string) {
 	<div class="space-y-4">
 		<div class="flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
 			<div class="w-[320px] max-sm:w-full">
-				@component.Search(
+				@search.Input(
 					"users-search",
 					"q",
 					q,
