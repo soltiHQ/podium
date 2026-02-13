@@ -6,6 +6,7 @@ import (
 
 	"github.com/rs/zerolog"
 	v1 "github.com/soltiHQ/control-plane/api/v1"
+	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/user"
 	"github.com/soltiHQ/control-plane/internal/transport/http/apimap"
@@ -39,7 +40,12 @@ func NewAPI(logger zerolog.Logger, accessSVC *access.Service, userSVC *user.Serv
 
 // Routes registers API routes.
 func (a *API) Routes(mux *http.ServeMux, auth route.BaseMW, perm route.PermMW, common ...route.BaseMW) {
-	route.HandleFunc(mux, "/api/v1/users", a.UsersList, append(common, auth)...)
+	route.HandleFunc(
+		mux,
+		"/api/v1/users",
+		a.UsersList,
+		append(common, auth, perm(kind.UsersGet), perm(kind.UsersAdd), perm(kind.UsersEdit), perm(kind.UsersDelete))...,
+	)
 }
 
 // UsersList handles GET /api/v1/users
