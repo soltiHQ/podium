@@ -6,9 +6,9 @@ import (
 
 	"github.com/rs/zerolog"
 	v1 "github.com/soltiHQ/control-plane/api/v1"
-	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/user"
+	"github.com/soltiHQ/control-plane/internal/transport/http/apimap"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/http/route"
@@ -39,9 +39,6 @@ func NewAPI(logger zerolog.Logger, accessSVC *access.Service, userSVC *user.Serv
 
 // Routes registers API routes.
 func (a *API) Routes(mux *http.ServeMux, auth route.BaseMW, perm route.PermMW, common ...route.BaseMW) {
-	_ = perm // будет нужно для /users/* операций (create/delete/etc)
-
-	// List users (JSON for /api/*, or HTML block if HTMX with your responder setup)
 	route.HandleFunc(mux, "/api/v1/users", a.UsersList, append(common, auth)...)
 }
 
@@ -68,15 +65,12 @@ func (a *API) UsersList(w http.ResponseWriter, r *http.Request) {
 		cursor = r.URL.Query().Get("cursor")
 		q      = r.URL.Query().Get("q")
 	)
-
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil {
 			limit = n
 		}
 	}
 
-	// NOTE: storage-level filter НЕ должен собираться в handler (и точно не через inmemory).
-	// Если нужно искать по q, делай фабрику фильтров в storage слое и используйте её тут.
 	res, err := a.userSVC.List(r.Context(), user.ListQuery{
 		Limit:  limit,
 		Cursor: cursor,
@@ -92,39 +86,13 @@ func (a *API) UsersList(w http.ResponseWriter, r *http.Request) {
 		if u == nil {
 			continue
 		}
-		items = append(items, toAPIUser(u))
+		items = append(items, apimap.User(u))
 	}
-
 	response.OK(w, r, mode, &responder.View{
 		Data: v1.UserListResponse{
 			Items:      items,
 			NextCursor: res.NextCursor,
 		},
-		// HTML block (HTMX). Your templ expects []*model.User, so pass domain directly.
 		Component: contentUser.List(res.Items, res.NextCursor, q),
 	})
-}
-
-func toAPIUser(u *model.User) v1.User {
-	if u == nil {
-		return v1.User{}
-	}
-
-	roleIDs := u.RoleIDsAll()
-
-	perms := u.PermissionsAll()
-	outPerms := make([]string, 0, len(perms))
-	for _, p := range perms {
-		outPerms = append(outPerms, string(p))
-	}
-
-	return v1.User{
-		ID:          u.ID(),
-		Subject:     u.Subject(),
-		Email:       u.Email(),
-		Name:        u.Name(),
-		Disabled:    u.Disabled(),
-		RoleIDs:     append([]string(nil), roleIDs...),
-		Permissions: append([]string(nil), outPerms...),
-	}
 }
