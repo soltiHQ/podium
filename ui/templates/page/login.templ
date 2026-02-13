@@ -4,6 +4,7 @@ import (
 	"github.com/soltiHQ/control-plane/ui/templates/asset"
 	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
 	"github.com/soltiHQ/control-plane/ui/templates/component/form"
+	"github.com/soltiHQ/control-plane/ui/templates/component/button"
 	"github.com/soltiHQ/control-plane/ui/templates/layout"
 )
 
@@ -50,7 +51,7 @@ templ Login(redirectURL string, errMsg string) {
 					)
 
 					<div class="space-y-3">
-						@form.Button(
+						@button.Button(
 							"Sign in",
 							"submit",
 							true,

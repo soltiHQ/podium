@@ -3,6 +3,7 @@ package pages
 import (
 	"github.com/soltiHQ/control-plane/internal/ui/policy"
 	"github.com/soltiHQ/control-plane/ui/templates/component/form"
+	"github.com/soltiHQ/control-plane/ui/templates/component/button"
 	"github.com/soltiHQ/control-plane/ui/templates/layout"
 )
 
@@ -89,7 +90,7 @@ templ UserCreate(
 				</div>
 
 				<div class="flex items-center gap-2 pt-2">
-					@form.Button("Create user", "submit", false, "primary", false)
+					@button.Button("Create user", "submit", false, "primary", false)
 
 					<a
 						href="/users"
