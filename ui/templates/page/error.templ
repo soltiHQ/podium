@@ -3,22 +3,20 @@ package pages
 import (
 	"strconv"
 
-	"github.com/soltiHQ/control-plane/ui/templates/component"
+	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
 	"github.com/soltiHQ/control-plane/ui/templates/layout"
 )
 
 templ ErrorPage(code int, title, message, requestID string) {
 	@layout.Root(title) {
 		<div class="relative min-h-screen bg-bg text-fg overflow-hidden">
-			@component.BCircle()
+			@visual.BackgroundCircle()
 
 			<main class="relative mx-auto flex min-h-screen w-full max-w-3xl flex-col justify-center px-6 py-10">
-				<!-- code -->
 				<div class="text-sm font-mono uppercase tracking-[0.12em] text-muted-strong">
 					{ strconv.Itoa(code) }
 				</div>
 
-				<!-- headline + message -->
 				<div class="mt-6 space-y-4">
 					<h1 class="text-4xl font-semibold tracking-tight text-fg sm:text-5xl">
 						{ title }
@@ -31,7 +29,6 @@ templ ErrorPage(code int, title, message, requestID string) {
 					}
 				</div>
 
-				<!-- request id -->
 				<div class="mt-10">
 					if requestID != "" {
 						<div class="inline-flex items-center rounded-[var(--r-6)] border border-border bg-card px-3 py-2 text-xs font-mono tracking-[0.08em] text-muted-strong">

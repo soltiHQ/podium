@@ -1,0 +1,76 @@
+package form
+
+templ Input(
+	id string,
+	typ string,
+	value string,
+	placeholder string,
+	required bool,
+	autofocus bool,
+	errMsg string,
+) {
+	{{
+		hasErr := errMsg != ""
+
+		baseClass := `
+			block w-full h-11 px-4
+			rounded-[var(--r-6)]
+			bg-card text-fg
+			placeholder:text-muted-strong
+			outline-none transition-colors
+			disabled:opacity-50 disabled:pointer-events-none
+		`
+		errClass := `
+			border border-danger
+			hover:border-danger
+			focus:ring-2 focus:ring-danger/25 focus:border-danger
+		`
+		okClass := `
+			border border-input
+			hover:border-border
+			focus:ring-2 focus:ring-primary/25 focus:border-primary
+		`
+
+		cls := baseClass
+		if hasErr {
+			cls += errClass
+		} else {
+			cls += okClass
+		}
+	}}
+
+	<div class="space-y-1">
+		if hasErr {
+			<input
+				type={ typ }
+				id={ id }
+				name={ id }
+				value={ value }
+				placeholder={ placeholder }
+				required?={ required }
+				autofocus?={ autofocus }
+				aria-invalid="true"
+				aria-describedby={ id + "-error" }
+				class={ cls }
+			/>
+		} else {
+			<input
+				type={ typ }
+				id={ id }
+				name={ id }
+				value={ value }
+				placeholder={ placeholder }
+				required?={ required }
+				autofocus?={ autofocus }
+				aria-invalid="false"
+				class={ cls }
+			/>
+		}
+
+		if hasErr {
+			<p id={ id + "-error" } class="text-xs text-danger">
+				{ errMsg }
+			</p>
+		}
+	</div>
+}

@@ -14,7 +14,7 @@ templ List(items []*model.User, nextCursor string, q string) {
 					"q",
 					q,
 					"Search…",
-					"/users/list",
+					"/api/v1/users",
 					"#users-results",
 				)
 			</div>
@@ -74,7 +74,7 @@ templ Footer(nextCursor string, q string) {
 		<div
 			id="users-sentinel"
 			class="h-6"
-			hx-get={ "/users/list/rows?cursor=" + nextCursor + "&q=" + q }
+			hx-get={ "/api/v1/users?cursor=" + nextCursor + "&q=" + q }
 			hx-trigger="revealed"
 			hx-target="#users-cards"
 			hx-swap="beforeend"

@@ -2,14 +2,15 @@ package pages
 
 import (
 	"github.com/soltiHQ/control-plane/ui/templates/asset"
-	"github.com/soltiHQ/control-plane/ui/templates/component"
+	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
+	"github.com/soltiHQ/control-plane/ui/templates/component/form"
 	"github.com/soltiHQ/control-plane/ui/templates/layout"
 )
 
 templ Login(redirectURL string, errMsg string) {
 	@layout.Root("Login") {
 		<div class="relative min-h-screen bg-bg text-fg flex items-center justify-center px-4 overflow-hidden">
-			@component.BCircle()
+			@visual.BackgroundCircle()
 
 			<div class="relative w-full max-w-sm">
 				<div class="text-center space-y-3">
@@ -28,7 +29,7 @@ templ Login(redirectURL string, errMsg string) {
 				<form method="POST" action="/login" class="mt-4 space-y-4">
 					<input type="hidden" name="redirect" value={ redirectURL }/>
 
-					@component.Input(
+					@form.Input(
 						"subject",
 						"text",
 						"",
@@ -38,7 +39,7 @@ templ Login(redirectURL string, errMsg string) {
 						"",
 					)
 
-					@component.Input(
+					@form.Input(
 						"password",
 						"password",
 						"",
@@ -49,7 +50,7 @@ templ Login(redirectURL string, errMsg string) {
 					)
 
 					<div class="space-y-3">
-						@component.Button(
+						@form.Button(
 							"Sign in",
 							"submit",
 							true,

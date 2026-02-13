@@ -9,6 +9,8 @@ import (
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/user"
+	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/http/apimap"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
@@ -70,16 +72,21 @@ func (a *API) UsersList(w http.ResponseWriter, r *http.Request) {
 		limit  int
 		cursor = r.URL.Query().Get("cursor")
 		q      = r.URL.Query().Get("q")
+		filter storage.UserFilter
 	)
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil {
 			limit = n
 		}
 	}
+	if q != "" {
+		filter = inmemory.NewUserFilter().Query(q)
+	}
 
 	res, err := a.userSVC.List(r.Context(), user.ListQuery{
 		Limit:  limit,
 		Cursor: cursor,
+		Filter: filter,
 	})
 	if err != nil {
 		a.logger.Error().Err(err).Msg("api: list users failed")

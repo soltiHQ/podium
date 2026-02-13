@@ -14,7 +14,6 @@ const (
 )
 
 // All contains all declared permissions.
-// Useful for bootstrap (admin role) and validation.
 var All = []Permission{
 	AgentsGet,
 	AgentsEdit,
