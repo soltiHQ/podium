@@ -44,7 +44,7 @@ func (a *API) Routes(mux *http.ServeMux, auth route.BaseMW, perm route.PermMW, c
 		mux,
 		"/api/v1/users",
 		a.UsersList,
-		append(common, auth, perm(kind.UsersGet), perm(kind.UsersAdd), perm(kind.UsersEdit), perm(kind.UsersDelete))...,
+		append(common, auth, perm(kind.UsersGet))...,
 	)
 }
 
