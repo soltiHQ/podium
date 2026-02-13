@@ -2,12 +2,12 @@ package layout
 
 import (
     "github.com/soltiHQ/control-plane/internal/ui/policy"
-    "github.com/soltiHQ/control-plane/ui/templates/component"
+    "github.com/soltiHQ/control-plane/ui/templates/component/datagrid"
 )
 
 templ App(title string, active string, nav policy.Nav) {
 	@Root(title) {
-		@component.VBar(active, nav)
+		@datagrid.VBar(active, nav)
 
 		<div
 			class="
