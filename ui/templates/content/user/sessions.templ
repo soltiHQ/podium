@@ -1,8 +1,11 @@
+// ui/templates/content/user/sessions.templ
 package user
 
 import (
 	"fmt"
+
 	v1 "github.com/soltiHQ/control-plane/api/v1"
+	"github.com/soltiHQ/control-plane/internal/ui/routepath"
 	"github.com/soltiHQ/control-plane/ui/templates/component/button"
 )
 
@@ -39,22 +42,12 @@ templ sessionRow(s v1.Session) {
 			<div class="flex items-center gap-2.5">
 				<span class="text-sm font-medium text-fg">{ s.AuthKind }</span>
 				if s.Revoked {
-					<span class="
-						inline-flex items-center gap-1
-						rounded-full px-2 py-0.5
-						text-[10px] font-medium
-						bg-danger/10 text-danger
-					">
+					<span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-danger/10 text-danger">
 						<span class="h-1 w-1 rounded-full bg-current"></span>
 						Revoked
 					</span>
 				} else {
-					<span class="
-						inline-flex items-center gap-1
-						rounded-full px-2 py-0.5
-						text-[10px] font-medium
-						bg-success/10 text-success
-					">
+					<span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium bg-success/10 text-success">
 						<span class="h-1 w-1 rounded-full bg-current"></span>
 						Active
 					</span>
@@ -74,7 +67,9 @@ templ sessionRow(s v1.Session) {
 
 		if !s.Revoked {
 			<div class="shrink-0 pt-0.5">
-				@button.Button("Revoke", "button", false, button.VariantDanger, false)
+				<form hx-post={ routepath.ApiUserRevokeSession(s.ID) } hx-swap="none">
+                	@button.Button("Revoke", "submit", false, button.VariantDanger, false)
+                </form>
 			</div>
 		}
 	</div>

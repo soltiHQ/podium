@@ -61,7 +61,7 @@ func main() {
 	)
 	var (
 		uiHandler     = handler.NewUI(logger, authSVC)
-		apiHandler    = handler.NewAPI(logger, authSVC, userSVC, sessionSVC)
+		apiHandler    = handler.NewAPI(logger, userSVC, authSVC, sessionSVC)
 		staticHandler = handler.NewStatic(logger)
 	)
 	authMW := middleware.Auth(authModel.Verifier, authModel.Session)

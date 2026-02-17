@@ -110,6 +110,7 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 }
 
 // Upsert a user.
+// TODO: before insert check if role exist
 func (s *Service) Upsert(ctx context.Context, u *model.User) error {
 	return s.store.UpsertUser(ctx, u)
 }

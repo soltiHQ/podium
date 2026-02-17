@@ -97,6 +97,15 @@ func (u *User) NameAdd(name string) {
 	u.updatedAt = time.Now()
 }
 
+// SubjectAdd updates the user's subject.
+func (u *User) SubjectAdd(subject string) {
+	if u.subject == subject {
+		return
+	}
+	u.subject = subject
+	u.updatedAt = time.Now()
+}
+
 // Disable marks the user as disabled.
 func (u *User) Disable() {
 	if u.disabled {
@@ -122,11 +131,46 @@ func (u *User) RoleIDsAll() []string {
 	return out
 }
 
+// RolesIDsNew RoleIDsNew update full list of user's roles.
+func (u *User) RolesIDsNew(roles []string) {
+	u.roleIDs = make([]string, len(roles))
+	copy(u.roleIDs, roles)
+	u.updatedAt = time.Now()
+}
+
 // PermissionsAll returns a copy of permissions granted directly to the user.
 func (u *User) PermissionsAll() []kind.Permission {
 	out := make([]kind.Permission, len(u.permissions))
 	copy(out, u.permissions)
 	return out
+}
+
+// PermissionsNew update full list of user's permissions.
+func (u *User) PermissionsNew(perms []string) {
+	u.updatedAt = time.Now()
+
+	if len(perms) == 0 {
+		u.permissions = nil
+		return
+	}
+
+	var (
+		out  = make([]kind.Permission, 0, len(perms))
+		seen = make(map[kind.Permission]struct{}, len(perms))
+	)
+	for _, p := range perms {
+		if p == "" {
+			continue
+		}
+
+		perm := kind.Permission(p)
+		if _, ok := seen[perm]; ok {
+			continue
+		}
+		seen[perm] = struct{}{}
+		out = append(out, perm)
+	}
+	u.permissions = out
 }
 
 // RoleHas reports whether the user has the given role ID assigned.

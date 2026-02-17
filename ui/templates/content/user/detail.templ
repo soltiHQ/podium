@@ -1,7 +1,9 @@
+// ui/templates/content/user/detail.templ
 package user
 
 import (
 	v1 "github.com/soltiHQ/control-plane/api/v1"
+	"github.com/soltiHQ/control-plane/internal/ui/routepath"
 	"github.com/soltiHQ/control-plane/ui/templates/component/button"
 )
 
@@ -12,7 +14,6 @@ templ Detail(apiUser v1.User) {
 templ Identity(u v1.User) {
 	<section class="rounded-xl border border-border bg-surface overflow-hidden">
 		<div class="p-5 space-y-5">
-			<!-- Name + status -->
 			<div class="space-y-1">
 				<div class="flex items-center gap-2.5">
 					<h1 class="text-lg font-semibold text-fg truncate leading-tight">
@@ -30,13 +31,11 @@ templ Identity(u v1.User) {
 				}
 			</div>
 
-			<!-- Meta -->
 			<dl class="space-y-3">
 				@meta("User ID", u.ID, true)
 				@meta("Subject", u.Subject, false)
 			</dl>
 
-			<!-- Permissions -->
 			if len(u.Permissions) > 0 {
 				<div class="space-y-2 pt-1">
 					<h3 class="text-[11px] font-mono uppercase tracking-[0.14em] text-muted select-none">
@@ -59,10 +58,9 @@ templ Identity(u v1.User) {
 			}
 		</div>
 
-		<!-- Actions pinned to bottom -->
 		<div class="flex gap-2 px-5 py-4 border-t border-border bg-surface-dim">
-			@button.Link("Edit", "/users/edit/"+u.ID, false, "secondary")
-			@button.Link("Delete", "/users/delete/"+u.ID, false, "danger")
+			@button.Link("Edit", routepath.PageUserEditByID(u.ID), false, "secondary")
+		    @button.Link("Delete", routepath.PageUserDeleteByID(u.ID), false, "danger")
 		</div>
 	</section>
 }

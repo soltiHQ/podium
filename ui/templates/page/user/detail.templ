@@ -1,18 +1,21 @@
+// ui/templates/page/user/detail.templ
 package user
 
 import (
 	"github.com/soltiHQ/control-plane/internal/ui/policy"
+	"github.com/soltiHQ/control-plane/internal/ui/routepath"
+	"github.com/soltiHQ/control-plane/internal/ui/trigger"
 	"github.com/soltiHQ/control-plane/ui/templates/layout"
 )
 
 templ Detail(nav policy.Nav, userID string) {
 	@layout.App("User", "users", nav) {
 		<div class="grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-6 items-start p-6">
-			<!-- Left: identity (compact, sticky on scroll) -->
+
 			<div
 				id="user-identity"
-				hx-get={ "/api/v1/users/detail/" + userID }
-				hx-trigger="load"
+				hx-get={ routepath.ApiUserCrudOp(userID) }
+				hx-trigger={ "load once, " + trigger.UserUpdate + " from:body" }
 				hx-target="this"
 				hx-swap="innerHTML"
 				class="lg:sticky lg:top-6 min-h-[140px]"
@@ -20,17 +23,15 @@ templ Detail(nav policy.Nav, userID string) {
 				@skeleton("Loading user…")
 			</div>
 
-			<!-- Right: sessions (grows vertically) -->
-			<div
-				id="user-sessions"
-				hx-get={ "/api/v1/users/session/" + userID }
-				hx-trigger="load"
-				hx-target="this"
-				hx-swap="innerHTML"
-				class="min-h-[140px]"
-			>
-				@skeleton("Loading sessions…")
-			</div>
+			<div id="user-sessions"
+            	hx-get={ routepath.ApiUserSessions(userID) }
+            	hx-trigger="load once, user_session_update from:body"
+            	hx-target="this"
+            	hx-swap="innerHTML"
+            >
+            	@skeleton("Loading sessions…")
+            </div>
+
 		</div>
 	}
 }

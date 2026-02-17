@@ -17,6 +17,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transport/http/route"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
 	"github.com/soltiHQ/control-plane/internal/ui/policy"
+	"github.com/soltiHQ/control-plane/internal/ui/routepath"
 	pages "github.com/soltiHQ/control-plane/ui/templates/page"
 	pageUser "github.com/soltiHQ/control-plane/ui/templates/page/user"
 )
@@ -40,12 +41,12 @@ func NewUI(logger zerolog.Logger, accessSVC *access.Service) *UI {
 
 // Routes registers UI routes.
 func (u *UI) Routes(mux *http.ServeMux, auth route.BaseMW, perm route.PermMW, common ...route.BaseMW) {
-	route.HandleFunc(mux, "/login", u.Login, common...)
-	route.HandleFunc(mux, "/logout", u.Logout, append(common, auth)...)
+	route.HandleFunc(mux, routepath.PageLogin, u.Login, common...)
+	route.HandleFunc(mux, routepath.PageLogout, u.Logout, append(common, auth)...)
 
-	route.HandleFunc(mux, "/users", u.Users, append(common, auth)...)
-	route.HandleFunc(mux, "/users/info/", u.UserDetail, append(common, auth, perm(kind.UsersGet))...)
-	route.HandleFunc(mux, "/", u.Main, append(common, auth)...)
+	route.HandleFunc(mux, routepath.PageUsers, u.Users, append(common, auth)...)
+	route.HandleFunc(mux, routepath.PageUserInfo, u.UserDetail, append(common, auth, perm(kind.UsersGet))...)
+	route.HandleFunc(mux, routepath.PageHome, u.Main, append(common, auth)...)
 }
 
 // Login handles GET/POST /login.
@@ -54,13 +55,13 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		if r.URL.Path != "/login" {
+		if r.URL.Path != routepath.PageLogin {
 			response.NotFound(w, r, mode)
 			return
 		}
 		redirect := r.URL.Query().Get("redirect")
 		if redirect == "" {
-			redirect = "/"
+			redirect = routepath.PageHome
 		}
 		errMsg := r.URL.Query().Get("error")
 
@@ -69,7 +70,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	case http.MethodPost:
-		if r.URL.Path != "/login" {
+		if r.URL.Path != routepath.PageLogin {
 			response.NotFound(w, r, mode)
 			return
 		}
@@ -89,7 +90,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 		rateKey  = ratelimitkey.LoginKey(r, subject)
 	)
 	if redirect == "" {
-		redirect = "/"
+		redirect = routepath.PageHome
 	}
 	_, res, err := u.accessSVC.Login(r.Context(), access.LoginRequest{
 		Subject:  subject,
@@ -103,10 +104,10 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 			return
 		case errors.Is(err, auth.ErrInvalidCredentials),
 			errors.Is(err, auth.ErrInvalidRequest):
-			http.Redirect(w, r, "/login", http.StatusFound)
+			http.Redirect(w, r, routepath.PageLogin, http.StatusFound)
 			return
 		default:
-			http.Redirect(w, r, "/login", http.StatusFound)
+			http.Redirect(w, r, routepath.PageLogin, http.StatusFound)
 			return
 		}
 	}
@@ -119,7 +120,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 func (u *UI) Logout(w http.ResponseWriter, r *http.Request) {
 	mode := response.ModeFromRequest(r)
 
-	if r.URL.Path != "/logout" {
+	if r.URL.Path != routepath.PageLogout {
 		response.NotFound(w, r, mode)
 		return
 	}
@@ -132,26 +133,26 @@ func (u *UI) Logout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cookie.DeleteAuth(w, r)
-	http.Redirect(w, r, "/login", http.StatusFound)
+	http.Redirect(w, r, routepath.PageLogin, http.StatusFound)
 }
 
 // Main handle GET /.
 func (u *UI) Main(w http.ResponseWriter, r *http.Request) {
-	u.page(w, r, http.MethodGet, "/", func(nav policy.Nav) templ.Component {
+	u.page(w, r, http.MethodGet, routepath.PageHome, func(nav policy.Nav) templ.Component {
 		return pageUser.Main(nav)
 	})
 }
 
 // Users handle GET /users.
 func (u *UI) Users(w http.ResponseWriter, r *http.Request) {
-	u.page(w, r, http.MethodGet, "/users", func(nav policy.Nav) templ.Component {
+	u.page(w, r, http.MethodGet, routepath.PageUsers, func(nav policy.Nav) templ.Component {
 		return pages.Users(nav)
 	})
 }
 
 // UserDetail handle GET /users/info/{}.
 func (u *UI) UserDetail(w http.ResponseWriter, r *http.Request) {
-	u.pageParam(w, r, http.MethodGet, "/users/info/", func(nav policy.Nav, userID string) templ.Component {
+	u.pageParam(w, r, http.MethodGet, routepath.PageUserInfo, func(nav policy.Nav, userID string) templ.Component {
 		return pageUser.Detail(nav, userID)
 	})
 }

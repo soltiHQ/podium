@@ -1,7 +1,11 @@
+// ui/templates/content/user/list.templ
 package user
 
 import (
+	"net/url"
+
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/ui/routepath"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
 	"github.com/soltiHQ/control-plane/ui/templates/component/search"
 )
@@ -15,7 +19,7 @@ templ List(items []*model.User, nextCursor string, q string) {
 					"q",
 					q,
 					"Search…",
-					"/api/v1/users",
+					routepath.ApiUsers,
 					"#users-results",
 				)
 			</div>
@@ -44,7 +48,7 @@ templ Cards(items []*model.User) {
 		</div>
 	} else {
 		for _, u := range items {
-			@card.Card("/users/info/" + u.ID()) {
+			@card.Card(routepath.PageUserInfoByID(u.ID())) {
 				@card.CardHeader() {
 					@card.CardTitle() {
 						{ u.Subject() }
@@ -75,7 +79,7 @@ templ Footer(nextCursor string, q string) {
 		<div
 			id="users-sentinel"
 			class="h-6"
-			hx-get={ "/api/v1/users?cursor=" + nextCursor + "&q=" + q }
+			hx-get={ usersListURL(nextCursor, q) }
 			hx-trigger="revealed"
 			hx-target="#users-cards"
 			hx-swap="beforeend"
@@ -87,7 +91,7 @@ templ Footer(nextCursor string, q string) {
 templ RowsResponse(items []*model.User, nextCursor string, q string) {
 	if len(items) != 0 {
 		for _, u := range items {
-			@card.Card("/users/id/" + u.ID()) {
+			@card.Card(routepath.PageUserInfo + u.ID()) {
 				@card.CardHeader() {
 					@card.CardTitle() {
 						{ u.Subject() }
@@ -115,4 +119,20 @@ templ RowsResponse(items []*model.User, nextCursor string, q string) {
 	<div id="users-footer" hx-swap-oob="true">
 		@Footer(nextCursor, q)
 	</div>
+}
+
+func usersListURL(nextCursor string, q string) string {
+	v := url.Values{}
+	if nextCursor != "" {
+		v.Set("cursor", nextCursor)
+	}
+	if q != "" {
+		v.Set("q", q)
+	}
+
+	qs := v.Encode()
+	if qs == "" {
+		return routepath.ApiUsers
+	}
+	return routepath.ApiUsers + "?" + qs
 }
