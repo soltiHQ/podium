@@ -49,24 +49,32 @@ templ Identity(u v1.User) {
 		@card.CardFooter() {
 			if u.Disabled {
 				<form hx-post={ routepath.ApiUserEnable(u.ID) } hx-swap="none">
-					@button.Button("Enable", "submit", false, button.VariantSecondary, false) {
+					@button.Button("", "submit", false, button.VariantSecondary, false) {
+						<span> </span>
 						@asset.Icon("enable")
 					}
 				</form>
 			} else {
 				<form hx-post={ routepath.ApiUserDisable(u.ID) } hx-swap="none">
-					@button.Button("Disable", "submit", false, button.VariantSecondary, false) {
+					@button.Button("", "submit", false, button.VariantSecondary, false) {
+				        <span> </span>
 						@asset.Icon("disable")
 					}
 				</form>
 			}
 
-			@button.Link("Edit", routepath.PageUserEditByID(u.ID), false, button.VariantSecondary) {
+			@button.Link("", routepath.PageUserEditByID(u.ID), false, button.VariantSecondary) {
+				<span> </span>
 				@asset.Icon("edit")
 			}
-			@button.Link("Delete", routepath.PageUserDeleteByID(u.ID), false, button.VariantDanger) {
+			@button.Link("", routepath.PageUserDeleteByID(u.ID), false, button.VariantDanger) {
+			    <span> </span>
 				@asset.Icon("delete")
 			}
+			@button.Link("", routepath.PageUserDeleteByID(u.ID), false, button.VariantDanger) {
+                <span> </span>
+            	@asset.Icon("password")
+            }
 		}
 	}
 }
