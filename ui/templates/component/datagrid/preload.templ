@@ -1,0 +1,14 @@
+package datagrid
+
+import "github.com/soltiHQ/control-plane/ui/templates/asset"
+
+templ Preload(message string) {
+	<div class={ containerClass("py-10") }>
+		<div class="text-primary scale-[5]">
+			@asset.Icon("preload")
+		</div>
+		<p class={ messageClass(false) }>
+			{ message }
+		</p>
+	</div>
+}

@@ -5,6 +5,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/ui/routepath"
 	"github.com/soltiHQ/control-plane/ui/templates/asset"
 	"github.com/soltiHQ/control-plane/ui/templates/component/button"
+	"github.com/soltiHQ/control-plane/ui/templates/component/datagrid"
 	"github.com/soltiHQ/control-plane/ui/templates/layout"
 )
 
@@ -17,10 +18,10 @@ templ Users(nav policy.Nav) {
 				</h1>
 
 				if nav.CanAddUser {
-                	@button.Link("Add", routepath.PageUserNew, false, button.VariantMain) {
-                		@asset.Icon("add")
-                	}
-                }
+					@button.Link("Add", routepath.PageUserNew, false, button.VariantMain) {
+						@asset.Icon("add")
+					}
+				}
 			</div>
 
 			<div
@@ -31,9 +32,7 @@ templ Users(nav policy.Nav) {
 				hx-swap="innerHTML"
 				class="min-h-[120px]"
 			>
-				<div class="text-sm text-muted">
-					Loading...
-				</div>
+				@datagrid.Preload("Loading...")
 			</div>
 		</div>
 	}
