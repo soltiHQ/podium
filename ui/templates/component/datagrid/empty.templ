@@ -1,0 +1,17 @@
+package datagrid
+
+templ Empty(message string) {
+	<div class="col-span-full flex flex-col items-center justify-center py-14 text-center">
+		<div class="opacity-70">
+			<img
+				src="/static/img/empty.png"
+				alt="empty"
+				class="w-40 h-auto select-none pointer-events-none"
+			/>
+		</div>
+
+		<p class="mt-6 text-base font-medium text-muted-strong">
+			{ message }
+		</p>
+	</div>
+}

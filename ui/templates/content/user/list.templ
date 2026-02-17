@@ -6,6 +6,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/ui/routepath"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
+	"github.com/soltiHQ/control-plane/ui/templates/component/datagrid"
 	"github.com/soltiHQ/control-plane/ui/templates/component/search"
 )
 
@@ -42,9 +43,7 @@ templ Results(items []*model.User, nextCursor string, q string) {
 
 templ Cards(items []*model.User) {
 	if len(items) == 0 {
-		<div class="col-span-full text-center text-muted py-10">
-			No users found.
-		</div>
+		@datagrid.Empty("No users found")
 	} else {
 		for _, u := range items {
 			@card.Card(routepath.PageUserInfoByID(u.ID())) {
