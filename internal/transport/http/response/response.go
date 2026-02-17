@@ -6,7 +6,8 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
-	"github.com/soltiHQ/control-plane/ui/templates/page"
+
+	pageSystem "github.com/soltiHQ/control-plane/ui/templates/page/system"
 
 	"github.com/a-h/templ"
 )
@@ -40,7 +41,7 @@ func NotFound(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
 		},
 		Component: func(m httpctx.RenderMode) templ.Component {
 			if m == httpctx.RenderPage {
-				return pages.ErrorPage(
+				return pageSystem.ErrorPage(
 					http.StatusNotFound,
 					"Page not found",
 					"The page you are looking for doesn't exist or has been moved.",
@@ -64,7 +65,7 @@ func BadRequest(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode)
 		},
 		Component: func(m httpctx.RenderMode) templ.Component {
 			if m == httpctx.RenderPage {
-				return pages.ErrorPage(
+				return pageSystem.ErrorPage(
 					http.StatusBadRequest,
 					"Invalid request",
 					"The request you sent is invalid.",
@@ -88,7 +89,7 @@ func NotAllowed(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode)
 		},
 		Component: func(m httpctx.RenderMode) templ.Component {
 			if m == httpctx.RenderPage {
-				return pages.ErrorPage(
+				return pageSystem.ErrorPage(
 					http.StatusMethodNotAllowed,
 					"Method not allowed",
 					"The method you used is not allowed on this resource.",
@@ -112,7 +113,7 @@ func Forbidden(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) 
 		},
 		Component: func(m httpctx.RenderMode) templ.Component {
 			if m == httpctx.RenderPage {
-				return pages.ErrorPage(
+				return pageSystem.ErrorPage(
 					http.StatusForbidden,
 					"Forbidden",
 					"You are not allowed to access this page.",
@@ -136,7 +137,7 @@ func Unauthorized(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMod
 		},
 		Component: func(m httpctx.RenderMode) templ.Component {
 			if m == httpctx.RenderPage {
-				return pages.ErrorPage(
+				return pageSystem.ErrorPage(
 					http.StatusUnauthorized,
 					"Unauthorized",
 					"You are not authorized to access this page.",
@@ -160,7 +161,7 @@ func Unavailable(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode
 		},
 		Component: func(m httpctx.RenderMode) templ.Component {
 			if m == httpctx.RenderPage {
-				return pages.ErrorPage(
+				return pageSystem.ErrorPage(
 					http.StatusServiceUnavailable,
 					"Service unavailable",
 					"The server is temporarily unable to handle the request.",
@@ -184,7 +185,7 @@ func AuthRateLimit(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMo
 		},
 		Component: func(m httpctx.RenderMode) templ.Component {
 			if m == httpctx.RenderPage {
-				return pages.ErrorPage(
+				return pageSystem.ErrorPage(
 					http.StatusTooManyRequests,
 					"Too many auth attempts",
 					"Account temporarily locked. Please try again later.",

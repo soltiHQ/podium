@@ -19,6 +19,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/ui/policy"
 	"github.com/soltiHQ/control-plane/internal/ui/routepath"
 	pages "github.com/soltiHQ/control-plane/ui/templates/page"
+	pageSystem "github.com/soltiHQ/control-plane/ui/templates/page/system"
 	pageUser "github.com/soltiHQ/control-plane/ui/templates/page/user"
 )
 
@@ -66,7 +67,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 		errMsg := r.URL.Query().Get("error")
 
 		response.OK(w, r, mode, &responder.View{
-			Component: pages.Login(redirect, errMsg),
+			Component: pageSystem.Login(redirect, errMsg),
 		})
 		return
 	case http.MethodPost:
@@ -139,7 +140,7 @@ func (u *UI) Logout(w http.ResponseWriter, r *http.Request) {
 // Main handle GET /.
 func (u *UI) Main(w http.ResponseWriter, r *http.Request) {
 	u.page(w, r, http.MethodGet, routepath.PageHome, func(nav policy.Nav) templ.Component {
-		return pageUser.Main(nav)
+		return pages.Main(nav)
 	})
 }
 
