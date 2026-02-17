@@ -1,4 +1,3 @@
-// /static/js/copy_buf.js
 (() => {
     async function copyText(text) {
         if (!text) return false;
