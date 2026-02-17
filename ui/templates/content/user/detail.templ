@@ -18,17 +18,31 @@ templ Identity(u v1.User) {
 	@card.Card("") {
 		@card.CardBody() {
 			<div class="space-y-6">
-				<dl class="space-y-3">
-					@metaStatus("Status", !u.Disabled)
+				<div class="space-y-2">
+					if !u.Disabled {
+						@visual.Badge("Active", visual.VariantSuccess)
+					} else {
+						@visual.Badge("Disabled", visual.VariantDanger)
+					}
+				</div>
 
-					@datagrid.KV("User ID", u.ID, true)
-					@datagrid.KV("Subject", u.Subject, false)
-					@datagrid.KV("Name", u.Name, false)
-					@datagrid.KV("Email", u.Email, false)
+				<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-6">
+					<div class="space-y-3 min-w-0">
+						<dl class="space-y-3">
+							@datagrid.KV("User ID", u.ID, true)
+							@datagrid.KV("Subject", u.Subject, false)
+							@datagrid.KV("Name", u.Name, false)
+							@datagrid.KV("Email", u.Email, false)
+						</dl>
+					</div>
 
-					@metaBadges("Roles", u.RoleIDs, visual.VariantSecondary, true)
-					@metaBadges("Permissions", u.Permissions, visual.VariantPrimary, true)
-				</dl>
+					<div class="space-y-3 min-w-0">
+						<dl class="space-y-3">
+							@metaBadges("Roles", u.RoleIDs, visual.VariantSecondary, true)
+							@metaBadges("Permissions", u.Permissions, visual.VariantPrimary, true)
+						</dl>
+					</div>
+				</div>
 			</div>
 		}
 
@@ -55,19 +69,6 @@ templ Identity(u v1.User) {
 			}
 		}
 	}
-}
-
-templ metaStatus(label string, active bool) {
-	<div class="min-w-0">
-		<dt class="text-[11px] font-mono uppercase tracking-[0.1em] text-muted mb-0.5">{ label }</dt>
-		<dd>
-			if active {
-				@visual.Badge("Active", visual.VariantSuccess)
-			} else {
-				@visual.Badge("Disabled", visual.VariantDanger)
-			}
-		</dd>
-	</div>
 }
 
 templ metaBadges(label string, items []string, variant visual.Variant, copy bool) {
