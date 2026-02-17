@@ -12,7 +12,7 @@ import (
 
 templ List(items []*model.User, nextCursor string, q string) {
 	<div class="space-y-4">
-		<div class="flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
+		<div class="flex justify-center">
 			<div class="w-[320px] max-sm:w-full">
 				@search.Input(
 					"users-search",

@@ -22,21 +22,19 @@ templ Input(
 			value={ value }
 			placeholder={ placeholder }
 			class="
-				block w-full h-10 pl-10 pr-4
-				rounded-[var(--r-6)]
-				bg-card text-fg
-				border border-input
-				placeholder:text-muted-strong
-
-				shadow-[var(--shadow)]
-				transition
-				hover:border-border
-				hover:shadow-[var(--shadow)]
-
-				focus:outline-none
-				focus:border-primary/60
-				focus:shadow-[var(--shadow-focus)]
-			"
+            	block w-full h-10 pl-10 pr-4
+            	rounded-2xl
+            	bg-card text-fg
+            	border border-input
+           		placeholder:text-muted-strong
+            	shadow-[var(--shadow)]
+            	transition
+           		hover:border-border
+           		hover:shadow-[var(--shadow)]
+            	focus:outline-none
+            	focus:border-primary/60
+           		focus:shadow-[var(--shadow-focus)]
+           	"
 			hx-get={ endpoint }
 			hx-trigger="input changed delay:300ms, search"
 			hx-target={ target }
