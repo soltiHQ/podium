@@ -14,35 +14,27 @@ func focusFor(v Variant) string {
 	return "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 "
 }
 
-func styleForButton(v Variant) string {
+func styleFor(v Variant, isLink bool) string {
 	switch v {
+
 	case VariantMain:
-		return "bg-primary text-white shadow-sm hover:shadow-md active:shadow-sm hover:bg-primary/90 "
+		if isLink {
+			return "bg-card text-primary font-semibold border border-border shadow-sm hover:border-primary/40 hover:shadow-md active:shadow-sm "
+		}
+		return "bg-primary text-white font-semibold shadow-sm hover:shadow-md active:shadow-sm hover:bg-primary/90 "
+
 	case VariantPrimary:
-		return "bg-primary text-white hover:bg-primary/90 "
+		return "bg-primary text-white font-semibold hover:bg-primary/90 "
+
 	case VariantSecondary:
 		return "bg-card text-fg border border-border shadow-sm hover:border-primary/40 hover:shadow-md active:shadow-sm "
-	case VariantGhost:
-		return "bg-transparent text-fg hover:bg-nav-bg "
-	case VariantDanger:
-		return "bg-danger text-white hover:bg-danger/90 "
-	default:
-		return "bg-card text-fg border border-border hover:bg-nav-bg "
-	}
-}
 
-func styleForLink(v Variant) string {
-	switch v {
-	case VariantMain:
-		return "bg-card text-primary border border-border shadow-sm hover:border-primary/40 hover:shadow-md active:shadow-sm "
-	case VariantPrimary:
-		return "bg-primary text-white hover:bg-primary/90 "
-	case VariantSecondary:
-		return "bg-card text-fg border border-border hover:bg-nav-bg "
 	case VariantGhost:
 		return "bg-transparent text-fg hover:bg-nav-bg "
+
 	case VariantDanger:
 		return "bg-danger text-white hover:bg-danger/90 "
+
 	default:
 		return "bg-card text-fg border border-border hover:bg-nav-bg "
 	}

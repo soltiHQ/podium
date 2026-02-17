@@ -17,7 +17,7 @@ templ Link(
 			"transition-all duration-200 " +
 			width
 
-		className := base + radiusFor(variant) + styleForLink(variant) + focusFor(variant)
+		className := base + radiusFor(variant) + styleFor(variant, true) + focusFor(variant)
 	}}
 
 	<a href={ href } class={ className }>
