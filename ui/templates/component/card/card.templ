@@ -1,0 +1,63 @@
+package card
+
+templ Card(href string) {
+	{{
+		base := `
+			rounded-xl
+			border border-border
+			bg-surface
+			overflow-hidden
+		`
+	}}
+	if href != "" {
+		<a href={ href } class={ linkClass(base) }>
+			{ children... }
+		</a>
+	} else {
+		<section class={ base }>
+			{ children... }
+		</section>
+	}
+}
+
+templ CardHeader() {
+	<div class="px-5 py-4 border-b border-border flex items-center justify-between">
+		{ children... }
+	</div>
+}
+
+templ CardTitle() {
+	<h2 class="text-[11px] font-mono uppercase tracking-[0.14em] text-muted select-none">
+		{ children... }
+	</h2>
+}
+
+templ CardMeta() {
+	<span class="text-[11px] font-mono text-muted tabular-nums">
+		{ children... }
+	</span>
+}
+
+templ CardBody() {
+	<div class="p-5">
+		{ children... }
+	</div>
+}
+
+templ CardFooter() {
+	<div class="flex gap-2 px-5 py-4 border-t border-border bg-surface-dim">
+		{ children... }
+	</div>
+}
+
+templ CardList() {
+	<div class="divide-y divide-border">
+		{ children... }
+	</div>
+}
+
+templ CardRow() {
+	<div class="px-5 py-4 flex items-start justify-between gap-4">
+		{ children... }
+	</div>
+}

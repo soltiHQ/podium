@@ -7,11 +7,12 @@ import (
 	v1 "github.com/soltiHQ/control-plane/api/v1"
 	"github.com/soltiHQ/control-plane/internal/ui/routepath"
 	"github.com/soltiHQ/control-plane/ui/templates/component/button"
+	"github.com/soltiHQ/control-plane/ui/templates/component/card"
 )
 
 templ Sessions(items []v1.Session) {
-	<section class="rounded-xl border border-border bg-surface overflow-hidden">
-		<div class="px-5 py-4 border-b border-border flex items-center justify-between">
+	@card.Card("") {
+		@card.CardHeader() {
 			<h2 class="text-[11px] font-mono uppercase tracking-[0.14em] text-muted select-none">
 				Sessions
 			</h2>
@@ -20,24 +21,24 @@ templ Sessions(items []v1.Session) {
 					{ fmt.Sprintf("%d", len(items)) }
 				</span>
 			}
-		</div>
-
-		if len(items) == 0 {
-			<div class="p-5">
-				<p class="text-sm text-muted">No active sessions.</p>
-			</div>
-		} else {
-			<div class="divide-y divide-border">
-				for _, s := range items {
-					@sessionRow(s)
-				}
-			</div>
 		}
-	</section>
+
+		@card.CardBody() {
+			if len(items) == 0 {
+				<p class="text-sm text-muted">No active sessions.</p>
+			} else {
+				<div class="divide-y divide-border -mx-4">
+					for _, s := range items {
+						@sessionRow(s)
+					}
+				</div>
+			}
+		}
+	}
 }
 
 templ sessionRow(s v1.Session) {
-	<div class="px-5 py-4 flex items-start justify-between gap-4">
+	<div class="px-4 py-4 flex items-start justify-between gap-4">
 		<div class="min-w-0 space-y-1.5">
 			<div class="flex items-center gap-2.5">
 				<span class="text-sm font-medium text-fg">{ s.AuthKind }</span>
@@ -68,8 +69,8 @@ templ sessionRow(s v1.Session) {
 		if !s.Revoked {
 			<div class="shrink-0 pt-0.5">
 				<form hx-post={ routepath.ApiUserRevokeSession(s.ID) } hx-swap="none">
-                	@button.Button("Revoke", "submit", false, button.VariantDanger, false)
-                </form>
+					@button.Button("Revoke", "submit", false, button.VariantDanger, false)
+				</form>
 			</div>
 		}
 	</div>

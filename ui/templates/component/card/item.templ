@@ -9,16 +9,9 @@ templ Item(href string) {
 			p-4
 			space-y-2
 		`
-		linkExtras := `
-			block
-			transition-colors
-			hover:border-primary/40
-			cursor-pointer
-			[&_*]:cursor-pointer
-		`
 	}}
 	if href != "" {
-		<a href={ href } class={ base + " " + linkExtras }>
+		<a href={ href } class={ linkClass(base) }>
 			{ children... }
 		</a>
 	} else {
