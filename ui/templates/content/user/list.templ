@@ -8,6 +8,7 @@ import (
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
 	"github.com/soltiHQ/control-plane/ui/templates/component/datagrid"
 	"github.com/soltiHQ/control-plane/ui/templates/component/search"
+	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
 )
 
 templ List(items []*model.User, nextCursor string, q string) {
@@ -47,25 +48,35 @@ templ Cards(items []*model.User) {
 	} else {
 		for _, u := range items {
 			@card.Item(routepath.PageUserInfoByID(u.ID())) {
+
 				@card.ItemHeader() {
 					@card.ItemTitle() {
 						{ u.Subject() }
 					}
 
 					if u.Disabled() {
-						<span class="inline-flex items-center rounded-full bg-danger/10 text-danger px-2 py-1 text-xs">
-							Disabled
-						</span>
+						@visual.Badge("Disabled", visual.VariantDanger)
 					} else {
-						<span class="inline-flex items-center rounded-full bg-success/10 text-success px-2 py-1 text-xs">
-							Active
-						</span>
+						@visual.Badge("Active", visual.VariantSuccess)
 					}
 				}
 
 				@card.ItemBody() {
-					<div class="text-sm text-muted-strong">{ u.Name() }</div>
-					<div class="text-xs text-muted-strong">{ u.Email() }</div>
+					<div class="text-sm text-muted-strong">
+						if u.Name() != "" {
+							{ u.Name() }
+						} else {
+							<span class="text-fg/60">—</span>
+						}
+					</div>
+
+					<div class="text-xs text-muted-strong">
+						if u.Email() != "" {
+							{ u.Email() }
+						} else {
+							<span class="text-fg/60">—</span>
+						}
+					</div>
 				}
 			}
 		}

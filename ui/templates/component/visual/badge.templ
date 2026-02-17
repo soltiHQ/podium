@@ -1,0 +1,19 @@
+package visual
+
+templ Badge(label string, variant Variant) {
+	{{
+		base := `
+			inline-flex items-center gap-1.5
+			rounded-full px-2.5 py-0.5
+			text-[11px] font-medium
+		`
+	}}
+
+	<span class={ base + badgeStyle(variant) }>
+		<span class="shrink-0">
+			{ children... }
+		</span>
+		{ label }
+		<span> </span>
+	</span>
+}

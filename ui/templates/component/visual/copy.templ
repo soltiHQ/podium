@@ -1,0 +1,12 @@
+package visual
+
+templ Copy(text string) {
+	<span
+		data-copy
+		data-copy-text={ text }
+		title="Click to copy"
+		class="cursor-pointer select-none hover:text-primary"
+	>
+		{ children... }
+	</span>
+}

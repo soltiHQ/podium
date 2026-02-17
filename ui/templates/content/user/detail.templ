@@ -2,10 +2,12 @@ package user
 
 import (
 	v1 "github.com/soltiHQ/control-plane/api/v1"
-	"github.com/soltiHQ/control-plane/ui/templates/asset"
 	"github.com/soltiHQ/control-plane/internal/ui/routepath"
+	"github.com/soltiHQ/control-plane/ui/templates/asset"
 	"github.com/soltiHQ/control-plane/ui/templates/component/button"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
+	"github.com/soltiHQ/control-plane/ui/templates/component/datagrid"
+	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
 )
 
 templ Detail(apiUser v1.User) {
@@ -15,100 +17,77 @@ templ Detail(apiUser v1.User) {
 templ Identity(u v1.User) {
 	@card.Card("") {
 		@card.CardBody() {
-			<div class="space-y-5">
-				<div class="space-y-1">
-					<div class="flex items-center gap-2.5">
-						<h1 class="text-lg font-semibold text-fg truncate leading-tight">
-							if u.Name != "" {
-								{ u.Name }
-							} else {
-								{ u.Subject }
-							}
-						</h1>
-						@statusBadge(!u.Disabled)
-					</div>
-
-					if u.Email != "" {
-						<p class="text-sm text-muted-strong truncate">{ u.Email }</p>
-					}
-				</div>
-
+			<div class="space-y-6">
 				<dl class="space-y-3">
-					@meta("User ID", u.ID, true)
-					@meta("Subject", u.Subject, false)
-				</dl>
+					@metaStatus("Status", !u.Disabled)
 
-				if len(u.Permissions) > 0 {
-					<div class="space-y-2 pt-1">
-						<h3 class="text-[11px] font-mono uppercase tracking-[0.14em] text-muted select-none">
-							Permissions
-						</h3>
-						<div class="flex flex-wrap gap-1.5">
-							for _, p := range u.Permissions {
-								<code class="
-									inline-block px-2 py-0.5
-									rounded-md
-									bg-fg/[0.04] border border-border
-									text-[11px] font-mono text-fg/75
-									leading-relaxed
-								">
-									{ p }
-								</code>
-							}
-						</div>
-					</div>
-				}
+					@datagrid.KV("User ID", u.ID, true)
+					@datagrid.KV("Subject", u.Subject, false)
+					@datagrid.KV("Name", u.Name, false)
+					@datagrid.KV("Email", u.Email, false)
+
+					@metaBadges("Roles", u.RoleIDs, visual.VariantSecondary, true)
+					@metaBadges("Permissions", u.Permissions, visual.VariantPrimary, true)
+				</dl>
 			</div>
 		}
 
 		@card.CardFooter() {
+			if u.Disabled {
+				<form hx-post={ routepath.ApiUserEnable(u.ID) } hx-swap="none">
+					@button.Button("Enable", "submit", false, button.VariantSecondary, false) {
+						@asset.Icon("enable")
+					}
+				</form>
+			} else {
+				<form hx-post={ routepath.ApiUserDisable(u.ID) } hx-swap="none">
+					@button.Button("Disable", "submit", false, button.VariantSecondary, false) {
+						@asset.Icon("disable")
+					}
+				</form>
+			}
 
-            if u.Disabled {
-                <form hx-post={ routepath.ApiUserEnable(u.ID) } hx-swap="none">
-                    @button.Button("","submit",false,button.VariantSecondary,false){ <span> </span>@asset.Icon("enable") }
-                </form>
-            } else {
-                <form hx-post={ routepath.ApiUserDisable(u.ID) } hx-swap="none">
-                    @button.Button("","submit",false,button.VariantSecondary,false){ <span> </span>@asset.Icon("disable") }
-                </form>
-            }
-            @button.Link("Edit", routepath.PageUserEditByID(u.ID), false, button.VariantSecondary){ @asset.Icon("edit") }
-            @button.Link("Delete", routepath.PageUserDeleteByID(u.ID), false, button.VariantDanger){ @asset.Icon("delete") }
+			@button.Link("Edit", routepath.PageUserEditByID(u.ID), false, button.VariantSecondary) {
+				@asset.Icon("edit")
+			}
+			@button.Link("Delete", routepath.PageUserDeleteByID(u.ID), false, button.VariantDanger) {
+				@asset.Icon("delete")
+			}
 		}
 	}
 }
 
-templ meta(label, value string, mono bool) {
+templ metaStatus(label string, active bool) {
 	<div class="min-w-0">
 		<dt class="text-[11px] font-mono uppercase tracking-[0.1em] text-muted mb-0.5">{ label }</dt>
-		if mono {
-			<dd class="text-sm font-mono text-fg break-all leading-snug">{ value }</dd>
-		} else {
-			<dd class="text-sm text-fg break-words leading-snug">{ value }</dd>
-		}
+		<dd>
+			if active {
+				@visual.Badge("Active", visual.VariantSuccess)
+			} else {
+				@visual.Badge("Disabled", visual.VariantDanger)
+			}
+		</dd>
 	</div>
 }
 
-templ statusBadge(active bool) {
-	if active {
-		<span class="
-			inline-flex items-center gap-1.5
-			rounded-full px-2.5 py-0.5
-			text-[11px] font-medium
-			bg-success/10 text-success
-		">
-			<span class="h-1.5 w-1.5 rounded-full bg-current"></span>
-			Active
-		</span>
-	} else {
-		<span class="
-			inline-flex items-center gap-1.5
-			rounded-full px-2.5 py-0.5
-			text-[11px] font-medium
-			bg-danger/10 text-danger
-		">
-			<span class="h-1.5 w-1.5 rounded-full bg-current"></span>
-			Disabled
-		</span>
-	}
+templ metaBadges(label string, items []string, variant visual.Variant, copy bool) {
+	<div class="min-w-0">
+		<dt class="text-[11px] font-mono uppercase tracking-[0.1em] text-muted mb-0.5">{ label }</dt>
+
+		if len(items) == 0 {
+			<dd class="text-sm text-fg/60 break-words leading-snug">—</dd>
+		} else {
+			<dd class="flex flex-wrap gap-1.5">
+				for _, it := range items {
+					if copy {
+						@visual.Copy(it) {
+							@visual.Badge(it, variant)
+						}
+					} else {
+						@visual.Badge(it, variant)
+					}
+				}
+			</dd>
+		}
+	</div>
 }
