@@ -8,6 +8,7 @@ const (
 	PageUserInfo   = "/users/info/"
 	PageUserDelete = "/users/delete/"
 	PageUserEdit   = "/users/edit/"
+	PageUserNew    = "/users/new/"
 
 	ApiSession = "/api/v1/session/"
 	ApiUser    = "/api/v1/users/"

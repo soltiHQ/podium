@@ -1,10 +1,11 @@
 package user
 
 import (
+    "github.com/soltiHQ/control-plane/ui/templates/component/button"
 	"github.com/soltiHQ/control-plane/ui/templates/layout"
-	"github.com/soltiHQ/control-plane/ui/templates/component/button"
 
 	"github.com/soltiHQ/control-plane/internal/ui/policy"
+	"github.com/soltiHQ/control-plane/internal/ui/routepath"
 )
 
 templ Users(nav policy.Nav) {
@@ -16,13 +17,13 @@ templ Users(nav policy.Nav) {
 				</h1>
 
 				if nav.CanAddUser {
-					@button.Link("Add user", "/users/new", false, "primary")
+					@button.Link("Add user", { routepath.PageUserNew }, false, "primary")
 				}
 			</div>
 
 			<div
 				id="users-list"
-				hx-get="/api/v1/users"
+				hx-get={ routepath.ApiUsers }
 				hx-trigger="load"
 				hx-target="this"
 				hx-swap="innerHTML"
