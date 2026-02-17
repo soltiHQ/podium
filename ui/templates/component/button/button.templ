@@ -27,6 +27,7 @@ templ Button(
 		disabled?={ disabled }
 		class={ className }
 	>
-		{ label }
+		{ children... }
+		<span>{ label }</span>
 	</button>
 }
