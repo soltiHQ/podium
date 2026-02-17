@@ -23,14 +23,14 @@ templ Detail(nav policy.Nav, userID string) {
 			</div>
 
 			<div
-				id="user-sessions"
-				hx-get={ routepath.ApiUserSessions(userID) }
-				hx-trigger={ "load once, " + trigger.UserSessionUpdate + " from:body" }
-				hx-target="this"
-				hx-swap="innerHTML"
-			>
-				@datagrid.Preload("Sessions Loading...")
-			</div>
+            	id="user-sessions"
+            	hx-get={ routepath.ApiUserSessions(userID) }
+            	hx-trigger={ "load once, " + trigger.UserSessionUpdate + " from:body, " + trigger.UserSessionsRefresh }
+            	hx-target="this"
+            	hx-swap="innerHTML"
+            >
+            	@datagrid.Preload("Sessions Loading...")
+            </div>
 		</div>
 	}
 }
