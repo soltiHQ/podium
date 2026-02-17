@@ -1,11 +1,10 @@
 package user
 
 import (
-    "github.com/soltiHQ/control-plane/ui/templates/component/button"
-	"github.com/soltiHQ/control-plane/ui/templates/layout"
-
 	"github.com/soltiHQ/control-plane/internal/ui/policy"
 	"github.com/soltiHQ/control-plane/internal/ui/routepath"
+	"github.com/soltiHQ/control-plane/ui/templates/component/button"
+	"github.com/soltiHQ/control-plane/ui/templates/layout"
 )
 
 templ Users(nav policy.Nav) {
@@ -17,7 +16,7 @@ templ Users(nav policy.Nav) {
 				</h1>
 
 				if nav.CanAddUser {
-					@button.Link("Add user", { routepath.PageUserNew }, false, "primary")
+					@button.Link("Add user", routepath.PageUserNew, false, button.VariantMain)
 				}
 			</div>
 

@@ -4,45 +4,22 @@ templ Link(
 	label string,
 	href string,
 	fullWidth bool,
-	variant string,
+	variant Variant,
 ) {
 	{{
-		widthClass := ""
+		width := ""
 		if fullWidth {
-			widthClass = "w-full"
+			width = "w-full "
 		}
 
 		base := "inline-flex items-center justify-center gap-2 " +
 			"h-10 px-4 " +
-			"rounded-[var(--r-6)] " +
-			"focus-visible:outline-none focus-visible:ring-2 " +
-			"transition-colors " +
-			widthClass
+			"transition-all duration-200 " +
+			width
 
-		variantClass := "bg-card text-fg border border-border " +
-			"hover:bg-nav-bg " +
-			"focus-visible:ring-primary/40"
-
-		if variant == "primary" {
-			variantClass = "bg-primary text-white " +
-				"hover:bg-primary/90 " +
-				"focus-visible:ring-primary/40"
-		} else if variant == "secondary" {
-			variantClass = "bg-card text-fg border border-border " +
-				"hover:bg-nav-bg " +
-				"focus-visible:ring-primary/40"
-		} else if variant == "ghost" {
-			variantClass = "bg-transparent text-fg " +
-				"hover:bg-nav-bg " +
-				"focus-visible:ring-primary/40"
-		} else if variant == "danger" {
-			variantClass = "bg-danger text-white " +
-				"hover:bg-danger/90 " +
-				"focus-visible:ring-danger/40"
-		}
-
-		className := base + " " + variantClass
+		className := base + radiusFor(variant) + styleForLink(variant) + focusFor(variant)
 	}}
+
 	<a href={ href } class={ className }>
 		{ label }
 	</a>

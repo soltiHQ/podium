@@ -1,72 +1,31 @@
 package button
 
-type ButtonVariant string
-
-const (
-	VariantPrimary   ButtonVariant = "primary"
-	VariantSecondary ButtonVariant = "secondary"
-	VariantGhost     ButtonVariant = "ghost"
-	VariantDanger    ButtonVariant = "danger"
-)
-
 templ Button(
 	label string,
 	typ string,
 	fullWidth bool,
-	variant ButtonVariant,
-	disabled bool,
-) {
-	if fullWidth {
-		@buttonInner(label, typ, "w-full", variant, disabled)
-	} else {
-		@buttonInner(label, typ, "", variant, disabled)
-	}
-}
-
-templ buttonInner(
-	label string,
-	typ string,
-	widthClass string,
-	variant ButtonVariant,
+	variant Variant,
 	disabled bool,
 ) {
 	{{
-		// Base styles (shared)
-		base := "inline-flex items-center justify-center gap-2 " +
-			"h-10 px-4 " +
-			"rounded-[var(--r-6)] " +
-			"disabled:opacity-50 disabled:pointer-events-none " +
-			"transition-colors "
-
-		// Focus rings
-		focusPrimary := "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 "
-		focusDanger := "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40 "
-
-		style := ""
-		focus := focusPrimary
-
-		switch variant {
-		case VariantPrimary:
-			style = "bg-primary text-white hover:bg-primary/90 "
-		case VariantSecondary:
-			style = "bg-card text-fg border border-border hover:bg-nav-bg "
-		case VariantGhost:
-			style = "bg-transparent text-fg hover:bg-nav-bg "
-		case VariantDanger:
-			style = "bg-danger text-white hover:bg-danger/90 "
-			focus = focusDanger
-		default:
-			// sane fallback
-			style = "bg-card text-fg border border-border hover:bg-nav-bg "
+		width := ""
+		if fullWidth {
+			width = "w-full "
 		}
 
-		cls := base + style + focus + widthClass
+		base := "inline-flex items-center justify-center gap-2 " +
+			"h-10 px-4 " +
+			"disabled:opacity-50 disabled:pointer-events-none " +
+			"transition-all duration-200 " +
+			width
+
+		className := base + radiusFor(variant) + styleForButton(variant) + focusFor(variant)
 	}}
 
 	<button
 		type={ typ }
 		disabled?={ disabled }
-		class={ cls }
+		class={ className }
 	>
 		{ label }
 	</button>
