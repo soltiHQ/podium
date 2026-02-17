@@ -10,7 +10,7 @@ import (
 
 templ Detail(nav policy.Nav, userID string) {
 	@layout.App("User", "users", nav) {
-		<div class="grid grid-cols-1 lg:grid-cols-[340px_1fr] gap-6 items-start p-6">
+		<div class="grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-6 items-start p-6">
 			<div
 				id="user-identity"
 				hx-get={ routepath.ApiUserCrudOp(userID) }

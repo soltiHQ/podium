@@ -1,16 +1,9 @@
 package button
 
-templ Link(
-	label string,
-	href string,
-	fullWidth bool,
-	variant Variant,
-) {
+templ Link(label string, href string, fullWidth bool, variant Variant) {
 	{{
 		width := ""
-		if fullWidth {
-			width = "w-full "
-		}
+		if fullWidth { width = "w-full " }
 
 		base := "inline-flex items-center justify-center gap-2 " +
 			"h-10 px-4 " +

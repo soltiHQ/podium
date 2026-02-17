@@ -2,6 +2,7 @@ package user
 
 import (
 	v1 "github.com/soltiHQ/control-plane/api/v1"
+	"github.com/soltiHQ/control-plane/ui/templates/asset"
 	"github.com/soltiHQ/control-plane/internal/ui/routepath"
 	"github.com/soltiHQ/control-plane/ui/templates/component/button"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
@@ -61,8 +62,18 @@ templ Identity(u v1.User) {
 		}
 
 		@card.CardFooter() {
-			@button.Link("Edit", routepath.PageUserEditByID(u.ID), false, "secondary")
-			@button.Link("Delete", routepath.PageUserDeleteByID(u.ID), false, "danger")
+
+            if u.Disabled {
+                <form hx-post={ routepath.ApiUserEnable(u.ID) } hx-swap="none">
+                    @button.Button("","submit",false,button.VariantSecondary,false){ <span> </span>@asset.Icon("enable") }
+                </form>
+            } else {
+                <form hx-post={ routepath.ApiUserDisable(u.ID) } hx-swap="none">
+                    @button.Button("","submit",false,button.VariantSecondary,false){ <span> </span>@asset.Icon("disable") }
+                </form>
+            }
+            @button.Link("Edit", routepath.PageUserEditByID(u.ID), false, button.VariantSecondary){ @asset.Icon("edit") }
+            @button.Link("Delete", routepath.PageUserDeleteByID(u.ID), false, button.VariantDanger){ @asset.Icon("delete") }
 		}
 	}
 }
