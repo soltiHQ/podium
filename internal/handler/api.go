@@ -402,7 +402,7 @@ func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		response.Unavailable(w, r, mode)
 		return
 	}
-	w.Header().Set(trigger.Header, trigger.UserUpdate)
+	trigger.Redirect(w, routepath.PageUsers)
 	w.WriteHeader(http.StatusNoContent)
 }
 

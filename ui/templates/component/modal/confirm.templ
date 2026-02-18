@@ -1,0 +1,38 @@
+package modal
+
+// Confirm is a pre-built confirmation modal.
+//
+//   - name:         Alpine event name (e.g. "delete-user")
+//   - titleText:    heading shown in the modal
+//   - messageText:  description / warning
+//   - confirmLabel: text on the action button (e.g. "Delete")
+//   - action:       URL for the HTMX request
+//   - method:       HTTP method — "post", "delete", "put", "patch"
+//   - variant:      controls the confirm button colour
+templ Confirm(
+	name string,
+	titleText string,
+	messageText string,
+	confirmLabel string,
+	action string,
+	method Method,
+	variant Variant,
+) {
+	@Modal(name) {
+		@Body() {
+			@Title(titleText)
+			@Message(messageText)
+		}
+		@Footer() {
+			@CancelButton("Cancel")
+			<form { hxMethod(method, action)... } hx-swap="none" x-on:htmx:after-request="show = false">
+				<button
+					type="submit"
+					class={ confirmButtonStyle(variant) }
+				>
+					{ confirmLabel }
+				</button>
+			</form>
+		}
+	}
+}

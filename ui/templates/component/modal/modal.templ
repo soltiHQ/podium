@@ -1,0 +1,71 @@
+package modal
+
+// Modal is the base wrapper. It provides the overlay, centering, and
+// open/close behaviour via Alpine.js.  The caller supplies the inner
+// content through { children... }.
+//
+// `name` is the Alpine event name used to open the modal.
+// To open:  $dispatch('modal:open:NAME')
+// To close: the user clicks the overlay / presses Escape.
+templ Modal(name string) {
+	<div
+		x-data="{ show: false }"
+		x-on:keydown.escape.window="show = false"
+		x-effect="document.body.classList.toggle('overflow-hidden', show)"
+		{ xOn(name)... }
+		x-cloak
+	>
+		<!-- overlay -->
+		<div x-show="show" class={ overlay }
+			x-on:click="show = false"
+			x-transition:enter="transition ease-out duration-200"
+			x-transition:enter-start="opacity-0"
+			x-transition:enter-end="opacity-100"
+			x-transition:leave="transition ease-in duration-150"
+			x-transition:leave-start="opacity-100"
+			x-transition:leave-end="opacity-0"
+		></div>
+
+		<!-- panel -->
+		<div x-show="show" class={ panel } x-on:click="show = false">
+			<div
+				class={ container }
+				x-on:click.stop
+				x-transition:enter="transition ease-out duration-200"
+				x-transition:enter-start="opacity-0 scale-95"
+				x-transition:enter-end="opacity-100 scale-100"
+				x-transition:leave="transition ease-in duration-150"
+				x-transition:leave-start="opacity-100 scale-100"
+				x-transition:leave-end="opacity-0 scale-95"
+			>
+				{ children... }
+			</div>
+		</div>
+	</div>
+}
+
+templ Body() {
+	<div class={ body }>
+		{ children... }
+	</div>
+}
+
+templ Title(text string) {
+	<h3 class={ title }>{ text }</h3>
+}
+
+templ Message(text string) {
+	<p class={ message }>{ text }</p>
+}
+
+templ Footer() {
+	<div class={ footer }>
+		{ children... }
+	</div>
+}
+
+templ CancelButton(label string) {
+	<button type="button" class={ cancelButtonStyle } x-on:click="show = false">
+		{ label }
+	</button>
+}

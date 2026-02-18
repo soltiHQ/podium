@@ -7,6 +7,7 @@ import (
 	"github.com/soltiHQ/control-plane/ui/templates/component/button"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
 	"github.com/soltiHQ/control-plane/ui/templates/component/datagrid"
+	"github.com/soltiHQ/control-plane/ui/templates/component/modal"
 	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
 )
 
@@ -67,16 +68,30 @@ templ Identity(u v1.User) {
 				<span> </span>
 				@asset.Icon("edit")
 			}
-			@button.Link("", routepath.PageUserDeleteByID(u.ID), false, button.VariantDanger) {
-			    <span> </span>
+			<button
+				type="button"
+				class="inline-flex items-center justify-center gap-2 h-10 px-4 rounded-2xl bg-danger text-white hover:bg-danger/90 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40"
+				x-data
+				x-on:click={ modal.OpenEvent("delete-user") }
+			>
 				@asset.Icon("delete")
-			}
+			</button>
 			@button.Link("", routepath.PageUserDeleteByID(u.ID), false, button.VariantDanger) {
                 <span> </span>
             	@asset.Icon("password")
             }
 		}
 	}
+
+	@modal.Confirm(
+		"delete-user",
+		"Delete user",
+		"Are you sure you want to delete "+u.Subject+"? This action cannot be undone.",
+		"Delete",
+		routepath.ApiUserCrudOp(u.ID),
+		modal.MethodDelete,
+		modal.VariantDanger,
+	)
 }
 
 templ metaBadges(label string, items []string, variant visual.Variant, copy bool) {
