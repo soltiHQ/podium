@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain"
+	v1 "github.com/soltiHQ/control-plane/api/v1"
 	discoverv1 "github.com/soltiHQ/control-plane/domain/gen/v1"
 )
 
@@ -49,6 +50,42 @@ func NewAgent(id, name, endpoint string) (*Agent, error) {
 
 		metadata: make(map[string]string),
 		labels:   make(map[string]string),
+	}, nil
+}
+
+// NewAgentFromV1 constructs an Agent from an HTTP API DTO.
+//
+// This method performs defensive copies of maps and does NOT keep references to the input.
+func NewAgentFromV1(in *v1.Agent) (*Agent, error) {
+	if in == nil {
+		return nil, domain.ErrNilSyncRequest
+	}
+	if in.ID == "" {
+		return nil, domain.ErrEmptyID
+	}
+
+	var (
+		now = time.Now()
+		md  = make(map[string]string, len(in.Metadata))
+	)
+	for k, v := range in.Metadata {
+		md[k] = v
+	}
+	return &Agent{
+		createdAt: now,
+		updatedAt: now,
+
+		metadata: md,
+		labels:   make(map[string]string),
+
+		id:       in.ID,
+		name:     in.Name,
+		endpoint: in.Endpoint,
+		os:       in.OS,
+		arch:     in.Arch,
+		platform: in.Platform,
+
+		uptimeSeconds: in.UptimeSeconds,
 	}, nil
 }
 

@@ -9,14 +9,19 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"google.golang.org/grpc"
+
+	discoverv1 "github.com/soltiHQ/control-plane/domain/gen/v1"
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/credentials"
 	"github.com/soltiHQ/control-plane/internal/auth/wire"
 	"github.com/soltiHQ/control-plane/internal/handler"
 	"github.com/soltiHQ/control-plane/internal/server"
+	"github.com/soltiHQ/control-plane/internal/server/runner/grpcserver"
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
 	"github.com/soltiHQ/control-plane/internal/service/access"
+	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
 	"github.com/soltiHQ/control-plane/internal/service/session"
 	"github.com/soltiHQ/control-plane/internal/service/user"
@@ -55,6 +60,7 @@ func main() {
 		userSVC       = user.New(store, logger)
 		sessionSVC    = session.New(store, logger)
 		credentialSVC = credential.New(store, logger)
+		agentSVC      = agent.New(store, logger)
 	)
 
 	var (
@@ -82,128 +88,60 @@ func main() {
 		permMW,
 	)
 
-	var handler http.Handler = mux
-	handler = middleware.Negotiate(jsonResp, htmlResp)(handler)
-	handler = middleware.Recovery(logger)(handler)
-
-	//uiHandler.Wrap(mux)
+	var mainHandler http.Handler = mux
+	mainHandler = middleware.Negotiate(jsonResp, htmlResp)(mainHandler)
+	mainHandler = middleware.Recovery(logger)(mainHandler)
 
 	httpRunner, err := httpserver.New(
 		httpserver.Config{Name: "http", Addr: ":8080"},
 		logger,
-		handler,
+		mainHandler,
 	)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create http server")
 	}
 
-	// Responders
-	//jsonResp := responder.NewJSON()
-	//htmlResp := responder.NewHTML()
-
-	// Backend
-	//loginUC := backend.NewLogin(authSVC)
-	//usersUC := backend.NewUsers(store)
-
-	// Discovery backend (важно: не store напрямую, а UC)
-	// Если у тебя конструктор называется иначе — меняешь только эту строку.
-	//discoveryUC := backend.NewDiscovery(store)
-	//agentsUC := backend.NewAgents(store)
-
-	// Handlers
-	//uiHandler := handlers.NewUI(logger, authSVC, loginUC, agentsUC, usersUC)
-	//apiHandler := handlers.NewAPI(logger, authSVC, loginUC)
-	//staticHandler := handlers.NewStatic(logger)
-
-	//httpDiscovery := handlers.NewHTTPDiscovery(logger, discoveryUC)
-	//grpcDiscovery := handlers.NewGRPCDiscovery(logger, discoveryUC)
-
-	// ---------------------------------------------------------------
-	// UI/API HTTP :8080
-	// ---------------------------------------------------------------
-	//mux := http.NewServeMux()
-	//
-	//staticHandler.Routes(mux)
-
-	// Public
-	//mux.HandleFunc("/login", uiHandler.Login)
-	//mux.HandleFunc("/logout", uiHandler.Logout)
-	//mux.HandleFunc("/api/v1/login", apiHandler.Login)
-
-	// Protected
-	//authMw := middleware.Auth(authSVC.Verifier, authSVC.Session)
-	//mux.Handle("/", authMw(http.HandlerFunc(uiHandler.Main)))
-	//mux.Handle("/users", authMw(http.HandlerFunc(uiHandler.Users)))
-	//mux.Handle("/users/list", authMw(middleware.RequireHTMX(http.HandlerFunc(uiHandler.UsersList))))
-	//mux.Handle("/users/list/rows", authMw(middleware.RequireHTMX(http.HandlerFunc(uiHandler.UsersListRows))))
-	//mux.Handle("/users/new", authMw(http.HandlerFunc(uiHandler.UsersForm)))
-	//mux.Handle("/users/create", authMw(http.HandlerFunc(uiHandler.UsersCreate)))
-
-	//mux.Handle("/agents", authMw(http.HandlerFunc(uiHandler.Agents)))
-
-	// Middleware chain (outer -> inner)
-	//var handler http.Handler = mux
-	//handler = middleware.Negotiate(jsonResp, htmlResp)(handler)
-	//handler = middleware.Recovery(logger)(handler)
-	//handler = middleware.Logger(logger)(handler)
-	//handler = middleware.RequestID()(handler)
-	//handler = middleware.CORS(middleware.CORSConfig{
-	//	AllowOrigins: []string{"*"},
-	//})(handler)
-	//
-	//httpRunner, err := httpserver.New(
-	//	httpserver.Config{Name: "http", Addr: ":8080"},
-	//	logger,
-	//	handler,
-	//)
-	//if err != nil {
-	//	logger.Fatal().Err(err).Msg("failed to create http server")
-	//}
-
 	// ---------------------------------------------------------------
 	// HTTP Discovery :8082
 	// ---------------------------------------------------------------
-	//discMux := http.NewServeMux()
-	//discMux.HandleFunc("/api/v1/discovery/sync", httpDiscovery.Sync)
+	httpDiscovery := handler.NewHTTPDiscovery(logger, agentSVC)
 
-	// Тут negotiate НЕ нужен: путь /api/* и так вернёт JSON,
-	// но middleware.Response у тебя опирается на Responder из ctx.
-	// Поэтому negotiate оставляем, иначе response.* будет падать в TryResponder()->NewJSON()
-	// (если тебе это норм — можешь убрать, но тогда HTMLResponder там не нужен).
-	//var discHandler http.Handler = discMux
-	//discHandler = middleware.Negotiate(jsonResp, htmlResp)(discHandler)
-	//discHandler = middleware.Recovery(logger)(discHandler)
-	//discHandler = middleware.Logger(logger)(discHandler)
-	//discHandler = middleware.RequestID()(discHandler)
+	discMux := http.NewServeMux()
+	discMux.HandleFunc("/api/v1/discovery/sync", httpDiscovery.Sync)
 
-	//httpDiscoveryRunner, err := httpserver.New(
-	//	httpserver.Config{Name: "http-discovery", Addr: ":8082"},
-	//	logger,
-	//	discHandler,
-	//)
-	//if err != nil {
-	//	logger.Fatal().Err(err).Msg("failed to create http discovery server")
-	//}
+	var discHandler http.Handler = discMux
+	discHandler = middleware.Recovery(logger)(discHandler)
+
+	httpDiscoveryRunner, err := httpserver.New(
+		httpserver.Config{Name: "http-discovery", Addr: ":8082"},
+		logger,
+		discHandler,
+	)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to create http discovery server")
+	}
 
 	// ---------------------------------------------------------------
 	// gRPC Discovery :50051
 	// ---------------------------------------------------------------
-	//grpcSrv := grpc.NewServer()
-	//discoverv1.RegisterDiscoverServiceServer(grpcSrv, grpcDiscovery)
-	//
-	//grpcRunner, err := grpcserver.New(
-	//	grpcserver.Config{Name: "grpc-discovery", Addr: ":50051"},
-	//	logger,
-	//	grpcSrv,
-	//)
-	//if err != nil {
-	//	logger.Fatal().Err(err).Msg("failed to create grpc server")
-	//}
+	grpcDiscovery := handler.NewGRPCDiscovery(logger, agentSVC)
+
+	grpcSrv := grpc.NewServer()
+	discoverv1.RegisterDiscoverServiceServer(grpcSrv, grpcDiscovery)
+
+	grpcRunner, err := grpcserver.New(
+		grpcserver.Config{Name: "grpc-discovery", Addr: ":50051"},
+		logger,
+		grpcSrv,
+	)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to create grpc server")
+	}
 
 	// ---------------------------------------------------------------
 	// Server (3 runners)
 	// ---------------------------------------------------------------
-	srv, err := server.New(server.Config{}, logger, httpRunner)
+	srv, err := server.New(server.Config{}, logger, httpRunner, httpDiscoveryRunner, grpcRunner)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create server")
 	}
