@@ -6,6 +6,7 @@ import (
 	v1 "github.com/soltiHQ/control-plane/api/v1"
 	"github.com/soltiHQ/control-plane/internal/ui/policy"
 	"github.com/soltiHQ/control-plane/internal/ui/routepath"
+	"github.com/soltiHQ/control-plane/internal/ui/trigger"
 	"github.com/soltiHQ/control-plane/ui/templates/asset"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
 	"github.com/soltiHQ/control-plane/ui/templates/component/datagrid"
@@ -56,7 +57,7 @@ templ Identity(a v1.Agent, p policy.AgentDetail) {
 					type="button"
 					class="inline-flex items-center justify-center gap-2 h-10 px-4 rounded-2xl bg-card text-fg border border-border shadow-sm hover:border-primary/40 hover:shadow-md active:shadow-sm transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
 					x-data
-					x-on:click={ modal.OpenEvent("edit-agent") }
+					x-on:click={ modal.OpenEvent("edit-agent-labels") }
 				>
 					@asset.Icon("edit")
 				</button>
@@ -65,13 +66,70 @@ templ Identity(a v1.Agent, p policy.AgentDetail) {
 	}
 
 	if p.CanEditLabels {
-		@modal.Edit(
-			"edit-agent",
-			"Edit labels",
-			routepath.ApiAgentLabels(a.ID),
-			editLabelFields(a),
-			nil,
-		)
+		@labelsEditor(a)
+	}
+}
+
+templ labelsEditor(a v1.Agent) {
+	@modal.Modal("edit-agent-labels") {
+		<form
+			x-data={ kvEditorData(a.Labels) }
+			x-on:submit.prevent={ kvSubmitExpr(routepath.ApiAgentLabels(a.ID), trigger.AgentUpdate) }
+		>
+			<div class="p-6 space-y-4">
+				<h3 class="text-base font-semibold text-fg">Edit labels</h3>
+
+				<!-- existing rows -->
+				<template x-for="(row, idx) in rows" :key="idx">
+					<div class="flex items-center gap-2">
+						<input
+							type="text"
+							x-model="row.key"
+							placeholder="key"
+							class="block w-full h-9 px-3 rounded-[var(--r-6)] bg-card text-fg text-sm border border-input hover:border-border focus:ring-2 focus:ring-primary/25 focus:border-primary outline-none transition-colors placeholder:text-muted-strong font-mono"
+						/>
+						<input
+							type="text"
+							x-model="row.value"
+							placeholder="value"
+							class="block w-full h-9 px-3 rounded-[var(--r-6)] bg-card text-fg text-sm border border-input hover:border-border focus:ring-2 focus:ring-primary/25 focus:border-primary outline-none transition-colors placeholder:text-muted-strong"
+						/>
+						<button
+							type="button"
+							class="shrink-0 h-9 w-9 inline-flex items-center justify-center rounded-[var(--r-6)] text-muted-strong hover:text-danger hover:bg-danger/10 transition-colors"
+							x-on:click="rows.splice(idx, 1)"
+						>
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4">
+								<line x1="18" y1="6" x2="6" y2="18"></line>
+								<line x1="6" y1="6" x2="18" y2="18"></line>
+							</svg>
+						</button>
+					</div>
+				</template>
+
+				<!-- add button -->
+				<button
+					type="button"
+					class="inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:text-primary/80 transition-colors"
+					x-on:click="rows.push({key: '', value: ''})"
+				>
+					@asset.Icon("add")
+					<span>Add label</span>
+				</button>
+			</div>
+
+			<div class="flex justify-end gap-2 px-6 py-4 border-t border-border rounded-b-xl">
+				@modal.CancelButton("Cancel")
+				<button
+					type="submit"
+					class="inline-flex items-center justify-center gap-2 h-10 px-4 rounded-2xl font-semibold text-white bg-primary hover:bg-primary/90 focus-visible:ring-primary/40 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2"
+					x-bind:disabled="submitting"
+				>
+					<span x-show="!submitting">Save</span>
+					<span x-show="submitting" x-cloak>Saving...</span>
+				</button>
+			</div>
+		</form>
 	}
 }
 
