@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/a-h/templ"
 )
 
 // Field describes a single form field inside an Edit modal.
@@ -30,6 +32,16 @@ func editFormData(fields []Field) string {
 	}
 	parts = append(parts, "submitting: false")
 	return "{ " + strings.Join(parts, ", ") + " }"
+}
+
+// disabledAttrs returns templ.Attributes for a disabled input.
+func disabledAttrs() templ.Attributes {
+	return templ.Attributes{"disabled": "true"}
+}
+
+// modelAttrs returns templ.Attributes with x-model bound to the field ID.
+func modelAttrs(id string) templ.Attributes {
+	return templ.Attributes{"x-model": id}
 }
 
 // editableFieldIDs returns the IDs of editable (non-disabled) fields.

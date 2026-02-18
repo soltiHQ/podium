@@ -1,49 +1,46 @@
 package form
 
-templ Input(
+templ Select(
 	id string,
-	typ string,
-	value string,
-	placeholder string,
+	options []Option,
 	required bool,
-	autofocus bool,
 	errMsg string,
 	attrs ...templ.Attributes,
 ) {
 	{{
 		hasErr := errMsg != ""
-		cls := InputClass(hasErr)
+		cls := SelectClass(hasErr)
 		extra := mergeAttrs(attrs)
 	}}
 
 	<div class="space-y-1">
 		if hasErr {
-			<input
-				type={ typ }
+			<select
 				id={ id }
 				name={ id }
-				value={ value }
-				placeholder={ placeholder }
 				required?={ required }
-				autofocus?={ autofocus }
 				aria-invalid="true"
 				aria-describedby={ id + "-error" }
 				class={ cls }
 				{ extra... }
-			/>
+			>
+				for _, o := range options {
+					<option value={ o.Value } selected?={ o.Selected }>{ o.Label }</option>
+				}
+			</select>
 		} else {
-			<input
-				type={ typ }
+			<select
 				id={ id }
 				name={ id }
-				value={ value }
-				placeholder={ placeholder }
 				required?={ required }
-				autofocus?={ autofocus }
 				aria-invalid="false"
 				class={ cls }
 				{ extra... }
-			/>
+			>
+				for _, o := range options {
+					<option value={ o.Value } selected?={ o.Selected }>{ o.Label }</option>
+				}
+			</select>
 		}
 
 		if hasErr {

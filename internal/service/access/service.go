@@ -52,6 +52,11 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identi
 	}, nil
 }
 
+// GetPermissions returns all available permissions in the system.
+func (s *Service) GetPermissions() []kind.Permission {
+	return kind.All
+}
+
 // Logout revokes a session (idempotent / best-effort).
 func (s *Service) Logout(ctx context.Context, req LogoutRequest) error {
 	if req.SessionID == "" {

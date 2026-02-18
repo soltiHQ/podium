@@ -1,5 +1,7 @@
 package modal
 
+import "github.com/soltiHQ/control-plane/ui/templates/component/form"
+
 // Edit is a pre-built edit modal with a form that sends JSON.
 //
 //   - name:         Alpine event name (e.g. "edit-user")
@@ -22,25 +24,19 @@ templ Edit(
 
 				for _, f := range fields {
 					<div>
-						<label for={ f.ID } class={ fieldLabel }>{ f.Label }</label>
+						<label for={ f.ID } class={ form.LabelClass }>{ f.Label }</label>
 						if f.Disabled {
-							<input
-								type="text"
-								id={ f.ID }
-								value={ f.Value }
-								disabled
-								class={ fieldDisabledInput }
-							/>
+							@form.Input(
+								f.ID, "text", f.Value, f.Placeholder,
+								false, false, "",
+								disabledAttrs(),
+							)
 						} else {
-							<input
-								type="text"
-								id={ f.ID }
-								name={ f.ID }
-								placeholder={ f.Placeholder }
-								required?={ f.Required }
-								class={ editInputStyle }
-								{ xModel(f.ID)... }
-							/>
+							@form.Input(
+								f.ID, "text", f.Value, f.Placeholder,
+								f.Required, false, "",
+								modelAttrs(f.ID),
+							)
 						}
 					</div>
 				}

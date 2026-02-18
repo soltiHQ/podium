@@ -39,20 +39,3 @@ const cancelButtonStyle = "inline-flex items-center justify-center gap-2 " +
 	"focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 "
 
 const formBody = "p-6 space-y-4 "
-
-const fieldLabel = "text-[11px] font-mono uppercase tracking-[0.1em] text-muted mb-1 "
-
-const fieldDisabledInput = "block w-full h-11 px-4 " +
-	"rounded-[var(--r-6)] " +
-	"bg-card text-fg/40 " +
-	"border border-border " +
-	"cursor-not-allowed opacity-60 "
-
-const editInputStyle = "block w-full h-11 px-4 " +
-	"rounded-[var(--r-6)] " +
-	"bg-card text-fg " +
-	"placeholder:text-muted-strong " +
-	"outline-none transition-colors " +
-	"border border-input " +
-	"hover:border-border " +
-	"focus:ring-2 focus:ring-primary/25 focus:border-primary "

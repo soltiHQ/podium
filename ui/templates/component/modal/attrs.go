@@ -36,10 +36,3 @@ func hxMethod(m Method, url string) templ.Attributes {
 	}
 	return templ.Attributes{key: url}
 }
-
-// xModel returns a templ.Attributes map with x-model bound to the given field name.
-//
-// Usage in templ:  <input { xModel(f.ID)... } />
-func xModel(field string) templ.Attributes {
-	return templ.Attributes{"x-model": field}
-}
