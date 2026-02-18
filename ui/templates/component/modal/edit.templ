@@ -1,0 +1,62 @@
+package modal
+
+// Edit is a pre-built edit modal with a form that sends JSON.
+//
+//   - name:         Alpine event name (e.g. "edit-user")
+//   - titleText:    heading shown in the modal
+//   - action:       URL for the PUT request
+//   - fields:       ordered list of form fields to render
+templ Edit(
+	name string,
+	titleText string,
+	action string,
+	fields []Field,
+) {
+	@Modal(name) {
+		<form
+			x-data={ editFormData(fields) }
+			x-on:submit.prevent={ submitExpr(action, fields) }
+		>
+			<div class={ formBody }>
+				<h3 class={ title }>{ titleText }</h3>
+
+				for _, f := range fields {
+					<div>
+						<label for={ f.ID } class={ fieldLabel }>{ f.Label }</label>
+						if f.Disabled {
+							<input
+								type="text"
+								id={ f.ID }
+								value={ f.Value }
+								disabled
+								class={ fieldDisabledInput }
+							/>
+						} else {
+							<input
+								type="text"
+								id={ f.ID }
+								name={ f.ID }
+								placeholder={ f.Placeholder }
+								required?={ f.Required }
+								class={ editInputStyle }
+								{ xModel(f.ID)... }
+							/>
+						}
+					</div>
+				}
+			</div>
+
+			@Footer() {
+				@CancelButton("Cancel")
+				<button
+					type="submit"
+					class={ confirmButtonStyle(VariantDefault) }
+					x-bind:disabled="submitting"
+				>
+					<span x-show="!submitting">Save</span>
+					<span x-show="submitting" x-cloak>Saving...</span>
+				</button>
+			}
+		</form>
+	}
+}

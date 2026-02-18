@@ -64,10 +64,14 @@ templ Identity(u v1.User) {
 				</form>
 			}
 
-			@button.Link("", routepath.PageUserEditByID(u.ID), false, button.VariantSecondary) {
-				<span> </span>
+			<button
+				type="button"
+				class="inline-flex items-center justify-center gap-2 h-10 px-4 rounded-2xl bg-card text-fg border border-border shadow-sm hover:border-primary/40 hover:shadow-md active:shadow-sm transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+				x-data
+				x-on:click={ modal.OpenEvent("edit-user") }
+			>
 				@asset.Icon("edit")
-			}
+			</button>
 			<button
 				type="button"
 				class="inline-flex items-center justify-center gap-2 h-10 px-4 rounded-2xl bg-danger text-white hover:bg-danger/90 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger/40"
@@ -91,6 +95,13 @@ templ Identity(u v1.User) {
 		routepath.ApiUserCrudOp(u.ID),
 		modal.MethodDelete,
 		modal.VariantDanger,
+	)
+
+	@modal.Edit(
+		"edit-user",
+		"Edit user",
+		routepath.ApiUserCrudOp(u.ID),
+		editFields(u),
 	)
 }
 
