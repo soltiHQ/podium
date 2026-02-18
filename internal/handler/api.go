@@ -18,6 +18,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/service/access"
+	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
 	"github.com/soltiHQ/control-plane/internal/service/session"
 	"github.com/soltiHQ/control-plane/internal/service/user"
@@ -53,6 +54,7 @@ type API struct {
 	userSVC       *user.Service
 	sessionSVC    *session.Service
 	credentialSVC *credential.Service
+	agentSVC      *agent.Service
 }
 
 // NewAPI creates a new API handler.
@@ -62,6 +64,7 @@ func NewAPI(
 	accessSVC *access.Service,
 	sessionSVC *session.Service,
 	credentialSVC *credential.Service,
+	agentSVC *agent.Service,
 ) *API {
 	if accessSVC == nil {
 		panic("handler.API: accessSVC is nil")
@@ -75,12 +78,16 @@ func NewAPI(
 	if credentialSVC == nil {
 		panic("handler.API: credentialSVC is nil")
 	}
+	if agentSVC == nil {
+		panic("handler.API: agentSVC is nil")
+	}
 	return &API{
 		logger:        logger.With().Str("handler", "api").Logger(),
 		accessSVC:     accessSVC,
 		userSVC:       userSVC,
 		sessionSVC:    sessionSVC,
 		credentialSVC: credentialSVC,
+		agentSVC:      agentSVC,
 	}
 }
 
@@ -90,6 +97,7 @@ func (a *API) Routes(mux *http.ServeMux, auth route.BaseMW, _ route.PermMW, comm
 	route.HandleFunc(mux, routepath.ApiUsers, a.Users, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiUser, a.UsersRouter, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiSession, a.SessionsRouter, append(common, auth)...)
+	route.HandleFunc(mux, routepath.ApiAgents, a.Agents, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiPermissions, a.Permissions, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiRoles, a.Roles, append(common, auth)...)
 }
@@ -272,6 +280,31 @@ func (a *API) SessionsRouter(w http.ResponseWriter, r *http.Request) {
 	).ServeHTTP(w, r)
 }
 
+// Agents handles /api/v1/agents.
+//
+// Supported:
+//   - GET /api/v1/agents
+func (a *API) Agents(w http.ResponseWriter, r *http.Request) {
+	mode := response.ModeFromRequest(r)
+	if r.URL.Path != routepath.ApiAgents {
+		response.NotFound(w, r, mode)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		middleware.RequirePermission(kind.AgentsGet)(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				a.agentList(w, r, mode)
+			}),
+		).ServeHTTP(w, r)
+		return
+	default:
+		response.NotAllowed(w, r, mode)
+		return
+	}
+}
+
 // Permissions handles /api/v1/permissions.
 //
 // Supported:
@@ -340,6 +373,41 @@ func (a *API) rolesList(w http.ResponseWriter, r *http.Request, mode httpctx.Ren
 	}
 	response.OK(w, r, mode, &responder.View{
 		Data: v1.RoleListResponse{Items: items},
+	})
+}
+
+func (a *API) agentList(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
+	var (
+		limit  int
+		cursor = r.URL.Query().Get("cursor")
+	)
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			limit = n
+		}
+	}
+
+	res, err := a.agentSVC.List(r.Context(), agent.ListQuery{
+		Limit:  limit,
+		Cursor: cursor,
+	})
+	if err != nil {
+		response.Unavailable(w, r, mode)
+		return
+	}
+
+	items := make([]v1.Agent, 0, len(res.Items))
+	for _, ag := range res.Items {
+		if ag == nil {
+			continue
+		}
+		items = append(items, apimap.Agent(ag))
+	}
+	response.OK(w, r, mode, &responder.View{
+		Data: v1.AgentListResponse{
+			Items:      items,
+			NextCursor: res.NextCursor,
+		},
 	})
 }
 

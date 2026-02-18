@@ -14,6 +14,7 @@ const (
 	ApiSession     = "/api/v1/session/"
 	ApiUser        = "/api/v1/users/"
 	ApiUsers       = "/api/v1/users"
+	ApiAgents      = "/api/v1/agents"
 	ApiPermissions = "/api/v1/permissions"
 	ApiRoles       = "/api/v1/roles"
 )
