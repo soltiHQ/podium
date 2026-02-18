@@ -17,7 +17,7 @@ templ Detail(nav policy.Nav, agentID string) {
 				<div
 					id="agent-identity"
 					hx-get={ routepath.ApiAgentByID(agentID) }
-					hx-trigger={ "load once, " + trigger.AgentUpdate + " from:body" }
+					hx-trigger={ "load, " + trigger.Every1m + ", " + trigger.AgentUpdate + " from:body" }
 					hx-target="this"
 					hx-swap="innerHTML"
 					class="lg:sticky lg:top-6 min-h-[140px]"

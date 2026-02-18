@@ -3,6 +3,7 @@ package agent
 import (
 	"github.com/soltiHQ/control-plane/internal/ui/policy"
 	"github.com/soltiHQ/control-plane/internal/ui/routepath"
+	"github.com/soltiHQ/control-plane/internal/ui/trigger"
 	"github.com/soltiHQ/control-plane/ui/templates/component/datagrid"
 	"github.com/soltiHQ/control-plane/ui/templates/layout"
 )
@@ -17,7 +18,7 @@ templ Agents(nav policy.Nav) {
 			<div
 				id="agents-list"
 				hx-get={ routepath.ApiAgents }
-				hx-trigger="load"
+				hx-trigger={ "load, " + trigger.Every1m }
 				hx-target="this"
 				hx-swap="innerHTML"
 				class="min-h-[120px]"
