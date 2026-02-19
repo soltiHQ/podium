@@ -10,7 +10,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	v1 "github.com/soltiHQ/control-plane/api/v1"
-	discoverv1 "github.com/soltiHQ/control-plane/domain/gen/v1"
+	genv1 "github.com/soltiHQ/control-plane/domain/gen/v1"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 )
@@ -63,9 +63,9 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(v1.AgentSyncResponse{Success: true})
 }
 
-// GRPCDiscovery implements discoverv1.DiscoverServiceServer.
+// GRPCDiscovery implements genv1.DiscoverServiceServer.
 type GRPCDiscovery struct {
-	discoverv1.UnimplementedDiscoverServiceServer
+	genv1.UnimplementedDiscoverServiceServer
 	logger   zerolog.Logger
 	agentSVC *agent.Service
 }
@@ -81,8 +81,8 @@ func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service) *GRPCDisco
 	}
 }
 
-// Sync implements discoverv1.DiscoverServiceServer.
-func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (*discoverv1.SyncResponse, error) {
+// Sync implements genv1.DiscoverServiceServer.
+func (g *GRPCDiscovery) Sync(ctx context.Context, req *genv1.SyncRequest) (*genv1.SyncResponse, error) {
 	a, err := model.NewAgentFromProto(req)
 	if err != nil {
 		g.logger.Warn().Err(err).Msg("invalid sync request")
@@ -94,5 +94,5 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 		return nil, status.Errorf(codes.Internal, "upsert failed")
 	}
 
-	return &discoverv1.SyncResponse{Success: true}, nil
+	return &genv1.SyncResponse{Success: true}, nil
 }

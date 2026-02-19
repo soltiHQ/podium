@@ -17,6 +17,7 @@ import (
 	v1 "github.com/soltiHQ/control-plane/api/v1"
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
@@ -312,6 +313,7 @@ func (a *API) Agents(w http.ResponseWriter, r *http.Request) {
 // Supported:
 //   - GET  /api/v1/agents/{id}
 //   - PUT  /api/v1/agents/{id}/labels
+//   - GET  /api/v1/agents/{id}/tasks
 func (a *API) AgentsRouter(w http.ResponseWriter, r *http.Request) {
 	var (
 		mode = response.ModeFromRequest(r)
@@ -356,6 +358,17 @@ func (a *API) AgentsRouter(w http.ResponseWriter, r *http.Request) {
 		middleware.RequirePermission(kind.AgentsEdit)(
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				a.agentPatchLabels(w, r, mode, agentID)
+			}),
+		).ServeHTTP(w, r)
+		return
+	case "tasks":
+		if r.Method != http.MethodGet {
+			response.NotAllowed(w, r, mode)
+			return
+		}
+		middleware.RequirePermission(kind.AgentsGet)(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				a.agentTasksList(w, r, mode, agentID)
 			}),
 		).ServeHTTP(w, r)
 		return
@@ -522,6 +535,57 @@ func (a *API) agentPatchLabels(w http.ResponseWriter, r *http.Request, mode http
 
 	w.Header().Set(trigger.Header, trigger.AgentUpdate)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) agentTasksList(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, agentID string) {
+	ag, err := a.agentSVC.Get(r.Context(), agentID)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			response.NotFound(w, r, mode)
+			return
+		}
+		response.Unavailable(w, r, mode)
+		return
+	}
+
+	if ag.Endpoint() == "" {
+		response.Unavailable(w, r, mode)
+		return
+	}
+
+	filter := proxy.TaskFilter{
+		Slot:   r.URL.Query().Get("slot"),
+		Status: r.URL.Query().Get("status"),
+	}
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			filter.Limit = n
+		}
+	}
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			filter.Offset = n
+		}
+	}
+
+	p := proxy.New(ag.Endpoint())
+
+	result, err := p.ListTasks(r.Context(), filter)
+	if err != nil {
+		a.logger.Warn().Err(err).
+			Str("agent_id", agentID).
+			Str("endpoint", ag.Endpoint()).
+			Msg("proxy: ListTasks failed")
+		response.Unavailable(w, r, mode)
+		return
+	}
+
+	response.OK(w, r, mode, &responder.View{
+		Data: v1.TaskListResponse{
+			Tasks: apimap.TasksFromProxy(result.Tasks),
+			Total: result.Total,
+		},
+	})
 }
 
 func (a *API) userList(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {

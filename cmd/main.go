@@ -11,7 +11,7 @@ import (
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 
-	discoverv1 "github.com/soltiHQ/control-plane/domain/gen/v1"
+	genv1 "github.com/soltiHQ/control-plane/domain/gen/v1"
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/credentials"
@@ -127,7 +127,7 @@ func main() {
 	grpcDiscovery := handler.NewGRPCDiscovery(logger, agentSVC)
 
 	grpcSrv := grpc.NewServer()
-	discoverv1.RegisterDiscoverServiceServer(grpcSrv, grpcDiscovery)
+	genv1.RegisterDiscoverServiceServer(grpcSrv, grpcDiscovery)
 
 	grpcRunner, err := grpcserver.New(
 		grpcserver.Config{Name: "grpc-discovery", Addr: ":50051"},

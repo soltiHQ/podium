@@ -5,7 +5,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain"
 	v1 "github.com/soltiHQ/control-plane/api/v1"
-	discoverv1 "github.com/soltiHQ/control-plane/domain/gen/v1"
+	genv1 "github.com/soltiHQ/control-plane/domain/gen/v1"
 )
 
 var _ domain.Entity[*Agent] = (*Agent)(nil)
@@ -92,7 +92,7 @@ func NewAgentFromV1(in *v1.Agent) (*Agent, error) {
 // NewAgentFromProto constructs an Agent from a SyncRequest.
 //
 // This method performs defensive copies of maps and does NOT keep references to the proto object.
-func NewAgentFromProto(req *discoverv1.SyncRequest) (*Agent, error) {
+func NewAgentFromProto(req *genv1.SyncRequest) (*Agent, error) {
 	if req == nil {
 		return nil, domain.ErrNilSyncRequest
 	}

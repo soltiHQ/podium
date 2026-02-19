@@ -31,6 +31,7 @@ var (
 	PageAgentInfoByID = func(id string) string { return PageAgentInfo + id }
 	ApiAgentByID      = func(id string) string { return ApiAgent + id }
 	ApiAgentLabels    = func(id string) string { return ApiAgent + id + "/labels" }
+	ApiAgentTasks     = func(id string) string { return ApiAgent + id + "/tasks" }
 
 	ApiUserRevokeSession = func(id string) string {
 		return ApiSession + id + "/revoke"

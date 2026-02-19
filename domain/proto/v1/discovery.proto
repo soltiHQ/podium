@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package tno.discover.v1;
 
-option go_package = "github.com/soltiHQ/control-plane/domain/gen/v1/discover;discoverv1";
+option go_package = "github.com/soltiHQ/control-plane/domain/gen/v1;genv1";
 
 service DiscoverService {
   // Sync is invoked periodically by agent to report their status.

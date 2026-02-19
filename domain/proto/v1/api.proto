@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package tno.api.v1;
+
+option go_package = "github.com/soltiHQ/control-plane/domain/gen/v1;genv1";
+
+// Task execution state.
+enum TaskStatus {
+  TASK_STATUS_UNSPECIFIED = 0;
+  TASK_STATUS_PENDING     = 1;
+  TASK_STATUS_RUNNING     = 2;
+  TASK_STATUS_SUCCEEDED   = 3;
+  TASK_STATUS_FAILED      = 4;
+  TASK_STATUS_TIMEOUT     = 5;
+  TASK_STATUS_CANCELED    = 6;
+  TASK_STATUS_EXHAUSTED   = 7;
+}
+
+// Task information with current state.
+message TaskInfo {
+  string id          = 1;
+  string slot        = 2;
+  TaskStatus status  = 3;
+  uint32 attempt     = 4;
+  int64 created_at   = 5; // Unix timestamp.
+  int64 updated_at   = 6; // Unix timestamp.
+  optional string error = 7;
+}
+
+// TnoApi provides task management on the agent side.
+// The control-plane acts as a gRPC client calling into the agent.
+service TnoApi {
+  // ListTasks returns tasks matching the given filters with pagination.
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+}
+
+// ListTasksRequest — unified query with optional filters and pagination.
+message ListTasksRequest {
+  optional string slot       = 1;
+  optional TaskStatus status = 2;
+  uint32 limit               = 3; // 0 = default (100), max 1000.
+  uint32 offset              = 4; // default 0.
+}
+
+// ListTasksResponse — paginated result.
+message ListTasksResponse {
+  repeated TaskInfo tasks = 1;
+  uint32 total            = 2;
+}
