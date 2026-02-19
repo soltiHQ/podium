@@ -163,7 +163,9 @@ func TestVerifyPassword_CorruptedHash(t *testing.T) {
 	}
 
 	// Corrupted verifier payload.
-	v.DataSet(PasswordHashKey, "not-a-bcrypt-hash")
+	if err = v.DataSet(PasswordHashKey, "not-a-bcrypt-hash"); err != nil {
+		t.Fatalf("DataSet err=%v", err)
+	}
 
 	if err = VerifyPassword(cred, v, "pw"); !errors.Is(err, auth.ErrMissingPasswordHash) {
 		t.Fatalf("expected ErrMissingPasswordHash for corrupted hash, err=%v", err)

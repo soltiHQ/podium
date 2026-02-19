@@ -11,7 +11,6 @@ import (
 
 // Static serves static files from the UI package.
 type Static struct {
-	fs     http.FileSystem
 	server http.Handler
 }
 

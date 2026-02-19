@@ -80,15 +80,7 @@ func (p *httpProxy) ListTasks(ctx context.Context, f TaskFilter) (*TaskListResul
 
 	tasks := make([]Task, len(body.Tasks))
 	for i, t := range body.Tasks {
-		tasks[i] = Task{
-			ID:        t.ID,
-			Slot:      t.Slot,
-			Status:    t.Status,
-			Attempt:   t.Attempt,
-			CreatedAt: t.CreatedAt,
-			UpdatedAt: t.UpdatedAt,
-			Error:     t.Error,
-		}
+		tasks[i] = Task(t)
 	}
 
 	return &TaskListResult{

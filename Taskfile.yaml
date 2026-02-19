@@ -1,0 +1,171 @@
+version: '3'
+
+vars:
+  go_root:
+    sh: go env GOPATH
+  git_root:
+    sh: git rev-parse --show-toplevel
+  go_version:
+    sh: grep '^go ' {{.git_root}}/go.mod | awk '{print $2}'
+
+  alpinejs_version: "3.13.5"
+  htmx_version: "1.9.12"
+
+  cache_dir: ".cache"
+  image_ci_patch: "1"
+  image_ci: "ghcr.io/soltihq/golang-ci:{{.go_version}}-{{.image_ci_patch}}"
+
+tasks:
+  default:
+    desc: Default task.
+    cmds:
+      - echo "Please enter a task or use '-l' or '--list-all' to list all available tasks"
+    silent: true
+
+  # ================================================#
+  # ---------------------INTERNAL-------------------#
+  # ================================================#
+  _docker/run:
+    desc: Internal wrapper to run task in containers.
+    internal: true
+    silent: true
+    requires:
+      vars: [ IMAGE, CMD, MOUNT_DIR ]
+    dir: "{{.git_root}}"
+    cmd: |
+      set -euo pipefail
+      
+      if ! docker image inspect "{{.IMAGE}}" >/dev/null 2>&1; then
+        echo "pulling: {{.IMAGE}}"
+      
+        docker pull -q "{{.IMAGE}}" >/dev/null 2>&1 || {
+          echo "Failed to pull image: {{.IMAGE}}"
+          exit 1
+        }
+      fi
+      docker run --rm --init --pull=never \
+        --security-opt no-new-privileges \
+        --user $(id -u):$(id -g) \
+        --cap-drop=ALL \
+        \
+        --volume "{{.git_root}}/{{.MOUNT_DIR}}:/workspace/lighthouse:rw" \
+        {{if .VOLUMES}}{{range $vol := .VOLUMES}}--volume {{$vol}} {{end}}{{end}} \
+        {{if .ENVS}}{{range $env := .ENVS}}--env "{{$env}}" {{end}}{{end}} \
+        \
+        --workdir /workspace/lighthouse \
+        {{.IMAGE}} \
+        {{.CMD}}
+
+  _go/tool:
+    desc: Internal wrapper for running Go tools.
+    internal: true
+    silent: true
+    requires:
+      vars: [ CMD ]
+    cmds:
+      - cmd: mkdir -p "{{.git_root}}/{{.cache_dir}}"
+      - task: _docker/run
+        vars:
+          IMAGE: "{{.image_ci}}"
+          CMD: "{{.CMD}}"
+          MOUNT_DIR: "."
+          VOLUMES:
+            - "{{.git_root}}/{{.cache_dir}}:/tmp/{{.cache_dir}}"
+          ENVS:
+            - "HOME=/tmp"
+            - "GOMODCACHE=/tmp/{{.cache_dir}}/mod"
+            - "GOCACHE=/tmp/{{.cache_dir}}/build"
+
+  download/alpinejs:
+    internal: true
+    dir: "{{.git_root}}/ui/static/js"
+    cmds:
+      - |
+        if [ ! -f alpine.min.js ]; then
+          echo "Downloading Alpine.js"
+          curl -fsSL -o alpine.min.js https://cdn.jsdelivr.net/npm/alpinejs@{{.alpinejs_version}}/dist/cdn.min.js
+        fi
+    silent: true
+
+  download/htmx:
+    internal: true
+    dir: "{{.git_root}}/ui/static/js"
+    cmds:
+      - |
+        if [ ! -f htmx.min.js ]; then
+          echo "Downloading htmx"
+          curl -fsSL -o htmx.min.js https://unpkg.com/htmx.org@{{.htmx_version}}/dist/htmx.min.js
+        fi
+    silent: true
+
+  go/mod/tidy:
+    internal: true
+    deps:
+      - go/tidy
+    cmds:
+      - task: _go/tool
+        vars: { CMD: "go mod tidy" }
+
+  go/mod/vendor:
+    internal: true
+    cmds:
+      - task: _go/tool
+        vars: { CMD: "go mod vendor" }
+
+  proto/gen:
+    internal: true
+    cmds:
+      - task: _go/tool
+        vars: { CMD: "buf generate" }
+    silent: true
+
+  templ/gen:
+    internal: true
+    cmds:
+      - task: _go/tool
+        vars: { CMD: "templ generate" }
+
+  tailwindcss/gen:
+    internal: true
+    cmds:
+      - task: _go/tool
+        vars: { CMD: "tailwindcss -c tailwind.config.cjs -i ui/static/css/app.css -o ui/static/css/tailwindcss.css --minify" }
+
+  # ================================================#
+  # ----------------------PUBLIC--------------------#
+  # ================================================#
+  deps/install:
+    desc: Install dependencies.
+    cmds:
+      - task: download/alpinejs
+      - task: tailwindcss/gen
+      - task: download/htmx
+      - task: proto/gen
+      - task: templ/gen
+
+  go/test:
+    desc: Run Go tests.
+    deps:
+      - deps/install
+      - go/mod/vendor
+    cmds:
+      - task: _go/tool
+        vars: { CMD: "go test ./..." }
+
+  go/fumpt:
+    desc: Run Go fumpt formatter.
+    cmds:
+      - task: _go/tool
+        vars: { CMD: "gofumpt -l -w $(git ls-files \"*.go\")" }
+
+  go/lint:
+    desc: Run Go linters.
+    cmds:
+      - task: _go/tool
+        vars: { CMD: "golangci-lint run ./..." }
+
+  go/vulnerability:
+    desc: Run vulnerability scanner.
+    cmds:
+      - task: _go/tool
+        vars: { CMD: "govulncheck ./..." }

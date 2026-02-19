@@ -36,8 +36,10 @@ import (
 	contentUser "github.com/soltiHQ/control-plane/ui/templates/content/user"
 )
 
-type UserStatusMode uint8
-type UserUpsertMode uint8
+type (
+	UserStatusMode uint8
+	UserUpsertMode uint8
+)
 
 const (
 	UserDisable UserStatusMode = iota

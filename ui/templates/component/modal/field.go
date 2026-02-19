@@ -30,7 +30,7 @@ type Field struct {
 //	Endpoint returns { "items": [{"id": "role-admin", "name": "admin"}, ...] }
 //	ValueKey = "id", LabelKey = "name".
 type AsyncSelect struct {
-	ID       string   // JSON field name (e.g. "permissions", "role_ids")
+	ID       string // JSON field name (e.g. "permissions", "role_ids")
 	Label    string
 	Endpoint string   // GET URL that returns { "items": [...] }
 	Selected []string // currently selected values

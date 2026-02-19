@@ -84,12 +84,19 @@ func mustUpsertUser(t *testing.T, ctx context.Context, st storage.Storage, u *mo
 
 func mustUpsertPasswordCred(t *testing.T, ctx context.Context, st storage.Storage, credID, userID, plain string) *model.Credential {
 	t.Helper()
-	cred, err := credentials.NewPasswordCredential(credID, userID, plain, credentials.DefaultBcryptCost)
+	cred, err := credentials.NewPasswordCredential(credID, userID)
 	if err != nil {
 		t.Fatalf("NewPasswordCredential: %v", err)
 	}
 	if err := st.UpsertCredential(ctx, cred); err != nil {
 		t.Fatalf("UpsertCredential: %v", err)
+	}
+	ver, err := credentials.NewPasswordVerifier(credID+"-ver", credID, plain, credentials.DefaultBcryptCost)
+	if err != nil {
+		t.Fatalf("NewPasswordVerifier: %v", err)
+	}
+	if err := st.UpsertVerifier(ctx, ver); err != nil {
+		t.Fatalf("UpsertVerifier: %v", err)
 	}
 	return cred
 }

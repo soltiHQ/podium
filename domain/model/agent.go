@@ -3,8 +3,8 @@ package model
 import (
 	"time"
 
-	"github.com/soltiHQ/control-plane/domain"
 	v1 "github.com/soltiHQ/control-plane/api/v1"
+	"github.com/soltiHQ/control-plane/domain"
 	genv1 "github.com/soltiHQ/control-plane/domain/gen/v1"
 )
 

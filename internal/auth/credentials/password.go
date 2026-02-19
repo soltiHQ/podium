@@ -41,7 +41,6 @@ func NewPasswordVerifier(
 	plainPassword string,
 	cost int,
 ) (*model.Verifier, error) {
-
 	if plainPassword == "" {
 		return nil, auth.ErrInvalidRequest
 	}
@@ -61,7 +60,9 @@ func NewPasswordVerifier(
 		return nil, err
 	}
 
-	v.DataSet(PasswordHashKey, string(hash))
+	if err = v.DataSet(PasswordHashKey, string(hash)); err != nil {
+		return nil, err
+	}
 	return v, nil
 }
 
@@ -71,7 +72,6 @@ func VerifyPassword(
 	v *model.Verifier,
 	plainPassword string,
 ) error {
-
 	if cred == nil || v == nil || plainPassword == "" {
 		return auth.ErrPasswordMismatch
 	}
