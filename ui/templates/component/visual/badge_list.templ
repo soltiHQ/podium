@@ -9,7 +9,7 @@ templ BadgeList(label string, items []string, variant Variant, copyable bool) {
 		<dt class="text-[11px] font-mono uppercase tracking-[0.1em] text-muted mb-0.5">{ label }</dt>
 
 		if len(items) == 0 {
-			<dd class="text-sm text-fg/60 break-words leading-snug">—</dd>
+			<dd class="text-sm italic text-muted">None</dd>
 		} else {
 			<dd class="flex flex-wrap gap-1.5">
 				for _, it := range items {
@@ -33,7 +33,7 @@ templ BadgeMap(label string, items map[string]string, variant Variant) {
 		<dt class="text-[11px] font-mono uppercase tracking-[0.1em] text-muted mb-0.5">{ label }</dt>
 
 		if len(items) == 0 {
-			<dd class="text-sm text-fg/60 break-words leading-snug">—</dd>
+			<dd class="text-sm italic text-muted">None</dd>
 		} else {
 			<dd class="flex flex-wrap gap-1.5">
 				for k, v := range items {

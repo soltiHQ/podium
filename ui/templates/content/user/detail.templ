@@ -19,24 +19,38 @@ templ Detail(apiUser v1.User, p policy.UserDetail) {
 // Identity renders the user info card body (returned as an HTMX fragment).
 templ Identity(u v1.User, p policy.UserDetail) {
 	@card.Card("") {
-		@card.CardBody() {
-			<div class="flex flex-col gap-8">
-				<div class="flex items-center gap-2">
-					if !u.Disabled {
-						@visual.StatusDot("success")
-						<span class="text-sm font-medium text-success">Active</span>
+		// — header: name + status —
+		@card.CardHeader() {
+			<div class="min-w-0">
+				<h2 class="text-base font-semibold text-fg truncate">
+					if u.Name != "" {
+						{ u.Name }
 					} else {
-						@visual.StatusDot("muted")
-						<span class="text-sm font-medium text-muted">Inactive</span>
+						{ u.Subject }
 					}
-				</div>
+				</h2>
+				<p class="text-xs text-muted truncate">{ u.Subject }</p>
+			</div>
+			<div class="flex items-center gap-2 shrink-0">
+				if !u.Disabled {
+					@visual.StatusDot("success")
+					<span class="text-xs font-medium text-success">Active</span>
+				} else {
+					@visual.StatusDot("muted")
+					<span class="text-xs font-medium text-muted">Inactive</span>
+				}
+			</div>
+		}
 
+		// — body: identity + access —
+		@card.CardBody() {
+			<div class="flex flex-col gap-6">
 				<dl class="flex flex-col gap-3">
 					@visual.KV("User ID", u.ID, true)
-					@visual.KV("Subject", u.Subject, false)
-					@visual.KV("Name", u.Name, false)
 					@visual.KV("Email", u.Email, false)
 				</dl>
+
+				<div class="border-t border-border"></div>
 
 				<dl class="flex flex-col gap-3">
 					@visual.BadgeList("Roles", u.RoleIDs, visual.VariantSecondary, true)
@@ -45,6 +59,7 @@ templ Identity(u v1.User, p policy.UserDetail) {
 			</div>
 		}
 
+		// — footer: actions —
 		@card.CardFooter() {
 			if p.CanEdit && !p.IsSelf {
 				if u.Disabled {

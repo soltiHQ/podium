@@ -5,21 +5,16 @@ templ KV(label string, value string, mono bool) {
 	<div class="min-w-0">
 		<dt class="text-[11px] font-mono uppercase tracking-[0.1em] text-muted mb-0.5">{ label }</dt>
 
-		{{
-			v := value
-			if v == "" { v = "—" }
-
-			cls := "text-base text-fg break-words leading-snug"
-			if mono { cls = "text-base font-mono text-fg break-all leading-snug" }
-			if v == "—" { cls = cls + " text-fg/60" }
-		}}
-
-		if v != "—" {
+		if value != "" {
+			{{
+				cls := "text-base text-fg break-words leading-snug"
+				if mono { cls = "text-base font-mono text-fg break-all leading-snug" }
+			}}
 			<dd>
-				@Copy(v) { <span class={ cls }>{ v }</span> }
+				@Copy(value) { <span class={ cls }>{ value }</span> }
 			</dd>
 		} else {
-			<dd class={ cls }>{ v }</dd>
+			<dd class="text-sm italic text-muted">Not set</dd>
 		}
 	</div>
 }
