@@ -111,10 +111,10 @@
         --secondary: 181 204 200;
         --secondary-bg: 31 52 49;
 
-        --danger: 255 180 171;
-        --danger-bg: 147 0 10;
-        --warning: 217 119 6;
-        --success: 74 222 128;
+        --danger: 248 113 113;
+        --danger-bg: 127 0 10;
+        --warning: 202 163 30;
+        --success: 52 211 153;
 
         --nav-link-bg: 0 55 50;
         --nav-link-fg: 204 243 238;
@@ -138,5 +138,14 @@
         -moz-osx-font-smoothing: grayscale;
         background-color: rgb(var(--bg));
         color: rgb(var(--fg));
+    }
+
+    /* Search clear button — match muted color instead of browser blue */
+    input[type="search"]::-webkit-search-cancel-button {
+        -webkit-appearance: none;
+        height: 16px;
+        width: 16px;
+        background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='rgb(161,161,170)' stroke-width='2' stroke-linecap='round'%3E%3Cline x1='18' y1='6' x2='6' y2='18'/%3E%3Cline x1='6' y1='6' x2='18' y2='18'/%3E%3C/svg%3E") center/contain no-repeat;
+        cursor: pointer;
     }
 }
