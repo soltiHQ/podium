@@ -1,21 +1,5 @@
 package button
 
-import "github.com/a-h/templ"
-
-// mergeAttrs flattens a variadic list of templ.Attributes into one map.
-func mergeAttrs(attrs []templ.Attributes) templ.Attributes {
-	if len(attrs) == 0 {
-		return nil
-	}
-	out := templ.Attributes{}
-	for _, a := range attrs {
-		for k, v := range a {
-			out[k] = v
-		}
-	}
-	return out
-}
-
 func radiusFor(v Variant) string {
 	if v == VariantPrimary {
 		return "rounded-[var(--r-6)] "
@@ -32,12 +16,6 @@ func focusFor(v Variant) string {
 
 func styleFor(v Variant, isLink bool) string {
 	switch v {
-
-	case VariantMain:
-		if isLink {
-			return "bg-card text-primary font-semibold border border-border shadow-sm hover:border-primary/40 hover:shadow-md active:shadow-sm "
-		}
-		return "bg-primary text-white font-semibold shadow-sm hover:shadow-md active:shadow-sm hover:bg-primary/90 "
 
 	case VariantPrimary:
 		return "bg-primary text-white font-semibold hover:bg-primary/90 "

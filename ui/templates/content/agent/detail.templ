@@ -8,6 +8,7 @@ import (
 	"github.com/soltiHQ/control-plane/ui/templates/asset"
 	"github.com/soltiHQ/control-plane/ui/templates/component/button"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
+	"github.com/soltiHQ/control-plane/ui/templates/component/form"
 	"github.com/soltiHQ/control-plane/ui/templates/component/modal"
 	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
 )
@@ -81,13 +82,13 @@ templ labelsEditor(a v1.Agent) {
 							type="text"
 							x-model="row.key"
 							placeholder="key"
-							class="block w-full h-9 px-3 rounded-[var(--r-6)] bg-card text-fg text-sm border border-input hover:border-border focus:ring-2 focus:ring-primary/25 focus:border-primary outline-none transition-colors placeholder:text-muted-strong font-mono"
+							class={ form.BaseInputClass + "h-9 px-3 text-sm font-mono" }
 						/>
 						<input
 							type="text"
 							x-model="row.value"
 							placeholder="value"
-							class="block w-full h-9 px-3 rounded-[var(--r-6)] bg-card text-fg text-sm border border-input hover:border-border focus:ring-2 focus:ring-primary/25 focus:border-primary outline-none transition-colors placeholder:text-muted-strong"
+							class={ form.BaseInputClass + "h-9 px-3 text-sm" }
 						/>
 						<button
 							type="button"
@@ -115,14 +116,12 @@ templ labelsEditor(a v1.Agent) {
 
 			@modal.Footer() {
 				@modal.CancelButton("Cancel")
-				<button
-					type="submit"
-					class="inline-flex items-center justify-center gap-2 h-10 px-4 rounded-2xl font-semibold text-white bg-primary hover:bg-primary/90 focus-visible:ring-primary/40 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2"
-					x-bind:disabled="submitting"
-				>
+				@button.Button("", "submit", false, button.VariantPrimary, false,
+					templ.Attributes{"x-bind:disabled": "submitting"},
+				) {
 					<span x-show="!submitting">Save</span>
 					<span x-show="submitting" x-cloak>Saving...</span>
-				</button>
+				}
 			}
 		</form>
 	}

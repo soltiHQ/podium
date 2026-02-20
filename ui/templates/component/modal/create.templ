@@ -1,6 +1,7 @@
 package modal
 
 import (
+	"github.com/soltiHQ/control-plane/ui/templates/component/button"
 	"github.com/soltiHQ/control-plane/ui/templates/component/form"
 	"github.com/soltiHQ/control-plane/ui/templates/component/status"
 )
@@ -103,14 +104,12 @@ templ Create(
 
 				@Footer() {
 					@CancelButton("Cancel")
-					<button
-						type="submit"
-						class={ confirmButtonStyle(VariantDefault) }
-						x-bind:disabled="submitting"
-					>
+					@button.Button("", "submit", false, button.VariantPrimary, false,
+						templ.Attributes{"x-bind:disabled": "submitting"},
+					) {
 						<span x-show="!submitting">Create</span>
 						<span x-show="submitting" x-cloak>Creating...</span>
-					</button>
+					}
 				}
 			</div>
 		</form>

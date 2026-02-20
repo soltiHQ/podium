@@ -2,7 +2,7 @@ package layout
 
 templ Root(title string) {
 	<!DOCTYPE html>
-	<html lang="ru" class="fonts-loading">
+	<html lang="en" class="fonts-loading">
 	<head>
 		<meta charset="UTF-8"/>
 		<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
@@ -76,7 +76,7 @@ templ Root(title string) {
 							root.classList.remove("dark");
 							mode = "light";
 						}
-						document.cookie = "theme=" + mode + "; path=/; max-age=31536000";
+						document.cookie = "theme=" + mode + "; path=/; max-age=31536000; SameSite=Lax";
 					} catch (e) {}
 				};
 

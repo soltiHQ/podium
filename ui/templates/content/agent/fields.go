@@ -47,6 +47,7 @@ func kvSubmitExpr(action string, triggerEvent string) string {
 				show = false;
 				htmx.trigger(document.body, '%s');
 			}
+		}).catch(() => {
 		}).finally(() => submitting = false)`,
 		action,
 		strings.ReplaceAll(triggerEvent, "'", "\\'"),

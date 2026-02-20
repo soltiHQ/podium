@@ -1,5 +1,7 @@
 package form
 
+import "github.com/soltiHQ/control-plane/ui/templates/component/attrs"
+
 templ Input(
 	id string,
 	typ string,
@@ -8,12 +10,12 @@ templ Input(
 	required bool,
 	autofocus bool,
 	errMsg string,
-	attrs ...templ.Attributes,
+	a ...templ.Attributes,
 ) {
 	{{
 		hasErr := errMsg != ""
 		cls := InputClass(hasErr)
-		extra := mergeAttrs(attrs)
+		extra := attrs.Merge(a)
 	}}
 
 	<div class="space-y-1">

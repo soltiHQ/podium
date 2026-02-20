@@ -23,6 +23,10 @@ const DisabledClass = "block w-full h-11 px-4 " +
 	"border border-border " +
 	"cursor-not-allowed opacity-60 "
 
+// BaseInputClass is the default input class (no error state).
+// Use this for Alpine-dynamic inputs where form.Input() is not suitable.
+const BaseInputClass = baseInput + okBorder
+
 // InputClass returns the full Tailwind class string for an input.
 func InputClass(hasErr bool) string {
 	if hasErr {

@@ -92,13 +92,13 @@ func initExpr(selects []AsyncSelect) string {
 					` const items = d.items || [];`+
 					` %s_opts = items.map(x => x.%s);`+
 					` %s_labels = Object.fromEntries(items.map(x => [x.%s, x.%s]));`+
-					` })`,
+					` }).catch(() => {})`,
 				s.Endpoint, s.ID, s.ValueKey, s.ID, s.ValueKey, s.LabelKey,
 			))
 		} else {
 			// Flat string items.
 			fetches = append(fetches, fmt.Sprintf(
-				`fetch('%s').then(r => r.json()).then(d => { %s_opts = d.items || [] })`,
+				`fetch('%s').then(r => r.json()).then(d => { %s_opts = d.items || [] }).catch(() => {})`,
 				s.Endpoint, s.ID,
 			))
 		}
@@ -195,6 +195,7 @@ func formSubmitExpr(method, action string, fields []Field, selects []AsyncSelect
 				show = false;
 				htmx.trigger(document.body, 'user_update');
 			}
+		}).catch(() => {
 		}).finally(() => submitting = false)`,
 		action, method, jsonObj,
 	)

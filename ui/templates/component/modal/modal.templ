@@ -1,5 +1,7 @@
 package modal
 
+import "github.com/soltiHQ/control-plane/ui/templates/component/button"
+
 // Modal is the base wrapper. It provides the overlay, centering, and
 // open/close behaviour via Alpine.js.  The caller supplies the inner
 // content through { children... }.
@@ -65,7 +67,7 @@ templ Footer() {
 }
 
 templ CancelButton(label string) {
-	<button type="button" class={ cancelButtonStyle } x-on:click="show = false">
-		{ label }
-	</button>
+	@button.Button(label, "button", false, button.VariantSecondary, false,
+		templ.Attributes{"x-on:click": "show = false"},
+	)
 }

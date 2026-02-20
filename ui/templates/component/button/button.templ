@@ -1,12 +1,14 @@
 package button
 
+import "github.com/soltiHQ/control-plane/ui/templates/component/attrs"
+
 templ Button(
 	label string,
 	typ string,
 	fullWidth bool,
 	variant Variant,
 	disabled bool,
-	attrs ...templ.Attributes,
+	a ...templ.Attributes,
 ) {
 	{{
 		width := ""
@@ -21,7 +23,7 @@ templ Button(
 			width
 
 		className := base + radiusFor(variant) + styleFor(variant, false) + focusFor(variant)
-		extra := mergeAttrs(attrs)
+		extra := attrs.Merge(a)
 	}}
 
 	<button

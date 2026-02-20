@@ -1,5 +1,7 @@
 package modal
 
+import "github.com/soltiHQ/control-plane/ui/templates/component/button"
+
 // Confirm is a pre-built confirmation modal.
 //
 //   - name:         Alpine event name (e.g. "delete-user")
@@ -26,12 +28,7 @@ templ Confirm(
 		@Footer() {
 			@CancelButton("Cancel")
 			<form { hxMethod(method, action)... } hx-swap="none" x-on:htmx:after-request="show = false">
-				<button
-					type="submit"
-					class={ confirmButtonStyle(variant) }
-				>
-					{ confirmLabel }
-				</button>
+				@button.Button(confirmLabel, "submit", false, buttonVariant(variant), false)
 			</form>
 		}
 	}
