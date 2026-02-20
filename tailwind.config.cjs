@@ -27,6 +27,7 @@ module.exports = {
                 primary: "rgb(var(--primary) / <alpha-value>)",
                 "primary-bg": "rgb(var(--primary-bg) / <alpha-value>)",
                 danger: "rgb(var(--danger) / <alpha-value>)",
+                warning: "rgb(var(--warning) / <alpha-value>)",
                 success: "rgb(var(--success) / <alpha-value>)",
 
                 "nav-bg": "rgb(var(--nav-link-bg) / <alpha-value>)",

@@ -54,14 +54,12 @@ templ Identity(u v1.User, p policy.UserDetail) {
 				if u.Disabled {
 					<form hx-post={ routepath.ApiUserEnable(u.ID) } hx-swap="none">
 						@button.Button("", "submit", false, button.VariantSecondary, false) {
-							<span> </span>
 							@asset.Icon("enable")
 						}
 					</form>
 				} else {
 					<form hx-post={ routepath.ApiUserDisable(u.ID) } hx-swap="none">
 						@button.Button("", "submit", false, button.VariantSecondary, false) {
-							<span> </span>
 							@asset.Icon("disable")
 						}
 					</form>
@@ -74,19 +72,19 @@ templ Identity(u v1.User, p policy.UserDetail) {
 				}
 			}
 
+			if p.CanEdit {
+				@button.Button("", "button", false, button.VariantWarning, false,
+					templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent("password-user")},
+				) {
+					@asset.Icon("password")
+				}
+			}
+
 			if p.CanDelete {
 				@button.Button("", "button", false, button.VariantDanger, false,
 					templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent("delete-user")},
 				) {
 					@asset.Icon("delete")
-				}
-			}
-
-			if p.CanEdit {
-				@button.Button("", "button", false, button.VariantSecondary, false,
-					templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent("password-user")},
-				) {
-					@asset.Icon("password")
 				}
 			}
 		}

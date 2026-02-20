@@ -40,6 +40,7 @@
         --primary-bg: 244 244 245;
 
         --danger: 159 18 57;
+        --warning: 159 18 57;
         --success: 22 163 74;
 
         --nav-link-bg: 244 244 245;
@@ -71,7 +72,8 @@
 
         --primary: 5 150 105;
         --primary-bg: 5 30 24;
-        --danger: 251 113 133;
+        --danger: 159 18 57;
+        --warning: 159 18 57;
 
         --nav-link-bg: 39 39 42;
         --nav-link-fg: 244 244 245;

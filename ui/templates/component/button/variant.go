@@ -7,5 +7,6 @@ const (
 	VariantPrimary   Variant = "primary"
 	VariantSecondary Variant = "secondary"
 	VariantGhost     Variant = "ghost"
+	VariantWarning   Variant = "warning"
 	VariantDanger    Variant = "danger"
 )
