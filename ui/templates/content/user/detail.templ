@@ -50,7 +50,7 @@ templ Identity(u v1.User, p policy.UserDetail) {
 		}
 
 		@card.CardFooter() {
-			if p.CanEdit {
+			if p.CanEdit && !p.IsSelf {
 				if u.Disabled {
 					<form hx-post={ routepath.ApiUserEnable(u.ID) } hx-swap="none">
 						@button.Button("", "submit", false, button.VariantSecondary, false) {
