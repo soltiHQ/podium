@@ -30,7 +30,7 @@ templ ErrorPage(code int, title, message, requestID string) {
 			<div class="mt-10">
 				if requestID != "" {
 					@visual.Copy(requestID) {
-						<span class="inline-flex items-center gap-2 rounded-[var(--r-6)] border border-border bg-card px-3 py-2 text-xs font-mono tracking-[0.08em] text-muted-strong select-none hover:border-primary/40">
+						<span class="inline-flex items-center gap-2 rounded-[var(--r-xs)] border border-border bg-card px-3 py-2 text-xs font-mono tracking-[0.08em] text-muted-strong select-none hover:border-primary/40">
 							{ requestID }
 						</span>
 					}

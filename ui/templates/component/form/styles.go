@@ -1,10 +1,10 @@
 package form
 
 // LabelClass is the Tailwind class for form field labels.
-const LabelClass ="text-[11px] font-mono uppercase tracking-[0.1em] text-muted mb-1 "
+const LabelClass = "text-[11px] uppercase tracking-[0.05em] text-muted mb-1 "
 
 const baseInput = "block w-full h-11 px-4 " +
-	"rounded-[var(--r-6)] " +
+	"rounded-[var(--r-xs)] " +
 	"bg-card text-fg " +
 	"placeholder:text-muted-strong " +
 	"outline-none transition-colors " +
@@ -19,8 +19,8 @@ const errBorder = "border border-danger " +
 	"focus:ring-2 focus:ring-danger/25 focus:border-danger "
 
 // DisabledClass is the Tailwind class for read-only/disabled inputs.
-const DisabledClass ="block w-full h-11 px-4 " +
-	"rounded-[var(--r-6)] " +
+const DisabledClass = "block w-full h-11 px-4 " +
+	"rounded-[var(--r-xs)] " +
 	"bg-card text-fg/40 " +
 	"border border-border " +
 	"cursor-not-allowed opacity-60 "
@@ -49,7 +49,7 @@ const selectMultiple = "appearance-none py-2 "
 // SelectClass returns the full Tailwind class string for a select.
 func SelectClass(hasErr bool, multiple bool) string {
 	base := "block w-full px-4 " +
-		"rounded-[var(--r-6)] " +
+		"rounded-[var(--r-xs)] " +
 		"bg-card text-fg " +
 		"placeholder:text-muted-strong " +
 		"outline-none transition-colors " +

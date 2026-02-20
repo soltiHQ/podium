@@ -6,7 +6,7 @@ import "fmt"
 // Used for displaying roles, permissions, etc.
 templ BadgeList(label string, items []string, variant Variant, copyable bool) {
 	<div class="min-w-0">
-		<dt class="text-[11px] font-mono uppercase tracking-[0.1em] text-muted mb-0.5">{ label }</dt>
+		<dt class="text-[11px] uppercase tracking-[0.05em] text-muted mb-0.5">{ label }</dt>
 
 		if len(items) == 0 {
 			<dd class="text-sm italic text-muted">None</dd>
@@ -30,7 +30,7 @@ templ BadgeList(label string, items []string, variant Variant, copyable bool) {
 // Used for displaying labels, metadata, etc.
 templ BadgeMap(label string, items map[string]string, variant Variant) {
 	<div class="min-w-0">
-		<dt class="text-[11px] font-mono uppercase tracking-[0.1em] text-muted mb-0.5">{ label }</dt>
+		<dt class="text-[11px] uppercase tracking-[0.05em] text-muted mb-0.5">{ label }</dt>
 
 		if len(items) == 0 {
 			<dd class="text-sm italic text-muted">None</dd>

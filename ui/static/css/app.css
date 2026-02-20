@@ -22,67 +22,111 @@
 
 @layer base {
     :root {
-        --bg: 255 255 255;
+        /* ── Surface system (M3 tonal elevation) ── */
+        --bg: 250 250 250;
         --fg: 24 24 27;
+
+        --surface: 255 255 255;
+        --surface-dim: 241 241 243;
+        --surface-container: 245 245 246;
+        --surface-container-high: 239 239 241;
 
         --card: 255 255 255;
         --card-fg: 24 24 27;
 
-        /* muted */
+        /* ── Muted text ── */
         --muted: 161 161 170;
         --muted-strong: 113 113 122;
 
-        --border: 228 228 231;
-        --border-2: 239 239 241;
-        --input-border: 214 214 219;
+        /* ── Outline / border ── */
+        --border: 214 214 219;
+        --border-2: 228 228 231;
+        --input-border: 199 199 205;
 
-        --primary: 24 24 27;
-        --primary-bg: 244 244 245;
+        /* ── Primary (Teal) ── */
+        --primary: 13 148 136;
+        --primary-bg: 230 247 245;
+        --on-primary: 255 255 255;
+        --on-primary-container: 0 55 50;
 
-        --danger: 159 18 57;
+        /* ── Secondary (neutral teal) ── */
+        --secondary: 79 107 103;
+        --secondary-bg: 222 237 234;
+
+        /* ── Semantic ── */
+        --danger: 186 26 26;
+        --danger-bg: 255 218 214;
         --warning: 180 83 9;
         --success: 22 163 74;
 
-        --nav-link-bg: 244 244 245;
-        --nav-link-fg: 63 63 70;
+        /* ── Navigation ── */
+        --nav-link-bg: 230 247 245;
+        --nav-link-fg: 0 55 50;
 
+        /* ── Icons ── */
         --icon: 82 82 91;
-        --icon-active: 59 130 246;
+        --icon-active: 13 148 136;
 
-        --r-6: 0.375rem;
+        /* ── Shape scale (M3) ── */
+        --r-none: 0;
+        --r-xs: 0.25rem;
+        --r-sm: 0.5rem;
+        --r-md: 0.75rem;
+        --r-lg: 1rem;
+        --r-xl: 1.75rem;
         --r-full: 999px;
 
-        --shadow: 0 1px 2px 0 rgb(0 0 0 / 0.06), 0 8px 24px -12px rgb(0 0 0 / 0.12);
-        --shadow-focus: 0 0 0 4px rgb(var(--primary) / 0.18);
+        /* ── Elevation ── */
+        --shadow-1: 0 1px 2px 0 rgb(0 0 0 / 0.05), 0 1px 3px 0 rgb(0 0 0 / 0.10);
+        --shadow-2: 0 1px 2px 0 rgb(0 0 0 / 0.06), 0 4px 8px -2px rgb(0 0 0 / 0.10);
+        --shadow-3: 0 2px 4px 0 rgb(0 0 0 / 0.06), 0 8px 24px -8px rgb(0 0 0 / 0.12);
+        --shadow: var(--shadow-2);
+        --shadow-focus: 0 0 0 3px rgb(13 148 136 / 0.24);
     }
 
     .dark {
         --bg: 24 24 27;
-        --fg: 239 239 241;
+        --fg: 230 230 232;
 
-        --card: 31 31 35;
-        --card-fg: 239 239 241;
+        --surface: 31 31 35;
+        --surface-dim: 20 20 23;
+        --surface-container: 39 39 42;
+        --surface-container-high: 49 49 53;
+
+        --card: 39 39 42;
+        --card-fg: 230 230 232;
 
         --muted: 113 113 122;
         --muted-strong: 161 161 170;
 
-        --border: 39 39 42;
-        --border-2: 39 39 42;
-        --input-border: 39 39 42;
+        --border: 55 55 60;
+        --border-2: 49 49 53;
+        --input-border: 63 63 70;
 
-        --primary: 5 150 105;
-        --primary-bg: 5 30 24;
-        --danger: 159 18 57;
+        --primary: 94 215 204;
+        --primary-bg: 0 55 50;
+        --on-primary: 0 55 50;
+        --on-primary-container: 204 243 238;
+
+        --secondary: 181 204 200;
+        --secondary-bg: 31 52 49;
+
+        --danger: 255 180 171;
+        --danger-bg: 147 0 10;
         --warning: 217 119 6;
+        --success: 74 222 128;
 
-        --nav-link-bg: 39 39 42;
-        --nav-link-fg: 244 244 245;
+        --nav-link-bg: 0 55 50;
+        --nav-link-fg: 204 243 238;
 
         --icon: 161 161 170;
-        --icon-active: 36 115 245;
+        --icon-active: 94 215 204;
 
-        --shadow: 0 1px 2px 0 rgb(0 0 0 / 0.35), 0 10px 28px -14px rgb(0 0 0 / 0.55);
-        --shadow-focus: 0 0 0 4px rgb(var(--primary) / 0.22);
+        --shadow-1: 0 1px 2px 0 rgb(0 0 0 / 0.20), 0 1px 3px 0 rgb(0 0 0 / 0.30);
+        --shadow-2: 0 1px 2px 0 rgb(0 0 0 / 0.25), 0 4px 8px -2px rgb(0 0 0 / 0.35);
+        --shadow-3: 0 2px 4px 0 rgb(0 0 0 / 0.25), 0 10px 28px -8px rgb(0 0 0 / 0.45);
+        --shadow: var(--shadow-2);
+        --shadow-focus: 0 0 0 3px rgb(94 215 204 / 0.28);
     }
 
     html {

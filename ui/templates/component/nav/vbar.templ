@@ -53,19 +53,19 @@ templ VBarLogo() {
 		class="
 			flex items-center justify-center
 			h-14 w-14
-			rounded-2xl
+			rounded-[var(--r-lg)]
 
 			bg-card
 			text-primary
 			border border-border
 
-			shadow-sm
+			shadow-1
 			transition-all duration-200
 
 			hover:border-primary/40
-			hover:shadow-md
+			hover:shadow-2
 
-			active:shadow-sm
+			active:shadow-1
 		"
 		title="Home"
 	>
@@ -81,13 +81,12 @@ templ VBarItem(id string, href string, label string, active string) {
 			href={ href }
 			class="
 				flex items-center justify-center
-				h-12 w-12 rounded-xl
+				h-12 w-12 rounded-[var(--r-lg)]
 
-				bg-nav-bg
-				text-icon-active
+				bg-primary-bg
+				text-primary
 
-				border border-border
-				shadow-sm
+				border border-transparent
 			"
 			title={ label }
 		>
@@ -98,7 +97,7 @@ templ VBarItem(id string, href string, label string, active string) {
 			href={ href }
 			class="
 				flex items-center justify-center
-				h-12 w-12 rounded-xl
+				h-12 w-12 rounded-[var(--r-lg)]
 
 				text-icon
 				border border-transparent
@@ -107,7 +106,7 @@ templ VBarItem(id string, href string, label string, active string) {
 				hover:text-fg
 				hover:bg-nav-bg
 				hover:border-border
-				hover:shadow-[0_1px_4px_rgba(0,0,0,0.08)]
+				hover:shadow-1
 			"
 			title={ label }
 		>
@@ -122,7 +121,7 @@ templ ThemeToggle() {
 		onclick="window.__toggleTheme && window.__toggleTheme()"
 		class="
 			flex items-center justify-center
-			h-12 w-12 rounded-xl
+			h-12 w-12 rounded-[var(--r-lg)]
 
 			text-icon
 			border border-transparent
@@ -131,7 +130,7 @@ templ ThemeToggle() {
 			hover:text-fg
 			hover:bg-nav-bg
 			hover:border-border
-			hover:shadow-[0_1px_4px_rgba(0,0,0,0.08)]
+			hover:shadow-1
 		"
 		title="Theme"
 		aria-label="Toggle theme"

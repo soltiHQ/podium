@@ -4,9 +4,10 @@ package card
 templ Card(href string) {
 	{{
 		base := `
-			rounded-xl
+			rounded-[var(--r-md)]
 			border border-border
 			bg-surface
+			shadow-1
 			overflow-hidden
 		`
 	}}
@@ -34,8 +35,7 @@ templ CardBody() {
 }
 
 templ CardFooter() {
-	<div class="flex gap-2 px-5 py-4 border-t border-border bg-surface-dim">
+	<div class="flex gap-2 px-5 py-4 border-t border-border bg-surface-dim rounded-b-[var(--r-md)]">
 		{ children... }
 	</div>
 }
-

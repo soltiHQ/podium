@@ -11,6 +11,11 @@ module.exports = {
                 bg: "rgb(var(--bg) / <alpha-value>)",
                 fg: "rgb(var(--fg) / <alpha-value>)",
 
+                surface: "rgb(var(--surface) / <alpha-value>)",
+                "surface-dim": "rgb(var(--surface-dim) / <alpha-value>)",
+                "surface-container": "rgb(var(--surface-container) / <alpha-value>)",
+                "surface-container-high": "rgb(var(--surface-container-high) / <alpha-value>)",
+
                 card: "rgb(var(--card) / <alpha-value>)",
                 "card-fg": "rgb(var(--card-fg) / <alpha-value>)",
 
@@ -26,7 +31,14 @@ module.exports = {
 
                 primary: "rgb(var(--primary) / <alpha-value>)",
                 "primary-bg": "rgb(var(--primary-bg) / <alpha-value>)",
+                "on-primary": "rgb(var(--on-primary) / <alpha-value>)",
+                "on-primary-container": "rgb(var(--on-primary-container) / <alpha-value>)",
+
+                secondary: "rgb(var(--secondary) / <alpha-value>)",
+                "secondary-bg": "rgb(var(--secondary-bg) / <alpha-value>)",
+
                 danger: "rgb(var(--danger) / <alpha-value>)",
+                "danger-bg": "rgb(var(--danger-bg) / <alpha-value>)",
                 warning: "rgb(var(--warning) / <alpha-value>)",
                 success: "rgb(var(--success) / <alpha-value>)",
 
@@ -34,8 +46,18 @@ module.exports = {
                 "nav-fg": "rgb(var(--nav-link-fg) / <alpha-value>)",
             },
             borderRadius: {
-                6: "var(--r-6)",
+                none: "var(--r-none)",
+                xs: "var(--r-xs)",
+                sm: "var(--r-sm)",
+                md: "var(--r-md)",
+                lg: "var(--r-lg)",
+                xl: "var(--r-xl)",
                 full: "var(--r-full)",
+            },
+            boxShadow: {
+                1: "var(--shadow-1)",
+                2: "var(--shadow-2)",
+                3: "var(--shadow-3)",
             },
         },
     },

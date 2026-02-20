@@ -16,10 +16,10 @@ import (
 templ Tasks(agentID string, items []v1.Task, total int, slot string, offset int) {
 	@card.Card("") {
 		@card.CardHeader() {
-			<h2 class="text-[11px] font-mono uppercase tracking-[0.14em] text-muted select-none">
+			<h2 class="text-[11px] uppercase tracking-[0.05em] text-muted select-none">
 				Tasks
 			</h2>
-			<span class="text-[11px] font-mono text-muted tabular-nums">
+			<span class="text-[11px] text-muted tabular-nums">
 				{ fmt.Sprintf("%d", total) }
 			</span>
 		}
@@ -74,7 +74,7 @@ templ taskRow(t v1.Task) {
 			</div>
 
 			if t.Attempt > 0 {
-				<span class="shrink-0 text-[10px] font-mono text-muted tabular-nums">
+				<span class="shrink-0 text-[11px] text-muted tabular-nums">
 					#{ fmt.Sprintf("%d", t.Attempt) }
 				</span>
 			}
