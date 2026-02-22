@@ -149,6 +149,9 @@ func (a *Agent) Platform() string { return a.platform }
 // CreatedAt returns the creation timestamp.
 func (a *Agent) CreatedAt() time.Time { return a.createdAt }
 
+// SetCreatedAt overrides the creation timestamp (used to preserve the original value during sync).
+func (a *Agent) SetCreatedAt(t time.Time) { a.createdAt = t }
+
 // UpdatedAt returns the last modification timestamp.
 func (a *Agent) UpdatedAt() time.Time { return a.updatedAt }
 

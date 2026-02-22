@@ -64,7 +64,18 @@ func (s *Service) Get(ctx context.Context, id string) (*model.Agent, error) {
 }
 
 // Upsert an agent.
+//
+// If the agent already exists, control-plane owned labels and the original
+// createdAt timestamp are preserved because they are not part of the
+// discovery payload reported by the agent.
 func (s *Service) Upsert(ctx context.Context, m *model.Agent) error {
+	existing, _ := s.store.GetAgent(ctx, m.ID())
+	if existing != nil {
+		m.SetCreatedAt(existing.CreatedAt())
+		for k, v := range existing.LabelsAll() {
+			m.LabelAdd(k, v)
+		}
+	}
 	return s.store.UpsertAgent(ctx, m)
 }
 
