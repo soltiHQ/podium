@@ -15,10 +15,10 @@ import (
 func Logger(logger zerolog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
 			var (
-				m     = httpsnoop.CaptureMetrics(next, w, r)
-				evt   = logger.Info()
-				start = time.Now()
+				m   = httpsnoop.CaptureMetrics(next, w, r)
+				evt = logger.Info()
 			)
 			if m.Code >= 500 {
 				evt = logger.Error()

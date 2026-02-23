@@ -76,8 +76,10 @@ func mapError(err error) (codes.Code, string) {
 	// Storage errors.
 	case errors.Is(err, storage.ErrNotFound):
 		return codes.NotFound, "not found"
-	case errors.Is(err, storage.ErrConflict):
+	case errors.Is(err, storage.ErrAlreadyExists):
 		return codes.AlreadyExists, "already exists"
+	case errors.Is(err, storage.ErrConflict):
+		return codes.Aborted, "conflict"
 	case errors.Is(err, storage.ErrInvalidArgument):
 		return codes.InvalidArgument, "invalid argument"
 

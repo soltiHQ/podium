@@ -1,16 +1,15 @@
 package apimap
 
 import (
-	v1 "github.com/soltiHQ/control-plane/api/v1"
+	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
 	"github.com/soltiHQ/control-plane/domain/model"
 )
 
-func Role(r *model.Role) v1.Role {
+func Role(r *model.Role) restv1.Role {
 	if r == nil {
-		return v1.Role{}
+		return restv1.Role{}
 	}
-
-	return v1.Role{
+	return restv1.Role{
 		ID:   r.ID(),
 		Name: r.Name(),
 	}

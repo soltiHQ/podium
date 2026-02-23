@@ -1,13 +1,13 @@
-package v1
+package restv1
 
 type User struct {
 	Permissions []string `json:"permissions,omitempty"`
 	RoleIDs     []string `json:"role_ids,omitempty"`
 
-	Subject string `json:"subject"`
-	Email   string `json:"email,omitempty"`
-	Name    string `json:"name,omitempty"`
 	ID      string `json:"id"`
+	Subject string `json:"subject"`
+	Name    string `json:"name,omitempty"`
+	Email   string `json:"email,omitempty"`
 
 	Disabled bool `json:"disabled"`
 }

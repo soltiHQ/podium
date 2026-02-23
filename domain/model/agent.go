@@ -3,9 +3,10 @@ package model
 import (
 	"time"
 
-	v1 "github.com/soltiHQ/control-plane/api/v1"
+	discoveryv1 "github.com/soltiHQ/control-plane/api/discovery/v1"
 	"github.com/soltiHQ/control-plane/domain"
 	genv1 "github.com/soltiHQ/control-plane/domain/gen/v1"
+	"github.com/soltiHQ/control-plane/domain/kind"
 )
 
 var _ domain.Entity[*Agent] = (*Agent)(nil)
@@ -24,12 +25,14 @@ type Agent struct {
 	metadata map[string]string
 	labels   map[string]string
 
-	id       string
-	name     string
-	endpoint string
-	os       string
-	arch     string
-	platform string
+	id           string
+	name         string
+	endpoint     string
+	endpointType kind.EndpointType
+	apiVersion   kind.APIVersion
+	os           string
+	arch         string
+	platform     string
 
 	uptimeSeconds int64
 }
@@ -53,10 +56,10 @@ func NewAgent(id, name, endpoint string) (*Agent, error) {
 	}, nil
 }
 
-// NewAgentFromV1 constructs an Agent from an HTTP API DTO.
+// NewAgentFromSync constructs an Agent from an HTTP discovery SyncRequest.
 //
 // This method performs defensive copies of maps and does NOT keep references to the input.
-func NewAgentFromV1(in *v1.Agent) (*Agent, error) {
+func NewAgentFromSync(in *discoveryv1.SyncRequest) (*Agent, error) {
 	if in == nil {
 		return nil, domain.ErrNilSyncRequest
 	}
@@ -71,6 +74,11 @@ func NewAgentFromV1(in *v1.Agent) (*Agent, error) {
 	for k, v := range in.Metadata {
 		md[k] = v
 	}
+	epType, err := kind.EndpointTypeFromInt(in.EndpointType)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Agent{
 		createdAt: now,
 		updatedAt: now,
@@ -78,18 +86,20 @@ func NewAgentFromV1(in *v1.Agent) (*Agent, error) {
 		metadata: md,
 		labels:   make(map[string]string),
 
-		id:       in.ID,
-		name:     in.Name,
-		endpoint: in.Endpoint,
-		os:       in.OS,
-		arch:     in.Arch,
-		platform: in.Platform,
+		id:           in.ID,
+		name:         in.Name,
+		endpoint:     in.Endpoint,
+		endpointType: epType,
+		apiVersion:   kind.APIVersionFromInt(in.APIVersion),
+		os:           in.OS,
+		arch:         in.Arch,
+		platform:     in.Platform,
 
 		uptimeSeconds: in.UptimeSeconds,
 	}, nil
 }
 
-// NewAgentFromProto constructs an Agent from a SyncRequest.
+// NewAgentFromProto constructs an Agent from a gRPC SyncRequest.
 //
 // This method performs defensive copies of maps and does NOT keep references to the proto object.
 func NewAgentFromProto(req *genv1.SyncRequest) (*Agent, error) {
@@ -107,6 +117,11 @@ func NewAgentFromProto(req *genv1.SyncRequest) (*Agent, error) {
 	for k, v := range req.Metadata {
 		md[k] = v
 	}
+	epType, err := kind.EndpointTypeFromInt(int(req.EndpointType))
+	if err != nil {
+		return nil, err
+	}
+
 	return &Agent{
 		createdAt: now,
 		updatedAt: now,
@@ -114,12 +129,14 @@ func NewAgentFromProto(req *genv1.SyncRequest) (*Agent, error) {
 		metadata: md,
 		labels:   make(map[string]string),
 
-		id:       req.Id,
-		name:     req.Name,
-		endpoint: req.Endpoint,
-		os:       req.Os,
-		arch:     req.Arch,
-		platform: req.Platform,
+		id:           req.Id,
+		name:         req.Name,
+		endpoint:     req.Endpoint,
+		endpointType: epType,
+		apiVersion:   kind.APIVersionFromInt(int(req.ApiVersion)),
+		os:           req.Os,
+		arch:         req.Arch,
+		platform:     req.Platform,
 
 		uptimeSeconds: req.UptimeSeconds,
 	}, nil
@@ -133,6 +150,12 @@ func (a *Agent) Name() string { return a.name }
 
 // Endpoint returns the agent's network address.
 func (a *Agent) Endpoint() string { return a.endpoint }
+
+// EndpointType returns the agent's transport protocol.
+func (a *Agent) EndpointType() kind.EndpointType { return a.endpointType }
+
+// APIVersion returns the agent's API version.
+func (a *Agent) APIVersion() kind.APIVersion { return a.apiVersion }
 
 // UptimeSeconds returns the agent-reported uptime in seconds.
 func (a *Agent) UptimeSeconds() int64 { return a.uptimeSeconds }
@@ -217,12 +240,14 @@ func (a *Agent) Clone() *Agent {
 		metadata: md,
 		labels:   labels,
 
-		id:       a.id,
-		name:     a.name,
-		endpoint: a.endpoint,
-		os:       a.os,
-		arch:     a.arch,
-		platform: a.platform,
+		id:           a.id,
+		name:         a.name,
+		endpoint:     a.endpoint,
+		endpointType: a.endpointType,
+		apiVersion:   a.apiVersion,
+		os:           a.os,
+		arch:         a.arch,
+		platform:     a.platform,
 
 		uptimeSeconds: a.uptimeSeconds,
 	}

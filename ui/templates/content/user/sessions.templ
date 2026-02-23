@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	v1 "github.com/soltiHQ/control-plane/api/v1"
+	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
 	"github.com/soltiHQ/control-plane/internal/ui/routepath"
 	"github.com/soltiHQ/control-plane/ui/templates/asset"
 	"github.com/soltiHQ/control-plane/ui/templates/component/button"
@@ -14,7 +14,7 @@ import (
 )
 
 // Sessions renders the active sessions card for a user.
-templ Sessions(items []v1.Session) {
+templ Sessions(items []restv1.Session) {
 	@card.Card("") {
 		@card.CardHeader() {
 			<h2 class="text-[11px] uppercase tracking-[0.05em] text-muted select-none">
@@ -42,7 +42,7 @@ templ Sessions(items []v1.Session) {
 }
 
 // sessionRow renders a single session entry.
-templ sessionRow(s v1.Session) {
+templ sessionRow(s restv1.Session) {
 	{{
 		expired := !s.ExpiresAt.IsZero() && s.ExpiresAt.Before(time.Now())
 		dimmed := s.Revoked || expired

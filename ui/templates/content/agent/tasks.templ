@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"strconv"
 
-	v1 "github.com/soltiHQ/control-plane/api/v1"
+	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
 	"github.com/soltiHQ/control-plane/internal/ui/routepath"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
 	"github.com/soltiHQ/control-plane/ui/templates/component/form"
@@ -14,7 +14,7 @@ import (
 )
 
 // Tasks renders the paginated task table for a specific agent.
-templ Tasks(agentID string, items []v1.Task, total int, slot string, offset int) {
+templ Tasks(agentID string, items []proxyv1.Task, total int, slot string, offset int) {
 	@card.Card("") {
 		@card.CardHeader() {
 			<h2 class="text-[11px] uppercase tracking-[0.05em] text-muted select-none">
@@ -43,7 +43,7 @@ templ Tasks(agentID string, items []v1.Task, total int, slot string, offset int)
 }
 
 // TaskResults is the HTMX-swappable wrapper for task rows + pagination.
-templ TaskResults(agentID string, items []v1.Task, total int, slot string, offset int) {
+templ TaskResults(agentID string, items []proxyv1.Task, total int, slot string, offset int) {
 	<div id="tasks-results">
 		<div id="tasks-rows" class="divide-y divide-border -mx-5">
 			@TaskRows(items)
@@ -56,7 +56,7 @@ templ TaskResults(agentID string, items []v1.Task, total int, slot string, offse
 }
 
 // TaskRows renders table rows for a slice of tasks.
-templ TaskRows(items []v1.Task) {
+templ TaskRows(items []proxyv1.Task) {
 	if len(items) == 0 {
 		@status.Empty("No tasks found")
 	} else {
@@ -66,7 +66,7 @@ templ TaskRows(items []v1.Task) {
 	}
 }
 
-templ taskRow(t v1.Task) {
+templ taskRow(t proxyv1.Task) {
 	<div class="px-5 py-3 space-y-1.5">
 		<div class="flex items-center justify-between gap-3">
 			<div class="flex items-center gap-2 min-w-0">

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/model"
@@ -69,12 +70,17 @@ func (s *Service) Get(ctx context.Context, id string) (*model.Agent, error) {
 // createdAt timestamp are preserved because they are not part of the
 // discovery payload reported by the agent.
 func (s *Service) Upsert(ctx context.Context, m *model.Agent) error {
-	existing, _ := s.store.GetAgent(ctx, m.ID())
-	if existing != nil {
+	existing, err := s.store.GetAgent(ctx, m.ID())
+	switch {
+	case err == nil:
 		m.SetCreatedAt(existing.CreatedAt())
 		for k, v := range existing.LabelsAll() {
 			m.LabelAdd(k, v)
 		}
+	case errors.Is(err, storage.ErrNotFound):
+		// new agent — nothing to preserve.
+	default:
+		return err
 	}
 	return s.store.UpsertAgent(ctx, m)
 }

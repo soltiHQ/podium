@@ -1,7 +1,7 @@
 package user
 
 import (
-	v1 "github.com/soltiHQ/control-plane/api/v1"
+	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
 	"github.com/soltiHQ/control-plane/internal/ui/routepath"
 	"github.com/soltiHQ/control-plane/ui/templates/component/modal"
 )
@@ -14,7 +14,7 @@ func createFields() []modal.Field {
 	}
 }
 
-func editFields(u v1.User) []modal.Field {
+func editFields(u restv1.User) []modal.Field {
 	return []modal.Field{
 		{ID: "subject", Label: "Subject", Value: u.Subject, Placeholder: "Username", Required: true},
 		{ID: "name", Label: "Name", Value: u.Name, Placeholder: "Full name"},
@@ -22,7 +22,7 @@ func editFields(u v1.User) []modal.Field {
 	}
 }
 
-func editSelects(u v1.User) []modal.AsyncSelect {
+func editSelects(u restv1.User) []modal.AsyncSelect {
 	return []modal.AsyncSelect{
 		{
 			ID:       "role_ids",

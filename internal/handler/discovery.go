@@ -9,10 +9,12 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	v1 "github.com/soltiHQ/control-plane/api/v1"
+	discoveryv1 "github.com/soltiHQ/control-plane/api/discovery/v1"
 	genv1 "github.com/soltiHQ/control-plane/domain/gen/v1"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
+	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
+	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 )
 
 // HTTPDiscovery handles agent discovery over HTTP.
@@ -34,33 +36,48 @@ func NewHTTPDiscovery(logger zerolog.Logger, agentSVC *agent.Service) *HTTPDisco
 
 // Sync handles POST /api/v1/discovery/sync.
 func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
+	mode := response.ModeFromRequest(r)
+
 	if r.Method != http.MethodPost {
-		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		response.NotAllowed(w, r, mode)
 		return
 	}
 
-	var in v1.Agent
+	var in discoveryv1.SyncRequest
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		h.logger.Warn().Err(err).Msg("sync: failed to decode request body")
+		response.BadRequest(w, r, mode)
 		return
 	}
 
-	a, err := model.NewAgentFromV1(&in)
+	h.logger.Debug().
+		Str("agent_id", in.ID).
+		Str("name", in.Name).
+		Str("endpoint", in.Endpoint).
+		Int("endpoint_type", in.EndpointType).
+		Int("api_version", in.APIVersion).
+		Msg("sync request received")
+
+	a, err := model.NewAgentFromSync(&in)
 	if err != nil {
-		h.logger.Warn().Err(err).Str("agent_id", in.ID).Msg("invalid sync request")
-		http.Error(w, "invalid agent data", http.StatusBadRequest)
+		h.logger.Warn().Err(err).
+			Str("agent_id", in.ID).
+			Int("endpoint_type", in.EndpointType).
+			Int("api_version", in.APIVersion).
+			Msg("invalid sync request")
+		response.BadRequest(w, r, mode)
 		return
 	}
 
 	if err = h.agentSVC.Upsert(r.Context(), a); err != nil {
 		h.logger.Error().Err(err).Str("agent_id", in.ID).Msg("upsert failed")
-		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		response.Unavailable(w, r, mode)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(v1.AgentSyncResponse{Success: true})
+	response.OK(w, r, mode, &responder.View{
+		Data: discoveryv1.SyncResponse{Success: true},
+	})
 }
 
 // GRPCDiscovery implements genv1.DiscoverServiceServer.

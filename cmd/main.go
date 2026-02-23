@@ -17,6 +17,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth/credentials"
 	"github.com/soltiHQ/control-plane/internal/auth/wire"
 	"github.com/soltiHQ/control-plane/internal/handler"
+	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/server"
 	"github.com/soltiHQ/control-plane/internal/server/runner/grpcserver"
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
@@ -63,13 +64,16 @@ func main() {
 		agentSVC      = agent.New(store, logger)
 	)
 
+	proxyPool := proxy.NewPool()
+	defer proxyPool.Close()
+
 	var (
 		jsonResp = responder.NewJSON()
 		htmlResp = responder.NewHTML()
 	)
 	var (
 		uiHandler     = handler.NewUI(logger, authSVC)
-		apiHandler    = handler.NewAPI(logger, userSVC, authSVC, sessionSVC, credentialSVC, agentSVC)
+		apiHandler    = handler.NewAPI(logger, userSVC, authSVC, sessionSVC, credentialSVC, agentSVC, proxyPool)
 		staticHandler = handler.NewStatic(logger)
 	)
 	authMW := middleware.Auth(authModel.Verifier, authModel.Session)
