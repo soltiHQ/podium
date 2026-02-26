@@ -35,6 +35,10 @@ type Agent struct {
 	platform     string
 
 	uptimeSeconds int64
+
+	status            kind.AgentStatus
+	lastSeenAt        time.Time
+	heartbeatInterval time.Duration
 }
 
 // NewAgent creates a new agent domain entity.
@@ -44,8 +48,9 @@ func NewAgent(id, name, endpoint string) (*Agent, error) {
 	}
 	now := time.Now()
 	return &Agent{
-		createdAt: now,
-		updatedAt: now,
+		createdAt:  now,
+		updatedAt:  now,
+		lastSeenAt: now,
 
 		id:       id,
 		name:     name,
@@ -53,6 +58,8 @@ func NewAgent(id, name, endpoint string) (*Agent, error) {
 
 		metadata: make(map[string]string),
 		labels:   make(map[string]string),
+
+		status: kind.AgentStatusActive,
 	}, nil
 }
 
@@ -96,6 +103,10 @@ func NewAgentFromSync(in *discoveryv1.SyncRequest) (*Agent, error) {
 		platform:     in.Platform,
 
 		uptimeSeconds: in.UptimeSeconds,
+
+		status:            kind.AgentStatusActive,
+		lastSeenAt:        now,
+		heartbeatInterval: time.Duration(in.HeartbeatIntervalS) * time.Second,
 	}, nil
 }
 
@@ -139,6 +150,10 @@ func NewAgentFromProto(req *genv1.SyncRequest) (*Agent, error) {
 		platform:     req.Platform,
 
 		uptimeSeconds: req.UptimeSeconds,
+
+		status:            kind.AgentStatusActive,
+		lastSeenAt:        now,
+		heartbeatInterval: time.Duration(req.HeartbeatIntervalS) * time.Second,
 	}, nil
 }
 
@@ -168,6 +183,24 @@ func (a *Agent) Arch() string { return a.arch }
 
 // Platform returns the agent's platform.
 func (a *Agent) Platform() string { return a.platform }
+
+// Status returns the agent's lifecycle status.
+func (a *Agent) Status() kind.AgentStatus { return a.status }
+
+// LastSeenAt returns the timestamp of the agent's last successful sync.
+func (a *Agent) LastSeenAt() time.Time { return a.lastSeenAt }
+
+// HeartbeatInterval returns the agent-reported heartbeat interval.
+func (a *Agent) HeartbeatInterval() time.Duration { return a.heartbeatInterval }
+
+// SetStatus updates the agent's lifecycle status.
+func (a *Agent) SetStatus(s kind.AgentStatus) {
+	a.status = s
+	a.updatedAt = time.Now()
+}
+
+// SetHeartbeatInterval sets the agent's heartbeat interval.
+func (a *Agent) SetHeartbeatInterval(d time.Duration) { a.heartbeatInterval = d }
 
 // CreatedAt returns the creation timestamp.
 func (a *Agent) CreatedAt() time.Time { return a.createdAt }
@@ -250,5 +283,9 @@ func (a *Agent) Clone() *Agent {
 		platform:     a.platform,
 
 		uptimeSeconds: a.uptimeSeconds,
+
+		status:            a.status,
+		lastSeenAt:        a.lastSeenAt,
+		heartbeatInterval: a.heartbeatInterval,
 	}
 }

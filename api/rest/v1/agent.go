@@ -13,6 +13,10 @@ type Agent struct {
 	OS           string `json:"os"`
 	Arch         string `json:"arch"`
 	Platform     string `json:"platform"`
+
+	Status            string `json:"status"`
+	LastSeenAt        string `json:"last_seen_at,omitempty"`
+	HeartbeatInterval int    `json:"heartbeat_interval_s,omitempty"`
 }
 
 type AgentListResponse struct {

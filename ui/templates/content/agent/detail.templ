@@ -24,7 +24,7 @@ templ Identity(a restv1.Agent, p policy.AgentDetail) {
 		@card.CardBody() {
 			<div class="space-y-6">
 				<div class="space-y-2">
-					@visual.Badge("Online", visual.VariantSuccess)
+					@agentStatusBadge(a.Status)
 				</div>
 
 				<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-6">
@@ -65,6 +65,25 @@ templ Identity(a restv1.Agent, p policy.AgentDetail) {
 
 	if p.CanEditLabels {
 		@labelsEditor(a)
+	}
+}
+
+templ agentStatusBadge(s string) {
+	switch s {
+		case "active":
+			@visual.Badge("Active", visual.VariantSuccess) {
+				@visual.StatusDot("success")
+			}
+		case "inactive":
+			@visual.Badge("Inactive", visual.VariantMuted) {
+				@visual.StatusDot("muted")
+			}
+		case "disconnected":
+			@visual.Badge("Disconnected", visual.VariantDanger) {
+				@visual.StatusDot("danger")
+			}
+		default:
+			@visual.Badge(s, visual.VariantMuted)
 	}
 }
 

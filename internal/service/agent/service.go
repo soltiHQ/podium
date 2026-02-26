@@ -72,8 +72,10 @@ func (s *Service) Upsert(ctx context.Context, m *model.Agent) error {
 		for k, v := range existing.LabelsAll() {
 			m.LabelAdd(k, v)
 		}
+		if m.HeartbeatInterval() == 0 && existing.HeartbeatInterval() > 0 {
+			m.SetHeartbeatInterval(existing.HeartbeatInterval())
+		}
 	case errors.Is(err, storage.ErrNotFound):
-		// new agent — nothing to preserve.
 	default:
 		return err
 	}

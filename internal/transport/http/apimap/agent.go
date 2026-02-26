@@ -1,6 +1,8 @@
 package apimap
 
 import (
+	"time"
+
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
 	"github.com/soltiHQ/control-plane/domain/model"
 )
@@ -24,5 +26,9 @@ func Agent(a *model.Agent) restv1.Agent {
 		Endpoint:     a.Endpoint(),
 		EndpointType: string(a.EndpointType()),
 		APIVersion:   a.APIVersion().String(),
+
+		Status:            a.Status().String(),
+		LastSeenAt:        a.LastSeenAt().Format(time.RFC3339),
+		HeartbeatInterval: int(a.HeartbeatInterval().Seconds()),
 	}
 }

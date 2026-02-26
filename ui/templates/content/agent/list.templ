@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 
+	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/ui/routepath"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
@@ -55,7 +56,7 @@ templ Cards(items []*model.Agent) {
 				@card.ItemHeader() {
 					@card.ItemTitle() {
 						<div class="flex items-center gap-2.5">
-							@visual.StatusDot("success")
+							@agentStatusDot(a.Status())
 							<span class="truncate">
 								if a.Name() != "" {
 									{ a.Name() }
@@ -131,6 +132,19 @@ func agentsListURL(nextCursor string, q string) string {
 		return routepath.ApiAgents
 	}
 	return routepath.ApiAgents + "?" + qs
+}
+
+templ agentStatusDot(s kind.AgentStatus) {
+	switch s {
+		case kind.AgentStatusActive:
+			@visual.StatusDot("success")
+		case kind.AgentStatusInactive:
+			@visual.StatusDot("muted")
+		case kind.AgentStatusDisconnected:
+			@visual.StatusDot("danger")
+		default:
+			@visual.StatusDot("muted")
+	}
 }
 
 func formatUptime(s int64) string {

@@ -21,6 +21,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/server"
 	"github.com/soltiHQ/control-plane/internal/server/runner/grpcserver"
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
+	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
@@ -67,6 +68,11 @@ func main() {
 
 	proxyPool := proxy.NewPool()
 	defer proxyPool.Close()
+
+	lifecycleRunner, err := lifecycle.New(lifecycle.Config{}, logger, store)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to create lifecycle runner")
+	}
 
 	var (
 		jsonResp = responder.NewJSON()
@@ -154,9 +160,9 @@ func main() {
 	}
 
 	// ---------------------------------------------------------------
-	// Server (3 runners)
+	// Server (4 runners)
 	// ---------------------------------------------------------------
-	srv, err := server.New(server.Config{}, logger, httpRunner, httpDiscoveryRunner, grpcRunner)
+	srv, err := server.New(server.Config{}, logger, httpRunner, httpDiscoveryRunner, grpcRunner, lifecycleRunner)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create server")
 	}
