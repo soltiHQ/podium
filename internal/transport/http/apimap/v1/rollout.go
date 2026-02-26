@@ -8,7 +8,7 @@ import (
 )
 
 // RolloutSpec maps a domain Spec and its rollouts to the composite DTO.
-func RolloutSpec(ts *model.Spec, states []*model.SyncState) restv1.RolloutSpec {
+func RolloutSpec(ts *model.Spec, states []*model.Rollout) restv1.RolloutSpec {
 	dto := restv1.RolloutSpec{
 		Spec: Spec(ts),
 	}
@@ -21,8 +21,8 @@ func RolloutSpec(ts *model.Spec, states []*model.SyncState) restv1.RolloutSpec {
 	return dto
 }
 
-// RolloutEntry maps a domain SyncState to its REST rollout entry DTO.
-func RolloutEntry(ss *model.SyncState) restv1.RolloutEntry {
+// RolloutEntry maps a domain Rollout to its REST rollout entry DTO.
+func RolloutEntry(ss *model.Rollout) restv1.RolloutEntry {
 	if ss == nil {
 		return restv1.RolloutEntry{}
 	}

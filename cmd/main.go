@@ -27,7 +27,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
 	"github.com/soltiHQ/control-plane/internal/service/session"
-	"github.com/soltiHQ/control-plane/internal/service/taskspec"
+	"github.com/soltiHQ/control-plane/internal/service/spec"
 	"github.com/soltiHQ/control-plane/internal/service/user"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/grpc/interceptor"
@@ -66,7 +66,7 @@ func main() {
 		sessionSVC    = session.New(store)
 		credentialSVC = credential.New(store, logger)
 		agentSVC      = agent.New(store)
-		specSVC       = taskspec.New(store)
+		specSVC       = spec.New(store)
 	)
 
 	proxyPool := proxy.NewPool()

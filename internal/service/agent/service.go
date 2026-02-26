@@ -1,3 +1,7 @@
+// Package agent implements agent management use-cases:
+//   - Paginated listing and retrieval
+//   - Upsert with label and heartbeat preservation
+//   - Control-plane label patching.
 package agent
 
 import (
@@ -9,10 +13,12 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
+// Service provides agent management operations.
 type Service struct {
 	store storage.AgentStore
 }
 
+// New creates a new agent service.
 func New(store storage.AgentStore) *Service {
 	if store == nil {
 		panic("agent.Service: store is nil")
@@ -82,7 +88,7 @@ func (s *Service) Upsert(ctx context.Context, m *model.Agent) error {
 	return s.store.UpsertAgent(ctx, m)
 }
 
-// PatchLabels replaces labels for an agent (control-plane owned).
+// PatchLabels replaces labels for an agent.
 func (s *Service) PatchLabels(ctx context.Context, req PatchLabels) (*model.Agent, error) {
 	if req.ID == "" {
 		return nil, storage.ErrInvalidArgument

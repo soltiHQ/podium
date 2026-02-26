@@ -1,4 +1,9 @@
-package taskspec
+// Package spec implements task spec management use-cases:
+//   - Paginated listing and retrieval
+//   - Creation, update with version increment, and deletion
+//   - Deployment (rollout creation for target agents)
+//   - Rollout querying by spec.
+package spec
 
 import (
 	"context"
@@ -16,7 +21,7 @@ type Service struct {
 // New creates a new task spec service.
 func New(store storage.Storage) *Service {
 	if store == nil {
-		panic("taskspec.Service: store is nil")
+		panic("spec.Service: store is nil")
 	}
 	return &Service{store: store}
 }
@@ -44,7 +49,7 @@ func (s *Service) List(ctx context.Context, q ListQuery) (*Page, error) {
 	}, nil
 }
 
-// Get returns a single task spec by ID.
+// Get returns a single spec by ID.
 func (s *Service) Get(ctx context.Context, id string) (*model.Spec, error) {
 	if id == "" {
 		return nil, storage.ErrInvalidArgument
@@ -56,7 +61,7 @@ func (s *Service) Get(ctx context.Context, id string) (*model.Spec, error) {
 	return ts.Clone(), nil
 }
 
-// Create persists a new task spec.
+// Create persists a new spec.
 func (s *Service) Create(ctx context.Context, ts *model.Spec) error {
 	if ts == nil {
 		return storage.ErrInvalidArgument
@@ -64,12 +69,12 @@ func (s *Service) Create(ctx context.Context, ts *model.Spec) error {
 	return s.store.UpsertSpec(ctx, ts)
 }
 
-// Update persists changes to an existing task spec and increments its version.
-func (s *Service) Update(ctx context.Context, ts *model.Spec) error {
+// Upsert persists changes to an existing task spec and increments its version.
+func (s *Service) Upsert(ctx context.Context, ts *model.Spec) error {
 	if ts == nil {
 		return storage.ErrInvalidArgument
 	}
-	// Verify it exists
+
 	if _, err := s.store.GetSpec(ctx, ts.ID()); err != nil {
 		return err
 	}
@@ -88,53 +93,58 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	return s.store.DeleteSpec(ctx, id)
 }
 
-// Deploy creates or updates rollout records for all target agents with status pending.
+// RolloutsBySpec returns all rollout records associated with a spec.
+func (s *Service) RolloutsBySpec(ctx context.Context, specID string, filter storage.RolloutFilter) ([]*model.Rollout, error) {
+	if specID == "" {
+		return nil, storage.ErrInvalidArgument
+	}
+
+	res, err := s.store.ListRollouts(ctx, filter, storage.ListOptions{Limit: storage.MaxListLimit})
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]*model.Rollout, 0, len(res.Items))
+	for _, ss := range res.Items {
+		if ss == nil {
+			continue
+		}
+		out = append(out, ss.Clone())
+	}
+	return out, nil
+}
+
+// Deploy initiates distribution of a spec to all its target agents.
+//
+// For each agent in [model.Spec.Targets] the method either updates an existing rollout record or creates a new one,
+// setting status to pending with the current spec version.
+//
+// The sync runner will later pick up pending rollouts and push the spec payload to the agents.
 func (s *Service) Deploy(ctx context.Context, specID string) error {
 	ts, err := s.store.GetSpec(ctx, specID)
 	if err != nil {
 		return err
 	}
 
+	var existing *model.Rollout
 	for _, agentID := range ts.Targets() {
-		ssID := "ss-" + specID + "-" + agentID
-		existing, err := s.store.GetRollout(ctx, ssID)
+		existing, err = s.store.GetRollout(ctx, model.RolloutID(specID, agentID))
 		if err == nil {
-			// Update existing rollout
 			existing.MarkPending(ts.Version())
-			if err := s.store.UpsertRollout(ctx, existing); err != nil {
+			if err = s.store.UpsertRollout(ctx, existing); err != nil {
 				return err
 			}
 			continue
 		}
-		// Create new rollout
-		ss, err := model.NewSyncState(specID, agentID, ts.Version())
+
+		var rollout *model.Rollout
+		rollout, err = model.NewRollout(specID, agentID, ts.Version())
 		if err != nil {
 			return err
 		}
-		if err := s.store.UpsertRollout(ctx, ss); err != nil {
+		if err = s.store.UpsertRollout(ctx, rollout); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// RolloutsBySpec returns all rollouts for a given spec.
-func (s *Service) RolloutsBySpec(ctx context.Context, specID string) ([]*model.SyncState, error) {
-	if specID == "" {
-		return nil, storage.ErrInvalidArgument
-	}
-
-	// Use a filter to match by spec ID
-	res, err := s.store.ListRollouts(ctx, nil, storage.ListOptions{Limit: storage.MaxListLimit})
-	if err != nil {
-		return nil, err
-	}
-
-	out := make([]*model.SyncState, 0)
-	for _, ss := range res.Items {
-		if ss.SpecID() == specID {
-			out = append(out, ss.Clone())
-		}
-	}
-	return out, nil
 }

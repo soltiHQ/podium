@@ -6,8 +6,8 @@ const defaultListLimit = 1000
 
 // ListByUserQuery describes listing credentials for a user.
 type ListByUserQuery struct {
-	UserID string
 	Limit  int
+	UserID string
 }
 
 // Page is a list result.

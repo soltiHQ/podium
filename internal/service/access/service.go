@@ -1,3 +1,7 @@
+// Package access implements authentication use-cases:
+//   - Login with rate-limiting
+//   - Logout (session revocation)
+//   - Permission/role listing.
 package access
 
 import (
@@ -14,8 +18,9 @@ import (
 
 // Service implements shared authentication use-cases.
 type Service struct {
+	auth *wire.Auth
+
 	logger zerolog.Logger
-	auth   *wire.Auth
 	store  storage.Storage
 }
 
@@ -79,7 +84,7 @@ func (s *Service) GetRoles(ctx context.Context) ([]*model.Role, error) {
 	return res.Items, nil
 }
 
-// Logout revokes a session (idempotent / best-effort).
+// Logout revokes a session.
 func (s *Service) Logout(ctx context.Context, req LogoutRequest) error {
 	if req.SessionID == "" {
 		return nil

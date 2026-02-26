@@ -7,7 +7,7 @@ import (
 	"github.com/soltiHQ/control-plane/ui/templates/layout"
 )
 
-// Detail renders the task spec detail page with sidebar + sync states panels.
+// Detail renders the task spec detail page with sidebar + rollout panels.
 templ Detail(nav policy.Nav, specID string) {
 	@layout.DetailPage("Task Spec", "tasks", nav,
 		layout.DetailPanel{
@@ -17,10 +17,10 @@ templ Detail(nav policy.Nav, specID string) {
 			PreloadMsg: "Details Loading...",
 		},
 		layout.DetailPanel{
-			ID:         "taskspec-syncstates",
+			ID:         "taskspec-rollouts",
 			URL:        routepath.ApiSpecSync(specID),
 			Trigger:    "load, " + trigger.SpecsRefresh + ", " + trigger.SpecUpdate + " from:body",
-			PreloadMsg: "Loading sync states...",
+			PreloadMsg: "Loading rollouts...",
 		},
 	)
 }

@@ -1,3 +1,7 @@
+// Package user implements user management use-cases:
+//   - Paginated listing and retrieval (by ID or subject)
+//   - Upsert
+//   - Cascading deletion (sessions → verifiers → credentials → user).
 package user
 
 import (
@@ -114,8 +118,18 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-// Upsert a user.
-// TODO: before insert check if role exist
+// Upsert creates or replaces a user.
+//
+// If the user carries role IDs, every ID is verified against the role store
+// before persisting. Returns storage.ErrNotFound if any role does not exist.
 func (s *Service) Upsert(ctx context.Context, u *model.User) error {
+	if u == nil {
+		return storage.ErrInvalidArgument
+	}
+	if ids := u.RoleIDsAll(); len(ids) > 0 {
+		if _, err := s.store.GetRoles(ctx, ids); err != nil {
+			return err
+		}
+	}
 	return s.store.UpsertUser(ctx, u)
 }

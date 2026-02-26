@@ -32,7 +32,7 @@ type Store struct {
 	verifiers   *GenericStore[*model.Verifier]
 	sessions    *GenericStore[*model.Session]
 	specs   *GenericStore[*model.Spec]
-	rollouts *GenericStore[*model.SyncState]
+	rollouts *GenericStore[*model.Rollout]
 }
 
 // New creates a new in-memory store with an empty state.
@@ -45,7 +45,7 @@ func New() *Store {
 		verifiers:   NewGenericStore[*model.Verifier](),
 		sessions:    NewGenericStore[*model.Session](),
 		specs:   NewGenericStore[*model.Spec](),
-		rollouts: NewGenericStore[*model.SyncState](),
+		rollouts: NewGenericStore[*model.Rollout](),
 	}
 }
 
@@ -517,19 +517,19 @@ func (s *Store) DeleteSpec(ctx context.Context, id string) error {
 
 // --- Rollouts ---
 
-func (s *Store) UpsertRollout(ctx context.Context, ss *model.SyncState) error {
+func (s *Store) UpsertRollout(ctx context.Context, ss *model.Rollout) error {
 	if ss == nil {
 		return storage.ErrInvalidArgument
 	}
 	return s.rollouts.Upsert(ctx, ss)
 }
 
-func (s *Store) GetRollout(ctx context.Context, id string) (*model.SyncState, error) {
+func (s *Store) GetRollout(ctx context.Context, id string) (*model.Rollout, error) {
 	return s.rollouts.Get(ctx, id)
 }
 
 func (s *Store) ListRollouts(ctx context.Context, filter storage.RolloutFilter, opts storage.ListOptions) (*storage.RolloutListResult, error) {
-	var predicate func(*model.SyncState) bool
+	var predicate func(*model.Rollout) bool
 
 	if filter != nil {
 		f, ok := filter.(*RolloutFilter)

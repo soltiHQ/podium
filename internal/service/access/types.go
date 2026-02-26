@@ -7,6 +7,7 @@ type LoginRequest struct {
 	RateKey  string
 }
 
+// LoginResult carries issued tokens and session ID after a successful login.
 type LoginResult struct {
 	AccessToken  string
 	RefreshToken string

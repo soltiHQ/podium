@@ -62,7 +62,7 @@ type SessionListResult = ListResult[*model.Session]
 type SpecListResult = ListResult[*model.Spec]
 
 // RolloutListResult contains a page of rollout results with pagination support.
-type RolloutListResult = ListResult[*model.SyncState]
+type RolloutListResult = ListResult[*model.Rollout]
 
 // AgentStore defines persistence operations for agent entities.
 type AgentStore interface {
@@ -409,7 +409,7 @@ type SpecStore interface {
 
 // RolloutStore defines persistence operations for rollout entities.
 //
-// A rollout (model.SyncState) tracks the delivery state of a single Spec
+// A rollout (model.Rollout) tracks the delivery state of a single Spec
 // on a specific agent: desired vs actual version, sync status, and attempts.
 type RolloutStore interface {
 	// UpsertRollout creates a new rollout or replaces an existing one.
@@ -418,7 +418,7 @@ type RolloutStore interface {
 	//   - ErrInvalidArgument if the rollout is nil or violates storage-level invariants.
 	//   - ErrUnavailable if the backend is temporarily unavailable.
 	//   - ErrInternal for unexpected storage failures.
-	UpsertRollout(ctx context.Context, ss *model.SyncState) error
+	UpsertRollout(ctx context.Context, ss *model.Rollout) error
 
 	// GetRollout retrieves a rollout by its unique identifier.
 	//
@@ -427,7 +427,7 @@ type RolloutStore interface {
 	//   - ErrInvalidArgument if the ID is empty or malformed.
 	//   - ErrUnavailable if the backend is temporarily unavailable.
 	//   - ErrInternal for unexpected storage failures.
-	GetRollout(ctx context.Context, id string) (*model.SyncState, error)
+	GetRollout(ctx context.Context, id string) (*model.Rollout, error)
 
 	// ListRollouts retrieves rollouts matching the provided filter with pagination support.
 	//

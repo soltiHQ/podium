@@ -1,3 +1,7 @@
+// Package credential implements credential management use-cases:
+//   - Listing credentials by user
+//   - Credential retrieval and deletion (with verifier cascade)
+//   - Password creation and replacement.
 package credential
 
 import (
@@ -14,11 +18,13 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
+// Service provides credential management operations.
 type Service struct {
 	logger zerolog.Logger
 	store  storage.Storage
 }
 
+// New creates a new credential service.
 func New(store storage.Storage, logger zerolog.Logger) *Service {
 	if store == nil {
 		panic("credential.Service: store is nil")

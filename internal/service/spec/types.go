@@ -1,4 +1,4 @@
-package taskspec
+package spec
 
 import (
 	"github.com/soltiHQ/control-plane/domain/model"
@@ -14,7 +14,7 @@ type ListQuery struct {
 	Limit  int
 }
 
-// Page is a paginated task spec listing result.
+// Page is a paginated task spec listing the result.
 type Page struct {
 	Items      []*model.Spec
 	NextCursor string

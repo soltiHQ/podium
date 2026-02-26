@@ -122,7 +122,7 @@ func (r *Runner) push(ctx context.Context, ssID, specID, agentID string) {
 	if err != nil {
 		r.logger.Warn().Err(err).
 			Str("spec_id", specID).
-			Str("sync_state_id", ssID).
+			Str("rollout_id", ssID).
 			Msg("push: get spec failed")
 		r.markFailed(ctx, ssID, "spec not found: "+err.Error())
 		return
@@ -133,7 +133,7 @@ func (r *Runner) push(ctx context.Context, ssID, specID, agentID string) {
 	if err != nil {
 		r.logger.Warn().Err(err).
 			Str("agent_id", agentID).
-			Str("sync_state_id", ssID).
+			Str("rollout_id", ssID).
 			Msg("push: get agent failed")
 		r.markFailed(ctx, ssID, "agent not found: "+err.Error())
 		return
@@ -145,7 +145,7 @@ func (r *Runner) push(ctx context.Context, ssID, specID, agentID string) {
 		r.logger.Warn().Err(err).
 			Str("agent_id", agentID).
 			Str("endpoint", ag.Endpoint()).
-			Str("sync_state_id", ssID).
+			Str("rollout_id", ssID).
 			Msg("push: get proxy failed")
 		r.markFailed(ctx, ssID, "proxy error: "+err.Error())
 		return
@@ -158,7 +158,7 @@ func (r *Runner) push(ctx context.Context, ssID, specID, agentID string) {
 		r.logger.Warn().Err(err).
 			Str("agent_id", agentID).
 			Str("spec_id", specID).
-			Str("sync_state_id", ssID).
+			Str("rollout_id", ssID).
 			Msg("push: submit task failed")
 		r.markFailed(ctx, ssID, "submit error: "+err.Error())
 		return
@@ -177,23 +177,23 @@ func (r *Runner) push(ctx context.Context, ssID, specID, agentID string) {
 func (r *Runner) markSynced(ctx context.Context, ssID string, version int) {
 	ss, err := r.store.GetRollout(ctx, ssID)
 	if err != nil {
-		r.logger.Error().Err(err).Str("sync_state_id", ssID).Msg("markSynced: get failed")
+		r.logger.Error().Err(err).Str("rollout_id", ssID).Msg("markSynced: get failed")
 		return
 	}
 	ss.MarkSynced(version)
 	if err := r.store.UpsertRollout(ctx, ss); err != nil {
-		r.logger.Error().Err(err).Str("sync_state_id", ssID).Msg("markSynced: upsert failed")
+		r.logger.Error().Err(err).Str("rollout_id", ssID).Msg("markSynced: upsert failed")
 	}
 }
 
 func (r *Runner) markFailed(ctx context.Context, ssID, errMsg string) {
 	ss, err := r.store.GetRollout(ctx, ssID)
 	if err != nil {
-		r.logger.Error().Err(err).Str("sync_state_id", ssID).Msg("markFailed: get failed")
+		r.logger.Error().Err(err).Str("rollout_id", ssID).Msg("markFailed: get failed")
 		return
 	}
 	ss.MarkFailed(errMsg)
 	if err := r.store.UpsertRollout(ctx, ss); err != nil {
-		r.logger.Error().Err(err).Str("sync_state_id", ssID).Msg("markFailed: upsert failed")
+		r.logger.Error().Err(err).Str("rollout_id", ssID).Msg("markFailed: upsert failed")
 	}
 }

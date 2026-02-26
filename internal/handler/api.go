@@ -22,7 +22,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
 	"github.com/soltiHQ/control-plane/internal/service/session"
-	"github.com/soltiHQ/control-plane/internal/service/taskspec"
+	"github.com/soltiHQ/control-plane/internal/service/spec"
 	"github.com/soltiHQ/control-plane/internal/service/user"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
@@ -33,9 +33,9 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transport/http/route"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
 	"github.com/soltiHQ/control-plane/internal/ui/policy"
-	contentAgent    "github.com/soltiHQ/control-plane/ui/templates/content/agent"
+	contentAgent "github.com/soltiHQ/control-plane/ui/templates/content/agent"
 	contentSpec "github.com/soltiHQ/control-plane/ui/templates/content/taskspec"
-	contentUser     "github.com/soltiHQ/control-plane/ui/templates/content/user"
+	contentUser "github.com/soltiHQ/control-plane/ui/templates/content/user"
 )
 
 type (
@@ -61,7 +61,7 @@ type API struct {
 	sessionSVC    *session.Service
 	credentialSVC *credential.Service
 	agentSVC      *agent.Service
-	specSVC   *taskspec.Service
+	specSVC       *spec.Service
 	proxyPool     *proxy.Pool
 }
 
@@ -73,7 +73,7 @@ func NewAPI(
 	sessionSVC *session.Service,
 	credentialSVC *credential.Service,
 	agentSVC *agent.Service,
-	specSVC *taskspec.Service,
+	specSVC *spec.Service,
 	proxyPool *proxy.Pool,
 ) *API {
 	if accessSVC == nil {
@@ -104,7 +104,7 @@ func NewAPI(
 		sessionSVC:    sessionSVC,
 		credentialSVC: credentialSVC,
 		agentSVC:      agentSVC,
-		specSVC:   specSVC,
+		specSVC:       specSVC,
 		proxyPool:     proxyPool,
 	}
 }
@@ -1012,7 +1012,7 @@ func (a *API) specList(w http.ResponseWriter, r *http.Request, mode httpctx.Rend
 		filter = inmemory.NewSpecFilter().Query(q)
 	}
 
-	res, err := a.specSVC.List(r.Context(), taskspec.ListQuery{
+	res, err := a.specSVC.List(r.Context(), spec.ListQuery{
 		Limit:  limit,
 		Cursor: cursor,
 		Filter: filter,
@@ -1051,7 +1051,7 @@ func (a *API) specDetails(w http.ResponseWriter, r *http.Request, mode httpctx.R
 		return
 	}
 
-	states, err := a.specSVC.RolloutsBySpec(r.Context(), id)
+	states, err := a.specSVC.RolloutsBySpec(r.Context(), id, inmemory.NewRolloutFilter().BySpecID(id))
 	if err != nil {
 		a.logger.Error().Err(err).Str("spec_id", id).Msg("spec rollouts failed")
 		response.Unavailable(w, r, mode)
@@ -1208,7 +1208,7 @@ func (a *API) specUpdate(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		ts.SetRunnerLabels(in.RunnerLabels)
 	}
 
-	if err := a.specSVC.Update(r.Context(), ts); err != nil {
+	if err := a.specSVC.Upsert(r.Context(), ts); err != nil {
 		a.logger.Error().Err(err).Str("spec_id", id).Msg("spec update failed")
 		response.Unavailable(w, r, mode)
 		return
@@ -1248,7 +1248,7 @@ func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 }
 
 func (a *API) specRollouts(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
-	states, err := a.specSVC.RolloutsBySpec(r.Context(), id)
+	states, err := a.specSVC.RolloutsBySpec(r.Context(), id, inmemory.NewRolloutFilter().BySpecID(id))
 	if err != nil {
 		a.logger.Error().Err(err).Str("spec_id", id).Msg("spec rollouts failed")
 		response.Unavailable(w, r, mode)

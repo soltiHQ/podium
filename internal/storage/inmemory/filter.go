@@ -233,34 +233,34 @@ func (f *SpecFilter) Matches(ts *model.Spec) bool {
 // Filters are composed by chaining builder methods. All predicates are ANDed together.
 // RolloutFilter is mutable and not safe for concurrent use.
 type RolloutFilter struct {
-	predicates []func(*model.SyncState) bool
+	predicates []func(*model.Rollout) bool
 }
 
 // NewRolloutFilter creates an empty rollout filter that matches all rollouts.
 func NewRolloutFilter() *RolloutFilter {
-	return &RolloutFilter{predicates: make([]func(*model.SyncState) bool, 0)}
+	return &RolloutFilter{predicates: make([]func(*model.Rollout) bool, 0)}
 }
 
 // BySpecID matches rollouts for a given spec.
 func (f *RolloutFilter) BySpecID(id string) *RolloutFilter {
-	f.predicates = append(f.predicates, func(ss *model.SyncState) bool { return ss.SpecID() == id })
+	f.predicates = append(f.predicates, func(ss *model.Rollout) bool { return ss.SpecID() == id })
 	return f
 }
 
 // ByAgentID matches rollouts for a given agent.
 func (f *RolloutFilter) ByAgentID(id string) *RolloutFilter {
-	f.predicates = append(f.predicates, func(ss *model.SyncState) bool { return ss.AgentID() == id })
+	f.predicates = append(f.predicates, func(ss *model.Rollout) bool { return ss.AgentID() == id })
 	return f
 }
 
 // ByStatus matches rollouts with a given sync status.
 func (f *RolloutFilter) ByStatus(s kind.SyncStatus) *RolloutFilter {
-	f.predicates = append(f.predicates, func(ss *model.SyncState) bool { return ss.Status() == s })
+	f.predicates = append(f.predicates, func(ss *model.Rollout) bool { return ss.Status() == s })
 	return f
 }
 
 // Matches reports whether the given rollout satisfies all predicates.
-func (f *RolloutFilter) Matches(ss *model.SyncState) bool {
+func (f *RolloutFilter) Matches(ss *model.Rollout) bool {
 	for _, pred := range f.predicates {
 		if !pred(ss) {
 			return false

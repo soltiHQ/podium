@@ -107,7 +107,7 @@ versioned REST DTOs (`api/rest/v1`):
 ```text
   model.Agent       →  Agent(a)         →  restv1.Agent
   model.Spec        →  Spec(ts)         →  restv1.Spec
-  model.SyncState   →  RolloutEntry(ss) →  restv1.RolloutEntry
+  model.Rollout     →  RolloutEntry(ss) →  restv1.RolloutEntry
   (Spec + states)   →  RolloutSpec(…)   →  restv1.RolloutSpec
   model.User        →  User(u)          →  restv1.User
   model.Role        →  Role(r)          →  restv1.Role

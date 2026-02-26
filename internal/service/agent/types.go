@@ -27,7 +27,7 @@ type Page struct {
 //
 // Semantics:
 //   - ID is required.
-//   - Labels replaces the entire label set (no merge).
+//   - Labels replace the entire label set (no merge).
 type PatchLabels struct {
 	Labels map[string]string
 	ID     string
