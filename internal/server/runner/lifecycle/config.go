@@ -3,21 +3,22 @@ package lifecycle
 import "time"
 
 const (
-	defaultTickInterval         = 30 * time.Second
+	defaultTickInterval = 10 * time.Second
+	defaultHeartbeat    = 30 * time.Second
+	
 	defaultInactiveMultiplier   = 2
 	defaultDisconnectMultiplier = 5
 	defaultDeleteMultiplier     = 10
-	defaultHeartbeat            = 30 * time.Second
 )
 
 // Config configures the lifecycle runner.
 type Config struct {
-	Name                 string
 	TickInterval         time.Duration
+	DefaultHeartbeat     time.Duration
 	InactiveMultiplier   int
 	DisconnectMultiplier int
 	DeleteMultiplier     int
-	DefaultHeartbeat     time.Duration
+	Name                 string
 }
 
 func (c Config) withDefaults() Config {
@@ -38,6 +39,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.DefaultHeartbeat <= 0 {
 		c.DefaultHeartbeat = defaultHeartbeat
+	}
+	if c.DisconnectMultiplier <= c.InactiveMultiplier {
+		c.DisconnectMultiplier = c.InactiveMultiplier + 1
+	}
+	if c.DeleteMultiplier <= c.DisconnectMultiplier {
+		c.DeleteMultiplier = c.DisconnectMultiplier + 1
 	}
 	return c
 }

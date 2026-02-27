@@ -4,14 +4,11 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
 	genv1 "github.com/soltiHQ/control-plane/domain/gen/v1"
 	"google.golang.org/grpc"
 )
-
-const grpcV1Timeout = 10 * time.Second
 
 // grpcProxyV1 implements AgentProxy over gRPC (solti.v1.SoltiApi).
 type grpcProxyV1 struct {
@@ -19,14 +16,11 @@ type grpcProxyV1 struct {
 }
 
 func (p *grpcProxyV1) ListTasks(ctx context.Context, f TaskFilter) (*proxyv1.TaskListResponse, error) {
-	ctx, cancel := context.WithTimeout(ctx, grpcV1Timeout)
-	defer cancel()
-
 	client := genv1.NewSoltiApiClient(p.conn)
 
 	req := &genv1.ListTasksRequest{
-		Limit:  uint32(f.Limit),
-		Offset: uint32(f.Offset),
+		Limit:  clampUint32(f.Limit),
+		Offset: clampUint32(f.Offset),
 	}
 	if f.Slot != "" {
 		req.Slot = &f.Slot
@@ -61,12 +55,9 @@ func (p *grpcProxyV1) ListTasks(ctx context.Context, f TaskFilter) (*proxyv1.Tas
 	}, nil
 }
 
+// SubmitTask is not yet supported over gRPC — the proto does not define the RPC.
 func (p *grpcProxyV1) SubmitTask(_ context.Context, _ TaskSubmission) error {
-	return fmt.Errorf("%w: gRPC SubmitTask not implemented", ErrSubmitTask)
-}
-
-func (p *grpcProxyV1) ExportSpecs(_ context.Context) ([]SpecExport, error) {
-	return nil, fmt.Errorf("%w: gRPC ExportSpecs not implemented", ErrExportSpecs)
+	return fmt.Errorf("%w: not available over gRPC (no proto RPC defined)", ErrSubmitTask)
 }
 
 // v1TaskStatusString converts a v1 proto TaskStatus enum to a lowercase string.
@@ -88,4 +79,11 @@ func parseV1TaskStatus(s string) (genv1.TaskStatus, bool) {
 		return genv1.TaskStatus_TASK_STATUS_UNSPECIFIED, false
 	}
 	return genv1.TaskStatus(v), true
+}
+
+func clampUint32(v int) uint32 {
+	if v <= 0 {
+		return 0
+	}
+	return uint32(v)
 }

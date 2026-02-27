@@ -1,3 +1,7 @@
+// Package grpcserver implements a server.Runner that manages the lifecycle of a [grpc.Server]:
+//   - Binds a TCP (or custom network) listener on the configured address
+//   - Serves incoming RPCs until Stop is called
+//   - Graceful shutdown with context-deadline fallback to hard stop.
 package grpcserver
 
 import (
@@ -24,8 +28,8 @@ type Runner struct {
 
 // New creates a gRPC server runner.
 //
-// srv must be a fully configured *grpc.Server (with interceptors, keepalive, etc).
-// Registration of services should be done by the caller before passing srv here.
+// Srv must be a fully configured *grpc.Server (with interceptors, keepalive, etc.).
+// The caller should do registration of services before passing srv here.
 func New(cfg Config, logger zerolog.Logger, srv *grpc.Server) (*Runner, error) {
 	cfg = cfg.withDefaults()
 
@@ -75,6 +79,10 @@ func (r *Runner) Start(_ context.Context) error {
 
 // Stop attempts graceful shutdown and falls back to hard stop when ctx expires.
 func (r *Runner) Stop(ctx context.Context) error {
+	if !r.started.Load() {
+		return nil
+	}
+
 	select {
 	case <-r.ready:
 	case <-ctx.Done():

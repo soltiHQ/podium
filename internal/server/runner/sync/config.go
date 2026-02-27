@@ -3,17 +3,18 @@ package sync
 import "time"
 
 const (
-	defaultName         = "sync"
 	defaultTickInterval = 10 * time.Second
 	defaultPushTimeout  = 15 * time.Second
-	defaultMaxRetries   = 5
+
+	defaultName       = "sync"
+	defaultMaxRetries = 5
 )
 
 // Config configures the sync runner.
 type Config struct {
-	Name         string
 	TickInterval time.Duration
 	PushTimeout  time.Duration
+	Name         string
 	MaxRetries   int
 }
 

@@ -1,3 +1,7 @@
+// Package lifecycle implements a server.Runner that periodically checks agent liveness
+//   - Transitions agents through status stages: (active → inactive → disconnected → deleted)
+//
+// Thresholds are expressed as multiples of each agent's heartbeat interval.
 package lifecycle
 
 import (
@@ -11,14 +15,13 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
-// Runner is a server.Runner that periodically checks agent liveness
-// and transitions agents through lifecycle states (active -> inactive -> disconnected -> deleted).
+// Runner is a server.Runner that periodically checks agent liveness.
 type Runner struct {
 	logger  zerolog.Logger
 	cfg     Config
 	store   storage.AgentStore
-	started atomic.Bool
 	stop    chan struct{}
+	started atomic.Bool
 }
 
 // New creates a lifecycle runner.
@@ -47,11 +50,11 @@ func (r *Runner) Start(_ context.Context) error {
 	ticker := time.NewTicker(r.cfg.TickInterval)
 	defer ticker.Stop()
 
-	r.logger.Info().
+	r.logger.Debug().
 		Dur("tick", r.cfg.TickInterval).
-		Int("inactive_mult", r.cfg.InactiveMultiplier).
-		Int("disconnect_mult", r.cfg.DisconnectMultiplier).
-		Int("delete_mult", r.cfg.DeleteMultiplier).
+		Int("inactive", r.cfg.InactiveMultiplier).
+		Int("disconnect", r.cfg.DisconnectMultiplier).
+		Int("delete", r.cfg.DeleteMultiplier).
 		Msg("lifecycle runner started")
 
 	for {
@@ -65,19 +68,28 @@ func (r *Runner) Start(_ context.Context) error {
 	}
 }
 
-// Stop signals the runner to exit.
+// Stop signals the runner to exit. Safe to call multiple times.
 func (r *Runner) Stop(_ context.Context) error {
-	close(r.stop)
+	if !r.started.Load() {
+		return nil
+	}
+	select {
+	case <-r.stop:
+	default:
+		close(r.stop)
+	}
 	return nil
 }
 
 func (r *Runner) tick() {
-	ctx := context.Background()
-	now := time.Now()
+	var (
+		ctx = context.Background()
+		now = time.Now()
 
-	res, err := r.store.ListAgents(ctx, nil, storage.ListOptions{
-		Limit: storage.MaxListLimit,
-	})
+		res, err = r.store.ListAgents(ctx, nil, storage.ListOptions{
+			Limit: storage.MaxListLimit,
+		})
+	)
 	if err != nil {
 		r.logger.Error().Err(err).Msg("tick: list agents failed")
 		return
@@ -94,11 +106,9 @@ func (r *Runner) tick() {
 		}
 
 		silence := now.Sub(a.LastSeenAt())
-
 		switch {
-		// delete threshold (check hardest first)
 		case silence > hb*time.Duration(r.cfg.DeleteMultiplier):
-			if err := r.store.DeleteAgent(ctx, a.ID()); err != nil {
+			if err = r.store.DeleteAgent(ctx, a.ID()); err != nil {
 				r.logger.Warn().Err(err).Str("agent_id", a.ID()).Msg("tick: delete failed")
 				continue
 			}
@@ -107,11 +117,11 @@ func (r *Runner) tick() {
 				Dur("silence", silence).
 				Msg("agent deleted (stale)")
 
-		// disconnected threshold
 		case silence > hb*time.Duration(r.cfg.DisconnectMultiplier):
 			if a.Status() != kind.AgentStatusDisconnected {
 				a.SetStatus(kind.AgentStatusDisconnected)
-				if err := r.store.UpsertAgent(ctx, a); err != nil {
+
+				if err = r.store.UpsertAgent(ctx, a); err != nil {
 					r.logger.Warn().Err(err).Str("agent_id", a.ID()).Msg("tick: upsert disconnected failed")
 					continue
 				}
@@ -120,11 +130,11 @@ func (r *Runner) tick() {
 					Msg("agent → disconnected")
 			}
 
-		// inactive threshold
 		case silence > hb*time.Duration(r.cfg.InactiveMultiplier):
 			if a.Status() != kind.AgentStatusInactive {
 				a.SetStatus(kind.AgentStatusInactive)
-				if err := r.store.UpsertAgent(ctx, a); err != nil {
+
+				if err = r.store.UpsertAgent(ctx, a); err != nil {
 					r.logger.Warn().Err(err).Str("agent_id", a.ID()).Msg("tick: upsert inactive failed")
 					continue
 				}
@@ -133,6 +143,5 @@ func (r *Runner) tick() {
 					Msg("agent → inactive")
 			}
 		}
-		// active agents — nothing to do, sync handles recovery
 	}
 }

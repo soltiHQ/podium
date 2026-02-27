@@ -20,7 +20,8 @@ import (
 // For HTTP it holds a single *http.Client whose Transport pools TCP connections.
 // For gRPC it caches one *grpc.ClientConn per endpoint address.
 type Pool struct {
-	mu        sync.RWMutex
+	mu sync.RWMutex
+
 	httpCli   *http.Client
 	grpcConns map[string]*grpc.ClientConn
 }
@@ -35,9 +36,9 @@ func NewPool() *Pool {
 					KeepAlive: 30 * time.Second,
 				}).DialContext,
 				TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
+				IdleConnTimeout:     90 * time.Second,
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 10,
-				IdleConnTimeout:     90 * time.Second,
 			},
 		},
 		grpcConns: make(map[string]*grpc.ClientConn),

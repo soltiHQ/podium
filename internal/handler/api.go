@@ -38,31 +38,33 @@ import (
 	contentUser "github.com/soltiHQ/control-plane/ui/templates/content/user"
 )
 
-type (
-	UserStatusMode uint8
-	UserUpsertMode uint8
-)
+// userStatusMode selects enable/disable branch in userSetStatus.
+type userStatusMode uint8
 
 const (
-	UserDisable UserStatusMode = iota
-	UserActive
+	userDisable userStatusMode = iota
+	userActive
 )
 
+// upsertMode selects create/update branch in upsert handlers.
+type upsertMode uint8
+
 const (
-	UserCreate UserUpsertMode = iota
-	UserUpdate
+	modeCreate upsertMode = iota
+	modeUpdate
 )
 
 // API handlers.
 type API struct {
-	logger        zerolog.Logger
-	accessSVC     *access.Service
-	userSVC       *user.Service
-	sessionSVC    *session.Service
 	credentialSVC *credential.Service
+	sessionSVC    *session.Service
+	accessSVC     *access.Service
 	agentSVC      *agent.Service
 	specSVC       *spec.Service
+	userSVC       *user.Service
 	proxyPool     *proxy.Pool
+
+	logger zerolog.Logger
 }
 
 // NewAPI creates a new API handler.
@@ -98,13 +100,14 @@ func NewAPI(
 		panic("handler.API: proxyPool is nil")
 	}
 	return &API{
-		logger:        logger.With().Str("handler", "api").Logger(),
-		accessSVC:     accessSVC,
-		userSVC:       userSVC,
-		sessionSVC:    sessionSVC,
+		logger: logger.With().Str("handler", "api").Logger(),
+
 		credentialSVC: credentialSVC,
+		sessionSVC:    sessionSVC,
+		accessSVC:     accessSVC,
 		agentSVC:      agentSVC,
 		specSVC:       specSVC,
+		userSVC:       userSVC,
 		proxyPool:     proxyPool,
 	}
 }
@@ -146,7 +149,7 @@ func (a *API) Users(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		middleware.RequirePermission(kind.UsersAdd)(
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.userUpsert(w, r, mode, "", UserCreate)
+				a.userUpsert(w, r, mode, "", modeCreate)
 			}),
 		).ServeHTTP(w, r)
 		return
@@ -193,7 +196,7 @@ func (a *API) UsersRouter(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPut:
 			middleware.RequirePermission(kind.UsersEdit)(
 				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					a.userUpsert(w, r, mode, userID, UserUpdate)
+					a.userUpsert(w, r, mode, userID, modeUpdate)
 				}),
 			).ServeHTTP(w, r)
 			return
@@ -234,7 +237,7 @@ func (a *API) UsersRouter(w http.ResponseWriter, r *http.Request) {
 		}
 		middleware.RequirePermission(kind.UsersEdit)(
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.userSetStatus(w, r, mode, userID, UserDisable)
+				a.userSetStatus(w, r, mode, userID, userDisable)
 			}),
 		).ServeHTTP(w, r)
 		return
@@ -245,7 +248,7 @@ func (a *API) UsersRouter(w http.ResponseWriter, r *http.Request) {
 		}
 		middleware.RequirePermission(kind.UsersEdit)(
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.userSetStatus(w, r, mode, userID, UserActive)
+				a.userSetStatus(w, r, mode, userID, userActive)
 			}),
 		).ServeHTTP(w, r)
 		return
@@ -709,7 +712,7 @@ func (a *API) usersSessions(w http.ResponseWriter, r *http.Request, mode httpctx
 	})
 }
 
-func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string, action UserUpsertMode) {
+func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string, action upsertMode) {
 	var (
 		in restv1.User
 		u  *model.User
@@ -720,7 +723,7 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	}
 
 	switch action {
-	case UserCreate:
+	case modeCreate:
 		if in.Subject == "" {
 			response.BadRequest(w, r, mode)
 			return
@@ -732,7 +735,7 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		}
 		x.Enable()
 		u = x
-	case UserUpdate:
+	case modeUpdate:
 		if id == "" || (in.ID != "" && in.ID != id) {
 			response.BadRequest(w, r, mode)
 			return
@@ -775,7 +778,7 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 
-	if action == UserCreate {
+	if action == modeCreate {
 		a.logger.Info().Str("user_id", u.ID()).Str("subject", u.Subject()).Msg("user created")
 		trigger.Redirect(w, routepath.PageUsers)
 		response.NoContent(w, r)
@@ -798,7 +801,7 @@ func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	response.NoContent(w, r)
 }
 
-func (a *API) userSetStatus(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, userID string, status UserStatusMode) {
+func (a *API) userSetStatus(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, userID string, status userStatusMode) {
 	u, err := a.userSVC.Get(r.Context(), userID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -810,7 +813,7 @@ func (a *API) userSetStatus(w http.ResponseWriter, r *http.Request, mode httpctx
 		return
 	}
 
-	if status == UserActive {
+	if status == userActive {
 		u.Enable()
 	} else {
 		u.Disable()
@@ -897,7 +900,7 @@ func (a *API) Specs(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		middleware.RequirePermission(kind.SpecsAdd)(
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.specCreate(w, r, mode)
+				a.specUpsert(w, r, mode, "", modeCreate)
 			}),
 		).ServeHTTP(w, r)
 		return
@@ -943,7 +946,7 @@ func (a *API) SpecsRouter(w http.ResponseWriter, r *http.Request) {
 		case http.MethodPut:
 			middleware.RequirePermission(kind.SpecsEdit)(
 				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					a.specUpdate(w, r, mode, tsID)
+					a.specUpsert(w, r, mode, tsID, modeUpdate)
 				}),
 			).ServeHTTP(w, r)
 			return
@@ -1046,14 +1049,14 @@ func (a *API) specDetails(w http.ResponseWriter, r *http.Request, mode httpctx.R
 			response.NotFound(w, r, mode)
 			return
 		}
-		a.logger.Error().Err(err).Str("spec_id", id).Msg("spec get failed")
+		a.logger.Error().Err(err).Str("spec", id).Msg("spec get failed")
 		response.Unavailable(w, r, mode)
 		return
 	}
 
 	states, err := a.specSVC.RolloutsBySpec(r.Context(), id, inmemory.NewRolloutFilter().BySpecID(id))
 	if err != nil {
-		a.logger.Error().Err(err).Str("spec_id", id).Msg("spec rollouts failed")
+		a.logger.Error().Err(err).Str("spec", id).Msg("spec rollouts failed")
 		response.Unavailable(w, r, mode)
 		return
 	}
@@ -1066,97 +1069,49 @@ func (a *API) specDetails(w http.ResponseWriter, r *http.Request, mode httpctx.R
 	})
 }
 
-func (a *API) specCreate(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
-	var in restv1.SpecCreateRequest
+func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string, action upsertMode) {
+	var (
+		in restv1.SpecCreateRequest
+		ts *model.Spec
+	)
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		response.BadRequest(w, r, mode)
 		return
 	}
 
-	if in.Name == "" || in.Slot == "" {
-		response.BadRequest(w, r, mode)
-		return
-	}
-
-	ts, err := model.NewSpec(ksuid.New().String(), in.Name, in.Slot)
-	if err != nil {
-		response.BadRequest(w, r, mode)
-		return
-	}
-
-	// Kind
-	if in.KindType != "" {
-		ts.SetKindType(kind.TaskKindType(in.KindType))
-	}
-	if in.KindConfig != nil {
-		ts.SetKindConfig(in.KindConfig)
-	}
-
-	// Lifecycle
-	if in.TimeoutMs > 0 {
-		ts.SetTimeoutMs(in.TimeoutMs)
-	}
-	if in.RestartType != "" {
-		ts.SetRestartType(kind.RestartType(in.RestartType))
-	}
-	if in.IntervalMs > 0 {
-		ts.SetIntervalMs(in.IntervalMs)
-	}
-	ts.SetBackoff(model.BackoffConfig{
-		Jitter:  kind.JitterStrategy(in.Jitter),
-		FirstMs: in.BackoffFirstMs,
-		MaxMs:   in.BackoffMaxMs,
-		Factor:  in.BackoffFactor,
-	})
-	if in.Admission != "" {
-		ts.SetAdmission(kind.AdmissionStrategy(in.Admission))
-	}
-
-	// Targets
-	if len(in.Targets) > 0 {
-		ts.SetTargets(in.Targets)
-	}
-	if len(in.TargetLabels) > 0 {
-		ts.SetTargetLabels(in.TargetLabels)
-	}
-	if len(in.RunnerLabels) > 0 {
-		ts.SetRunnerLabels(in.RunnerLabels)
-	}
-
-	if err := a.specSVC.Create(r.Context(), ts); err != nil {
-		a.logger.Error().Err(err).Msg("spec create failed")
-		response.Unavailable(w, r, mode)
-		return
-	}
-
-	a.logger.Info().Str("spec_id", ts.ID()).Str("name", ts.Name()).Msg("spec created")
-	trigger.Redirect(w, routepath.PageSpecs)
-	response.NoContent(w, r)
-}
-
-func (a *API) specUpdate(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
-	ts, err := a.specSVC.Get(r.Context(), id)
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			response.NotFound(w, r, mode)
+	switch action {
+	case modeCreate:
+		if in.Name == "" || in.Slot == "" {
+			response.BadRequest(w, r, mode)
 			return
 		}
-		a.logger.Error().Err(err).Str("spec_id", id).Msg("spec get failed")
-		response.Unavailable(w, r, mode)
-		return
-	}
-
-	var in restv1.SpecCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		x, err := model.NewSpec(ksuid.New().String(), in.Name, in.Slot)
+		if err != nil {
+			response.BadRequest(w, r, mode)
+			return
+		}
+		ts = x
+	case modeUpdate:
+		x, err := a.specSVC.Get(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, storage.ErrNotFound) {
+				response.NotFound(w, r, mode)
+				return
+			}
+			a.logger.Error().Err(err).Str("spec", id).Msg("spec get failed")
+			response.Unavailable(w, r, mode)
+			return
+		}
+		if in.Name != "" {
+			x.SetName(in.Name)
+		}
+		if in.Slot != "" {
+			x.SetSlot(in.Slot)
+		}
+		ts = x
+	default:
 		response.BadRequest(w, r, mode)
 		return
-	}
-
-	if in.Name != "" {
-		ts.SetName(in.Name)
-	}
-	if in.Slot != "" {
-		ts.SetSlot(in.Slot)
 	}
 
 	// Kind
@@ -1177,7 +1132,14 @@ func (a *API) specUpdate(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	if in.IntervalMs > 0 {
 		ts.SetIntervalMs(in.IntervalMs)
 	}
-	if in.Jitter != "" || in.BackoffFirstMs > 0 || in.BackoffMaxMs > 0 || in.BackoffFactor > 0 {
+	if action == modeCreate {
+		ts.SetBackoff(model.BackoffConfig{
+			Jitter:  kind.JitterStrategy(in.Jitter),
+			FirstMs: in.BackoffFirstMs,
+			MaxMs:   in.BackoffMaxMs,
+			Factor:  in.BackoffFactor,
+		})
+	} else if in.Jitter != "" || in.BackoffFirstMs > 0 || in.BackoffMaxMs > 0 || in.BackoffFactor > 0 {
 		b := ts.Backoff()
 		if in.Jitter != "" {
 			b.Jitter = kind.JitterStrategy(in.Jitter)
@@ -1198,23 +1160,46 @@ func (a *API) specUpdate(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	}
 
 	// Targets
-	if in.Targets != nil {
-		ts.SetTargets(in.Targets)
-	}
-	if in.TargetLabels != nil {
-		ts.SetTargetLabels(in.TargetLabels)
-	}
-	if in.RunnerLabels != nil {
-		ts.SetRunnerLabels(in.RunnerLabels)
+	if action == modeCreate {
+		if len(in.Targets) > 0 {
+			ts.SetTargets(in.Targets)
+		}
+		if len(in.TargetLabels) > 0 {
+			ts.SetTargetLabels(in.TargetLabels)
+		}
+		if len(in.RunnerLabels) > 0 {
+			ts.SetRunnerLabels(in.RunnerLabels)
+		}
+	} else {
+		if in.Targets != nil {
+			ts.SetTargets(in.Targets)
+		}
+		if in.TargetLabels != nil {
+			ts.SetTargetLabels(in.TargetLabels)
+		}
+		if in.RunnerLabels != nil {
+			ts.SetRunnerLabels(in.RunnerLabels)
+		}
 	}
 
-	if err := a.specSVC.Upsert(r.Context(), ts); err != nil {
-		a.logger.Error().Err(err).Str("spec_id", id).Msg("spec update failed")
-		response.Unavailable(w, r, mode)
+	if action == modeCreate {
+		if err := a.specSVC.Create(r.Context(), ts); err != nil {
+			a.logger.Error().Err(err).Msg("spec create failed")
+			response.Unavailable(w, r, mode)
+			return
+		}
+		a.logger.Info().Str("spec", ts.ID()).Str("name", ts.Name()).Msg("spec created")
+		trigger.Redirect(w, routepath.PageSpecs)
+		response.NoContent(w, r)
 		return
 	}
 
-	a.logger.Info().Str("spec_id", id).Msg("spec updated")
+	if err := a.specSVC.Upsert(r.Context(), ts); err != nil {
+		a.logger.Error().Err(err).Str("spec", id).Msg("spec update failed")
+		response.Unavailable(w, r, mode)
+		return
+	}
+	a.logger.Info().Str("spec", id).Msg("spec updated")
 	trigger.Set(w, trigger.SpecUpdate)
 	response.NoContent(w, r)
 }
@@ -1222,11 +1207,11 @@ func (a *API) specUpdate(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 func (a *API) specDelete(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	err := a.specSVC.Delete(r.Context(), id)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
-		a.logger.Error().Err(err).Str("spec_id", id).Msg("spec delete failed")
+		a.logger.Error().Err(err).Str("spec", id).Msg("spec delete failed")
 		response.Unavailable(w, r, mode)
 		return
 	}
-	a.logger.Info().Str("spec_id", id).Msg("spec deleted")
+	a.logger.Info().Str("spec", id).Msg("spec deleted")
 	trigger.Redirect(w, routepath.PageSpecs)
 	response.NoContent(w, r)
 }
@@ -1237,12 +1222,29 @@ func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 			response.NotFound(w, r, mode)
 			return
 		}
-		a.logger.Error().Err(err).Str("spec_id", id).Msg("spec deploy failed")
+		a.logger.Error().Err(err).Str("spec", id).Msg("spec deploy failed")
 		response.Unavailable(w, r, mode)
 		return
 	}
 
-	a.logger.Info().Str("spec_id", id).Msg("spec deployed")
+	rollouts, err := a.specSVC.RolloutsBySpec(r.Context(), id, inmemory.NewRolloutFilter().BySpecID(id))
+	if err != nil {
+		a.logger.Warn().Err(err).Str("spec", id).Msg("spec deployed but rollout query failed")
+	} else {
+		a.logger.Info().Str("spec", id).Int("rollouts", len(rollouts)).Msg("spec deployed")
+		if a.logger.GetLevel() <= zerolog.DebugLevel {
+			for _, ss := range rollouts {
+				a.logger.Debug().
+					Str("rollout_id", ss.ID()).
+					Str("agent_id", ss.AgentID()).
+					Str("status", ss.Status().String()).
+					Int("desired", ss.DesiredVersion()).
+					Int("actual", ss.ActualVersion()).
+					Msg("deploy rollout")
+			}
+		}
+	}
+
 	trigger.Set(w, trigger.SpecUpdate)
 	response.NoContent(w, r)
 }
@@ -1250,9 +1252,24 @@ func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 func (a *API) specRollouts(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	states, err := a.specSVC.RolloutsBySpec(r.Context(), id, inmemory.NewRolloutFilter().BySpecID(id))
 	if err != nil {
-		a.logger.Error().Err(err).Str("spec_id", id).Msg("spec rollouts failed")
+		a.logger.Error().Err(err).Str("spec", id).Msg("spec rollouts failed")
 		response.Unavailable(w, r, mode)
 		return
+	}
+
+	a.logger.Info().Str("spec", id).Int("count", len(states)).Msg("spec rollouts loaded")
+	if a.logger.GetLevel() <= zerolog.DebugLevel {
+		for _, ss := range states {
+			a.logger.Debug().
+				Str("rollout_id", ss.ID()).
+				Str("agent_id", ss.AgentID()).
+				Str("status", ss.Status().String()).
+				Int("desired", ss.DesiredVersion()).
+				Int("actual", ss.ActualVersion()).
+				Int("attempts", ss.Attempts()).
+				Str("error", ss.Error()).
+				Msg("rollout entry")
+		}
 	}
 
 	items := make([]restv1.RolloutEntry, 0, len(states))

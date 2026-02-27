@@ -1,3 +1,8 @@
+// Package httpserver implements a server.Runner that manages the lifecycle
+// of an [http.Server]:
+//   - Builds the server from a provided [http.Handler] and timeout config
+//   - Binds a TCP listener on the configured address
+//   - Graceful shutdown via [http.Server.Shutdown] with hard-close fallback.
 package httpserver
 
 import (
@@ -87,6 +92,10 @@ func (r *Runner) Start(_ context.Context) error {
 
 // Stop gracefully shuts down the server within the ctx deadline.
 func (r *Runner) Stop(ctx context.Context) error {
+	if !r.started.Load() {
+		return nil
+	}
+
 	select {
 	case <-r.ready:
 	case <-ctx.Done():
@@ -110,5 +119,9 @@ func (r *Runner) Stop(ctx context.Context) error {
 			Msg("http server hard-closed (timeout)")
 		return err
 	}
+
+	r.logger.Info().
+		Str("runner", r.cfg.Name).
+		Msg("http server stopped")
 	return nil
 }

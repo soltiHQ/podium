@@ -1,3 +1,4 @@
+// Package server provides unified lifecycle management for runtime components.
 package server
 
 import (

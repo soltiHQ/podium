@@ -1,3 +1,8 @@
+// Package sync implements a server.Runner that reconciles pending rollouts
+// by pushing specs to agents via the proxy pool:
+//   - Lists actionable rollouts (pending, drift, failed under max retries)
+//   - Resolves spec and agent, gets a proxy, calls SubmitTask
+//   - Marks rollout synced on success, failed (with attempt increment) on error.
 package sync
 
 import (
@@ -18,16 +23,16 @@ import (
 // On each tick it:
 //  1. Lists all rollouts with status pending, drift, or failed (under max retries).
 //  2. For each, resolves the Spec and agent.
-//  3. Obtains an AgentProxy from the pool and calls SubmitTask.
+//  3. Gets an AgentProxy from the pool and calls "SubmitTask".
 //  4. On success: marks the rollout as synced.
-//  5. On failure: marks the rollout as failed (increments attempts).
+//  5. On failure: marks the rollout as failed (increment attempts).
 type Runner struct {
 	logger  zerolog.Logger
 	cfg     Config
 	store   storage.Storage
 	pool    *proxy.Pool
-	started atomic.Bool
 	stop    chan struct{}
+	started atomic.Bool
 }
 
 // New creates a sync runner.
@@ -38,6 +43,7 @@ func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.P
 	if pool == nil {
 		return nil, errors.New("sync: proxy pool is nil")
 	}
+
 	cfg = cfg.withDefaults()
 	return &Runner{
 		logger: logger.With().Str("runner", cfg.Name).Logger(),
@@ -76,17 +82,22 @@ func (r *Runner) Start(_ context.Context) error {
 	}
 }
 
-// Stop signals the runner to exit.
+// Stop signals the runner to exit. Safe to call multiple times.
 func (r *Runner) Stop(_ context.Context) error {
-	close(r.stop)
+	if !r.started.Load() {
+		return nil
+	}
+	select {
+	case <-r.stop:
+	default:
+		close(r.stop)
+	}
 	return nil
 }
 
 func (r *Runner) tick() {
-	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.PushTimeout)
-	defer cancel()
+	ctx := context.Background()
 
-	// List ALL rollouts and filter in-memory for actionable ones.
 	res, err := r.store.ListRollouts(ctx, nil, storage.ListOptions{
 		Limit: storage.MaxListLimit,
 	})
@@ -100,100 +111,93 @@ func (r *Runner) tick() {
 			continue
 		}
 
-		// Only process actionable states.
 		switch ss.Status() {
 		case kind.SyncStatusPending, kind.SyncStatusDrift:
-			// always actionable
 		case kind.SyncStatusFailed:
 			if ss.Attempts() >= r.cfg.MaxRetries {
-				continue // exhausted retries
+				continue
 			}
 		default:
-			continue // synced, unknown — skip
+			continue
 		}
 
-		r.push(ctx, ss.ID(), ss.SpecID(), ss.AgentID())
+		pushCtx, cancel := context.WithTimeout(ctx, r.cfg.PushTimeout)
+		r.push(pushCtx, ss.ID(), ss.SpecID(), ss.AgentID())
+		cancel()
 	}
 }
 
-func (r *Runner) push(ctx context.Context, ssID, specID, agentID string) {
-	// 1. Get Spec
+func (r *Runner) push(ctx context.Context, rID, specID, agentID string) {
 	ts, err := r.store.GetSpec(ctx, specID)
 	if err != nil {
 		r.logger.Warn().Err(err).
+			Str("rid", rID).
 			Str("spec_id", specID).
-			Str("rollout_id", ssID).
 			Msg("push: get spec failed")
-		r.markFailed(ctx, ssID, "spec not found: "+err.Error())
+		r.markFailed(ctx, rID, "spec not found: "+err.Error())
 		return
 	}
-
-	// 2. Get Agent (for endpoint info)
 	ag, err := r.store.GetAgent(ctx, agentID)
 	if err != nil {
 		r.logger.Warn().Err(err).
+			Str("rid", rID).
 			Str("agent_id", agentID).
-			Str("rollout_id", ssID).
 			Msg("push: get agent failed")
-		r.markFailed(ctx, ssID, "agent not found: "+err.Error())
+		r.markFailed(ctx, rID, "agent not found: "+err.Error())
 		return
 	}
-
-	// 3. Get proxy from pool
 	ap, err := r.pool.Get(ag.Endpoint(), ag.EndpointType(), ag.APIVersion())
 	if err != nil {
 		r.logger.Warn().Err(err).
+			Str("rid", rID).
 			Str("agent_id", agentID).
 			Str("endpoint", ag.Endpoint()).
-			Str("rollout_id", ssID).
 			Msg("push: get proxy failed")
-		r.markFailed(ctx, ssID, "proxy error: "+err.Error())
+		r.markFailed(ctx, rID, "proxy error: "+err.Error())
 		return
 	}
 
-	// 4. Submit spec
-	spec := ts.ToCreateSpec()
-	err = ap.SubmitTask(ctx, proxy.TaskSubmission{Spec: spec})
+	err = ap.SubmitTask(ctx, proxy.TaskSubmission{Spec: ts.ToCreateSpec()})
 	if err != nil {
 		r.logger.Warn().Err(err).
-			Str("agent_id", agentID).
+			Str("rid", rID).
 			Str("spec_id", specID).
-			Str("rollout_id", ssID).
+			Str("agent_id", agentID).
 			Msg("push: submit task failed")
-		r.markFailed(ctx, ssID, "submit error: "+err.Error())
+		r.markFailed(ctx, rID, "submit error: "+err.Error())
 		return
 	}
 
-	// 5. Mark synced
-	r.markSynced(ctx, ssID, ts.Version())
-
+	r.markSynced(ctx, rID, ts.Version())
 	r.logger.Info().
-		Str("agent_id", agentID).
 		Str("spec_id", specID).
+		Str("agent_id", agentID).
 		Int("version", ts.Version()).
 		Msg("spec pushed to agent")
 }
 
-func (r *Runner) markSynced(ctx context.Context, ssID string, version int) {
-	ss, err := r.store.GetRollout(ctx, ssID)
+func (r *Runner) markSynced(ctx context.Context, rID string, version int) {
+	ss, err := r.store.GetRollout(ctx, rID)
 	if err != nil {
-		r.logger.Error().Err(err).Str("rollout_id", ssID).Msg("markSynced: get failed")
+		r.logger.Error().Err(err).Str("rid", rID).Msg("markSynced: get failed")
 		return
 	}
+
 	ss.MarkSynced(version)
-	if err := r.store.UpsertRollout(ctx, ss); err != nil {
-		r.logger.Error().Err(err).Str("rollout_id", ssID).Msg("markSynced: upsert failed")
+	if err = r.store.UpsertRollout(ctx, ss); err != nil {
+		r.logger.Error().Err(err).Str("rid", rID).Msg("markSynced: upsert failed")
 	}
 }
 
-func (r *Runner) markFailed(ctx context.Context, ssID, errMsg string) {
-	ss, err := r.store.GetRollout(ctx, ssID)
+func (r *Runner) markFailed(ctx context.Context, rID, errMsg string) {
+	ss, err := r.store.GetRollout(ctx, rID)
 	if err != nil {
-		r.logger.Error().Err(err).Str("rollout_id", ssID).Msg("markFailed: get failed")
+		r.logger.Error().Err(err).Str("rid", rID).Msg("markFailed: get failed")
 		return
 	}
+
 	ss.MarkFailed(errMsg)
-	if err := r.store.UpsertRollout(ctx, ss); err != nil {
-		r.logger.Error().Err(err).Str("rollout_id", ssID).Msg("markFailed: upsert failed")
+	if err = r.store.UpsertRollout(ctx, ss); err != nil {
+		r.logger.Error().Err(err).Str("rid", rID).Msg("markFailed: upsert failed")
 	}
 }

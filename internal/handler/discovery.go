@@ -62,13 +62,11 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, r, mode)
 		return
 	}
-
 	if err = h.agentSVC.Upsert(r.Context(), a); err != nil {
 		h.logger.Error().Err(err).Str("agent_id", in.ID).Msg("upsert failed")
 		response.Unavailable(w, r, mode)
 		return
 	}
-
 	response.OK(w, r, mode, &responder.View{
 		Data: discoveryv1.SyncResponse{Success: true},
 	})
@@ -104,6 +102,5 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *genv1.SyncRequest) (*genv
 		g.logger.Error().Err(err).Str("agent_id", req.GetId()).Msg("upsert failed")
 		return nil, status.FromError(ctx, err).Err()
 	}
-
 	return &genv1.SyncResponse{Success: true}, nil
 }

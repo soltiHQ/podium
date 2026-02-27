@@ -3,8 +3,6 @@ package grpcserver
 import "errors"
 
 var (
-	// ErrNilContext indicates a nil context was passed to Start/Stop.
-	ErrNilContext = errors.New("grpcserver: nil context")
 	// ErrNilServer indicates the grpc.Server is nil.
 	ErrNilServer = errors.New("grpcserver: nil server")
 	// ErrEmptyAddr indicates the listen address is empty.
