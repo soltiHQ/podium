@@ -2,7 +2,7 @@ package user
 
 import (
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
-	"github.com/soltiHQ/control-plane/internal/ui/routepath"
+	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 	"github.com/soltiHQ/control-plane/ui/templates/component/modal"
 )
 
