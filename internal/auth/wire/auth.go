@@ -25,14 +25,14 @@ const (
 
 // Config configures the authentication subsystem.
 type Config struct {
-	JWTSecret     string
-	Audience      string
-	Issuer        string
-	AccessTTL     time.Duration
-	RefreshTTL    time.Duration
-	RateWindow    time.Duration
-	RateAttempts  int
-	RotateRefresh bool
+	JWTSecret     string        `yaml:"jwt_secret"`
+	Audience      string        `yaml:"audience"`
+	Issuer        string        `yaml:"issuer"`
+	AccessTTL     time.Duration `yaml:"access_ttl"`
+	RefreshTTL    time.Duration `yaml:"refresh_ttl"`
+	RateWindow    time.Duration `yaml:"rate_window"`
+	RateAttempts  int           `yaml:"rate_attempts"`
+	RotateRefresh bool          `yaml:"rotate_refresh"`
 }
 
 func (c Config) withDefaults() Config {

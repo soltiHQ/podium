@@ -23,14 +23,14 @@ const (
 
 // Config holds configurable polling intervals.
 type Config struct {
-	UsersRefresh        string
-	UserDetailRefresh   string
-	UserSessionsRefresh string
-	AgentsRefresh       string
-	AgentDetailRefresh  string
-	AgentTasksRefresh   string
-	SpecsRefresh        string
-	SpecDetailRefresh   string
+	UsersRefresh        string `yaml:"users_refresh"`
+	UserDetailRefresh   string `yaml:"user_detail_refresh"`
+	UserSessionsRefresh string `yaml:"user_sessions_refresh"`
+	AgentsRefresh       string `yaml:"agents_refresh"`
+	AgentDetailRefresh  string `yaml:"agent_detail_refresh"`
+	AgentTasksRefresh   string `yaml:"agent_tasks_refresh"`
+	SpecsRefresh        string `yaml:"specs_refresh"`
+	SpecDetailRefresh   string `yaml:"spec_detail_refresh"`
 }
 
 var cfg = defaultConfig()

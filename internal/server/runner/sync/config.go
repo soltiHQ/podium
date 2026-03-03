@@ -12,10 +12,10 @@ const (
 
 // Config configures the sync runner.
 type Config struct {
-	TickInterval time.Duration
-	PushTimeout  time.Duration
-	Name         string
-	MaxRetries   int
+	TickInterval time.Duration `yaml:"tick_interval"`
+	PushTimeout  time.Duration `yaml:"push_timeout"`
+	Name         string        `yaml:"name"`
+	MaxRetries   int           `yaml:"max_retries"`
 }
 
 func (c Config) withDefaults() Config {

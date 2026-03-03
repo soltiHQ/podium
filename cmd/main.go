@@ -38,11 +38,14 @@ import (
 )
 
 func main() {
-	var (
-		logger = zerolog.New(os.Stdout).With().Timestamp().Logger()
-		cfg    = config.Default()
-		store  = inmemory.New()
+	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to load config")
+	}
 
+	var (
+		store     = inmemory.New()
 		authModel = wire.NewAuth(store, cfg.Auth)
 
 		authSVC       = access.New(authModel, store, logger)
@@ -55,7 +58,7 @@ func main() {
 	)
 	trigger.Configure(cfg.Triggers)
 
-	if err := bootstrap.Run(context.Background(), logger, roleSVC, userSVC, credentialSVC); err != nil {
+	if err = bootstrap.Run(context.Background(), logger, roleSVC, userSVC, credentialSVC); err != nil {
 		logger.Fatal().Err(err).Msg("failed to bootstrap")
 	}
 

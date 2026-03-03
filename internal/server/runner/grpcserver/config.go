@@ -7,9 +7,9 @@ const (
 
 // Config controls the gRPC server runner behavior.
 type Config struct {
-	Name    string
-	Addr    string
-	Network string
+	Name    string `yaml:"name"`
+	Addr    string `yaml:"addr"`
+	Network string `yaml:"network"`
 }
 
 func (c Config) withDefaults() Config {
