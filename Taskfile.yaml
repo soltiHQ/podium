@@ -8,6 +8,8 @@ vars:
   go_version:
     sh: grep '^go ' {{.git_root}}/go.mod | awk '{print $2}'
 
+  name: "podium"
+
   alpinejs_version: "3.13.5"
   htmx_version: "1.9.12"
 
@@ -143,6 +145,22 @@ tasks:
       - task: go/mod/tidy
       - task: _go/tool
         vars: { CMD: "go mod vendor" }
+
+  go/build:
+    desc: Build binary. Pass GOOS/GOARCH to cross-compile.
+    deps:
+      - go/mod/vendor
+    vars:
+      GOOS: '{{.GOOS | default "linux"}}'
+      GOARCH: '{{.GOARCH | default "amd64"}}'
+    cmds:
+      - task: _go/tool
+        vars:
+          CMD: >-
+            sh -c 'mkdir -p bin &&
+            CGO_ENABLED=0 GOOS={{.GOOS}} GOARCH={{.GOARCH}}
+            go build -trimpath -ldflags="-s -w"
+            -o bin/{{.name}}-{{.GOOS}}-{{.GOARCH}} ./cmd'
 
   go/test:
     desc: Run Go tests.
