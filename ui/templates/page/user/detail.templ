@@ -19,7 +19,7 @@ templ Detail(nav policy.Nav, userID string) {
 		layout.DetailPanel{
 			ID:         "user-sessions",
 			URL:        routepath.ApiUserSessions(userID),
-			Trigger:    "load once, " + trigger.SessionUpdate + " from:body, " + trigger.UserSessionsRefresh,
+			Trigger:    "load once, " + trigger.SessionUpdate + " from:body, " + trigger.GetUserSessionsRefresh(),
 			PreloadMsg: "Sessions Loading...",
 		},
 	)

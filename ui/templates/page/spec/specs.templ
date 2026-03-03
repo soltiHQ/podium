@@ -22,6 +22,6 @@ templ Specs(nav policy.Nav) {
 			}
 		}
 
-		@layout.HTMXLoader("taskspecs-list", routepath.ApiSpecs, "load, "+trigger.SpecsRefresh, "Loading...")
+		@layout.HTMXLoader("taskspecs-list", routepath.ApiSpecs, "load, "+trigger.GetSpecsRefresh(), "Loading...")
 	}
 }

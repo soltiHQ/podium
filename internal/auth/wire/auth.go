@@ -15,9 +15,47 @@ import (
 )
 
 const (
-	audience = "control-plane"
-	issuer   = "solti"
+	defaultAudience      = "control-plane"
+	defaultIssuer        = "solti"
+	defaultAccessTTL     = 15 * time.Minute
+	defaultRefreshTTL    = 7 * 24 * time.Hour
+	defaultRateWindow    = 1 * time.Minute
+	defaultRateAttempts  = 5
 )
+
+// Config configures the authentication subsystem.
+type Config struct {
+	JWTSecret     string
+	Audience      string
+	Issuer        string
+	AccessTTL     time.Duration
+	RefreshTTL    time.Duration
+	RateWindow    time.Duration
+	RateAttempts  int
+	RotateRefresh bool
+}
+
+func (c Config) withDefaults() Config {
+	if c.Audience == "" {
+		c.Audience = defaultAudience
+	}
+	if c.Issuer == "" {
+		c.Issuer = defaultIssuer
+	}
+	if c.AccessTTL <= 0 {
+		c.AccessTTL = defaultAccessTTL
+	}
+	if c.RefreshTTL <= 0 {
+		c.RefreshTTL = defaultRefreshTTL
+	}
+	if c.RateWindow <= 0 {
+		c.RateWindow = defaultRateWindow
+	}
+	if c.RateAttempts <= 0 {
+		c.RateAttempts = defaultRateAttempts
+	}
+	return c
+}
 
 // Auth is a composition root for the authentication subsystem.
 //
@@ -46,49 +84,41 @@ type Auth struct {
 }
 
 // NewAuth constructs a fully wired authentication stack.
-//
-// Contract:
-//
-//   - secret must be non-empty to produce valid signed tokens.
-//   - aTTL controls access token lifetime.
-//   - rTTL controls refresh token lifetime.
-//   - wTTL controls rate-limit block window duration.
-//   - attemptLimit defines the number of failed attempts before blocking.
-//   - HS256 is used for signing and verification.
-//   - Refresh token rotation is enabled by default.
-func NewAuth(storage storage.Storage, secret string, aTTL, rTTL, wTTL time.Duration, attemptLimit int) *Auth {
+func NewAuth(store storage.Storage, cfg Config) *Auth {
+	cfg = cfg.withDefaults()
+
 	var (
 		clock   = token.RealClock()
-		secretb = []byte(secret)
+		secretb = []byte(cfg.JWTSecret)
 
-		verifier = jwt.NewHSVerifier(issuer, audience, secretb, clock)
+		verifier = jwt.NewHSVerifier(cfg.Issuer, cfg.Audience, secretb, clock)
 		issuerHS = jwt.NewHSIssuer(secretb, clock)
-		resolver = rbac.NewResolver(storage)
+		resolver = rbac.NewResolver(store)
 
 		sesCfg = session2.Config{
-			Audience:      audience,
-			Issuer:        issuer,
-			AccessTTL:     aTTL,
-			RefreshTTL:    rTTL,
-			RotateRefresh: true,
+			Audience:      cfg.Audience,
+			Issuer:        cfg.Issuer,
+			AccessTTL:     cfg.AccessTTL,
+			RefreshTTL:    cfg.RefreshTTL,
+			RotateRefresh: cfg.RotateRefresh,
 		}
 	)
 	return &Auth{
 		Clock:    clock,
 		Verifier: verifier,
 		Session: session2.New(
-			storage,
+			store,
 			issuerHS,
 			clock,
 			sesCfg,
 			resolver,
 			map[kind.Auth]providers.Provider{
-				kind.Password: passwordprovider.New(storage),
+				kind.Password: passwordprovider.New(store),
 			},
 		),
 		Limiter: ratelimit.New(ratelimit.Config{
-			MaxAttempts: attemptLimit,
-			BlockWindow: wTTL,
+			MaxAttempts: cfg.RateAttempts,
+			BlockWindow: cfg.RateWindow,
 		}),
 	}
 }

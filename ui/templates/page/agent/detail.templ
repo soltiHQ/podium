@@ -19,7 +19,7 @@ templ Detail(nav policy.Nav, agentID string) {
 		layout.DetailPanel{
 			ID:         "agent-tasks",
 			URL:        routepath.ApiAgentTasks(agentID),
-			Trigger:    "load, " + trigger.AgentTasksRefresh,
+			Trigger:    "load, " + trigger.GetAgentTasksRefresh(),
 			PreloadMsg: "Loading tasks...",
 		},
 	)

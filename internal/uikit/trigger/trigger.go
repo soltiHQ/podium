@@ -20,11 +20,46 @@ const (
 	Every30s = "every 30s"
 	Every1m  = "every 60s"
 	Every5m  = "every 300s"
-
-	UserSessionsRefresh = Every1m
-	AgentTasksRefresh   = Every15s
-	SpecsRefresh        = Every5s
 )
+
+// Config holds configurable polling intervals.
+type Config struct {
+	UserSessionsRefresh string
+	AgentTasksRefresh   string
+	SpecsRefresh        string
+}
+
+var cfg = defaultConfig()
+
+func defaultConfig() Config {
+	return Config{
+		UserSessionsRefresh: Every1m,
+		AgentTasksRefresh:   Every15s,
+		SpecsRefresh:        Every5s,
+	}
+}
+
+// Configure overrides default polling intervals. Must be called before server start.
+func Configure(c Config) {
+	if c.UserSessionsRefresh != "" {
+		cfg.UserSessionsRefresh = c.UserSessionsRefresh
+	}
+	if c.AgentTasksRefresh != "" {
+		cfg.AgentTasksRefresh = c.AgentTasksRefresh
+	}
+	if c.SpecsRefresh != "" {
+		cfg.SpecsRefresh = c.SpecsRefresh
+	}
+}
+
+// GetUserSessionsRefresh returns the polling interval for user session lists.
+func GetUserSessionsRefresh() string { return cfg.UserSessionsRefresh }
+
+// GetAgentTasksRefresh returns the polling interval for agent task lists.
+func GetAgentTasksRefresh() string { return cfg.AgentTasksRefresh }
+
+// GetSpecsRefresh returns the polling interval for spec lists.
+func GetSpecsRefresh() string { return cfg.SpecsRefresh }
 
 // Set sets an HX-Trigger header on the response.
 func Set(w http.ResponseWriter, event string) {

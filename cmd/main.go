@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
@@ -15,6 +14,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/internal/auth/wire"
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
+	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/handler"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/server"
@@ -30,6 +30,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/spec"
 	"github.com/soltiHQ/control-plane/internal/service/user"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 	"github.com/soltiHQ/control-plane/internal/transport/grpc/interceptor"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
@@ -37,22 +38,16 @@ import (
 )
 
 func main() {
+	cfg := config.Default()
+
 	var (
 		logger = zerolog.New(os.Stdout).With().Timestamp().Logger()
 		store  = inmemory.New()
 	)
 
-	var (
-		jwtSecret = "dev-secret-change-me-in-production"
-		authModel = wire.NewAuth(
-			store,
-			jwtSecret,
-			1*time.Minute,
-			7*24*time.Hour,
-			1*time.Minute,
-			2,
-		)
-	)
+	trigger.Configure(cfg.Triggers)
+
+	authModel := wire.NewAuth(store, cfg.Auth)
 
 	var (
 		authSVC       = access.New(authModel, store, logger)
@@ -72,12 +67,12 @@ func main() {
 	proxyPool := proxy.NewPool()
 	defer proxyPool.Close()
 
-	lifecycleRunner, err := lifecycle.New(lifecycle.Config{}, logger, store)
+	lifecycleRunner, err := lifecycle.New(cfg.Lifecycle, logger, store)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create lifecycle runner")
 	}
 
-	syncRunner, err := syncrunner.New(syncrunner.Config{}, logger, store, proxyPool)
+	syncRunner, err := syncrunner.New(cfg.Sync, logger, store, proxyPool)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create sync runner")
 	}
@@ -117,11 +112,7 @@ func main() {
 	mainHandler = middleware.Negotiate(jsonResp, htmlResp)(mainHandler)
 	mainHandler = middleware.Recovery(logger)(mainHandler)
 
-	httpRunner, err := httpserver.New(
-		httpserver.Config{Name: "http", Addr: ":8080"},
-		logger,
-		mainHandler,
-	)
+	httpRunner, err := httpserver.New(cfg.HTTP, logger, mainHandler)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create http server")
 	}
@@ -137,11 +128,7 @@ func main() {
 	var discHandler http.Handler = discMux
 	discHandler = middleware.Recovery(logger)(discHandler)
 
-	httpDiscoveryRunner, err := httpserver.New(
-		httpserver.Config{Name: "http-discovery", Addr: ":8082"},
-		logger,
-		discHandler,
-	)
+	httpDiscoveryRunner, err := httpserver.New(cfg.HTTPDiscovery, logger, discHandler)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create http discovery server")
 	}
@@ -158,11 +145,7 @@ func main() {
 	)
 	genv1.RegisterDiscoverServiceServer(grpcSrv, grpcDiscovery)
 
-	grpcRunner, err := grpcserver.New(
-		grpcserver.Config{Name: "grpc-discovery", Addr: ":50051"},
-		logger,
-		grpcSrv,
-	)
+	grpcRunner, err := grpcserver.New(cfg.GRPC, logger, grpcSrv)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create grpc server")
 	}
@@ -170,7 +153,7 @@ func main() {
 	// ---------------------------------------------------------------
 	// Server (5 runners)
 	// ---------------------------------------------------------------
-	srv, err := server.New(server.Config{}, logger, httpRunner, httpDiscoveryRunner, grpcRunner, lifecycleRunner, syncRunner)
+	srv, err := server.New(cfg.Server, logger, httpRunner, httpDiscoveryRunner, grpcRunner, lifecycleRunner, syncRunner)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create server")
 	}

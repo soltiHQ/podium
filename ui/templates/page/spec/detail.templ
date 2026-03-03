@@ -19,7 +19,7 @@ templ Detail(nav policy.Nav, specID string) {
 		layout.SectionPanel{
 			ID:         "spec-rollouts",
 			URL:        routepath.ApiSpecSync(specID),
-			Trigger:    "load, " + trigger.SpecsRefresh + ", " + trigger.SpecUpdate + " from:body",
+			Trigger:    "load, " + trigger.GetSpecsRefresh() + ", " + trigger.SpecUpdate + " from:body",
 			PreloadMsg: "Loading rollouts...",
 		},
 	)
