@@ -25,7 +25,6 @@ type SetPasswordRequest struct {
 	Cost int
 
 	Password     string
-	VerifierID   string
 	CredentialID string
 	UserID       string
 }

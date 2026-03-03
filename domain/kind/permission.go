@@ -16,6 +16,7 @@ const (
 	SpecsAdd    Permission = "taskspecs:add"
 	SpecsEdit   Permission = "taskspecs:edit"
 	SpecsDeploy Permission = "taskspecs:deploy"
+	SpecsDelete Permission = "taskspecs:delete"
 )
 
 // All contains all declared permissions.
@@ -30,4 +31,5 @@ var All = []Permission{
 	SpecsAdd,
 	SpecsEdit,
 	SpecsDeploy,
+	SpecsDelete,
 }

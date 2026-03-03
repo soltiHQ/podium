@@ -53,7 +53,7 @@ templ Identity(u restv1.User, p policy.UserDetail) {
 				<div class="border-t border-border"></div>
 
 				<dl class="flex flex-col gap-3">
-					@visual.BadgeList("Roles", u.RoleIDs, visual.VariantSecondary, true)
+					@visual.BadgeList("Roles", u.RoleNames, visual.VariantSecondary, true)
 					@visual.BadgeList("Permissions", u.Permissions, visual.VariantPrimary, true)
 				</dl>
 			</div>

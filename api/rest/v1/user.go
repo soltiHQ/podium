@@ -4,6 +4,7 @@ package restv1
 type User struct {
 	Permissions []string `json:"permissions,omitempty"`
 	RoleIDs     []string `json:"role_ids,omitempty"`
+	RoleNames   []string `json:"role_names,omitempty"`
 
 	ID      string `json:"id"`
 	Subject string `json:"subject"`

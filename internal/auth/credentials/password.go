@@ -1,6 +1,8 @@
 package credentials
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 
 	"golang.org/x/crypto/bcrypt"
@@ -26,6 +28,20 @@ func normalizeCost(cost int) (int, error) {
 		return 0, auth.ErrInvalidRequest
 	}
 	return cost, nil
+}
+
+// GeneratePassword returns a cryptographically random URL-safe password
+// of the given byte length (encoded length will be ~4/3 longer).
+// If n <= 0 a default of 24 bytes (32-char string) is used.
+func GeneratePassword(n int) (string, error) {
+	if n <= 0 {
+		n = 24
+	}
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(b), nil
 }
 
 // NewPasswordCredential creates a credential bound to user with password kind.
