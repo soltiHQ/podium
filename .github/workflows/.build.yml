@@ -1,0 +1,49 @@
+name: Build
+
+on:
+  workflow_call: {}
+
+jobs:
+  vendor:
+    name: Vendor
+    uses: ./.github/workflows/.vendor.yml
+
+  build:
+    runs-on: ${{ vars.RUNS_ON }}
+    needs: vendor
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute toolchain tag
+        id: tc
+        shell: bash
+        run: |
+          GO_VERSION=$(grep '^go ' go.mod | awk '{print $2}')
+          echo "tag=${GO_VERSION}${{ vars.IMAGE_PATCH }}" >> $GITHUB_OUTPUT
+
+      - name: Get Cache
+        id: cache_get
+        uses: ./.github/actions/cache-get
+        with:
+          toolchain_tag: ${{ steps.tc.outputs.tag }}
+
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+        uses: soltiHQ/actions/taskfile@main
+        with:
+          command: go/build GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }}
+
+      - name: Put Cache
+        uses: ./.github/actions/cache-put
+        with:
+          toolchain_tag: ${{ steps.tc.outputs.tag }}
