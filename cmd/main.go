@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/rs/zerolog"
+	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 	"google.golang.org/grpc"
 
 	genv1 "github.com/soltiHQ/control-plane/api/gen/v1"
@@ -30,7 +31,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/spec"
 	"github.com/soltiHQ/control-plane/internal/service/user"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 	"github.com/soltiHQ/control-plane/internal/transport/grpc/interceptor"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
@@ -38,28 +38,23 @@ import (
 )
 
 func main() {
-	cfg := config.Default()
-
 	var (
 		logger = zerolog.New(os.Stdout).With().Timestamp().Logger()
+		cfg    = config.Default()
 		store  = inmemory.New()
-	)
 
-	trigger.Configure(cfg.Triggers)
+		authModel = wire.NewAuth(store, cfg.Auth)
 
-	authModel := wire.NewAuth(store, cfg.Auth)
-
-	var (
 		authSVC       = access.New(authModel, store, logger)
-		roleSVC       = role.New(store)
+		credentialSVC = credential.New(store, logger)
 		userSVC       = user.New(store, logger)
 		sessionSVC    = session.New(store)
-		credentialSVC = credential.New(store, logger)
 		agentSVC      = agent.New(store)
 		specSVC       = spec.New(store)
+		roleSVC       = role.New(store)
 	)
+	trigger.Configure(cfg.Triggers)
 
-	// Bootstrap roles + admin user
 	if err := bootstrap.Run(context.Background(), logger, roleSVC, userSVC, credentialSVC); err != nil {
 		logger.Fatal().Err(err).Msg("failed to bootstrap")
 	}
@@ -78,38 +73,26 @@ func main() {
 	}
 
 	var (
-		jsonResp = responder.NewJSON()
-		htmlResp = responder.NewHTML()
-	)
-	var (
-		uiHandler     = handler.NewUI(logger, authSVC)
 		apiHandler    = handler.NewAPI(logger, userSVC, authSVC, sessionSVC, credentialSVC, agentSVC, specSVC, proxyPool)
+		uiHandler     = handler.NewUI(logger, authSVC)
 		staticHandler = handler.NewStatic(logger)
-	)
-	authMW := middleware.Auth(authModel.Verifier, authModel.Session)
-	permMW := route.PermMW(func(p kind.Permission) route.BaseMW {
-		return middleware.RequirePermission(p)
-	})
 
-	mux := http.NewServeMux()
+		authMW = middleware.Auth(authModel.Verifier, authModel.Session)
+		logMW  = middleware.Logger(logger)
+		ridMW  = middleware.RequestID()
+
+		permMW = route.PermMW(func(p kind.Permission) route.BaseMW {
+			return middleware.RequirePermission(p)
+		})
+		mux = http.NewServeMux()
+	)
+	apiHandler.Routes(mux, authMW, permMW, ridMW, logMW)
+	uiHandler.Routes(mux, authMW, permMW)
 	staticHandler.Routes(mux)
-	uiHandler.Routes(mux,
-		authMW,
-		permMW,
-	)
-	var (
-		ridMW = middleware.RequestID()
-		logMW = middleware.Logger(logger)
-	)
-	apiHandler.Routes(mux,
-		authMW,
-		permMW,
-		ridMW,
-		logMW,
-	)
 
 	var mainHandler http.Handler = mux
-	mainHandler = middleware.Negotiate(jsonResp, htmlResp)(mainHandler)
+	mainHandler = middleware.Negotiate(responder.NewJSON(), responder.NewHTML())(mainHandler)
+	mainHandler = middleware.CORS(cfg.CORS)(mainHandler)
 	mainHandler = middleware.Recovery(logger)(mainHandler)
 
 	httpRunner, err := httpserver.New(cfg.HTTP, logger, mainHandler)
@@ -117,31 +100,31 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to create http server")
 	}
 
-	// ---------------------------------------------------------------
-	// HTTP Discovery :8082
-	// ---------------------------------------------------------------
-	httpDiscovery := handler.NewHTTPDiscovery(logger, agentSVC)
-
-	discMux := http.NewServeMux()
+	var (
+		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC)
+		discMux       = http.NewServeMux()
+	)
 	discMux.HandleFunc("/api/v1/discovery/sync", httpDiscovery.Sync)
 
 	var discHandler http.Handler = discMux
 	discHandler = middleware.Recovery(logger)(discHandler)
+	discHandler = middleware.Logger(logger)(discHandler)
+	discHandler = middleware.RequestID()(discHandler)
 
 	httpDiscoveryRunner, err := httpserver.New(cfg.HTTPDiscovery, logger, discHandler)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create http discovery server")
 	}
 
-	// ---------------------------------------------------------------
-	// gRPC Discovery :50051
-	// ---------------------------------------------------------------
-	grpcDiscovery := handler.NewGRPCDiscovery(logger, agentSVC)
-
-	grpcSrv := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(
-			interceptor.UnaryRecovery(logger),
-		),
+	var (
+		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC)
+		grpcSrv       = grpc.NewServer(
+			grpc.ChainUnaryInterceptor(
+				interceptor.UnaryRecovery(logger),
+				interceptor.UnaryRequestID(),
+				interceptor.UnaryLogger(logger),
+			),
+		)
 	)
 	genv1.RegisterDiscoverServiceServer(grpcSrv, grpcDiscovery)
 
@@ -150,15 +133,10 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to create grpc server")
 	}
 
-	// ---------------------------------------------------------------
-	// Server (5 runners)
-	// ---------------------------------------------------------------
 	srv, err := server.New(cfg.Server, logger, httpRunner, httpDiscoveryRunner, grpcRunner, lifecycleRunner, syncRunner)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create server")
 	}
-
-	// Run
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

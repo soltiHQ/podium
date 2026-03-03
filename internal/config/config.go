@@ -9,6 +9,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
 	syncrunner "github.com/soltiHQ/control-plane/internal/server/runner/sync"
+	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 )
 
@@ -23,6 +24,7 @@ type Config struct {
 	Triggers      trigger.Config
 	Server        server.Config
 	Auth          wire.Config
+	CORS          middleware.CORSConfig
 }
 
 // Default returns the default development configuration.
@@ -34,6 +36,9 @@ func Default() Config {
 		GRPC:          grpcserver.Config{Name: "grpc-discovery", Addr: ":50051"},
 		Auth: wire.Config{
 			JWTSecret: "solti-fkhk5qo48thkads-85gnsdAdtXZvo9r",
+		},
+		CORS: middleware.CORSConfig{
+			AllowOrigins: []string{"*"},
 		},
 	}
 }
