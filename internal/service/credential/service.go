@@ -92,8 +92,12 @@ func (s *Service) Delete(ctx context.Context, req DeleteRequest) error {
 }
 
 // SetPassword creates or replaces password auth material for a user.
+//
+// CredentialID is optional — if empty, the existing password credential is
+// looked up or a new one is generated as "cred-{userID}".
+// VerifierID is always derived as "ver-{credID}".
 func (s *Service) SetPassword(ctx context.Context, req SetPasswordRequest) error {
-	if req.UserID == "" || req.VerifierID == "" || req.Password == "" {
+	if req.UserID == "" || req.Password == "" {
 		return auth.ErrInvalidRequest
 	}
 
@@ -112,7 +116,6 @@ func (s *Service) SetPassword(ctx context.Context, req SetPasswordRequest) error
 			if !errors.Is(err, storage.ErrNotFound) {
 				return err
 			}
-			// No password credential yet — generate a new ID.
 			credID = "cred-" + req.UserID
 		} else {
 			credID = existing.ID()
@@ -127,7 +130,8 @@ func (s *Service) SetPassword(ctx context.Context, req SetPasswordRequest) error
 		return err
 	}
 
-	ver, err := authcred.NewPasswordVerifier(req.VerifierID, credID, req.Password, req.Cost)
+	verifierID := "ver-" + credID
+	ver, err := authcred.NewPasswordVerifier(verifierID, credID, req.Password, req.Cost)
 	if err != nil {
 		return err
 	}

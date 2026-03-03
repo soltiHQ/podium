@@ -11,21 +11,21 @@ import (
 type CORSConfig struct {
 	// AllowOrigins is the list of allowed origins.
 	// Use ["*"] to allow all (not recommended with credentials).
-	AllowOrigins []string
+	AllowOrigins []string `yaml:"allow_origins"`
 	// AllowMethods is the list of allowed HTTP methods.
 	// Defaults to GET, POST, PUT, DELETE, PATCH, OPTIONS.
-	AllowMethods []string
+	AllowMethods []string `yaml:"allow_methods"`
 	// AllowHeaders is the list of allowed request headers.
 	// Defaults to Authorization, Content-Type, X-Request-Id.
-	AllowHeaders []string
+	AllowHeaders []string `yaml:"allow_headers"`
 	// ExposeHeaders is the list of headers the browser can access.
 	// Defaults to X-Request-Id.
-	ExposeHeaders []string
+	ExposeHeaders []string `yaml:"expose_headers"`
 	// AllowCredentials indicates whether cookies/auth headers are allowed.
-	AllowCredentials bool
+	AllowCredentials bool `yaml:"allow_credentials"`
 	// MaxAge is how long the browser caches preflight results.
 	// Defaults to 12 hours.
-	MaxAge time.Duration
+	MaxAge time.Duration `yaml:"max_age"`
 }
 
 func (c CORSConfig) withDefaults() CORSConfig {

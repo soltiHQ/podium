@@ -13,13 +13,13 @@ templ Detail(nav policy.Nav, agentID string) {
 		layout.DetailPanel{
 			ID:         "agent-identity",
 			URL:        routepath.ApiAgentByID(agentID),
-			Trigger:    "load, " + trigger.Every1m + ", " + trigger.AgentUpdate + " from:body",
+			Trigger:    "load, " + trigger.GetAgentDetailRefresh() + ", " + trigger.AgentUpdate + " from:body",
 			PreloadMsg: "Details Loading...",
 		},
 		layout.DetailPanel{
 			ID:         "agent-tasks",
 			URL:        routepath.ApiAgentTasks(agentID),
-			Trigger:    "load, " + trigger.AgentTasksRefresh,
+			Trigger:    "load, " + trigger.GetAgentTasksRefresh(),
 			PreloadMsg: "Loading tasks...",
 		},
 	)

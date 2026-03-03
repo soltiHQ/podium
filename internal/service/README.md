@@ -10,6 +10,7 @@ service/
 ├── access/           authentication: login, logout, permission listing
 ├── agent/            agent CRUD, label patching, heartbeat preservation
 ├── credential/       credential lifecycle, password creation, verifier cascade
+├── role/             role CRUD
 ├── session/          session retrieval, revocation, bulk deletion
 ├── spec/             spec CRUD, deployment (rollout fan-out), rollout queries
 └── user/             user CRUD, cascading deletion, role validation

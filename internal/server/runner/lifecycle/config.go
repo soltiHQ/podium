@@ -13,12 +13,12 @@ const (
 
 // Config configures the lifecycle runner.
 type Config struct {
-	TickInterval         time.Duration
-	DefaultHeartbeat     time.Duration
-	InactiveMultiplier   int
-	DisconnectMultiplier int
-	DeleteMultiplier     int
-	Name                 string
+	TickInterval         time.Duration `yaml:"tick_interval"`
+	DefaultHeartbeat     time.Duration `yaml:"default_heartbeat"`
+	InactiveMultiplier   int           `yaml:"inactive_multiplier"`
+	DisconnectMultiplier int           `yaml:"disconnect_multiplier"`
+	DeleteMultiplier     int           `yaml:"delete_multiplier"`
+	Name                 string        `yaml:"name"`
 }
 
 func (c Config) withDefaults() Config {

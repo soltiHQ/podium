@@ -3,6 +3,7 @@ package user
 import (
 	"github.com/soltiHQ/control-plane/internal/uikit/policy"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
+	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 	"github.com/soltiHQ/control-plane/ui/templates/asset"
 	"github.com/soltiHQ/control-plane/ui/templates/component/button"
 	"github.com/soltiHQ/control-plane/ui/templates/component/modal"
@@ -23,7 +24,7 @@ templ Users(nav policy.Nav) {
 			}
 		}
 
-		@layout.HTMXLoader("users-list", routepath.ApiUsers, "load", "Loading...")
+		@layout.HTMXLoader("users-list", routepath.ApiUsers, "load, "+trigger.GetUsersRefresh(), "Loading...")
 	}
 
 	if nav.CanAddUser {

@@ -16,17 +16,17 @@ const (
 
 // Config controls HTTP server runtime behavior.
 type Config struct {
-	ReadHeaderTimeout time.Duration
-	ReadTimeout       time.Duration
-	WriteTimeout      time.Duration
-	IdleTimeout       time.Duration
-	MaxHeaderBytes    int
+	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
+	ReadTimeout       time.Duration `yaml:"read_timeout"`
+	WriteTimeout      time.Duration `yaml:"write_timeout"`
+	IdleTimeout       time.Duration `yaml:"idle_timeout"`
+	MaxHeaderBytes    int           `yaml:"max_header_bytes"`
 
-	Name string
-	Addr string
+	Name string `yaml:"name"`
+	Addr string `yaml:"addr"`
 
-	BaseContext func(net.Listener) context.Context
-	ConnContext func(ctx context.Context, c net.Conn) context.Context
+	BaseContext func(net.Listener) context.Context                   `yaml:"-"`
+	ConnContext func(ctx context.Context, c net.Conn) context.Context `yaml:"-"`
 }
 
 func (c Config) withDefaults() Config {

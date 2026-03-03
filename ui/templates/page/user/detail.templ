@@ -13,13 +13,13 @@ templ Detail(nav policy.Nav, userID string) {
 		layout.DetailPanel{
 			ID:         "user-identity",
 			URL:        routepath.ApiUserCrudOp(userID),
-			Trigger:    "load once, " + trigger.UserUpdate + " from:body",
+			Trigger:    "load, " + trigger.GetUserDetailRefresh() + ", " + trigger.UserUpdate + " from:body",
 			PreloadMsg: "Details Loading...",
 		},
 		layout.DetailPanel{
 			ID:         "user-sessions",
 			URL:        routepath.ApiUserSessions(userID),
-			Trigger:    "load once, " + trigger.SessionUpdate + " from:body, " + trigger.UserSessionsRefresh,
+			Trigger:    "load, " + trigger.GetUserSessionsRefresh() + ", " + trigger.SessionUpdate + " from:body",
 			PreloadMsg: "Sessions Loading...",
 		},
 	)

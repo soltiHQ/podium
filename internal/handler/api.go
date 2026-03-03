@@ -841,9 +841,8 @@ func (a *API) userSetPassword(w http.ResponseWriter, r *http.Request, mode httpc
 	}
 
 	err := a.credentialSVC.SetPassword(r.Context(), credential.SetPasswordRequest{
-		UserID:     userID,
-		Password:   in.Password,
-		VerifierID: "ver-" + userID,
+		UserID:   userID,
+		Password: in.Password,
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
