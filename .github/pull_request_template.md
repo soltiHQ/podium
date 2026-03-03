@@ -5,7 +5,6 @@ Please explain the purpose of this PR. What does it change or add?
 Resolves #ISSUE_ID (if applicable)
 
 ## ✅ Checklist
-- [ ] Documentation updated (README, rustdoc, examples)
 - [ ] Tests added/updated (if relevant)
 - [ ] No breaking changes introduced
 - [ ] CI passes locally
