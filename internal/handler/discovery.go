@@ -17,6 +17,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
+	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 )
 
 // HTTPDiscovery handles agent discovery over HTTP.
@@ -79,6 +80,7 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 		response.Unavailable(w, r, mode)
 		return
 	}
+	trigger.Notify(trigger.AgentUpdate)
 	response.OK(w, r, mode, &responder.View{
 		Data: discoveryv1.SyncResponse{Success: true},
 	})
@@ -126,5 +128,6 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *genv1.SyncRequest) (*genv
 		g.logger.Error().Err(err).Str("agent_id", req.GetId()).Msg("upsert failed")
 		return nil, status.FromError(ctx, err).Err()
 	}
+	trigger.Notify(trigger.AgentUpdate)
 	return &genv1.SyncResponse{Success: true}, nil
 }

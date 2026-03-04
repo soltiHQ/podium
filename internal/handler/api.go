@@ -780,6 +780,7 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 
 	if action == modeCreate {
 		a.logger.Info().Str("user_id", u.ID()).Str("subject", u.Subject()).Msg("user created")
+		trigger.Notify(trigger.UserUpdate)
 		trigger.Redirect(w, routepath.PageUsers)
 		response.NoContent(w, r)
 		return
@@ -797,6 +798,7 @@ func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 	a.logger.Info().Str("user_id", id).Msg("user deleted")
+	trigger.Notify(trigger.UserUpdate)
 	trigger.Redirect(w, routepath.PageUsers)
 	response.NoContent(w, r)
 }
@@ -1188,6 +1190,7 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 			return
 		}
 		a.logger.Info().Str("spec", ts.ID()).Str("name", ts.Name()).Msg("spec created")
+		trigger.Notify(trigger.SpecUpdate)
 		trigger.Redirect(w, routepath.PageSpecs)
 		response.NoContent(w, r)
 		return
@@ -1211,6 +1214,7 @@ func (a *API) specDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 	a.logger.Info().Str("spec", id).Msg("spec deleted")
+	trigger.Notify(trigger.SpecUpdate)
 	trigger.Redirect(w, routepath.PageSpecs)
 	response.NoContent(w, r)
 }

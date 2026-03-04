@@ -12,6 +12,6 @@ templ Agents(nav policy.Nav) {
 	@layout.ListPage("Agents", "agents", nav) {
 		@layout.ListHeader("Agents")
 
-		@layout.HTMXLoader("agents-list", routepath.ApiAgents, "load, "+trigger.GetAgentsRefresh(), "Loading...")
+		@layout.HTMXLoader("agents-list", routepath.ApiAgents, "load, "+trigger.GetAgentsRefresh()+", "+trigger.AgentUpdate+" from:body", "Loading...")
 	}
 }

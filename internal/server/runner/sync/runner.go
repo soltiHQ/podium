@@ -15,6 +15,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 )
 
 // Runner is a server.Runner that periodically reconciles pending rollout
@@ -186,7 +187,9 @@ func (r *Runner) markSynced(ctx context.Context, rID string, version int) {
 	ss.MarkSynced(version)
 	if err = r.store.UpsertRollout(ctx, ss); err != nil {
 		r.logger.Error().Err(err).Str("rid", rID).Msg("markSynced: upsert failed")
+		return
 	}
+	trigger.Notify(trigger.SpecUpdate)
 }
 
 func (r *Runner) markFailed(ctx context.Context, rID, errMsg string) {
@@ -199,5 +202,7 @@ func (r *Runner) markFailed(ctx context.Context, rID, errMsg string) {
 	ss.MarkFailed(errMsg)
 	if err = r.store.UpsertRollout(ctx, ss); err != nil {
 		r.logger.Error().Err(err).Str("rid", rID).Msg("markFailed: upsert failed")
+		return
 	}
+	trigger.Notify(trigger.SpecUpdate)
 }
