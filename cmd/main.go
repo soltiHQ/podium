@@ -35,6 +35,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/route"
+	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 )
 
 func main() {
@@ -56,8 +57,6 @@ func main() {
 		specSVC       = spec.New(store)
 		roleSVC       = role.New(store)
 	)
-	trigger.Configure(cfg.Triggers)
-
 	if err = bootstrap.Run(context.Background(), logger, roleSVC, userSVC, credentialSVC); err != nil {
 		logger.Fatal().Err(err).Msg("failed to bootstrap")
 	}
@@ -92,6 +91,10 @@ func main() {
 	apiHandler.Routes(mux, authMW, permMW, ridMW, logMW)
 	uiHandler.Routes(mux, authMW, permMW)
 	staticHandler.Routes(mux)
+
+	trigger.Configure(cfg.Triggers)
+	trigger.InitHub()
+	route.HandleFunc(mux, routepath.ApiEventStream, trigger.SSEHandler(), ridMW, logMW, authMW)
 
 	var mainHandler http.Handler = mux
 	mainHandler = middleware.Negotiate(responder.NewJSON(), responder.NewHTML())(mainHandler)
@@ -142,6 +145,11 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	go func() {
+		<-ctx.Done()
+		trigger.CloseHub()
+	}()
 
 	if err = srv.Run(ctx); err != nil {
 		logger.Error().Err(err).Msg("server exited")

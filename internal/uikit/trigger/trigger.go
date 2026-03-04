@@ -1,5 +1,8 @@
-// Package trigger defines HTMX event names and polling intervals
-// used to coordinate client-side reactivity across the UI.
+// Package trigger defines HTMX event names, polling intervals, and a notification hub by SSE:
+//   - Named events shared by HTMX and SSE
+//   - Configurable polling intervals as fallback
+//   - Hub broadcasts mutations to all connected browsers
+//   - Set() combines HX-Trigger header with SSE broadcast.
 package trigger
 
 import "net/http"
@@ -9,16 +12,15 @@ const (
 	RedirectHeader = "HX-Redirect"
 
 	SessionUpdate = "session_update"
+	AgentUpdate   = "agent_update"
 	SpecUpdate    = "spec_update"
 	UserUpdate    = "user_update"
-	AgentUpdate   = "agent_update"
 )
 
 const (
-	Every5s  = "every 5s"
-	Every15s = "every 15s"
-	Every30s = "every 30s"
-	Every1m  = "every 60s"
+	Every1m = "every 60s"
+	Every3m = "every 180s"
+	Every5m = "every 300s"
 )
 
 // Config holds configurable polling intervals.
@@ -37,16 +39,16 @@ var cfg = defaultConfig()
 
 func defaultConfig() Config {
 	return Config{
-		UsersRefresh:        Every1m,
-		UserDetailRefresh:   Every1m,
-		UserSessionsRefresh: Every30s,
+		UsersRefresh:        Every3m,
+		UserDetailRefresh:   Every5m,
+		UserSessionsRefresh: Every3m,
 
-		AgentsRefresh:      Every15s,
-		AgentDetailRefresh: Every30s,
-		AgentTasksRefresh:  Every5s,
-		
-		SpecsRefresh:      Every5s,
-		SpecDetailRefresh: Every15s,
+		AgentsRefresh:      Every1m,
+		AgentDetailRefresh: Every3m,
+		AgentTasksRefresh:  Every1m,
+
+		SpecsRefresh:      Every3m,
+		SpecDetailRefresh: Every1m,
 	}
 }
 
@@ -102,12 +104,13 @@ func GetSpecsRefresh() string { return cfg.SpecsRefresh }
 // GetSpecDetailRefresh returns the polling interval for spec detail identity.
 func GetSpecDetailRefresh() string { return cfg.SpecDetailRefresh }
 
-// Set sets an HX-Trigger header on the response.
-func Set(w http.ResponseWriter, event string) {
-	w.Header().Set(Header, event)
-}
-
 // Redirect sets an HX-Redirect header on the response.
 func Redirect(w http.ResponseWriter, url string) {
 	w.Header().Set(RedirectHeader, url)
+}
+
+// Set sets an HX-Trigger header on the response and broadcasts the event to all connected SSE clients.
+func Set(w http.ResponseWriter, event string) {
+	w.Header().Set(Header, event)
+	Notify(event)
 }

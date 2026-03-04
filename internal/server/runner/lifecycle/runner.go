@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 )
 
 // Runner is a server.Runner that periodically checks agent liveness.
@@ -116,6 +117,7 @@ func (r *Runner) tick() {
 				Str("agent_id", a.ID()).
 				Dur("silence", silence).
 				Msg("agent deleted (stale)")
+			trigger.Notify(trigger.AgentUpdate)
 
 		case silence > hb*time.Duration(r.cfg.DisconnectMultiplier):
 			if a.Status() != kind.AgentStatusDisconnected {
@@ -128,6 +130,7 @@ func (r *Runner) tick() {
 				r.logger.Info().
 					Str("agent_id", a.ID()).
 					Msg("agent → disconnected")
+				trigger.Notify(trigger.AgentUpdate)
 			}
 
 		case silence > hb*time.Duration(r.cfg.InactiveMultiplier):
@@ -141,6 +144,7 @@ func (r *Runner) tick() {
 				r.logger.Info().
 					Str("agent_id", a.ID()).
 					Msg("agent → inactive")
+				trigger.Notify(trigger.AgentUpdate)
 			}
 		}
 	}

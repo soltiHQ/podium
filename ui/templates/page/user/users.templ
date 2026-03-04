@@ -24,7 +24,7 @@ templ Users(nav policy.Nav) {
 			}
 		}
 
-		@layout.HTMXLoader("users-list", routepath.ApiUsers, "load, "+trigger.GetUsersRefresh(), "Loading...")
+		@layout.HTMXLoader("users-list", routepath.ApiUsers, "load, "+trigger.GetUsersRefresh()+", "+trigger.UserUpdate+" from:body", "Loading...")
 	}
 
 	if nav.CanAddUser {
