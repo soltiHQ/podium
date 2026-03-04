@@ -13,13 +13,13 @@ templ Detail(nav policy.Nav, specID string) {
 		layout.SectionPanel{
 			ID:         "spec-identity",
 			URL:        routepath.ApiSpecByID(specID),
-			Trigger:    "load, " + trigger.GetSpecDetailRefresh() + ", " + trigger.SpecUpdate + " from:body",
+			Trigger:    trigger.LoadAndPoll(trigger.GetSpecDetailRefresh(), trigger.SpecUpdate),
 			PreloadMsg: "Loading spec...",
 		},
 		layout.SectionPanel{
 			ID:         "spec-rollouts",
 			URL:        routepath.ApiSpecSync(specID),
-			Trigger:    "load, " + trigger.GetSpecsRefresh() + ", " + trigger.SpecUpdate + " from:body",
+			Trigger:    trigger.LoadAndPoll(trigger.GetSpecsRefresh(), trigger.SpecUpdate),
 			PreloadMsg: "Loading rollouts...",
 		},
 	)

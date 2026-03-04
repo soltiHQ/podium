@@ -50,7 +50,7 @@ templ TaskResults(agentID string, items []proxyv1.Task, total int, q string, off
 	<div
 		id="tasks-results"
 		hx-get={ routepath.ApiAgentTasks(agentID) }
-		hx-trigger={ trigger.GetAgentTasksRefresh() + ", " + trigger.AgentUpdate + " from:body" }
+		hx-trigger={ trigger.Poll(trigger.GetAgentTasksRefresh(), trigger.AgentUpdate) }
 		hx-target="this"
 		hx-swap="outerHTML"
 		hx-select="#tasks-results"

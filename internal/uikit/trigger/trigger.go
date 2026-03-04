@@ -104,6 +104,18 @@ func GetSpecsRefresh() string { return cfg.SpecsRefresh }
 // GetSpecDetailRefresh returns the polling interval for spec detail identity.
 func GetSpecDetailRefresh() string { return cfg.SpecDetailRefresh }
 
+// Poll returns an hx-trigger value combining a polling interval with an SSE event.
+// Use on Results containers that handle periodic and event-driven refreshes.
+func Poll(interval, event string) string {
+	return interval + ", " + event + " from:body"
+}
+
+// LoadAndPoll returns an hx-trigger value that fires once on a load, then keeps
+// refreshing via polling and SSE. Use on DetailPanel containers.
+func LoadAndPoll(interval, event string) string {
+	return "load, " + interval + ", " + event + " from:body"
+}
+
 // Redirect sets an HX-Redirect header on the response.
 func Redirect(w http.ResponseWriter, url string) {
 	w.Header().Set(RedirectHeader, url)

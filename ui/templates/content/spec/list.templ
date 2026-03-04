@@ -2,7 +2,6 @@ package spec
 
 import (
 	"fmt"
-	"net/url"
 
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
@@ -19,12 +18,12 @@ templ List(items []*model.Spec, nextCursor string, q string) {
 		<div class="flex justify-center mb-10">
 			<div class="w-[320px] max-sm:w-full">
 				@form.SearchInput(
-					"taskspecs-search",
+					"specs-search",
 					"q",
 					q,
-					"Search...",
+					"Search…",
 					routepath.ApiSpecs,
-					"#taskspecs-results",
+					"#specs-results",
 				)
 			</div>
 		</div>
@@ -38,15 +37,15 @@ templ List(items []*model.Spec, nextCursor string, q string) {
 // replace only the results, leaving the search input untouched.
 templ Results(items []*model.Spec, nextCursor string, q string) {
 	<div
-		id="taskspecs-results"
+		id="specs-results"
 		hx-get={ routepath.ApiSpecs }
-		hx-trigger={ trigger.GetSpecsRefresh() + ", " + trigger.SpecUpdate + " from:body" }
+		hx-trigger={ trigger.Poll(trigger.GetSpecsRefresh(), trigger.SpecUpdate) }
 		hx-target="this"
 		hx-swap="outerHTML"
-		hx-select="#taskspecs-results"
-		hx-include="#taskspecs-search"
+		hx-select="#specs-results"
+		hx-include="#specs-search"
 	>
-		<div id="taskspecs-cards" class="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
+		<div id="specs-cards" class="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
 			@Cards(items)
 			@specsSentinel(nextCursor, q)
 		</div>
@@ -91,29 +90,15 @@ templ Cards(items []*model.Spec) {
 templ specsSentinel(nextCursor string, q string) {
 	if nextCursor != "" {
 		<div
-			id="taskspecs-sentinel"
+			id="specs-sentinel"
 			class="col-span-full h-6"
-			hx-get={ specsListURL(nextCursor, q) }
+			hx-get={ routepath.CursorURL(routepath.ApiSpecs, nextCursor, q) }
 			hx-trigger="revealed"
 			hx-target="this"
 			hx-swap="outerHTML"
-			hx-select="#taskspecs-cards > *"
-			hx-sync="#taskspecs-sentinel:replace"
+			hx-select="#specs-cards > *"
+			hx-sync="#specs-sentinel:replace"
 		></div>
 	}
 }
 
-func specsListURL(nextCursor string, q string) string {
-	v := url.Values{}
-	if nextCursor != "" {
-		v.Set("cursor", nextCursor)
-	}
-	if q != "" {
-		v.Set("q", q)
-	}
-	qs := v.Encode()
-	if qs == "" {
-		return routepath.ApiSpecs
-	}
-	return routepath.ApiSpecs + "?" + qs
-}

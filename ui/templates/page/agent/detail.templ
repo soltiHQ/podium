@@ -13,7 +13,7 @@ templ Detail(nav policy.Nav, agentID string) {
 		layout.DetailPanel{
 			ID:         "agent-identity",
 			URL:        routepath.ApiAgentByID(agentID),
-			Trigger:    "load, " + trigger.GetAgentDetailRefresh() + ", " + trigger.AgentUpdate + " from:body",
+			Trigger:    trigger.LoadAndPoll(trigger.GetAgentDetailRefresh(), trigger.AgentUpdate),
 			PreloadMsg: "Details Loading...",
 		},
 		layout.DetailPanel{

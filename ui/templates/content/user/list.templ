@@ -1,8 +1,6 @@
 package user
 
 import (
-	"net/url"
-
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
@@ -39,7 +37,7 @@ templ Results(items []*model.User, nextCursor string, q string) {
 	<div
 		id="users-results"
 		hx-get={ routepath.ApiUsers }
-		hx-trigger={ trigger.GetUsersRefresh() + ", " + trigger.UserUpdate + " from:body" }
+		hx-trigger={ trigger.Poll(trigger.GetUsersRefresh(), trigger.UserUpdate) }
 		hx-target="this"
 		hx-swap="outerHTML"
 		hx-select="#users-results"
@@ -101,7 +99,7 @@ templ usersSentinel(nextCursor string, q string) {
 		<div
 			id="users-sentinel"
 			class="col-span-full h-6"
-			hx-get={ usersListURL(nextCursor, q) }
+			hx-get={ routepath.CursorURL(routepath.ApiUsers, nextCursor, q) }
 			hx-trigger="revealed"
 			hx-target="this"
 			hx-swap="outerHTML"
@@ -111,18 +109,3 @@ templ usersSentinel(nextCursor string, q string) {
 	}
 }
 
-func usersListURL(nextCursor string, q string) string {
-	v := url.Values{}
-	if nextCursor != "" {
-		v.Set("cursor", nextCursor)
-	}
-	if q != "" {
-		v.Set("q", q)
-	}
-
-	qs := v.Encode()
-	if qs == "" {
-		return routepath.ApiUsers
-	}
-	return routepath.ApiUsers + "?" + qs
-}

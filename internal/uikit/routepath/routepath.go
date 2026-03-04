@@ -8,6 +8,8 @@
 // and typo-free across handlers, templates, and Alpine.js fetch calls.
 package routepath
 
+import "net/url"
+
 const (
 	PageHome   = "/"
 	PageLogin  = "/login"
@@ -59,3 +61,19 @@ var (
 	ApiSpecDeploy    = func(id string) string { return ApiSpec + id + "/deploy" }
 	ApiSpecSync      = func(id string) string { return ApiSpec + id + "/sync" }
 )
+
+// CursorURL appends optional cursor and query parameters to a base API path.
+func CursorURL(base, cursor, q string) string {
+	v := url.Values{}
+	if cursor != "" {
+		v.Set("cursor", cursor)
+	}
+	if q != "" {
+		v.Set("q", q)
+	}
+	qs := v.Encode()
+	if qs == "" {
+		return base
+	}
+	return base + "?" + qs
+}

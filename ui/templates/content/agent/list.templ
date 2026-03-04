@@ -2,7 +2,6 @@ package agent
 
 import (
 	"fmt"
-	"net/url"
 
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
@@ -41,7 +40,7 @@ templ Results(items []*model.Agent, nextCursor string, q string) {
 	<div
 		id="agents-results"
 		hx-get={ routepath.ApiAgents }
-		hx-trigger={ trigger.GetAgentsRefresh() + ", " + trigger.AgentUpdate + " from:body" }
+		hx-trigger={ trigger.Poll(trigger.GetAgentsRefresh(), trigger.AgentUpdate) }
 		hx-target="this"
 		hx-swap="outerHTML"
 		hx-select="#agents-results"
@@ -118,7 +117,7 @@ templ agentsSentinel(nextCursor string, q string) {
 		<div
 			id="agents-sentinel"
 			class="col-span-full h-6"
-			hx-get={ agentsListURL(nextCursor, q) }
+			hx-get={ routepath.CursorURL(routepath.ApiAgents, nextCursor, q) }
 			hx-trigger="revealed"
 			hx-target="this"
 			hx-swap="outerHTML"
@@ -126,21 +125,6 @@ templ agentsSentinel(nextCursor string, q string) {
 			hx-sync="#agents-sentinel:replace"
 		></div>
 	}
-}
-
-func agentsListURL(nextCursor string, q string) string {
-	v := url.Values{}
-	if nextCursor != "" {
-		v.Set("cursor", nextCursor)
-	}
-	if q != "" {
-		v.Set("q", q)
-	}
-	qs := v.Encode()
-	if qs == "" {
-		return routepath.ApiAgents
-	}
-	return routepath.ApiAgents + "?" + qs
 }
 
 templ agentStatusDot(s kind.AgentStatus) {

@@ -59,26 +59,26 @@ templ Create(
 						<div>
 							<label class={ form.LabelClass }>{ s.Label }</label>
 							<div
-								class={ msWrapper }
+								class={ form.MsWrapper }
 								x-on:click.outside={ closeDropdownExpr(s.ID) }
 							>
 								<!-- trigger / selected tags -->
 								<div
-									class={ msTrigger }
+									class={ form.MsTrigger }
 									x-on:click={ toggleDropdownExpr(s.ID) }
 								>
 									<template { xForSelected(s.ID)... }>
-										<span class={ msTag }>
+										<span class={ form.MsTag }>
 											<span x-text={ tagTextExpr(s) }></span>
 											<span
-												class={ msTagRemove }
+												class={ form.MsTagRemove }
 												x-on:click.stop={ removeTagExpr(s.ID) }
 											>&times;</span>
 										</span>
 									</template>
 									<span
 										x-show={ s.ID + ".length === 0" }
-										class={ msPlaceholder }
+										class={ form.MsPlaceholder }
 									>Select...</span>
 								</div>
 								<!-- dropdown list -->
@@ -86,16 +86,16 @@ templ Create(
 									{ xShowDropdown(s.ID)... }
 									x-cloak
 									x-transition.opacity
-									class={ msDropdown }
+									class={ form.MsDropdown }
 								>
 									<template { xForOpts(s.ID)... }>
 										<div
-											class={ msOption }
+											class={ form.MsOption }
 											x-on:click={ toggleExpr(s.ID) }
 										>
 											<input
 												type="checkbox"
-												class={ msCheckbox }
+												class={ form.MsCheckbox }
 												x-bind:checked={ isCheckedExpr(s.ID) }
 											/>
 											<span x-text={ optTextExpr(s) }></span>
