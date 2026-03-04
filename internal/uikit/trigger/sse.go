@@ -32,7 +32,9 @@ func SSEHandler() http.HandlerFunc {
 				if !ok {
 					return
 				}
-				io.WriteString(w, "data: "+ev+"\n\n")
+				if _, err := io.WriteString(w, "data: "+ev+"\n\n"); err != nil {
+					return
+				}
 				flusher.Flush()
 			case <-r.Context().Done():
 				return
