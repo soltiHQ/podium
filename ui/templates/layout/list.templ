@@ -16,7 +16,7 @@ templ ListPage(title string, active string, nav policy.Nav) {
 
 // ListHeader renders a page title row with an optional action slot (e.g. "Add" button).
 templ ListHeader(title string) {
-	<div class="flex items-center justify-between">
+	<div class="flex items-center justify-between min-h-10">
 		<h1 class="text-2xl font-bold text-fg">
 			{ title }
 		</h1>

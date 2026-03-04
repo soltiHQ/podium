@@ -82,7 +82,7 @@ templ sessionRow(s restv1.Session) {
 
 		<div class="flex items-center gap-4 text-xs text-muted pl-[18px]">
 			<span title="Created">{ formatSessionTime(s.CreatedAt) }</span>
-			<span class="text-border [&_svg]:w-3.5 [&_svg]:h-3.5">
+			<span class="text-muted [&_svg]:w-4 [&_svg]:h-4">
 				@asset.Icon("start")
 			</span>
 			<span title="Expires">{ formatSessionTime(s.ExpiresAt) }</span>

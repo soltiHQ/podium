@@ -61,18 +61,16 @@ templ Cards(items []*model.Agent) {
 		for _, a := range items {
 			@card.Item(routepath.PageAgentInfoByID(a.ID())) {
 				@card.ItemHeader() {
-					@card.ItemTitle() {
-						<div class="flex items-center gap-2.5">
-							@agentStatusDot(a.Status())
-							<span class="truncate">
-								if a.Name() != "" {
-									{ a.Name() }
-								} else {
-									{ a.ID() }
-								}
-							</span>
-						</div>
-					}
+					<div class="flex items-center gap-2.5 min-w-0">
+						@agentStatusDot(a.Status())
+						@card.ItemTitle() {
+							if a.Name() != "" {
+								{ a.Name() }
+							} else {
+								{ a.ID() }
+							}
+						}
+					</div>
 
 					if a.UptimeSeconds() > 0 {
 						<span class="text-[11px] text-muted tabular-nums shrink-0">
