@@ -3,7 +3,6 @@ package spec
 import (
 	"github.com/soltiHQ/control-plane/internal/uikit/policy"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 	"github.com/soltiHQ/control-plane/ui/templates/asset"
 	"github.com/soltiHQ/control-plane/ui/templates/component/button"
 	"github.com/soltiHQ/control-plane/ui/templates/layout"
@@ -12,7 +11,7 @@ import (
 // Specs renders the spec list page with HTMX auto-refresh.
 templ Specs(nav policy.Nav) {
 	@layout.ListPage("Specs", "tasks", nav) {
-		@layout.ListHeader("Spec management") {
+		@layout.ListHeader("Specs") {
 			if nav.CanAddSpec {
 				<a href={ templ.SafeURL(routepath.PageSpecNew) }>
 					@button.Button("Add", "button", false, button.VariantPrimary, false, templ.Attributes{}) {
@@ -22,6 +21,6 @@ templ Specs(nav policy.Nav) {
 			}
 		}
 
-		@layout.HTMXLoader("taskspecs-list", routepath.ApiSpecs, "load, "+trigger.GetSpecsRefresh()+", "+trigger.SpecUpdate+" from:body", "Loading...")
+		@layout.HTMXLoader("taskspecs-list", routepath.ApiSpecs, "Loading...")
 	}
 }

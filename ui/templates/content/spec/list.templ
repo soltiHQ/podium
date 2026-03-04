@@ -6,6 +6,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
+	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
 	"github.com/soltiHQ/control-plane/ui/templates/component/form"
 	"github.com/soltiHQ/control-plane/ui/templates/component/status"
@@ -32,15 +33,22 @@ templ List(items []*model.Spec, nextCursor string, q string) {
 	</div>
 }
 
-// Results is the HTMX-swappable wrapper for the spec cards + pagination footer.
+// Results is the HTMX-swappable wrapper for the spec cards + pagination sentinel.
+// SSE and polling triggers live here (not on the outer loader) so that refreshes
+// replace only the results, leaving the search input untouched.
 templ Results(items []*model.Spec, nextCursor string, q string) {
-	<div id="taskspecs-results" class="space-y-4">
+	<div
+		id="taskspecs-results"
+		hx-get={ routepath.ApiSpecs }
+		hx-trigger={ trigger.GetSpecsRefresh() + ", " + trigger.SpecUpdate + " from:body" }
+		hx-target="this"
+		hx-swap="outerHTML"
+		hx-select="#taskspecs-results"
+		hx-include="#taskspecs-search"
+	>
 		<div id="taskspecs-cards" class="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
 			@Cards(items)
-		</div>
-
-		<div id="taskspecs-footer">
-			@Footer(nextCursor, q)
+			@specsSentinel(nextCursor, q)
 		</div>
 	</div>
 }
@@ -78,16 +86,18 @@ templ Cards(items []*model.Spec) {
 	}
 }
 
-// Footer renders the "Load more" sentinel for cursor-based pagination.
-templ Footer(nextCursor string, q string) {
+// specsSentinel renders the infinite-scroll sentinel for cursor-based pagination.
+// It replaces itself (outerHTML) with the next page's cards + a new sentinel.
+templ specsSentinel(nextCursor string, q string) {
 	if nextCursor != "" {
 		<div
 			id="taskspecs-sentinel"
-			class="h-6"
+			class="col-span-full h-6"
 			hx-get={ specsListURL(nextCursor, q) }
 			hx-trigger="revealed"
-			hx-target="#taskspecs-cards"
-			hx-swap="beforeend"
+			hx-target="this"
+			hx-swap="outerHTML"
+			hx-select="#taskspecs-cards > *"
 			hx-sync="#taskspecs-sentinel:replace"
 		></div>
 	}

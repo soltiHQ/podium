@@ -1,5 +1,17 @@
 package visual
 
+import "sort"
+
+// sortedKeys returns the keys of a map sorted alphabetically.
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 func badgeStyle(v Variant) string {
 	switch v {
 

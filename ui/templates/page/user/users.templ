@@ -3,7 +3,6 @@ package user
 import (
 	"github.com/soltiHQ/control-plane/internal/uikit/policy"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 	"github.com/soltiHQ/control-plane/ui/templates/asset"
 	"github.com/soltiHQ/control-plane/ui/templates/component/button"
 	"github.com/soltiHQ/control-plane/ui/templates/component/modal"
@@ -14,7 +13,7 @@ import (
 // Users renders the user list page with optional "Add" button.
 templ Users(nav policy.Nav) {
 	@layout.ListPage("Users", "users", nav) {
-		@layout.ListHeader("Users management") {
+		@layout.ListHeader("Users") {
 			if nav.CanAddUser {
 				@button.Button("Add", "button", false, button.VariantPrimary, false,
 					templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent("create-user")},
@@ -24,7 +23,7 @@ templ Users(nav policy.Nav) {
 			}
 		}
 
-		@layout.HTMXLoader("users-list", routepath.ApiUsers, "load, "+trigger.GetUsersRefresh()+", "+trigger.UserUpdate+" from:body", "Loading...")
+		@layout.HTMXLoader("users-list", routepath.ApiUsers, "Loading...")
 	}
 
 	if nav.CanAddUser {

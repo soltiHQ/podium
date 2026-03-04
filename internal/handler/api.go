@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 
+	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
@@ -564,6 +567,7 @@ func (a *API) agentPatchLabels(w http.ResponseWriter, r *http.Request, mode http
 	response.NoContent(w, r)
 }
 
+// TODO: remove "q" - need to understand a correct way for getting tasks from agent with paginator and etc.
 func (a *API) agentTasksList(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, agentID string) {
 	ag, err := a.agentSVC.Get(r.Context(), agentID)
 	if err != nil {
@@ -574,16 +578,17 @@ func (a *API) agentTasksList(w http.ResponseWriter, r *http.Request, mode httpct
 		response.Unavailable(w, r, mode)
 		return
 	}
-
 	if ag.Endpoint() == "" {
 		response.Unavailable(w, r, mode)
 		return
 	}
 
-	filter := proxy.TaskFilter{
-		Slot:   r.URL.Query().Get("slot"),
-		Status: r.URL.Query().Get("status"),
-	}
+	var (
+		filter = proxy.TaskFilter{
+			Status: r.URL.Query().Get("status"),
+		}
+		q = r.URL.Query().Get("q")
+	)
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil {
 			filter.Limit = n
@@ -620,10 +625,24 @@ func (a *API) agentTasksList(w http.ResponseWriter, r *http.Request, mode httpct
 		response.Unavailable(w, r, mode)
 		return
 	}
-
+	if q != "" {
+		lower := strings.ToLower(q)
+		filtered := result.Tasks[:0]
+		for _, t := range result.Tasks {
+			if strings.Contains(strings.ToLower(t.Slot), lower) ||
+				strings.Contains(strings.ToLower(t.ID), lower) {
+				filtered = append(filtered, t)
+			}
+		}
+		result.Tasks = filtered
+		result.Total = len(filtered)
+	}
+	slices.SortFunc(result.Tasks, func(a, b proxyv1.Task) int {
+		return cmp.Compare(kind.ParseTaskStatus(a.Status).Priority(), kind.ParseTaskStatus(b.Status).Priority())
+	})
 	response.OK(w, r, mode, &responder.View{
 		Data:      result,
-		Component: contentAgent.Tasks(agentID, result.Tasks, result.Total, filter.Slot, filter.Offset),
+		Component: contentAgent.Tasks(agentID, result.Tasks, result.Total, q, filter.Offset),
 	})
 }
 
@@ -706,6 +725,14 @@ func (a *API) usersSessions(w http.ResponseWriter, r *http.Request, mode httpctx
 		}
 		items = append(items, apimapv1.Session(s))
 	}
+	slices.SortFunc(items, func(a, b restv1.Session) int {
+		pa := kind.DeriveSessionStatus(a.Revoked, a.ExpiresAt).Priority()
+		pb := kind.DeriveSessionStatus(b.Revoked, b.ExpiresAt).Priority()
+		if pa != pb {
+			return cmp.Compare(pa, pb)
+		}
+		return b.CreatedAt.Compare(a.CreatedAt)
+	})
 	response.OK(w, r, mode, &responder.View{
 		Data:      restv1.SessionResponse{Items: items},
 		Component: contentUser.Sessions(items),

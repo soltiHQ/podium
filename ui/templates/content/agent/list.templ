@@ -7,6 +7,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
+	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
 	"github.com/soltiHQ/control-plane/ui/templates/component/form"
 	"github.com/soltiHQ/control-plane/ui/templates/component/status"
@@ -33,15 +34,22 @@ templ List(items []*model.Agent, nextCursor string, q string) {
 	</div>
 }
 
-// Results is the HTMX-swappable wrapper for the agent cards + pagination footer.
+// Results is the HTMX-swappable wrapper for the agent cards + pagination sentinel.
+// SSE and polling triggers live here (not on the outer loader) so that refreshes
+// replace only the results, leaving the search input untouched.
 templ Results(items []*model.Agent, nextCursor string, q string) {
-	<div id="agents-results" class="space-y-4">
+	<div
+		id="agents-results"
+		hx-get={ routepath.ApiAgents }
+		hx-trigger={ trigger.GetAgentsRefresh() + ", " + trigger.AgentUpdate + " from:body" }
+		hx-target="this"
+		hx-swap="outerHTML"
+		hx-select="#agents-results"
+		hx-include="#agents-search"
+	>
 		<div id="agents-cards" class="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
 			@Cards(items)
-		</div>
-
-		<div id="agents-footer">
-			@Footer(nextCursor, q)
+			@agentsSentinel(nextCursor, q)
 		</div>
 	</div>
 }
@@ -104,16 +112,17 @@ templ Cards(items []*model.Agent) {
 	}
 }
 
-// Footer renders the "Load more" button for cursor-based pagination.
-templ Footer(nextCursor string, q string) {
+// agentsSentinel renders the infinite-scroll sentinel for cursor-based pagination.
+templ agentsSentinel(nextCursor string, q string) {
 	if nextCursor != "" {
 		<div
 			id="agents-sentinel"
-			class="h-6"
+			class="col-span-full h-6"
 			hx-get={ agentsListURL(nextCursor, q) }
 			hx-trigger="revealed"
-			hx-target="#agents-cards"
-			hx-swap="beforeend"
+			hx-target="this"
+			hx-swap="outerHTML"
+			hx-select="#agents-cards > *"
 			hx-sync="#agents-sentinel:replace"
 		></div>
 	}

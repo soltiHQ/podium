@@ -14,6 +14,8 @@ type Entity[T any] interface {
 	ID() string
 	// Clone creates a deep copy of the entity.
 	Clone() T
+	// CreatedAt returns the creation timestamp.
+	CreatedAt() time.Time
 	// UpdatedAt returns the last modification timestamp.
 	UpdatedAt() time.Time
 }

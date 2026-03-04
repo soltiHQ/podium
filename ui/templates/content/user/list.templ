@@ -5,6 +5,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
+	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
 	"github.com/soltiHQ/control-plane/ui/templates/component/form"
 	"github.com/soltiHQ/control-plane/ui/templates/component/status"
@@ -31,15 +32,22 @@ templ List(items []*model.User, nextCursor string, q string) {
 	</div>
 }
 
-// Results is the HTMX-swappable wrapper for the user cards + pagination footer.
+// Results is the HTMX-swappable wrapper for the user cards + pagination sentinel.
+// SSE and polling triggers live here (not on the outer loader) so that refreshes
+// replace only the results, leaving the search input untouched.
 templ Results(items []*model.User, nextCursor string, q string) {
-	<div id="users-results" class="space-y-4">
+	<div
+		id="users-results"
+		hx-get={ routepath.ApiUsers }
+		hx-trigger={ trigger.GetUsersRefresh() + ", " + trigger.UserUpdate + " from:body" }
+		hx-target="this"
+		hx-swap="outerHTML"
+		hx-select="#users-results"
+		hx-include="#users-search"
+	>
 		<div id="users-cards" class="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
 			@Cards(items)
-		</div>
-
-		<div id="users-footer">
-			@Footer(nextCursor, q)
+			@usersSentinel(nextCursor, q)
 		</div>
 	</div>
 }
@@ -86,16 +94,18 @@ templ Cards(items []*model.User) {
 	}
 }
 
-// Footer renders the "Load more" button for cursor-based pagination.
-templ Footer(nextCursor string, q string) {
+// usersSentinel renders the infinite-scroll sentinel for cursor-based pagination.
+// It replaces itself (outerHTML) with the next page's cards + a new sentinel.
+templ usersSentinel(nextCursor string, q string) {
 	if nextCursor != "" {
 		<div
 			id="users-sentinel"
-			class="h-6"
+			class="col-span-full h-6"
 			hx-get={ usersListURL(nextCursor, q) }
 			hx-trigger="revealed"
-			hx-target="#users-cards"
-			hx-swap="beforeend"
+			hx-target="this"
+			hx-swap="outerHTML"
+			hx-select="#users-cards > *"
 			hx-sync="#users-sentinel:replace"
 		></div>
 	}

@@ -16,7 +16,7 @@ const (
 //
 // It must align with the global ordering contract:
 //
-//	(UpdatedAt DESC, ID ASC)
+//	(CreatedAt DESC, ID ASC)
 //
 // Cursor is intentionally opaque for callers, but self-describing for validation:
 //   - b: backend tag (must match "inmemory")
@@ -25,9 +25,7 @@ type cursor struct {
 	Backend string `json:"b"`
 	Version int    `json:"v"`
 
-	// UpdatedAtUnixNano stores UpdatedAt as unix nanoseconds.
-	// Using int64 avoids RFC3339 parsing and timezone concerns.
-	UpdatedAtUnixNano int64  `json:"u"`
+	CreatedAtUnixNano int64  `json:"u"`
 	ID                string `json:"i"`
 }
 
@@ -50,7 +48,7 @@ func encodeCursor(c cursor) (string, error) {
 //   - Malformed base64 or JSON returns ErrInvalidArgument.
 //   - Cursor must be produced by this backend (Backend == "inmemory").
 //   - Cursor version must match (Version == 1).
-//   - Missing ID or zero UpdatedAtUnixNano returns ErrInvalidArgument.
+//   - Missing ID or zero CreatedAtUnixNano returns ErrInvalidArgument.
 func decodeCursor(s string) (cursor, error) {
 	if s == "" {
 		return cursor{}, nil
@@ -68,7 +66,7 @@ func decodeCursor(s string) (cursor, error) {
 	if c.Backend != cursorBackend || c.Version != cursorVersion {
 		return cursor{}, storage.ErrInvalidArgument
 	}
-	if c.ID == "" || c.UpdatedAtUnixNano == 0 {
+	if c.ID == "" || c.CreatedAtUnixNano == 0 {
 		return cursor{}, storage.ErrInvalidArgument
 	}
 	return c, nil

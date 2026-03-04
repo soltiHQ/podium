@@ -17,7 +17,7 @@ func TestDecodeCursor_EmptyIsValid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeCursor(empty) err=%v", err)
 	}
-	if c.ID != "" || c.UpdatedAtUnixNano != 0 {
+	if c.ID != "" || c.CreatedAtUnixNano != 0 {
 		t.Fatalf("expected zero cursor, got=%+v", c)
 	}
 }
@@ -129,7 +129,7 @@ func TestEncodeCursor_RoundTripAndForcesBackendVersion(t *testing.T) {
 	s, err := encodeCursor(cursor{
 		Backend:           "evil",
 		Version:           999,
-		UpdatedAtUnixNano: wantU,
+		CreatedAtUnixNano: wantU,
 		ID:                "id-1",
 	})
 	if err != nil {
@@ -153,8 +153,8 @@ func TestEncodeCursor_RoundTripAndForcesBackendVersion(t *testing.T) {
 	if c.ID != "id-1" {
 		t.Fatalf("expected id=%q got=%q", "id-1", c.ID)
 	}
-	if c.UpdatedAtUnixNano != wantU {
-		t.Fatalf("expected u=%d got=%d", wantU, c.UpdatedAtUnixNano)
+	if c.CreatedAtUnixNano != wantU {
+		t.Fatalf("expected u=%d got=%d", wantU, c.CreatedAtUnixNano)
 	}
 }
 
@@ -164,7 +164,7 @@ func TestEncodeCursor_ProducesDecodableToken(t *testing.T) {
 	u := time.Unix(1, 0).UTC().UnixNano()
 
 	s, err := encodeCursor(cursor{
-		UpdatedAtUnixNano: u,
+		CreatedAtUnixNano: u,
 		ID:                "x",
 	})
 	if err != nil {
@@ -178,7 +178,7 @@ func TestEncodeCursor_ProducesDecodableToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decodeCursor err=%v", err)
 	}
-	if c.ID != "x" || c.UpdatedAtUnixNano != u {
+	if c.ID != "x" || c.CreatedAtUnixNano != u {
 		t.Fatalf("unexpected cursor: %+v", c)
 	}
 }
