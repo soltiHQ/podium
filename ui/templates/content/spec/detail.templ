@@ -75,7 +75,7 @@ templ Detail(ts restv1.RolloutSpec, p policy.SpecDetail) {
 			@card.Card("") {
 				@card.CardBody() {
 					<div class="flex items-center justify-between mb-3">
-						<span class="text-[11px] uppercase tracking-[0.05em] text-muted font-semibold">Agent CreateSpec</span>
+						<span class={ visual.SectionLabel + " font-semibold" }>Agent CreateSpec</span>
 						<button type="button"
 							class="text-[11px] text-primary hover:text-primary/80 transition-colors"
 							onclick={ copySpec(ts.CreateSpec) }>Copy</button>
@@ -117,7 +117,7 @@ templ Rollouts(states []restv1.RolloutEntry) {
 		@status.Empty("No rollouts")
 	} else {
 		<div class="space-y-3">
-			<h3 class="text-xs font-semibold uppercase tracking-wider text-muted-strong">Rollouts</h3>
+			<h3 class={ visual.SectionTitle }>Rollouts</h3>
 			for _, ss := range states {
 				@card.Card("") {
 					@card.CardBody() {

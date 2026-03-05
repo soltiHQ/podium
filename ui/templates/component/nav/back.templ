@@ -1,0 +1,12 @@
+package nav
+
+// BackLink renders a "← Label" navigation link with bottom margin.
+templ BackLink(href string, label string) {
+	<div class="mb-6">
+		<a href={ templ.SafeURL(href) }
+			class="inline-flex items-center gap-1.5 text-sm text-muted hover:text-fg transition-colors">
+			<span>←</span>
+			<span>{ label }</span>
+		</a>
+	</div>
+}

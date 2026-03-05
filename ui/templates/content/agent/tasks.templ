@@ -10,6 +10,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
 	"github.com/soltiHQ/control-plane/ui/templates/component/form"
+	"github.com/soltiHQ/control-plane/ui/templates/component/list"
 	"github.com/soltiHQ/control-plane/ui/templates/component/status"
 	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
 )
@@ -18,7 +19,7 @@ import (
 templ Tasks(agentID string, items []proxyv1.Task, total int, q string, offset int) {
 	@card.Card("") {
 		@card.CardHeader() {
-			<h2 class="text-[11px] uppercase tracking-[0.05em] text-muted select-none">
+			<h2 class={ visual.SectionLabel + " select-none" }>
 				Tasks
 			</h2>
 			<span class="text-[11px] text-muted tabular-nums">
@@ -56,9 +57,11 @@ templ TaskResults(agentID string, items []proxyv1.Task, total int, q string, off
 		hx-select="#tasks-results"
 		hx-include="#tasks-search"
 	>
-		<div id="tasks-rows" class="divide-y divide-border -mx-5">
+		<div id="tasks-rows" class={ list.StripedClass }>
 			@TaskRows(items)
-			@taskSentinel(agentID, total, q, offset, len(items))
+			if nextOffset(offset, len(items)) < total {
+				@list.Sentinel("tasks-sentinel", tasksURL(agentID, q, nextOffset(offset, len(items))), "tasks-rows")
+			}
 		</div>
 	</div>
 }
@@ -121,23 +124,6 @@ templ taskStatusBadge(s string) {
 			@visual.Badge("exhausted", visual.VariantDanger)
 		default:
 			@visual.Badge(s, visual.VariantMuted)
-	}
-}
-
-// taskSentinel renders the infinite-scroll sentinel for offset-based task pagination.
-// It replaces itself (outerHTML) with the next page's rows + a new sentinel.
-templ taskSentinel(agentID string, total int, q string, offset int, count int) {
-	if nextOffset(offset, count) < total {
-		<div
-			id="tasks-sentinel"
-			class="h-6"
-			hx-get={ tasksURL(agentID, q, nextOffset(offset, count)) }
-			hx-trigger="revealed"
-			hx-target="this"
-			hx-swap="outerHTML"
-			hx-select="#tasks-rows > *"
-			hx-sync="#tasks-sentinel:replace"
-		></div>
 	}
 }
 

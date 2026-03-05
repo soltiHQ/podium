@@ -37,6 +37,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transportctx"
 	"github.com/soltiHQ/control-plane/internal/uikit/policy"
 	contentAgent "github.com/soltiHQ/control-plane/ui/templates/content/agent"
+	contentHome "github.com/soltiHQ/control-plane/ui/templates/content/home"
 	contentSpec "github.com/soltiHQ/control-plane/ui/templates/content/spec"
 	contentUser "github.com/soltiHQ/control-plane/ui/templates/content/user"
 )
@@ -125,8 +126,103 @@ func (a *API) Routes(mux *http.ServeMux, auth route.BaseMW, _ route.PermMW, comm
 	route.HandleFunc(mux, routepath.ApiAgent, a.AgentsRouter, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiSpecs, a.Specs, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiSpec, a.SpecsRouter, append(common, auth)...)
+	route.HandleFunc(mux, routepath.ApiDashboard, a.Dashboard, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiPermissions, a.Permissions, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiRoles, a.Roles, append(common, auth)...)
+}
+
+// Dashboard handles GET /api/v1/dashboard.
+func (a *API) Dashboard(w http.ResponseWriter, r *http.Request) {
+	mode := httpctx.ModeFromRequest(r)
+	if r.URL.Path != routepath.ApiDashboard {
+		response.NotFound(w, r, mode)
+		return
+	}
+	if r.Method != http.MethodGet {
+		response.NotAllowed(w, r, mode)
+		return
+	}
+	ctx := r.Context()
+
+	agents, err := a.agentSVC.List(ctx, agent.ListQuery{Limit: storage.MaxListLimit})
+	if err != nil {
+		a.logger.Error().Err(err).Msg("dashboard: agent list failed")
+		response.Unavailable(w, r, mode)
+		return
+	}
+
+	var active, inactive, disconnected int
+	for _, ag := range agents.Items {
+		switch ag.Status() {
+		case kind.AgentStatusActive:
+			active++
+		case kind.AgentStatusInactive:
+			inactive++
+		case kind.AgentStatusDisconnected:
+			disconnected++
+		}
+	}
+
+	specs, err := a.specSVC.List(ctx, spec.ListQuery{Limit: storage.MaxListLimit})
+	if err != nil {
+		a.logger.Error().Err(err).Msg("dashboard: spec list failed")
+		response.Unavailable(w, r, mode)
+		return
+	}
+
+	users, err := a.userSVC.List(ctx, user.ListQuery{Limit: storage.MaxListLimit})
+	if err != nil {
+		a.logger.Error().Err(err).Msg("dashboard: user list failed")
+		response.Unavailable(w, r, mode)
+		return
+	}
+
+	rollouts, err := a.specSVC.Rollouts(ctx, nil)
+	if err != nil {
+		a.logger.Error().Err(err).Msg("dashboard: rollouts list failed")
+		response.Unavailable(w, r, mode)
+		return
+	}
+
+	var synced, pending, failed, drift int
+	for _, r := range rollouts {
+		switch r.Status() {
+		case kind.SyncStatusSynced:
+			synced++
+		case kind.SyncStatusPending:
+			pending++
+		case kind.SyncStatusFailed:
+			failed++
+		case kind.SyncStatusDrift:
+			drift++
+		}
+	}
+
+	stats := contentHome.DashboardStats{
+		TotalAgents:   len(agents.Items),
+		TotalSpecs:    len(specs.Items),
+		TotalUsers:    len(users.Items),
+		TotalRollouts: len(rollouts),
+
+		ActiveAgents:       active,
+		InactiveAgents:     inactive,
+		DisconnectedAgents: disconnected,
+		SyncedRollouts:     synced,
+		PendingRollouts:    pending,
+		FailedRollouts:     failed,
+		DriftRollouts:      drift,
+		
+		Events: trigger.RecentEvents(30),
+		Issues: trigger.RecentEventsOfKind(15,
+			trigger.EventAgentDisconnected,
+			trigger.EventAgentInactive,
+			trigger.EventAgentDeleted,
+		),
+	}
+	response.OK(w, r, mode, &responder.View{
+		Data:      stats,
+		Component: contentHome.Dashboard(stats),
+	})
 }
 
 // Users handles /api/v1/users.
@@ -539,8 +635,6 @@ func (a *API) agentDetails(w http.ResponseWriter, r *http.Request, mode httpctx.
 }
 
 func (a *API) agentPatchLabels(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
-	// The Edit modal sends flat JSON { key: value, key: value }.
-	// We interpret the entire body as the new labels map.
 	var labels map[string]string
 	if err := json.NewDecoder(r.Body).Decode(&labels); err != nil {
 		response.BadRequest(w, r, mode)
@@ -807,6 +901,7 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 
 	if action == modeCreate {
 		a.logger.Info().Str("user_id", u.ID()).Str("subject", u.Subject()).Msg("user created")
+		trigger.Record(trigger.EventUserCreated, map[string]string{"id": u.ID(), "subject": u.Subject()})
 		trigger.Notify(trigger.UserUpdate)
 		trigger.Redirect(w, routepath.PageUsers)
 		response.NoContent(w, r)
@@ -825,6 +920,7 @@ func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 	a.logger.Info().Str("user_id", id).Msg("user deleted")
+	trigger.Record(trigger.EventUserDeleted, map[string]string{"id": id})
 	trigger.Notify(trigger.UserUpdate)
 	trigger.Redirect(w, routepath.PageUsers)
 	response.NoContent(w, r)
@@ -1217,6 +1313,7 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 			return
 		}
 		a.logger.Info().Str("spec", ts.ID()).Str("name", ts.Name()).Msg("spec created")
+		trigger.Record(trigger.EventSpecCreated, map[string]string{"id": ts.ID(), "name": ts.Name()})
 		trigger.Notify(trigger.SpecUpdate)
 		trigger.Redirect(w, routepath.PageSpecs)
 		response.NoContent(w, r)
@@ -1229,6 +1326,7 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 	a.logger.Info().Str("spec", id).Msg("spec updated")
+	trigger.Record(trigger.EventSpecUpdated, map[string]string{"id": id, "name": ts.Name()})
 	trigger.Set(w, trigger.SpecUpdate)
 	response.NoContent(w, r)
 }
@@ -1275,6 +1373,7 @@ func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		}
 	}
 
+	trigger.Record(trigger.EventSpecDeployed, map[string]string{"id": id})
 	trigger.Set(w, trigger.SpecUpdate)
 	response.NoContent(w, r)
 }

@@ -1,0 +1,18 @@
+package list
+
+// Sentinel renders an infinite-scroll trigger that loads the next page.
+// id is the sentinel element ID (e.g. "specs-sentinel").
+// nextURL is the full URL for the next page (caller builds it).
+// parentID is the CSS ID of the parent container whose children are appended.
+templ Sentinel(id, nextURL, parentID string) {
+	<div
+		id={ id }
+		class="col-span-full h-6"
+		hx-get={ nextURL }
+		hx-trigger="revealed"
+		hx-target="this"
+		hx-swap="outerHTML"
+		hx-select={ "#" + parentID + " > *" }
+		hx-sync={ "#" + id + ":replace" }
+	></div>
+}

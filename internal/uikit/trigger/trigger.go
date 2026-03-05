@@ -17,6 +17,19 @@ const (
 	UserUpdate    = "user_update"
 )
 
+// Event kinds for the dashboard activity feed.
+const (
+	EventAgentConnected    = "agent_connected"
+	EventAgentInactive     = "agent_inactive"
+	EventAgentDisconnected = "agent_disconnected"
+	EventAgentDeleted      = "agent_deleted"
+	EventSpecCreated       = "spec_created"
+	EventSpecUpdated       = "spec_updated"
+	EventSpecDeployed      = "spec_deployed"
+	EventUserCreated       = "user_created"
+	EventUserDeleted       = "user_deleted"
+)
+
 const (
 	Every1m = "every 60s"
 	Every3m = "every 180s"
@@ -25,6 +38,7 @@ const (
 
 // Config holds configurable polling intervals.
 type Config struct {
+	DashboardRefresh    string `yaml:"dashboard_refresh"`
 	UsersRefresh        string `yaml:"users_refresh"`
 	UserDetailRefresh   string `yaml:"user_detail_refresh"`
 	UserSessionsRefresh string `yaml:"user_sessions_refresh"`
@@ -39,6 +53,8 @@ var cfg = defaultConfig()
 
 func defaultConfig() Config {
 	return Config{
+		DashboardRefresh: Every1m,
+
 		UsersRefresh:        Every3m,
 		UserDetailRefresh:   Every5m,
 		UserSessionsRefresh: Every3m,
@@ -54,6 +70,9 @@ func defaultConfig() Config {
 
 // Configure overrides default polling intervals. Must be called before server start.
 func Configure(c Config) {
+	if c.DashboardRefresh != "" {
+		cfg.DashboardRefresh = c.DashboardRefresh
+	}
 	if c.UsersRefresh != "" {
 		cfg.UsersRefresh = c.UsersRefresh
 	}
@@ -79,6 +98,9 @@ func Configure(c Config) {
 		cfg.SpecDetailRefresh = c.SpecDetailRefresh
 	}
 }
+
+// GetDashboardRefresh returns the polling interval for the dashboard.
+func GetDashboardRefresh() string { return cfg.DashboardRefresh }
 
 // GetUsersRefresh returns the polling interval for user lists.
 func GetUsersRefresh() string { return cfg.UsersRefresh }
@@ -108,6 +130,15 @@ func GetSpecDetailRefresh() string { return cfg.SpecDetailRefresh }
 // Use on Results containers that handle periodic and event-driven refreshes.
 func Poll(interval, event string) string {
 	return interval + ", " + event + " from:body"
+}
+
+// PollMulti returns an hx-trigger value combining a polling interval with multiple SSE events.
+func PollMulti(interval string, events ...string) string {
+	s := interval
+	for _, e := range events {
+		s += ", " + e + " from:body"
+	}
+	return s
 }
 
 // LoadAndPoll returns an hx-trigger value that fires once on a load, then keeps

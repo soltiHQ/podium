@@ -6,17 +6,19 @@ import (
 	"github.com/soltiHQ/control-plane/ui/templates/component/status"
 )
 
-// Create is a pre-built creation modal with a form that sends JSON via POST.
+// FormModal is a unified create/edit modal with a form that sends JSON.
 //
-//   - name:      Alpine event name (e.g. "create-user")
+//   - name:      Alpine event name (e.g. "create-user", "edit-user")
 //   - titleText: heading shown in the modal
-//   - action:    POST URL for the form submission
+//   - action:    URL for form submission
+//   - method:    HTTP method — "POST" renders Create/Creating, "PUT" renders Save/Saving
 //   - fields:    static text inputs
 //   - selects:   async multi-selects loaded from API
-templ Create(
+templ FormModal(
 	name string,
 	titleText string,
 	action string,
+	method string,
 	fields []Field,
 	selects []AsyncSelect,
 ) {
@@ -24,7 +26,7 @@ templ Create(
 		<form
 			x-data={ editFormData(fields, selects) }
 			x-init={ initExpr(selects) }
-			x-on:submit.prevent={ createSubmitExpr(action, fields, selects) }
+			x-on:submit.prevent={ formSubmitExpr(method, action, fields, selects) }
 		>
 			<!-- preloader -->
 			<div x-show="loading" class={ formBody }>
@@ -112,8 +114,13 @@ templ Create(
 					@button.Button("", "submit", false, button.VariantPrimary, false,
 						templ.Attributes{"x-bind:disabled": "submitting"},
 					) {
-						<span x-show="!submitting">Create</span>
-						<span x-show="submitting" x-cloak>Creating...</span>
+						if method == "POST" {
+							<span x-show="!submitting">Create</span>
+							<span x-show="submitting" x-cloak>Creating...</span>
+						} else {
+							<span x-show="!submitting">Save</span>
+							<span x-show="submitting" x-cloak>Saving...</span>
+						}
 					}
 				}
 			</div>

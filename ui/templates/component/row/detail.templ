@@ -1,0 +1,30 @@
+package row
+
+import (
+	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
+)
+
+// Detail renders a multi-line row with a status dot, title, subtitle, and detail line.
+templ Detail(dotColor, title, subtitle, detail string, dimmed bool) {
+	<div class={ "px-5 py-4", templ.KV("opacity-60", dimmed) }>
+		<div class="flex items-center justify-between gap-4 mb-2">
+			<div class="flex items-center gap-2.5 min-w-0">
+				@visual.StatusDot(dotColor)
+				<span class="text-sm font-medium text-fg">{ title }</span>
+			</div>
+			{ children... }
+		</div>
+		if subtitle != "" {
+			<div class="text-xs text-muted pl-[18px]">
+				{ subtitle }
+			</div>
+		}
+		if detail != "" {
+			<div class="mt-1 pl-[18px] min-w-0">
+				@visual.Copy(detail) {
+					@visual.Truncate(detail, "text-[11px] text-fg/40")
+				}
+			</div>
+		}
+	</div>
+}

@@ -115,18 +115,20 @@ templ Identity(u restv1.User, p policy.UserDetail) {
 
 	if p.CanEdit {
 		if p.CanEditRoles {
-			@modal.Edit(
+			@modal.FormModal(
 				"edit-user",
 				"Edit user",
 				routepath.ApiUserCrudOp(u.ID),
+				"PUT",
 				editFields(u),
 				editSelects(u),
 			)
 		} else {
-			@modal.Edit(
+			@modal.FormModal(
 				"edit-user",
 				"Edit user",
 				routepath.ApiUserCrudOp(u.ID),
+				"PUT",
 				editFields(u),
 				nil,
 			)

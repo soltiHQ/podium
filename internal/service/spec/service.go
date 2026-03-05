@@ -93,7 +93,22 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	return s.store.DeleteSpec(ctx, id)
 }
 
-// RolloutsBySpec returns all rollout records associated with a spec.
+// Rollouts return all rollout records associated with a spec.
+func (s *Service) Rollouts(ctx context.Context, filter storage.RolloutFilter) ([]*model.Rollout, error) {
+	res, err := s.store.ListRollouts(ctx, filter, storage.ListOptions{Limit: storage.MaxListLimit})
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]*model.Rollout, 0, len(res.Items))
+	for _, r := range res.Items {
+		if r != nil {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
 func (s *Service) RolloutsBySpec(ctx context.Context, specID string, filter storage.RolloutFilter) ([]*model.Rollout, error) {
 	if specID == "" {
 		return nil, storage.ErrInvalidArgument
