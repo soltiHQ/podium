@@ -65,20 +65,20 @@ templ Dashboard(stats DashboardStats) {
 
 // statsBar renders the top stats strip with accent background and shadow.
 templ statsBar(stats DashboardStats) {
-	<div class="flex items-center gap-4 px-4 py-2.5 rounded-[var(--r-xl)] bg-primary-bg shadow-1">
-		<a href={ templ.SafeURL(routepath.PageAgents) } class="flex items-center gap-1.5 text-sm hover:text-on-primary-container transition-colors">
-			<span class="font-semibold text-on-primary-container tabular-nums">{ fmt.Sprint(stats.TotalAgents) }</span>
-			<span class="text-on-primary-container/70">{ word(stats.TotalAgents, "agent", "agents") }</span>
+	<div class="flex items-center gap-4 px-4 py-2.5 rounded-[var(--r-xl)] bg-primary/80 shadow-1">
+		<a href={ templ.SafeURL(routepath.PageAgents) } class="flex items-center gap-1.5 text-sm hover:text-on-primary/80 transition-colors">
+			<span class="font-semibold text-on-primary tabular-nums">{ fmt.Sprint(stats.TotalAgents) }</span>
+			<span class="text-on-primary/70">{ word(stats.TotalAgents, "agent", "agents") }</span>
 		</a>
-		<span class="text-on-primary-container/30">·</span>
-		<a href={ templ.SafeURL(routepath.PageSpecs) } class="flex items-center gap-1.5 text-sm hover:text-on-primary-container transition-colors">
-			<span class="font-semibold text-on-primary-container tabular-nums">{ fmt.Sprint(stats.TotalSpecs) }</span>
-			<span class="text-on-primary-container/70">{ word(stats.TotalSpecs, "spec", "specs") }</span>
+		<span class="text-on-primary/30">·</span>
+		<a href={ templ.SafeURL(routepath.PageSpecs) } class="flex items-center gap-1.5 text-sm hover:text-on-primary/80 transition-colors">
+			<span class="font-semibold text-on-primary tabular-nums">{ fmt.Sprint(stats.TotalSpecs) }</span>
+			<span class="text-on-primary/70">{ word(stats.TotalSpecs, "spec", "specs") }</span>
 		</a>
-		<span class="text-on-primary-container/30">·</span>
-		<a href={ templ.SafeURL(routepath.PageUsers) } class="flex items-center gap-1.5 text-sm hover:text-on-primary-container transition-colors">
-			<span class="font-semibold text-on-primary-container tabular-nums">{ fmt.Sprint(stats.TotalUsers) }</span>
-			<span class="text-on-primary-container/70">{ word(stats.TotalUsers, "user", "users") }</span>
+		<span class="text-on-primary/30">·</span>
+		<a href={ templ.SafeURL(routepath.PageUsers) } class="flex items-center gap-1.5 text-sm hover:text-on-primary/80 transition-colors">
+			<span class="font-semibold text-on-primary tabular-nums">{ fmt.Sprint(stats.TotalUsers) }</span>
+			<span class="text-on-primary/70">{ word(stats.TotalUsers, "user", "users") }</span>
 		</a>
 	</div>
 }
