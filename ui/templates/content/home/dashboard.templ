@@ -1,0 +1,123 @@
+package home
+
+import (
+	"fmt"
+
+	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
+	"github.com/soltiHQ/control-plane/internal/uikit/timeformat"
+	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
+	"github.com/soltiHQ/control-plane/ui/templates/component/row"
+	"github.com/soltiHQ/control-plane/ui/templates/component/status"
+	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
+)
+
+// DashboardStats holds the aggregated data for the dashboard view.
+type DashboardStats struct {
+	TotalAgents        int
+	ActiveAgents       int
+	InactiveAgents     int
+	DisconnectedAgents int
+	TotalSpecs         int
+	TotalUsers         int
+	TotalRollouts      int
+	SyncedRollouts     int
+	PendingRollouts    int
+	FailedRollouts     int
+	DriftRollouts      int
+	Events             []trigger.EventRecord
+	Issues             []trigger.EventRecord
+}
+
+// Dashboard renders the dashboard with a stats bar, issues feed, and activity feed.
+templ Dashboard(stats DashboardStats) {
+	<div
+		id="dashboard-results"
+		hx-get={ routepath.ApiDashboard }
+		hx-trigger={ trigger.PollMulti(trigger.GetDashboardRefresh(), trigger.AgentUpdate, trigger.SpecUpdate, trigger.UserUpdate) }
+		hx-target="this"
+		hx-swap="outerHTML"
+		hx-select="#dashboard-results"
+	>
+		@statsBar(stats)
+
+		<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+			// ── Issues ──
+			<div class="rounded-[var(--r-md)] border border-border bg-card overflow-hidden flex flex-col" style="height:50vh;min-height:420px">
+				<div class="px-4 py-3 border-b border-border shrink-0">
+					<h2 class={ visual.SectionTitle }>Issues</h2>
+				</div>
+				<div class="flex-1 overflow-y-auto px-3 py-3">
+					@IssueTable(stats.Issues)
+				</div>
+			</div>
+
+			// ── Activity ──
+			<div class="rounded-[var(--r-md)] border border-border bg-card overflow-hidden flex flex-col" style="height:50vh;min-height:420px">
+				<div class="px-4 py-3 border-b border-border shrink-0">
+					<h2 class={ visual.SectionTitle }>Activity</h2>
+				</div>
+				<div class="flex-1 overflow-y-auto">
+					@ActivityTable(stats.Events)
+				</div>
+			</div>
+		</div>
+	</div>
+}
+
+// statsBar renders the top stats strip with accent background and shadow.
+templ statsBar(stats DashboardStats) {
+	<div class="flex items-center gap-4 px-4 py-2.5 rounded-[var(--r-xl)] bg-primary/80 shadow-1">
+		<a href={ templ.SafeURL(routepath.PageAgents) } class="flex items-center gap-1.5 text-sm hover:text-on-primary/80 transition-colors">
+			<span class="font-semibold text-on-primary tabular-nums">{ fmt.Sprint(stats.TotalAgents) }</span>
+			<span class="text-on-primary/70">{ word(stats.TotalAgents, "agent", "agents") }</span>
+		</a>
+		<span class="text-on-primary/30">/</span>
+		<a href={ templ.SafeURL(routepath.PageSpecs) } class="flex items-center gap-1.5 text-sm hover:text-on-primary/80 transition-colors">
+			<span class="font-semibold text-on-primary tabular-nums">{ fmt.Sprint(stats.TotalSpecs) }</span>
+			<span class="text-on-primary/70">{ word(stats.TotalSpecs, "spec", "specs") }</span>
+		</a>
+		<span class="text-on-primary/30">/</span>
+		<a href={ templ.SafeURL(routepath.PageUsers) } class="flex items-center gap-1.5 text-sm hover:text-on-primary/80 transition-colors">
+			<span class="font-semibold text-on-primary tabular-nums">{ fmt.Sprint(stats.TotalUsers) }</span>
+			<span class="text-on-primary/70">{ word(stats.TotalUsers, "user", "users") }</span>
+		</a>
+	</div>
+}
+
+// IssueTable renders issue events using accent row cards.
+templ IssueTable(issues []trigger.EventRecord) {
+	if len(issues) == 0 {
+		@status.NoIssues("No issues")
+	} else {
+		<div class="space-y-2">
+			for _, ev := range issues {
+				@row.Accent(
+					issueBorderColor(ev.Kind),
+					eventLabel(ev.Kind),
+					eventLabelColor(ev.Kind),
+					eventEntity(ev.Kind)+" · "+eventName(ev),
+					timeformat.Relative(ev.Time),
+				)
+			}
+		</div>
+	}
+}
+
+// ActivityTable renders the event list using compact table rows.
+templ ActivityTable(events []trigger.EventRecord) {
+	if len(events) == 0 {
+		@status.Empty("No recent activity")
+	} else {
+		<table class="w-full text-sm">
+			for _, ev := range events {
+				@row.Compact(
+					eventLabel(ev.Kind),
+					eventLabelColor(ev.Kind),
+					eventEntity(ev.Kind),
+					eventName(ev),
+					timeformat.Relative(ev.Time),
+				)
+			}
+		</table>
+	}
+}

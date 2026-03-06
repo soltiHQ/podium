@@ -7,10 +7,11 @@ import (
 
 // CreateModal wraps modal.Create with user-specific fields.
 templ CreateModal() {
-	@modal.Create(
+	@modal.FormModal(
 		"create-user",
 		"Add user",
 		routepath.ApiUsers,
+		"POST",
 		createFields(),
 		nil,
 	)

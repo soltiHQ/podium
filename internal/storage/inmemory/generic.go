@@ -31,7 +31,7 @@ func validateEntity[T domain.Entity[T]](entity T) error {
 	if entity.ID() == "" {
 		return storage.ErrInvalidArgument
 	}
-	if entity.UpdatedAt().IsZero() {
+	if entity.CreatedAt().IsZero() {
 		return storage.ErrInvalidArgument
 	}
 	return nil
@@ -166,7 +166,7 @@ func (s *GenericStore[T]) GetMany(_ context.Context, ids []string) ([]T, error) 
 //   - Pass nil predicate to retrieve all entities.
 //   - Pass a function that returns true for entities to include.
 //
-// Pagination ordering is (UpdatedAt DESC, ID ASC).
+// Pagination ordering is (CreatedAt DESC, ID ASC).
 // Cursor is an opaque token produced by this backend; a malformed cursor returns ErrInvalidArgument.
 func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts storage.ListOptions) (*storage.ListResult[T], error) {
 	cur, err := decodeCursor(opts.Cursor)
@@ -176,7 +176,6 @@ func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts
 
 	limit := storage.NormalizeLimit(opts.Limit)
 
-	// snapshot under read lock
 	s.mu.RLock()
 	if len(s.data) == 0 {
 		s.mu.RUnlock()
@@ -206,13 +205,12 @@ func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts
 		return &storage.ListResult[T]{Items: []T{}, NextCursor: ""}, nil
 	}
 
-	// sort once (ctx cannot interrupt sort.Slice in the middle; acceptable for inmemory)
 	sort.Slice(snapshot, func(i, j int) bool {
-		ti, tj := snapshot[i].UpdatedAt(), snapshot[j].UpdatedAt()
+		ti, tj := snapshot[i].CreatedAt(), snapshot[j].CreatedAt()
 		if !ti.Equal(tj) {
 			return ti.After(tj) // DESC
 		}
-		return snapshot[i].ID() < snapshot[j].ID() // ASC
+		return snapshot[i].ID() < snapshot[j].ID()
 	})
 
 	start := 0
@@ -238,7 +236,7 @@ func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts
 	if end < len(snapshot) {
 		last := page[len(page)-1]
 		nextCursor, err = encodeCursor(cursor{
-			UpdatedAtUnixNano: last.UpdatedAt().UnixNano(),
+			CreatedAtUnixNano: last.CreatedAt().UnixNano(),
 			ID:                last.ID(),
 		})
 		if err != nil {
@@ -270,7 +268,7 @@ func (s *GenericStore[T]) Delete(_ context.Context, id string) error {
 	return nil
 }
 
-// findCursorPosition returns the index of the first item strictly after the cursor under ordering (UpdatedAt DESC, ID ASC).
+// findCursorPosition returns the index of the first item strictly after the cursor under ordering (CreatedAt DESC, ID ASC).
 func findCursorPosition[T domain.Entity[T]](ctx context.Context, items []T, cur cursor) (int, error) {
 	for i, e := range items {
 		if i%1000 == 0 {
@@ -281,24 +279,16 @@ func findCursorPosition[T domain.Entity[T]](ctx context.Context, items []T, cur 
 			}
 		}
 
-		eu := e.UpdatedAt().UnixNano()
-
-		// exact match -> start after it
-		if eu == cur.UpdatedAtUnixNano && e.ID() == cur.ID {
+		eu := e.CreatedAt().UnixNano()
+		if eu == cur.CreatedAtUnixNano && e.ID() == cur.ID {
 			return i + 1, nil
 		}
-
-		// strictly after cursor in (DESC, ASC) order:
-		//   UpdatedAt smaller => later
-		//   UpdatedAt equal and ID greater => later
-		if eu < cur.UpdatedAtUnixNano {
+		if eu < cur.CreatedAtUnixNano {
 			return i, nil
 		}
-		if eu == cur.UpdatedAtUnixNano && e.ID() > cur.ID {
+		if eu == cur.CreatedAtUnixNano && e.ID() > cur.ID {
 			return i, nil
 		}
 	}
-
-	// the cursor is after all items -> nothing left
 	return len(items), nil
 }

@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/rs/zerolog"
@@ -14,6 +15,7 @@ import (
 	genv1 "github.com/soltiHQ/control-plane/api/gen/v1"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
+	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
@@ -75,10 +77,14 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, r, mode)
 		return
 	}
+	_, getErr := h.agentSVC.Get(r.Context(), in.ID)
 	if err = h.agentSVC.Upsert(r.Context(), a); err != nil {
 		h.logger.Error().Err(err).Str("agent_id", in.ID).Msg("upsert failed")
 		response.Unavailable(w, r, mode)
 		return
+	}
+	if errors.Is(getErr, storage.ErrNotFound) {
+		trigger.Record(trigger.EventAgentConnected, map[string]string{"id": in.ID, "name": in.Name})
 	}
 	trigger.Notify(trigger.AgentUpdate)
 	response.OK(w, r, mode, &responder.View{
@@ -124,9 +130,13 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *genv1.SyncRequest) (*genv
 		return nil, status.Errorf(ctx, codes.InvalidArgument, "invalid agent data: %v", err)
 	}
 
+	_, getErr := g.agentSVC.Get(ctx, req.GetId())
 	if err = g.agentSVC.Upsert(ctx, a); err != nil {
 		g.logger.Error().Err(err).Str("agent_id", req.GetId()).Msg("upsert failed")
 		return nil, status.FromError(ctx, err).Err()
+	}
+	if errors.Is(getErr, storage.ErrNotFound) {
+		trigger.Record(trigger.EventAgentConnected, map[string]string{"id": req.GetId(), "name": req.GetName()})
 	}
 	trigger.Notify(trigger.AgentUpdate)
 	return &genv1.SyncResponse{Success: true}, nil

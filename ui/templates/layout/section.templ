@@ -2,6 +2,7 @@ package layout
 
 import (
 	"github.com/soltiHQ/control-plane/internal/uikit/policy"
+	compnav "github.com/soltiHQ/control-plane/ui/templates/component/nav"
 	"github.com/soltiHQ/control-plane/ui/templates/component/status"
 )
 
@@ -18,14 +19,7 @@ type SectionPanel struct {
 // sections span the full content width.
 templ SectionPage(title string, active string, nav policy.Nav, backURL string, backLabel string, panels ...SectionPanel) {
 	@App(title, active, nav) {
-		<!-- Back link -->
-		<div class="mb-6">
-			<a href={ templ.SafeURL(backURL) }
-				class="inline-flex items-center gap-1.5 text-sm text-muted hover:text-fg transition-colors">
-				<span>←</span>
-				<span>{ backLabel }</span>
-			</a>
-		</div>
+		@compnav.BackLink(backURL, backLabel)
 
 		<div class="space-y-6">
 			for _, p := range panels {

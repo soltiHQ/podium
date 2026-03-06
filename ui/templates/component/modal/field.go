@@ -156,17 +156,6 @@ func passwordSubmitExpr(action string) string {
 	)
 }
 
-// submitExpr builds the Alpine x-on:submit.prevent expression
-// that collects editable fields and async selects into a JSON body and sends a PUT.
-func submitExpr(action string, fields []Field, selects []AsyncSelect) string {
-	return formSubmitExpr("PUT", action, fields, selects)
-}
-
-// createSubmitExpr builds the same expression but sends a POST.
-func createSubmitExpr(action string, fields []Field, selects []AsyncSelect) string {
-	return formSubmitExpr("POST", action, fields, selects)
-}
-
 // formSubmitExpr builds the Alpine submit expression with a configurable HTTP method.
 func formSubmitExpr(method, action string, fields []Field, selects []AsyncSelect) string {
 	ids := editableFieldIDs(fields)

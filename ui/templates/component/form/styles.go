@@ -18,13 +18,6 @@ const errBorder = "border border-danger " +
 	"hover:border-danger " +
 	"focus:ring-2 focus:ring-danger/25 focus:border-danger "
 
-// DisabledClass is the Tailwind class for read-only/disabled inputs.
-const DisabledClass = "block w-full h-11 px-4 " +
-	"rounded-[var(--r-xs)] " +
-	"bg-card text-fg/40 " +
-	"border border-border " +
-	"cursor-not-allowed opacity-60 "
-
 // BaseInputClass is the default input class (no error state).
 const BaseInputClass = baseInput + okBorder
 

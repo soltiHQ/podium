@@ -4,6 +4,7 @@ import (
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
 	"github.com/soltiHQ/control-plane/internal/uikit/policy"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
+	"github.com/soltiHQ/control-plane/internal/uikit/timeformat"
 	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 	"github.com/soltiHQ/control-plane/ui/templates/asset"
 	"github.com/soltiHQ/control-plane/ui/templates/component/button"
@@ -37,7 +38,7 @@ templ Identity(a restv1.Agent, p policy.AgentDetail) {
 							@visual.KV("OS", a.OS)
 							@visual.KV("Arch", a.Arch)
 							if a.UptimeSeconds > 0 {
-								@visual.KV("Uptime", formatUptime(a.UptimeSeconds))
+								@visual.KV("Uptime", timeformat.Uptime(a.UptimeSeconds))
 							}
 						</dl>
 					</div>
@@ -69,21 +70,13 @@ templ Identity(a restv1.Agent, p policy.AgentDetail) {
 }
 
 templ agentStatusBadge(s string) {
-	switch s {
-		case "active":
-			@visual.Badge("Active", visual.VariantSuccess) {
-				@visual.StatusDot("success")
-			}
-		case "inactive":
-			@visual.Badge("Inactive", visual.VariantMuted) {
-				@visual.StatusDot("muted")
-			}
-		case "disconnected":
-			@visual.Badge("Disconnected", visual.VariantDanger) {
-				@visual.StatusDot("danger")
-			}
-		default:
-			@visual.Badge(s, visual.VariantMuted)
+	{{
+		color := agentDotColorStr(s)
+		variant := agentBadgeVariant(color)
+		label := agentStatusLabel(s)
+	}}
+	@visual.Badge(label, variant) {
+		@visual.StatusDot(color)
 	}
 }
 

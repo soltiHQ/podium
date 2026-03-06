@@ -115,13 +115,13 @@ tasks:
     silent: true
 
   templ/gen:
-    internal: true
+    #internal: true
     cmds:
       - task: _go/tool
         vars: { CMD: "templ generate" }
 
   tailwindcss/gen:
-    internal: true
+    #internal: true
     cmds:
       - task: _go/tool
         vars: { CMD: "tailwindcss -c tailwind.config.cjs -i ui/static/css/app.css -o ui/static/css/tailwindcss.css --minify" }

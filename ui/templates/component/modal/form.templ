@@ -6,17 +6,19 @@ import (
 	"github.com/soltiHQ/control-plane/ui/templates/component/status"
 )
 
-// Edit is a pre-built edit modal with a form that sends JSON via PUT.
+// FormModal is a unified create/edit modal with a form that sends JSON.
 //
-//   - name:      Alpine event name (e.g. "edit-user")
+//   - name:      Alpine event name (e.g. "create-user", "edit-user")
 //   - titleText: heading shown in the modal
-//   - action:    PUT URL for the form submission
+//   - action:    URL for form submission
+//   - method:    HTTP method — "POST" renders Create/Creating, "PUT" renders Save/Saving
 //   - fields:    static text inputs
 //   - selects:   async multi-selects loaded from API
-templ Edit(
+templ FormModal(
 	name string,
 	titleText string,
 	action string,
+	method string,
 	fields []Field,
 	selects []AsyncSelect,
 ) {
@@ -24,7 +26,7 @@ templ Edit(
 		<form
 			x-data={ editFormData(fields, selects) }
 			x-init={ initExpr(selects) }
-			x-on:submit.prevent={ submitExpr(action, fields, selects) }
+			x-on:submit.prevent={ formSubmitExpr(method, action, fields, selects) }
 		>
 			<!-- preloader -->
 			<div x-show="loading" class={ formBody }>
@@ -59,26 +61,26 @@ templ Edit(
 						<div>
 							<label class={ form.LabelClass }>{ s.Label }</label>
 							<div
-								class={ msWrapper }
+								class={ form.MsWrapper }
 								x-on:click.outside={ closeDropdownExpr(s.ID) }
 							>
 								<!-- trigger / selected tags -->
 								<div
-									class={ msTrigger }
+									class={ form.MsTrigger }
 									x-on:click={ toggleDropdownExpr(s.ID) }
 								>
 									<template { xForSelected(s.ID)... }>
-										<span class={ msTag }>
+										<span class={ form.MsTag }>
 											<span x-text={ tagTextExpr(s) }></span>
 											<span
-												class={ msTagRemove }
+												class={ form.MsTagRemove }
 												x-on:click.stop={ removeTagExpr(s.ID) }
 											>&times;</span>
 										</span>
 									</template>
 									<span
 										x-show={ s.ID + ".length === 0" }
-										class={ msPlaceholder }
+										class={ form.MsPlaceholder }
 									>Select...</span>
 								</div>
 								<!-- dropdown list -->
@@ -86,16 +88,16 @@ templ Edit(
 									{ xShowDropdown(s.ID)... }
 									x-cloak
 									x-transition.opacity
-									class={ msDropdown }
+									class={ form.MsDropdown }
 								>
 									<template { xForOpts(s.ID)... }>
 										<div
-											class={ msOption }
+											class={ form.MsOption }
 											x-on:click={ toggleExpr(s.ID) }
 										>
 											<input
 												type="checkbox"
-												class={ msCheckbox }
+												class={ form.MsCheckbox }
 												x-bind:checked={ isCheckedExpr(s.ID) }
 											/>
 											<span x-text={ optTextExpr(s) }></span>
@@ -112,8 +114,13 @@ templ Edit(
 					@button.Button("", "submit", false, button.VariantPrimary, false,
 						templ.Attributes{"x-bind:disabled": "submitting"},
 					) {
-						<span x-show="!submitting">Save</span>
-						<span x-show="submitting" x-cloak>Saving...</span>
+						if method == "POST" {
+							<span x-show="!submitting">Create</span>
+							<span x-show="submitting" x-cloak>Creating...</span>
+						} else {
+							<span x-show="!submitting">Save</span>
+							<span x-show="submitting" x-cloak>Saving...</span>
+						}
 					}
 				}
 			</div>

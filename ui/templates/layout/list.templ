@@ -16,7 +16,7 @@ templ ListPage(title string, active string, nav policy.Nav) {
 
 // ListHeader renders a page title row with an optional action slot (e.g. "Add" button).
 templ ListHeader(title string) {
-	<div class="flex items-center justify-between">
+	<div class="flex items-center justify-between min-h-10">
 		<h1 class="text-2xl font-bold text-fg">
 			{ title }
 		</h1>
@@ -24,12 +24,13 @@ templ ListHeader(title string) {
 	</div>
 }
 
-// HTMXLoader renders a container that fetches content via HTMX on a given trigger.
-templ HTMXLoader(id string, url string, trigger string, preloadMsg string) {
+// HTMXLoader renders a container that fetches content via HTMX once on page load.
+// Subsequent refreshes (SSE, polling) are handled by the content's Results container.
+templ HTMXLoader(id string, url string, preloadMsg string) {
 	<div
 		id={ id }
 		hx-get={ url }
-		hx-trigger={ trigger }
+		hx-trigger="load"
 		hx-target="this"
 		hx-swap="innerHTML"
 		class="min-h-[120px]"

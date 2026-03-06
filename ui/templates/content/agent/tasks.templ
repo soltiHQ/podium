@@ -7,17 +7,19 @@ import (
 
 	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
+	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
 	"github.com/soltiHQ/control-plane/ui/templates/component/form"
+	"github.com/soltiHQ/control-plane/ui/templates/component/list"
 	"github.com/soltiHQ/control-plane/ui/templates/component/status"
 	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
 )
 
 // Tasks renders the paginated task table for a specific agent.
-templ Tasks(agentID string, items []proxyv1.Task, total int, slot string, offset int) {
+templ Tasks(agentID string, items []proxyv1.Task, total int, q string, offset int) {
 	@card.Card("") {
 		@card.CardHeader() {
-			<h2 class="text-[11px] uppercase tracking-[0.05em] text-muted select-none">
+			<h2 class={ visual.SectionLabel + " select-none" }>
 				Tasks
 			</h2>
 			<span class="text-[11px] text-muted tabular-nums">
@@ -29,28 +31,37 @@ templ Tasks(agentID string, items []proxyv1.Task, total int, slot string, offset
 			<div class="mb-4">
 				@form.SearchInput(
 					"tasks-search",
-					"slot",
-					slot,
+					"q",
+					q,
 					"Filter by slot…",
 					routepath.ApiAgentTasks(agentID),
 					"#tasks-results",
 				)
 			</div>
 
-			@TaskResults(agentID, items, total, slot, offset)
+			@TaskResults(agentID, items, total, q, offset)
 		}
 	}
 }
 
 // TaskResults is the HTMX-swappable wrapper for task rows + pagination.
-templ TaskResults(agentID string, items []proxyv1.Task, total int, slot string, offset int) {
-	<div id="tasks-results">
-		<div id="tasks-rows" class="divide-y divide-border -mx-5">
+// SSE and polling triggers live here (not on the outer panel) so that refreshes
+// replace only the results, leaving the search input untouched.
+templ TaskResults(agentID string, items []proxyv1.Task, total int, q string, offset int) {
+	<div
+		id="tasks-results"
+		hx-get={ routepath.ApiAgentTasks(agentID) }
+		hx-trigger={ trigger.Poll(trigger.GetAgentTasksRefresh(), trigger.AgentUpdate) }
+		hx-target="this"
+		hx-swap="outerHTML"
+		hx-select="#tasks-results"
+		hx-include="#tasks-search"
+	>
+		<div id="tasks-rows" class={ list.StripedClass }>
 			@TaskRows(items)
-		</div>
-
-		<div id="tasks-footer">
-			@TaskFooter(agentID, total, slot, offset, len(items))
+			if nextOffset(offset, len(items)) < total {
+				@list.Sentinel("tasks-sentinel", tasksURL(agentID, q, nextOffset(offset, len(items))), "tasks-rows")
+			}
 		</div>
 	</div>
 }
@@ -58,7 +69,7 @@ templ TaskResults(agentID string, items []proxyv1.Task, total int, slot string, 
 // TaskRows renders table rows for a slice of tasks.
 templ TaskRows(items []proxyv1.Task) {
 	if len(items) == 0 {
-		@status.Empty("No tasks found")
+		@status.NotFound("No tasks found")
 	} else {
 		for _, t := range items {
 			@taskRow(t)
@@ -116,29 +127,14 @@ templ taskStatusBadge(s string) {
 	}
 }
 
-// TaskFooter renders the "Load more" button for offset-based task pagination.
-templ TaskFooter(agentID string, total int, slot string, offset int, count int) {
-	if nextOffset(offset, count) < total {
-		<div
-			id="tasks-sentinel"
-			class="h-6"
-			hx-get={ tasksURL(agentID, slot, nextOffset(offset, count)) }
-			hx-trigger="revealed"
-			hx-target="#tasks-rows"
-			hx-swap="beforeend"
-			hx-sync="#tasks-sentinel:replace"
-		></div>
-	}
-}
-
 func nextOffset(offset int, count int) int {
 	return offset + count
 }
 
-func tasksURL(agentID string, slot string, offset int) string {
+func tasksURL(agentID string, q string, offset int) string {
 	v := url.Values{}
-	if slot != "" {
-		v.Set("slot", slot)
+	if q != "" {
+		v.Set("q", q)
 	}
 	if offset > 0 {
 		v.Set("offset", strconv.Itoa(offset))

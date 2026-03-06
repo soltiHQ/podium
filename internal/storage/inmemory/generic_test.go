@@ -286,7 +286,7 @@ func TestCursor_BackendValidation(t *testing.T) {
 	raw := cursor{
 		Backend:           "not-inmemory",
 		Version:           1,
-		UpdatedAtUnixNano: time.Unix(10, 0).UTC().UnixNano(),
+		CreatedAtUnixNano: time.Unix(10, 0).UTC().UnixNano(),
 		ID:                "x",
 	}
 

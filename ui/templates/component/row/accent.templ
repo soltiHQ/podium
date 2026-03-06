@@ -1,0 +1,20 @@
+package row
+
+// Accent renders a bordered card with a thick colored left accent strip.
+templ Accent(borderColor, label, labelColor, name, timeStr string) {
+	<div class={ "rounded-[var(--r-sm)] border border-border border-l-[5px] " + borderColor }>
+		<div class="flex items-center gap-3 px-4 py-3">
+			<span class={ "text-xs font-medium shrink-0 w-20 " + labelColor }>
+				{ label }
+			</span>
+			<span class="text-sm text-fg font-medium truncate">
+				{ name }
+			</span>
+			if timeStr != "" {
+				<span class="text-xs text-muted tabular-nums whitespace-nowrap ml-auto shrink-0">
+					{ timeStr }
+				</span>
+			}
+		</div>
+	</div>
+}
