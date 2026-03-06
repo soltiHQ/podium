@@ -56,7 +56,7 @@ templ Results(items []*model.User, nextCursor string, q string) {
 // Cards renders the grid of user item cards.
 templ Cards(items []*model.User) {
 	if len(items) == 0 {
-		@status.Empty("No users found")
+		@status.NotFound("No users found")
 	} else {
 		for _, u := range items {
 			@card.Item(routepath.PageUserInfoByID(u.ID())) {

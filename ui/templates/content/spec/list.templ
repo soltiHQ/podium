@@ -58,7 +58,7 @@ templ Results(items []*model.Spec, nextCursor string, q string) {
 // Cards renders the grid of spec item cards.
 templ Cards(items []*model.Spec) {
 	if len(items) == 0 {
-		@status.Empty("No specs found")
+		@status.NotFound("No specs found")
 	} else {
 		for _, ts := range items {
 			@card.Item(routepath.PageSpecInfoByID(ts.ID())) {

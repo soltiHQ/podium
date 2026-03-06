@@ -58,7 +58,7 @@ templ Results(items []*model.Agent, nextCursor string, q string) {
 // Cards renders the grid of agent item cards.
 templ Cards(items []*model.Agent) {
 	if len(items) == 0 {
-		@status.Empty("No agents found")
+		@status.NotFound("No agents found")
 	} else {
 		for _, a := range items {
 			@card.Item(routepath.PageAgentInfoByID(a.ID())) {

@@ -7,6 +7,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/uikit/timeformat"
 	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 	"github.com/soltiHQ/control-plane/ui/templates/component/row"
+	"github.com/soltiHQ/control-plane/ui/templates/component/status"
 	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
 )
 
@@ -70,12 +71,12 @@ templ statsBar(stats DashboardStats) {
 			<span class="font-semibold text-on-primary tabular-nums">{ fmt.Sprint(stats.TotalAgents) }</span>
 			<span class="text-on-primary/70">{ word(stats.TotalAgents, "agent", "agents") }</span>
 		</a>
-		<span class="text-on-primary/30">·</span>
+		<span class="text-on-primary/30">/</span>
 		<a href={ templ.SafeURL(routepath.PageSpecs) } class="flex items-center gap-1.5 text-sm hover:text-on-primary/80 transition-colors">
 			<span class="font-semibold text-on-primary tabular-nums">{ fmt.Sprint(stats.TotalSpecs) }</span>
 			<span class="text-on-primary/70">{ word(stats.TotalSpecs, "spec", "specs") }</span>
 		</a>
-		<span class="text-on-primary/30">·</span>
+		<span class="text-on-primary/30">/</span>
 		<a href={ templ.SafeURL(routepath.PageUsers) } class="flex items-center gap-1.5 text-sm hover:text-on-primary/80 transition-colors">
 			<span class="font-semibold text-on-primary tabular-nums">{ fmt.Sprint(stats.TotalUsers) }</span>
 			<span class="text-on-primary/70">{ word(stats.TotalUsers, "user", "users") }</span>
@@ -107,9 +108,7 @@ templ IssueTable(issues []trigger.EventRecord) {
 // ActivityTable renders the event list using compact table rows.
 templ ActivityTable(events []trigger.EventRecord) {
 	if len(events) == 0 {
-		<div class="px-4 py-6 text-center text-sm text-muted">
-			No recent activity
-		</div>
+		@status.Empty("No recent activity")
 	} else {
 		<table class="w-full text-sm">
 			for _, ev := range events {

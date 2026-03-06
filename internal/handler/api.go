@@ -901,7 +901,7 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 
 	if action == modeCreate {
 		a.logger.Info().Str("user_id", u.ID()).Str("subject", u.Subject()).Msg("user created")
-		trigger.Record(trigger.EventUserCreated, map[string]string{"id": u.ID(), "subject": u.Subject()})
+		trigger.Record(trigger.EventUserCreated, map[string]string{"id": u.ID(), "name": u.Name(), "subject": u.Subject()})
 		trigger.Notify(trigger.UserUpdate)
 		trigger.Redirect(w, routepath.PageUsers)
 		response.NoContent(w, r)

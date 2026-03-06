@@ -1,11 +1,11 @@
 package status
 
-// Empty renders an "empty list" placeholder with an illustration.
-templ Empty(message string) {
+// NotFound renders a "no items" placeholder with an illustration.
+templ NotFound(message string) {
 	<div class={ containerClass("py-14") }>
 		<div class="opacity-70">
 			<img
-				src="/static/img/empty.png"
+				src="/static/img/notfound.png"
 				alt=""
 				aria-hidden="true"
 				class="w-80 h-auto select-none pointer-events-none"

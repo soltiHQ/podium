@@ -114,7 +114,7 @@ templ Detail(ts restv1.RolloutSpec, p policy.SpecDetail) {
 // Rollouts renders the per-agent rollout entries.
 templ Rollouts(states []restv1.RolloutEntry) {
 	if len(states) == 0 {
-		@status.Empty("No rollouts")
+		@status.NotFound("No rollouts")
 	} else {
 		<div class="space-y-3">
 			<h3 class={ visual.SectionTitle }>Rollouts</h3>

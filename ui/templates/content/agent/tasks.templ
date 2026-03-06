@@ -69,7 +69,7 @@ templ TaskResults(agentID string, items []proxyv1.Task, total int, q string, off
 // TaskRows renders table rows for a slice of tasks.
 templ TaskRows(items []proxyv1.Task) {
 	if len(items) == 0 {
-		@status.Empty("No tasks found")
+		@status.NotFound("No tasks found")
 	} else {
 		for _, t := range items {
 			@taskRow(t)
