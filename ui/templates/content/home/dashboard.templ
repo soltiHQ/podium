@@ -87,9 +87,7 @@ templ statsBar(stats DashboardStats) {
 // IssueTable renders issue events using accent row cards.
 templ IssueTable(issues []trigger.EventRecord) {
 	if len(issues) == 0 {
-		<div class="px-4 py-6 text-center text-sm text-muted">
-			No issues
-		</div>
+		@status.NoIssues("No issues")
 	} else {
 		<div class="space-y-2">
 			for _, ev := range issues {
