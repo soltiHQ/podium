@@ -111,10 +111,10 @@
         --secondary: 181 204 200;
         --secondary-bg: 31 52 49;
 
-        --danger: 248 113 113;
+        --danger: 255 82 82;
         --danger-bg: 127 0 10;
-        --warning: 202 163 30;
-        --success: 52 211 153;
+        --warning: 250 204 21;
+        --success: 34 237 148;
 
         --nav-link-bg: 0 55 50;
         --nav-link-fg: 204 243 238;
