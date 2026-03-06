@@ -211,7 +211,7 @@ func (a *API) Dashboard(w http.ResponseWriter, r *http.Request) {
 		PendingRollouts:    pending,
 		FailedRollouts:     failed,
 		DriftRollouts:      drift,
-		
+
 		Events: trigger.RecentEvents(30),
 		Issues: trigger.RecentEventsOfKind(15,
 			trigger.EventAgentDisconnected,
@@ -913,6 +913,11 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 }
 
 func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
+	var name string
+	if u, err := a.userSVC.Get(r.Context(), id); err == nil {
+		name = u.Name()
+	}
+
 	err := a.userSVC.Delete(r.Context(), id)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		a.logger.Error().Err(err).Str("user_id", id).Msg("user delete failed")
@@ -920,7 +925,7 @@ func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 	a.logger.Info().Str("user_id", id).Msg("user deleted")
-	trigger.Record(trigger.EventUserDeleted, map[string]string{"id": id})
+	trigger.Record(trigger.EventUserDeleted, map[string]string{"id": id, "name": name})
 	trigger.Notify(trigger.UserUpdate)
 	trigger.Redirect(w, routepath.PageUsers)
 	response.NoContent(w, r)
@@ -1373,7 +1378,11 @@ func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		}
 	}
 
-	trigger.Record(trigger.EventSpecDeployed, map[string]string{"id": id})
+	var specName string
+	if ts, err := a.specSVC.Get(r.Context(), id); err == nil {
+		specName = ts.Name()
+	}
+	trigger.Record(trigger.EventSpecDeployed, map[string]string{"id": id, "name": specName})
 	trigger.Set(w, trigger.SpecUpdate)
 	response.NoContent(w, r)
 }
