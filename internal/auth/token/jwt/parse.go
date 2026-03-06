@@ -15,6 +15,7 @@ import (
 const (
 	claimUserID      = "uid"
 	claimSessionID   = "sid"
+	claimName        = "name"
 	claimPermissions = "perms"
 )
 
@@ -40,6 +41,7 @@ func mapClaimsFromIdentity(id *identity.Identity, now time.Time) jwtlib.MapClaim
 		TokenID:     id.TokenID,
 		SessionID:   id.SessionID,
 		UserID:      id.UserID,
+		Name:        id.Name,
 		IssuedAt:    id.IssuedAt,
 		NotBefore:   id.NotBefore,
 		ExpiresAt:   id.ExpiresAt,
@@ -62,6 +64,8 @@ func identityFromMapClaims(mc jwtlib.MapClaims, issuer, audience string) (*ident
 		return nil, auth.ErrInvalidToken
 	}
 
+	name, _ := mc[claimName].(string)
+
 	id := &identity.Identity{
 		IssuedAt:  iat,
 		NotBefore: nbf,
@@ -71,6 +75,7 @@ func identityFromMapClaims(mc jwtlib.MapClaims, issuer, audience string) (*ident
 		Audience:  []string{audience},
 		Subject:   sub,
 		UserID:    uid,
+		Name:      name,
 		TokenID:   jti,
 		SessionID: sid,
 	}
@@ -137,6 +142,7 @@ func mapClaimsFromClaims(cl token.Claims) jwtlib.MapClaims {
 
 		claimUserID:    cl.UserID,
 		claimSessionID: cl.SessionID,
+		claimName:      cl.Name,
 	}
 
 	if len(cl.Audience) == 1 {
@@ -169,6 +175,9 @@ func mapClaimsFromClaims(cl token.Claims) jwtlib.MapClaims {
 	}
 	if mc[claimSessionID] == "" {
 		delete(mc, claimSessionID)
+	}
+	if mc[claimName] == "" {
+		delete(mc, claimName)
 	}
 	return mc
 }

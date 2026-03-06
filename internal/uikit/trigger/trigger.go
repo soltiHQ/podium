@@ -26,8 +26,11 @@ const (
 	EventSpecCreated       = "spec_created"
 	EventSpecUpdated       = "spec_updated"
 	EventSpecDeployed      = "spec_deployed"
-	EventUserCreated       = "user_created"
-	EventUserDeleted       = "user_deleted"
+	EventUserCreated         = "user_created"
+	EventUserUpdated         = "user_updated"
+	EventUserDeleted         = "user_deleted"
+	EventUserPasswordChanged = "user_password_changed"
+	EventUserStatusChanged   = "user_status_changed"
 )
 
 const (

@@ -66,6 +66,9 @@ func mapError(err error) (codes.Code, string) {
 		errors.Is(err, auth.ErrWrongAuthKind):
 		return codes.InvalidArgument, "invalid argument"
 
+	case errors.Is(err, auth.ErrUserDisabled):
+		return codes.FailedPrecondition, "user disabled"
+
 	case errors.Is(err, storage.ErrNotFound):
 		return codes.NotFound, "not found"
 	case errors.Is(err, storage.ErrAlreadyExists):

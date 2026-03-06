@@ -84,7 +84,7 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if errors.Is(getErr, storage.ErrNotFound) {
-		trigger.Record(trigger.EventAgentConnected, map[string]string{"id": in.ID, "name": in.Name})
+		trigger.Record(trigger.EventAgentConnected, trigger.EventPayload{ID: in.ID, Name: in.Name})
 	}
 	trigger.Notify(trigger.AgentUpdate)
 	response.OK(w, r, mode, &responder.View{
@@ -136,7 +136,7 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *genv1.SyncRequest) (*genv
 		return nil, status.FromError(ctx, err).Err()
 	}
 	if errors.Is(getErr, storage.ErrNotFound) {
-		trigger.Record(trigger.EventAgentConnected, map[string]string{"id": req.GetId(), "name": req.GetName()})
+		trigger.Record(trigger.EventAgentConnected, trigger.EventPayload{ID: req.GetId(), Name: req.GetName()})
 	}
 	trigger.Notify(trigger.AgentUpdate)
 	return &genv1.SyncResponse{Success: true}, nil

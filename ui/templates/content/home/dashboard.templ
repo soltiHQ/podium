@@ -95,7 +95,7 @@ templ IssueTable(issues []trigger.EventRecord) {
 					issueBorderColor(ev.Kind),
 					eventLabel(ev.Kind),
 					eventLabelColor(ev.Kind),
-					eventEntity(ev.Kind)+" · "+eventName(ev),
+					eventDescription(ev),
 					timeformat.Relative(ev.Time),
 				)
 			}
@@ -114,7 +114,8 @@ templ ActivityTable(events []trigger.EventRecord) {
 					eventLabel(ev.Kind),
 					eventLabelColor(ev.Kind),
 					eventEntity(ev.Kind),
-					eventName(ev),
+					eventTarget(ev),
+					eventActor(ev),
 					timeformat.Relative(ev.Time),
 				)
 			}
