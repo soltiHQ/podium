@@ -219,6 +219,7 @@ func (a *API) Dashboard(w http.ResponseWriter, r *http.Request) {
 			trigger.EventAgentDisconnected,
 			trigger.EventAgentInactive,
 			trigger.EventAgentDeleted,
+			trigger.EventRateLimited,
 		),
 	}
 	response.OK(w, r, mode, &responder.View{

@@ -5,7 +5,7 @@ import "github.com/soltiHQ/control-plane/internal/uikit/trigger"
 // issueBorderColor returns the left border accent class for an issue event.
 func issueBorderColor(kind string) string {
 	switch kind {
-	case trigger.EventAgentDisconnected, trigger.EventAgentDeleted:
+	case trigger.EventAgentDisconnected, trigger.EventAgentDeleted, trigger.EventRateLimited:
 		return "border-l-danger"
 	case trigger.EventAgentInactive:
 		return "border-l-warning"
@@ -17,9 +17,10 @@ func issueBorderColor(kind string) string {
 // eventLabelColor returns the text color class for an event label.
 func eventLabelColor(kind string) string {
 	switch kind {
-	case trigger.EventAgentConnected:
+	case trigger.EventAgentConnected, trigger.EventSessionCreated:
 		return "text-success"
-	case trigger.EventAgentDisconnected, trigger.EventAgentDeleted, trigger.EventUserDeleted:
+	case trigger.EventAgentDisconnected, trigger.EventAgentDeleted,
+		trigger.EventUserDeleted, trigger.EventRateLimited:
 		return "text-danger"
 	case trigger.EventAgentInactive:
 		return "text-warning"
@@ -60,6 +61,10 @@ func eventLabel(kind string) string {
 		return "password changed"
 	case trigger.EventUserStatusChanged:
 		return "status changed"
+	case trigger.EventSessionCreated:
+		return "logged in"
+	case trigger.EventRateLimited:
+		return "rate limited"
 	default:
 		return kind
 	}
@@ -74,7 +79,8 @@ func eventEntity(kind string) string {
 	case trigger.EventSpecCreated, trigger.EventSpecUpdated, trigger.EventSpecDeployed:
 		return "spec"
 	case trigger.EventUserCreated, trigger.EventUserUpdated, trigger.EventUserDeleted,
-		trigger.EventUserPasswordChanged, trigger.EventUserStatusChanged:
+		trigger.EventUserPasswordChanged, trigger.EventUserStatusChanged,
+		trigger.EventSessionCreated, trigger.EventRateLimited:
 		return "user"
 	default:
 		return ""
