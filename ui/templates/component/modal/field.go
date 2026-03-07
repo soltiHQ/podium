@@ -74,6 +74,7 @@ func editFormData(fields []Field, selects []AsyncSelect) string {
 
 	parts = append(parts, "loading: true")
 	parts = append(parts, "submitting: false")
+	parts = append(parts, `error: ""`)
 	return "{ " + strings.Join(parts, ", ") + " }"
 }
 
@@ -141,13 +142,14 @@ func passwordSubmitExpr(action string) string {
 				'HX-Request': 'true'
 			},
 			body: JSON.stringify({ password: password })
-		}).then(r => {
+		}).then(async r => {
 			if (r.ok) {
 				password = ""; confirm = ""; error = "";
 				show = false;
 				htmx.trigger(document.body, 'user_update');
 			} else {
-				error = "Failed to set password";
+				try { const d = await r.json(); error = d.message || "Failed to set password"; }
+				catch { error = "Failed to set password"; }
 			}
 		}).catch(() => {
 			error = "Network error";
@@ -169,7 +171,8 @@ func formSubmitExpr(method, action string, fields []Field, selects []AsyncSelect
 	jsonObj := "{ " + strings.Join(pairs, ", ") + " }"
 
 	return fmt.Sprintf(
-		`submitting = true;
+		`error = "";
+		submitting = true;
 		fetch('%s', {
 			method: '%s',
 			headers: {
@@ -177,14 +180,19 @@ func formSubmitExpr(method, action string, fields []Field, selects []AsyncSelect
 				'HX-Request': 'true'
 			},
 			body: JSON.stringify(%s)
-		}).then(r => {
+		}).then(async r => {
 			if (r.ok) {
 				const redirect = r.headers.get('HX-Redirect');
 				if (redirect) { window.location.href = redirect; return; }
+				error = "";
 				show = false;
 				htmx.trigger(document.body, 'user_update');
+			} else {
+				try { const d = await r.json(); error = d.message || "Request failed"; }
+				catch { error = "Request failed"; }
 			}
 		}).catch(() => {
+			error = "Network error";
 		}).finally(() => submitting = false)`,
 		action, method, jsonObj,
 	)

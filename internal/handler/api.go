@@ -12,6 +12,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/segmentio/ksuid"
+	"github.com/soltiHQ/control-plane/domain"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
@@ -20,6 +21,8 @@ import (
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/auth"
+	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
@@ -217,6 +220,7 @@ func (a *API) Dashboard(w http.ResponseWriter, r *http.Request) {
 			trigger.EventAgentDisconnected,
 			trigger.EventAgentInactive,
 			trigger.EventAgentDeleted,
+			trigger.EventRateLimited,
 		),
 	}
 	response.OK(w, r, mode, &responder.View{
@@ -231,31 +235,12 @@ func (a *API) Dashboard(w http.ResponseWriter, r *http.Request) {
 //   - GET  /api/v1/users
 //   - POST /api/v1/users
 func (a *API) Users(w http.ResponseWriter, r *http.Request) {
-	mode := httpctx.ModeFromRequest(r)
-	if r.URL.Path != routepath.ApiUsers {
-		response.NotFound(w, r, mode)
-		return
-	}
-
-	switch r.Method {
-	case http.MethodGet:
-		middleware.RequirePermission(kind.UsersGet)(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.userList(w, r, mode)
-			}),
-		).ServeHTTP(w, r)
-		return
-	case http.MethodPost:
-		middleware.RequirePermission(kind.UsersAdd)(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.userUpsert(w, r, mode, "", modeCreate)
-			}),
-		).ServeHTTP(w, r)
-		return
-	default:
-		response.NotAllowed(w, r, mode)
-		return
-	}
+	a.resource(w, r, routepath.ApiUsers,
+		endpoint{http.MethodGet, kind.UsersGet, a.userList},
+		endpoint{http.MethodPost, kind.UsersAdd, func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode) {
+			a.userUpsert(w, r, m, "", modeCreate)
+		}},
+	)
 }
 
 // UsersRouter handles /api/v1/users/{id} and subroutes.
@@ -269,103 +254,21 @@ func (a *API) Users(w http.ResponseWriter, r *http.Request) {
 //   - POST   /api/v1/users/{id}/enable
 //   - POST   /api/v1/users/{id}/password
 func (a *API) UsersRouter(w http.ResponseWriter, r *http.Request) {
-	var (
-		mode = httpctx.ModeFromRequest(r)
-		rest = strings.Trim(strings.TrimPrefix(r.URL.Path, routepath.ApiUser), "/")
+	a.router(w, r, routepath.ApiUser,
+		subroute{"", http.MethodGet, kind.UsersGet, a.usersDetails},
+		subroute{"", http.MethodPut, kind.UsersEdit, func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
+			a.userUpsert(w, r, m, id, modeUpdate)
+		}},
+		subroute{"", http.MethodDelete, kind.UsersDelete, a.userDelete},
+		subroute{"sessions", http.MethodGet, kind.UsersGet, a.usersSessions},
+		subroute{"disable", http.MethodPost, kind.UsersEdit, func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
+			a.userSetStatus(w, r, m, id, userDisable)
+		}},
+		subroute{"enable", http.MethodPost, kind.UsersEdit, func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
+			a.userSetStatus(w, r, m, id, userActive)
+		}},
+		subroute{"password", http.MethodPost, kind.UsersEdit, a.userSetPassword},
 	)
-	if rest == "" {
-		response.NotFound(w, r, mode)
-		return
-	}
-
-	userID, tail, _ := strings.Cut(rest, "/")
-	if userID == "" {
-		response.NotFound(w, r, mode)
-		return
-	}
-	if tail == "" {
-		switch r.Method {
-		case http.MethodGet:
-			middleware.RequirePermission(kind.UsersGet)(
-				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					a.usersDetails(w, r, mode, userID)
-				}),
-			).ServeHTTP(w, r)
-			return
-		case http.MethodPut:
-			middleware.RequirePermission(kind.UsersEdit)(
-				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					a.userUpsert(w, r, mode, userID, modeUpdate)
-				}),
-			).ServeHTTP(w, r)
-			return
-		case http.MethodDelete:
-			middleware.RequirePermission(kind.UsersDelete)(
-				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					a.userDelete(w, r, mode, userID)
-				}),
-			).ServeHTTP(w, r)
-			return
-		default:
-			response.NotAllowed(w, r, mode)
-			return
-		}
-	}
-
-	action, extra, _ := strings.Cut(tail, "/")
-	if extra != "" {
-		response.NotFound(w, r, mode)
-		return
-	}
-	switch action {
-	case "sessions":
-		if r.Method != http.MethodGet {
-			response.NotAllowed(w, r, mode)
-			return
-		}
-		middleware.RequirePermission(kind.UsersGet)(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.usersSessions(w, r, mode, userID)
-			}),
-		).ServeHTTP(w, r)
-		return
-	case "disable":
-		if r.Method != http.MethodPost {
-			response.NotAllowed(w, r, mode)
-			return
-		}
-		middleware.RequirePermission(kind.UsersEdit)(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.userSetStatus(w, r, mode, userID, userDisable)
-			}),
-		).ServeHTTP(w, r)
-		return
-	case "enable":
-		if r.Method != http.MethodPost {
-			response.NotAllowed(w, r, mode)
-			return
-		}
-		middleware.RequirePermission(kind.UsersEdit)(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.userSetStatus(w, r, mode, userID, userActive)
-			}),
-		).ServeHTTP(w, r)
-		return
-	case "password":
-		if r.Method != http.MethodPost {
-			response.NotAllowed(w, r, mode)
-			return
-		}
-		middleware.RequirePermission(kind.UsersEdit)(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.userSetPassword(w, r, mode, userID)
-			}),
-		).ServeHTTP(w, r)
-		return
-	default:
-		response.NotFound(w, r, mode)
-		return
-	}
 }
 
 // SessionsRouter handles /api/v1/sessions/{id} action subroutes.
@@ -373,34 +276,9 @@ func (a *API) UsersRouter(w http.ResponseWriter, r *http.Request) {
 // Supported:
 //   - POST /api/v1/sessions/{sessionID}/revoke
 func (a *API) SessionsRouter(w http.ResponseWriter, r *http.Request) {
-	var (
-		mode = httpctx.ModeFromRequest(r)
-		rest = strings.Trim(strings.TrimPrefix(r.URL.Path, routepath.ApiSession), "/")
+	a.router(w, r, routepath.ApiSession,
+		subroute{"revoke", http.MethodPost, kind.UsersEdit, a.userRevokeSession},
 	)
-	if rest == "" {
-		response.NotFound(w, r, mode)
-		return
-	}
-	sessID, action, _ := strings.Cut(rest, "/")
-	if sessID == "" {
-		response.NotFound(w, r, mode)
-		return
-	}
-
-	if action != "revoke" {
-		response.NotFound(w, r, mode)
-		return
-	}
-	if r.Method != http.MethodPost {
-		response.NotAllowed(w, r, mode)
-		return
-	}
-
-	middleware.RequirePermission(kind.UsersEdit)(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			a.userRevokeSession(w, r, mode, sessID)
-		}),
-	).ServeHTTP(w, r)
 }
 
 // Agents handles /api/v1/agents.
@@ -408,24 +286,9 @@ func (a *API) SessionsRouter(w http.ResponseWriter, r *http.Request) {
 // Supported:
 //   - GET /api/v1/agents
 func (a *API) Agents(w http.ResponseWriter, r *http.Request) {
-	mode := httpctx.ModeFromRequest(r)
-	if r.URL.Path != routepath.ApiAgents {
-		response.NotFound(w, r, mode)
-		return
-	}
-
-	switch r.Method {
-	case http.MethodGet:
-		middleware.RequirePermission(kind.AgentsGet)(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.agentList(w, r, mode)
-			}),
-		).ServeHTTP(w, r)
-		return
-	default:
-		response.NotAllowed(w, r, mode)
-		return
-	}
+	a.resource(w, r, routepath.ApiAgents,
+		endpoint{http.MethodGet, kind.AgentsGet, a.agentList},
+	)
 }
 
 // AgentsRouter handles /api/v1/agents/{id} and subroutes.
@@ -435,67 +298,11 @@ func (a *API) Agents(w http.ResponseWriter, r *http.Request) {
 //   - PUT  /api/v1/agents/{id}/labels
 //   - GET  /api/v1/agents/{id}/tasks
 func (a *API) AgentsRouter(w http.ResponseWriter, r *http.Request) {
-	var (
-		mode = httpctx.ModeFromRequest(r)
-		rest = strings.Trim(strings.TrimPrefix(r.URL.Path, routepath.ApiAgent), "/")
+	a.router(w, r, routepath.ApiAgent,
+		subroute{"", http.MethodGet, kind.AgentsGet, a.agentDetails},
+		subroute{"labels", http.MethodPut, kind.AgentsEdit, a.agentPatchLabels},
+		subroute{"tasks", http.MethodGet, kind.AgentsGet, a.agentTasksList},
 	)
-	if rest == "" {
-		response.NotFound(w, r, mode)
-		return
-	}
-
-	agentID, tail, _ := strings.Cut(rest, "/")
-	if agentID == "" {
-		response.NotFound(w, r, mode)
-		return
-	}
-
-	if tail == "" {
-		if r.Method != http.MethodGet {
-			response.NotAllowed(w, r, mode)
-			return
-		}
-		middleware.RequirePermission(kind.AgentsGet)(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.agentDetails(w, r, mode, agentID)
-			}),
-		).ServeHTTP(w, r)
-		return
-	}
-
-	action, extra, _ := strings.Cut(tail, "/")
-	if extra != "" {
-		response.NotFound(w, r, mode)
-		return
-	}
-
-	switch action {
-	case "labels":
-		if r.Method != http.MethodPut {
-			response.NotAllowed(w, r, mode)
-			return
-		}
-		middleware.RequirePermission(kind.AgentsEdit)(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.agentPatchLabels(w, r, mode, agentID)
-			}),
-		).ServeHTTP(w, r)
-		return
-	case "tasks":
-		if r.Method != http.MethodGet {
-			response.NotAllowed(w, r, mode)
-			return
-		}
-		middleware.RequirePermission(kind.AgentsGet)(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.agentTasksList(w, r, mode, agentID)
-			}),
-		).ServeHTTP(w, r)
-		return
-	default:
-		response.NotFound(w, r, mode)
-		return
-	}
 }
 
 // Permissions handles /api/v1/permissions.
@@ -503,19 +310,9 @@ func (a *API) AgentsRouter(w http.ResponseWriter, r *http.Request) {
 // Supported:
 //   - GET /api/v1/permissions
 func (a *API) Permissions(w http.ResponseWriter, r *http.Request) {
-	mode := httpctx.ModeFromRequest(r)
-	switch r.Method {
-	case http.MethodGet:
-		middleware.RequirePermission(kind.UsersEdit)(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.permissionsList(w, r, mode)
-			}),
-		).ServeHTTP(w, r)
-		return
-	default:
-		response.NotAllowed(w, r, mode)
-		return
-	}
+	a.resource(w, r, "",
+		endpoint{http.MethodGet, kind.UsersEdit, a.permissionsList},
+	)
 }
 
 // Roles handles /api/v1/roles.
@@ -523,19 +320,9 @@ func (a *API) Permissions(w http.ResponseWriter, r *http.Request) {
 // Supported:
 //   - GET /api/v1/roles
 func (a *API) Roles(w http.ResponseWriter, r *http.Request) {
-	mode := httpctx.ModeFromRequest(r)
-	switch r.Method {
-	case http.MethodGet:
-		middleware.RequirePermission(kind.UsersEdit)(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.rolesList(w, r, mode)
-			}),
-		).ServeHTTP(w, r)
-		return
-	default:
-		response.NotAllowed(w, r, mode)
-		return
-	}
+	a.resource(w, r, "",
+		endpoint{http.MethodGet, kind.UsersEdit, a.rolesList},
+	)
 }
 
 func (a *API) permissionsList(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
@@ -558,13 +345,7 @@ func (a *API) rolesList(w http.ResponseWriter, r *http.Request, mode httpctx.Ren
 		return
 	}
 
-	items := make([]restv1.Role, 0, len(roles))
-	for _, role := range roles {
-		if role == nil {
-			continue
-		}
-		items = append(items, apimapv1.Role(role))
-	}
+	items := mapSlice(roles, apimapv1.Role)
 	response.OK(w, r, mode, &responder.View{
 		Data: restv1.RoleListResponse{Items: items},
 	})
@@ -572,17 +353,12 @@ func (a *API) rolesList(w http.ResponseWriter, r *http.Request, mode httpctx.Ren
 
 func (a *API) agentList(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
 	var (
-		limit  int
+		limit  = queryInt(r, "limit", 0)
 		filter storage.AgentFilter
 
 		cursor = r.URL.Query().Get("cursor")
 		q      = r.URL.Query().Get("q")
 	)
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil {
-			limit = n
-		}
-	}
 	if q != "" {
 		filter = inmemory.NewAgentFilter().Query(q)
 	}
@@ -598,13 +374,7 @@ func (a *API) agentList(w http.ResponseWriter, r *http.Request, mode httpctx.Ren
 		return
 	}
 
-	items := make([]restv1.Agent, 0, len(res.Items))
-	for _, ag := range res.Items {
-		if ag == nil {
-			continue
-		}
-		items = append(items, apimapv1.Agent(ag))
-	}
+	items := mapSlice(res.Items, apimapv1.Agent)
 	response.OK(w, r, mode, &responder.View{
 		Data: restv1.AgentListResponse{
 			Items:      items,
@@ -626,28 +396,26 @@ func (a *API) agentDetails(w http.ResponseWriter, r *http.Request, mode httpctx.
 		return
 	}
 
-	identity, _ := transportctx.Identity(r.Context())
 	apiAgent := apimapv1.Agent(ag)
 	response.OK(w, r, mode, &responder.View{
 		Data:      apiAgent,
-		Component: contentAgent.Detail(apiAgent, policy.BuildAgentDetail(identity)),
+		Component: contentAgent.Detail(apiAgent, policy.BuildAgentDetail(a.identity(r))),
 	})
 }
 
 func (a *API) agentPatchLabels(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
-	var labels map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&labels); err != nil {
+	labels, err := decodeJSON[map[string]string](r)
+	if err != nil {
 		response.BadRequest(w, r, mode)
 		return
 	}
 
-	_, err := a.agentSVC.PatchLabels(r.Context(), agent.PatchLabels{
+	_, err = a.agentSVC.PatchLabels(r.Context(), agent.PatchLabels{
 		ID:     id,
 		Labels: labels,
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			a.logger.Warn().Str("agent_id", id).Msg("agent not found")
 			response.NotFound(w, r, mode)
 			return
 		}
@@ -680,19 +448,11 @@ func (a *API) agentTasksList(w http.ResponseWriter, r *http.Request, mode httpct
 	var (
 		filter = proxy.TaskFilter{
 			Status: r.URL.Query().Get("status"),
+			Limit:  queryInt(r, "limit", 0),
+			Offset: queryInt(r, "offset", 0),
 		}
 		q = r.URL.Query().Get("q")
 	)
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil {
-			filter.Limit = n
-		}
-	}
-	if raw := r.URL.Query().Get("offset"); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil {
-			filter.Offset = n
-		}
-	}
 
 	p, err := a.proxyPool.Get(ag.Endpoint(), ag.EndpointType(), ag.APIVersion())
 	if err != nil {
@@ -742,17 +502,12 @@ func (a *API) agentTasksList(w http.ResponseWriter, r *http.Request, mode httpct
 
 func (a *API) userList(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
 	var (
-		limit  int
+		limit  = queryInt(r, "limit", 0)
 		filter storage.UserFilter
 
 		cursor = r.URL.Query().Get("cursor")
 		q      = r.URL.Query().Get("q")
 	)
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil {
-			limit = n
-		}
-	}
 	if q != "" {
 		filter = inmemory.NewUserFilter().Query(q)
 	}
@@ -768,13 +523,7 @@ func (a *API) userList(w http.ResponseWriter, r *http.Request, mode httpctx.Rend
 		return
 	}
 
-	items := make([]restv1.User, 0, len(res.Items))
-	for _, u := range res.Items {
-		if u == nil {
-			continue
-		}
-		items = append(items, apimapv1.User(u))
-	}
+	items := mapSlice(res.Items, apimapv1.User)
 	response.OK(w, r, mode, &responder.View{
 		Data: restv1.UserListResponse{
 			Items:      items,
@@ -796,11 +545,10 @@ func (a *API) usersDetails(w http.ResponseWriter, r *http.Request, mode httpctx.
 		return
 	}
 
-	identity, _ := transportctx.Identity(r.Context())
 	apiUser := apimapv1.User(u)
 	response.OK(w, r, mode, &responder.View{
 		Data:      apiUser,
-		Component: contentUser.Detail(apiUser, policy.BuildUserDetail(identity, id)),
+		Component: contentUser.Detail(apiUser, policy.BuildUserDetail(a.identity(r), id)),
 	})
 }
 
@@ -812,13 +560,7 @@ func (a *API) usersSessions(w http.ResponseWriter, r *http.Request, mode httpctx
 		return
 	}
 
-	items := make([]restv1.Session, 0, len(res.Items))
-	for _, s := range res.Items {
-		if s == nil {
-			continue
-		}
-		items = append(items, apimapv1.Session(s))
-	}
+	items := mapSlice(res.Items, apimapv1.Session)
 	slices.SortFunc(items, func(a, b restv1.Session) int {
 		pa := kind.DeriveSessionStatus(a.Revoked, a.ExpiresAt).Priority()
 		pb := kind.DeriveSessionStatus(b.Revoked, b.ExpiresAt).Priority()
@@ -834,24 +576,19 @@ func (a *API) usersSessions(w http.ResponseWriter, r *http.Request, mode httpctx
 }
 
 func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string, action upsertMode) {
-	var (
-		in restv1.User
-		u  *model.User
-	)
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	in, err := decodeJSON[restv1.User](r)
+	if err != nil {
 		response.BadRequest(w, r, mode)
 		return
 	}
 
+	var u *model.User
+
 	switch action {
 	case modeCreate:
-		if in.Subject == "" {
-			response.BadRequest(w, r, mode)
-			return
-		}
 		x, err := model.NewUser(ksuid.New().String(), in.Subject)
 		if err != nil {
-			response.BadRequest(w, r, mode)
+			response.BadRequestMsg(w, r, mode, "subject is required")
 			return
 		}
 		x.Enable()
@@ -892,22 +629,36 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	if len(in.Permissions) > 0 {
 		u.PermissionsNew(in.Permissions)
 	}
-
-	if err := a.userSVC.Upsert(r.Context(), u); err != nil {
-		a.logger.Error().Err(err).Str("user_id", u.ID()).Msg("user upsert failed")
-		response.Unavailable(w, r, mode)
+	if err = a.userSVC.Upsert(r.Context(), u); err != nil {
+		switch {
+		case errors.Is(err, domain.ErrInvalidSubject):
+			response.BadRequestMsg(w, r, mode, "subject is required")
+		case errors.Is(err, domain.ErrInvalidEmail):
+			response.BadRequestMsg(w, r, mode, "invalid email address")
+		case errors.Is(err, storage.ErrAlreadyExists):
+			response.Conflict(w, r, mode, "user with this subject already exists")
+		default:
+			a.logger.Error().Err(err).Str("user_id", u.ID()).Msg("user upsert failed")
+			response.Unavailable(w, r, mode)
+		}
 		return
 	}
 
+	by := a.actor(r)
 	if action == modeCreate {
 		a.logger.Info().Str("user_id", u.ID()).Str("subject", u.Subject()).Msg("user created")
-		trigger.Record(trigger.EventUserCreated, map[string]string{"id": u.ID(), "name": u.Name(), "subject": u.Subject()})
+		trigger.Record(trigger.EventUserCreated, trigger.EventPayload{
+			ID: u.ID(), Name: u.Name(), By: by,
+		})
 		trigger.Notify(trigger.UserUpdate)
 		trigger.Redirect(w, routepath.PageUsers)
 		response.NoContent(w, r)
 		return
 	}
 	a.logger.Info().Str("user_id", id).Msg("user updated")
+	trigger.Record(trigger.EventUserUpdated, trigger.EventPayload{
+		ID: u.ID(), Name: u.Name(), By: by,
+	})
 	trigger.Set(w, trigger.UserUpdate)
 	response.NoContent(w, r)
 }
@@ -925,7 +676,9 @@ func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 	a.logger.Info().Str("user_id", id).Msg("user deleted")
-	trigger.Record(trigger.EventUserDeleted, map[string]string{"id": id, "name": name})
+	trigger.Record(trigger.EventUserDeleted, trigger.EventPayload{
+		ID: id, Name: name, By: a.actor(r),
+	})
 	trigger.Notify(trigger.UserUpdate)
 	trigger.Redirect(w, routepath.PageUsers)
 	response.NoContent(w, r)
@@ -955,13 +708,20 @@ func (a *API) userSetStatus(w http.ResponseWriter, r *http.Request, mode httpctx
 		return
 	}
 	a.logger.Info().Str("user_id", userID).Msg("user status changed")
+	detail := "inactive"
+	if status == userActive {
+		detail = "active"
+	}
+	trigger.Record(trigger.EventUserStatusChanged, trigger.EventPayload{
+		ID: u.ID(), Name: u.Name(), By: a.actor(r), Detail: detail,
+	})
 	trigger.Set(w, trigger.UserUpdate)
 	response.NoContent(w, r)
 }
 
 func (a *API) userSetPassword(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, userID string) {
-	var in restv1.SetPasswordRequest
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	in, err := decodeJSON[restv1.SetPasswordRequest](r)
+	if err != nil {
 		response.BadRequest(w, r, mode)
 		return
 	}
@@ -970,22 +730,31 @@ func (a *API) userSetPassword(w http.ResponseWriter, r *http.Request, mode httpc
 		return
 	}
 
-	err := a.credentialSVC.SetPassword(r.Context(), credential.SetPasswordRequest{
+	err = a.credentialSVC.SetPassword(r.Context(), credential.SetPasswordRequest{
 		UserID:   userID,
 		Password: in.Password,
 	})
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			a.logger.Warn().Str("user_id", userID).Msg("user not found for password change")
+		switch {
+		case errors.Is(err, storage.ErrNotFound):
 			response.NotFound(w, r, mode)
-			return
+		case errors.Is(err, auth.ErrUserDisabled):
+			response.BadRequestMsg(w, r, mode, "user is disabled")
+		default:
+			a.logger.Error().Err(err).Str("user_id", userID).Msg("password change failed")
+			response.Unavailable(w, r, mode)
 		}
-		a.logger.Error().Err(err).Str("user_id", userID).Msg("user password change failed")
-		response.Unavailable(w, r, mode)
 		return
 	}
 
 	a.logger.Info().Str("user_id", userID).Msg("user password changed")
+	var userName string
+	if u, err := a.userSVC.Get(r.Context(), userID); err == nil {
+		userName = u.Name()
+	}
+	trigger.Record(trigger.EventUserPasswordChanged, trigger.EventPayload{
+		ID: userID, Name: userName, By: a.actor(r),
+	})
 	trigger.Set(w, trigger.UserUpdate)
 	response.NoContent(w, r)
 }
@@ -1012,31 +781,12 @@ func (a *API) userRevokeSession(w http.ResponseWriter, r *http.Request, mode htt
 //   - GET  /api/v1/specs
 //   - POST /api/v1/specs
 func (a *API) Specs(w http.ResponseWriter, r *http.Request) {
-	mode := httpctx.ModeFromRequest(r)
-	if r.URL.Path != routepath.ApiSpecs {
-		response.NotFound(w, r, mode)
-		return
-	}
-
-	switch r.Method {
-	case http.MethodGet:
-		middleware.RequirePermission(kind.SpecsGet)(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.specList(w, r, mode)
-			}),
-		).ServeHTTP(w, r)
-		return
-	case http.MethodPost:
-		middleware.RequirePermission(kind.SpecsAdd)(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.specUpsert(w, r, mode, "", modeCreate)
-			}),
-		).ServeHTTP(w, r)
-		return
-	default:
-		response.NotAllowed(w, r, mode)
-		return
-	}
+	a.resource(w, r, routepath.ApiSpecs,
+		endpoint{http.MethodGet, kind.SpecsGet, a.specList},
+		endpoint{http.MethodPost, kind.SpecsAdd, func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode) {
+			a.specUpsert(w, r, m, "", modeCreate)
+		}},
+	)
 }
 
 // SpecsRouter handles /api/v1/specs/{id} and subroutes.
@@ -1048,98 +798,25 @@ func (a *API) Specs(w http.ResponseWriter, r *http.Request) {
 //   - POST   /api/v1/specs/{id}/deploy
 //   - GET    /api/v1/specs/{id}/sync
 func (a *API) SpecsRouter(w http.ResponseWriter, r *http.Request) {
-	var (
-		mode = httpctx.ModeFromRequest(r)
-		rest = strings.Trim(strings.TrimPrefix(r.URL.Path, routepath.ApiSpec), "/")
+	a.router(w, r, routepath.ApiSpec,
+		subroute{"", http.MethodGet, kind.SpecsGet, a.specDetails},
+		subroute{"", http.MethodPut, kind.SpecsEdit, func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
+			a.specUpsert(w, r, m, id, modeUpdate)
+		}},
+		subroute{"", http.MethodDelete, kind.SpecsEdit, a.specDelete},
+		subroute{"deploy", http.MethodPost, kind.SpecsDeploy, a.specDeploy},
+		subroute{"sync", http.MethodGet, kind.SpecsGet, a.specRollouts},
 	)
-	if rest == "" {
-		response.NotFound(w, r, mode)
-		return
-	}
-
-	tsID, tail, _ := strings.Cut(rest, "/")
-	if tsID == "" {
-		response.NotFound(w, r, mode)
-		return
-	}
-
-	if tail == "" {
-		switch r.Method {
-		case http.MethodGet:
-			middleware.RequirePermission(kind.SpecsGet)(
-				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					a.specDetails(w, r, mode, tsID)
-				}),
-			).ServeHTTP(w, r)
-			return
-		case http.MethodPut:
-			middleware.RequirePermission(kind.SpecsEdit)(
-				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					a.specUpsert(w, r, mode, tsID, modeUpdate)
-				}),
-			).ServeHTTP(w, r)
-			return
-		case http.MethodDelete:
-			middleware.RequirePermission(kind.SpecsEdit)(
-				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					a.specDelete(w, r, mode, tsID)
-				}),
-			).ServeHTTP(w, r)
-			return
-		default:
-			response.NotAllowed(w, r, mode)
-			return
-		}
-	}
-
-	action, extra, _ := strings.Cut(tail, "/")
-	if extra != "" {
-		response.NotFound(w, r, mode)
-		return
-	}
-
-	switch action {
-	case "deploy":
-		if r.Method != http.MethodPost {
-			response.NotAllowed(w, r, mode)
-			return
-		}
-		middleware.RequirePermission(kind.SpecsDeploy)(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.specDeploy(w, r, mode, tsID)
-			}),
-		).ServeHTTP(w, r)
-		return
-	case "sync":
-		if r.Method != http.MethodGet {
-			response.NotAllowed(w, r, mode)
-			return
-		}
-		middleware.RequirePermission(kind.SpecsGet)(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				a.specRollouts(w, r, mode, tsID)
-			}),
-		).ServeHTTP(w, r)
-		return
-	default:
-		response.NotFound(w, r, mode)
-		return
-	}
 }
 
 func (a *API) specList(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
 	var (
-		limit  int
+		limit  = queryInt(r, "limit", 0)
 		filter storage.SpecFilter
 
 		cursor = r.URL.Query().Get("cursor")
 		q      = r.URL.Query().Get("q")
 	)
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil {
-			limit = n
-		}
-	}
 	if q != "" {
 		filter = inmemory.NewSpecFilter().Query(q)
 	}
@@ -1155,13 +832,7 @@ func (a *API) specList(w http.ResponseWriter, r *http.Request, mode httpctx.Rend
 		return
 	}
 
-	items := make([]restv1.Spec, 0, len(res.Items))
-	for _, ts := range res.Items {
-		if ts == nil {
-			continue
-		}
-		items = append(items, apimapv1.Spec(ts))
-	}
+	items := mapSlice(res.Items, apimapv1.Spec)
 	response.OK(w, r, mode, &responder.View{
 		Data: restv1.SpecListResponse{
 			Items:      items,
@@ -1190,23 +861,21 @@ func (a *API) specDetails(w http.ResponseWriter, r *http.Request, mode httpctx.R
 		return
 	}
 
-	identity, _ := transportctx.Identity(r.Context())
 	dto := apimapv1.RolloutSpec(ts, states)
 	response.OK(w, r, mode, &responder.View{
 		Data:      dto,
-		Component: contentSpec.Detail(dto, policy.BuildSpecDetail(identity)),
+		Component: contentSpec.Detail(dto, policy.BuildSpecDetail(a.identity(r))),
 	})
 }
 
 func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string, action upsertMode) {
-	var (
-		in restv1.SpecCreateRequest
-		ts *model.Spec
-	)
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	in, err := decodeJSON[restv1.SpecCreateRequest](r)
+	if err != nil {
 		response.BadRequest(w, r, mode)
 		return
 	}
+
+	var ts *model.Spec
 
 	switch action {
 	case modeCreate:
@@ -1318,20 +987,20 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 			return
 		}
 		a.logger.Info().Str("spec", ts.ID()).Str("name", ts.Name()).Msg("spec created")
-		trigger.Record(trigger.EventSpecCreated, map[string]string{"id": ts.ID(), "name": ts.Name()})
+		trigger.Record(trigger.EventSpecCreated, trigger.EventPayload{ID: ts.ID(), Name: ts.Name()})
 		trigger.Notify(trigger.SpecUpdate)
 		trigger.Redirect(w, routepath.PageSpecs)
 		response.NoContent(w, r)
 		return
 	}
 
-	if err := a.specSVC.Upsert(r.Context(), ts); err != nil {
+	if err = a.specSVC.Upsert(r.Context(), ts); err != nil {
 		a.logger.Error().Err(err).Str("spec", id).Msg("spec update failed")
 		response.Unavailable(w, r, mode)
 		return
 	}
 	a.logger.Info().Str("spec", id).Msg("spec updated")
-	trigger.Record(trigger.EventSpecUpdated, map[string]string{"id": id, "name": ts.Name()})
+	trigger.Record(trigger.EventSpecUpdated, trigger.EventPayload{ID: id, Name: ts.Name()})
 	trigger.Set(w, trigger.SpecUpdate)
 	response.NoContent(w, r)
 }
@@ -1382,7 +1051,7 @@ func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	if ts, err := a.specSVC.Get(r.Context(), id); err == nil {
 		specName = ts.Name()
 	}
-	trigger.Record(trigger.EventSpecDeployed, map[string]string{"id": id, "name": specName})
+	trigger.Record(trigger.EventSpecDeployed, trigger.EventPayload{ID: id, Name: specName})
 	trigger.Set(w, trigger.SpecUpdate)
 	response.NoContent(w, r)
 }
@@ -1410,12 +1079,139 @@ func (a *API) specRollouts(w http.ResponseWriter, r *http.Request, mode httpctx.
 		}
 	}
 
-	items := make([]restv1.RolloutEntry, 0, len(states))
-	for _, ss := range states {
-		items = append(items, apimapv1.RolloutEntry(ss))
-	}
+	items := mapSlice(states, apimapv1.RolloutEntry)
 	response.OK(w, r, mode, &responder.View{
 		Data:      items,
 		Component: contentSpec.Rollouts(items),
 	})
+}
+
+// identity returns the authenticated identity from the request context.
+func (a *API) identity(r *http.Request) *identity.Identity {
+	id, _ := transportctx.Identity(r.Context())
+	return id
+}
+
+// actor returns the display name of the authenticated user from the request context.
+func (a *API) actor(r *http.Request) string {
+	if id := a.identity(r); id != nil {
+		return id.Name
+	}
+	return "unknown"
+}
+
+// decodeJSON reads and decodes a JSON request body into v.
+func decodeJSON[T any](r *http.Request) (T, error) {
+	var v T
+	err := json.NewDecoder(r.Body).Decode(&v)
+	return v, err
+}
+
+// queryInt reads a query parameter as int, returning fallback if absent or invalid.
+func queryInt(r *http.Request, key string, fallback int) int {
+	raw := r.URL.Query().Get(key)
+	if raw == "" {
+		return fallback
+	}
+	if n, err := strconv.Atoi(raw); err == nil {
+		return n
+	}
+	return fallback
+}
+
+// mapSlice converts a slice of pointers using fn, skipping nils.
+func mapSlice[T any, U any](src []*T, fn func(*T) U) []U {
+	out := make([]U, 0, len(src))
+	for _, v := range src {
+		if v == nil {
+			continue
+		}
+		out = append(out, fn(v))
+	}
+	return out
+}
+
+// guard wraps an http.HandlerFunc with a permission check and serves it.
+func guard(w http.ResponseWriter, r *http.Request, perm kind.Permission, fn http.HandlerFunc) {
+	middleware.RequirePermission(perm)(fn).ServeHTTP(w, r)
+}
+
+// endpoint pairs an HTTP method with its permission and handler.
+type endpoint struct {
+	method string
+	perm   kind.Permission
+	fn     func(http.ResponseWriter, *http.Request, httpctx.RenderMode)
+}
+
+// resource handles a collection-style handler: mode, optional path check, method dispatch with guard.
+func (a *API) resource(w http.ResponseWriter, r *http.Request, path string, routes ...endpoint) {
+	mode := httpctx.ModeFromRequest(r)
+	if path != "" && r.URL.Path != path {
+		response.NotFound(w, r, mode)
+		return
+	}
+	for _, rt := range routes {
+		if rt.method == r.Method {
+			guard(w, r, rt.perm, func(w http.ResponseWriter, r *http.Request) {
+				rt.fn(w, r, mode)
+			})
+			return
+		}
+	}
+	response.NotAllowed(w, r, mode)
+}
+
+// subroute pairs an action name, HTTP method, permission and handler for entity subrouting.
+// action "" matches the root (e.g. /api/v1/users/{id}).
+type subroute struct {
+	action string
+	method string
+	perm   kind.Permission
+	fn     func(http.ResponseWriter, *http.Request, httpctx.RenderMode, string)
+}
+
+// handles /{prefix}/{id}[/{action}] dispatching: parses id and optional action,
+// then matches against the route table. Wrong method → 405, unknown action → 404.
+func (a *API) router(w http.ResponseWriter, r *http.Request, prefix string, routes ...subroute) {
+	mode := httpctx.ModeFromRequest(r)
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, prefix), "/")
+	if rest == "" {
+		response.NotFound(w, r, mode)
+		return
+	}
+
+	id, tail, _ := strings.Cut(rest, "/")
+	if id == "" {
+		response.NotFound(w, r, mode)
+		return
+	}
+
+	action := ""
+	if tail != "" {
+		var extra string
+		action, extra, _ = strings.Cut(tail, "/")
+		if extra != "" {
+			response.NotFound(w, r, mode)
+			return
+		}
+	}
+
+	found := false
+	for _, rt := range routes {
+		if rt.action != action {
+			continue
+		}
+		found = true
+		if rt.method == r.Method {
+			guard(w, r, rt.perm, func(w http.ResponseWriter, r *http.Request) {
+				rt.fn(w, r, mode, id)
+			})
+			return
+		}
+	}
+	if found {
+		response.NotAllowed(w, r, mode)
+	} else {
+		response.NotFound(w, r, mode)
+	}
 }

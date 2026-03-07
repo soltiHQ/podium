@@ -117,7 +117,7 @@ func (r *Runner) tick() {
 				Str("agent_id", a.ID()).
 				Dur("silence", silence).
 				Msg("agent deleted (stale)")
-			trigger.Record(trigger.EventAgentDeleted, map[string]string{"id": a.ID(), "name": a.Name()})
+			trigger.Record(trigger.EventAgentDeleted, trigger.EventPayload{ID: a.ID(), Name: a.Name()})
 			trigger.Notify(trigger.AgentUpdate)
 
 		case silence > hb*time.Duration(r.cfg.DisconnectMultiplier):
@@ -131,7 +131,7 @@ func (r *Runner) tick() {
 				r.logger.Info().
 					Str("agent_id", a.ID()).
 					Msg("agent → disconnected")
-				trigger.Record(trigger.EventAgentDisconnected, map[string]string{"id": a.ID(), "name": a.Name()})
+				trigger.Record(trigger.EventAgentDisconnected, trigger.EventPayload{ID: a.ID(), Name: a.Name()})
 				trigger.Notify(trigger.AgentUpdate)
 			}
 
@@ -146,7 +146,7 @@ func (r *Runner) tick() {
 				r.logger.Info().
 					Str("agent_id", a.ID()).
 					Msg("agent → inactive")
-				trigger.Record(trigger.EventAgentInactive, map[string]string{"id": a.ID(), "name": a.Name()})
+				trigger.Record(trigger.EventAgentInactive, trigger.EventPayload{ID: a.ID(), Name: a.Name()})
 				trigger.Notify(trigger.AgentUpdate)
 			}
 		}

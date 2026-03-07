@@ -19,10 +19,11 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transportctx"
 	"github.com/soltiHQ/control-plane/internal/uikit/policy"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
+	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 	pageAgent "github.com/soltiHQ/control-plane/ui/templates/page/agent"
 	pageHome "github.com/soltiHQ/control-plane/ui/templates/page/home"
-	pageSystem "github.com/soltiHQ/control-plane/ui/templates/page/system"
 	pageSpec "github.com/soltiHQ/control-plane/ui/templates/page/spec"
+	pageSystem "github.com/soltiHQ/control-plane/ui/templates/page/system"
 	pageUser "github.com/soltiHQ/control-plane/ui/templates/page/user"
 )
 
@@ -104,7 +105,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 	if redirect == "" {
 		redirect = routepath.PageHome
 	}
-	_, res, err := u.accessSVC.Login(r.Context(), access.LoginRequest{
+	id, res, err := u.accessSVC.Login(r.Context(), access.LoginRequest{
 		Subject:  subject,
 		Password: password,
 		RateKey:  rateKey,
@@ -112,12 +113,14 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, auth.ErrRateLimited):
-			u.logger.Warn().Str("subject", subject).Msg("login rate limited")
+			trigger.Record(trigger.EventRateLimited, trigger.EventPayload{
+				Name: subject, By: "auth",
+			})
 			response.AuthRateLimit(w, r, mode)
 			return
 		case errors.Is(err, auth.ErrInvalidCredentials),
 			errors.Is(err, auth.ErrInvalidRequest):
-			u.logger.Warn().Str("subject", subject).Msg("login failed")
+			transportctx.SetError(r.Context(), "invalid credentials")
 			http.Redirect(w, r, routepath.PageLogin+"?error=Invalid+username+or+password", http.StatusFound)
 			return
 		default:
@@ -128,6 +131,9 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u.logger.Info().Str("subject", subject).Msg("login success")
+	trigger.Record(trigger.EventSessionCreated, trigger.EventPayload{
+		ID: id.UserID, Name: id.Name, By: "auth",
+	})
 	cookie.SetAuth(w, r, res.AccessToken, res.RefreshToken, res.SessionID)
 	http.Redirect(w, r, redirect, http.StatusFound)
 }

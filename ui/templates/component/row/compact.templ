@@ -1,16 +1,19 @@
 package row
 
 // Compact renders a single-line table row with aligned columns.
-templ Compact(label, labelColor, entity, name, timeStr string) {
+templ Compact(label, labelColor, entity, name, actor, timeStr string) {
 	<tr class="border-b border-border last:border-b-0">
 		<td class={ "py-2.5 pl-4 pr-2 text-[11px] font-medium whitespace-nowrap " + labelColor }>
 			{ label }
 		</td>
-		<td class="py-2.5 px-2 text-[11px] text-muted whitespace-nowrap">
+		<td class="py-2.5 pr-1 text-[11px] text-muted whitespace-nowrap">
 			{ entity }
 		</td>
-		<td class="py-2.5 px-2 text-fg truncate max-w-0 w-full">
+		<td class="py-2.5 px-1 text-fg font-medium truncate max-w-0 w-full">
 			{ name }
+		</td>
+		<td class="py-2.5 px-2 text-[11px] text-muted whitespace-nowrap">
+			{ actor }
 		</td>
 		<td class="py-2.5 pl-2 pr-4 text-[11px] text-muted tabular-nums whitespace-nowrap text-right">
 			{ timeStr }

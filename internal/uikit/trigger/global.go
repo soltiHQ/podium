@@ -22,7 +22,7 @@ func Notify(event string) {
 }
 
 // Record appends an event to the package-level hub ring buffer.
-func Record(kind string, payload map[string]string) {
+func Record(kind string, payload EventPayload) {
 	if defaultHub != nil {
 		defaultHub.Record(kind, payload)
 	}

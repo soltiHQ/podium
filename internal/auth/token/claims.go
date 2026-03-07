@@ -27,6 +27,7 @@ type Claims struct {
 	TokenID   string
 	UserID    string
 	SessionID string
+	Name      string
 
 	Audience    []string
 	Permissions []kind.Permission

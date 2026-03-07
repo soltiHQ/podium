@@ -31,13 +31,11 @@ templ Identity(u restv1.User, p policy.UserDetail) {
 				</h2>
 				<p class="text-xs text-muted truncate">{ u.Subject }</p>
 			</div>
-			<div class="flex items-center gap-2 shrink-0">
-				if !u.Disabled {
-					@visual.StatusDot("success")
-					<span class="text-xs font-medium text-success">Active</span>
+			<div class="shrink-0">
+				if u.Disabled {
+					@visual.Badge("Disabled", visual.VariantDanger)
 				} else {
-					@visual.StatusDot("muted")
-					<span class="text-xs font-medium text-muted">Inactive</span>
+					@visual.Badge("Active", visual.VariantSuccess)
 				}
 			</div>
 		}
@@ -75,15 +73,14 @@ templ Identity(u restv1.User, p policy.UserDetail) {
 						}
 					</form>
 				}
+			}
 
+			if p.CanEdit {
 				@button.Button("", "button", false, button.VariantSecondary, false,
 					templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent("edit-user")},
 				) {
 					@asset.Icon("edit")
 				}
-			}
-
-			if p.CanEdit {
 				@button.Button("", "button", false, button.VariantWarning, false,
 					templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent("password-user")},
 				) {

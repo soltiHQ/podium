@@ -35,6 +35,7 @@ func NoContent(w http.ResponseWriter, r *http.Request) {
 
 // NotFound renders a 404 response.
 func NotFound(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
+	transportctx.SetError(r.Context(), "not found")
 	httpctx.Responder(r.Context()).Respond(w, r, http.StatusNotFound, &responder.View{
 		Data: errorBody{
 			Code:      http.StatusNotFound,
@@ -56,10 +57,16 @@ func NotFound(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
 
 // BadRequest renders a 400 response.
 func BadRequest(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
+	BadRequestMsg(w, r, mode, "invalid request")
+}
+
+// BadRequestMsg renders a 400 response with a custom message.
+func BadRequestMsg(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, msg string) {
+	transportctx.SetError(r.Context(), msg)
 	httpctx.Responder(r.Context()).Respond(w, r, http.StatusBadRequest, &responder.View{
 		Data: errorBody{
 			Code:      http.StatusBadRequest,
-			Message:   "invalid request",
+			Message:   msg,
 			RequestID: transportctx.TryRequestID(r.Context()),
 		},
 		Component: func(m httpctx.RenderMode) templ.Component {
@@ -67,7 +74,29 @@ func BadRequest(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode)
 				return pageSystem.ErrorPage(
 					http.StatusBadRequest,
 					"Invalid request",
-					"The request you sent is invalid.",
+					msg,
+				)
+			}
+			return nil
+		}(mode),
+	})
+}
+
+// Conflict renders a 409 response.
+func Conflict(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, msg string) {
+	transportctx.SetError(r.Context(), msg)
+	httpctx.Responder(r.Context()).Respond(w, r, http.StatusConflict, &responder.View{
+		Data: errorBody{
+			Code:      http.StatusConflict,
+			Message:   msg,
+			RequestID: transportctx.TryRequestID(r.Context()),
+		},
+		Component: func(m httpctx.RenderMode) templ.Component {
+			if m == httpctx.RenderPage {
+				return pageSystem.ErrorPage(
+					http.StatusConflict,
+					"Conflict",
+					msg,
 				)
 			}
 			return nil
@@ -77,6 +106,7 @@ func BadRequest(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode)
 
 // NotAllowed renders a 405 response.
 func NotAllowed(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
+	transportctx.SetError(r.Context(), "not allowed")
 	httpctx.Responder(r.Context()).Respond(w, r, http.StatusMethodNotAllowed, &responder.View{
 		Data: errorBody{
 			Code:      http.StatusMethodNotAllowed,
@@ -98,6 +128,7 @@ func NotAllowed(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode)
 
 // Forbidden renders a 403 response.
 func Forbidden(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
+	transportctx.SetError(r.Context(), "forbidden")
 	httpctx.Responder(r.Context()).Respond(w, r, http.StatusForbidden, &responder.View{
 		Data: errorBody{
 			Code:      http.StatusForbidden,
@@ -119,6 +150,7 @@ func Forbidden(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) 
 
 // Unauthorized renders a 401 response.
 func Unauthorized(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
+	transportctx.SetError(r.Context(), "unauthorized")
 	httpctx.Responder(r.Context()).Respond(w, r, http.StatusUnauthorized, &responder.View{
 		Data: errorBody{
 			Code:      http.StatusUnauthorized,
@@ -140,6 +172,7 @@ func Unauthorized(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMod
 
 // Unavailable renders a 503 response.
 func Unavailable(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
+	transportctx.SetError(r.Context(), "service unavailable")
 	httpctx.Responder(r.Context()).Respond(w, r, http.StatusServiceUnavailable, &responder.View{
 		Data: errorBody{
 			Code:      http.StatusServiceUnavailable,
@@ -161,6 +194,7 @@ func Unavailable(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode
 
 // AuthRateLimit renders a 429 response.
 func AuthRateLimit(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
+	transportctx.SetError(r.Context(), "rate limited")
 	httpctx.Responder(r.Context()).Respond(w, r, http.StatusTooManyRequests, &responder.View{
 		Data: errorBody{
 			Code:      http.StatusTooManyRequests,

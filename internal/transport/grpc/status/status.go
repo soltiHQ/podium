@@ -23,6 +23,7 @@ func FromError(ctx context.Context, err error) *grpcstatus.Status {
 		code, msg = mapError(err)
 		st        = grpcstatus.New(code, msg)
 	)
+	transportctx.SetError(ctx, msg)
 	if rid, ok := transportctx.RequestID(ctx); ok {
 		if detailed, detailErr := withRequestID(st, rid); detailErr == nil {
 			st = detailed
@@ -34,6 +35,7 @@ func FromError(ctx context.Context, err error) *grpcstatus.Status {
 // Errorf creates a gRPC status error with explicit code and message.
 func Errorf(ctx context.Context, code codes.Code, format string, args ...any) error {
 	st := grpcstatus.Newf(code, format, args...)
+	transportctx.SetError(ctx, st.Message())
 
 	if rid, ok := transportctx.RequestID(ctx); ok {
 		if detailed, err := withRequestID(st, rid); err == nil {
@@ -65,6 +67,9 @@ func mapError(err error) (codes.Code, string) {
 		errors.Is(err, auth.ErrInvalidArgument),
 		errors.Is(err, auth.ErrWrongAuthKind):
 		return codes.InvalidArgument, "invalid argument"
+
+	case errors.Is(err, auth.ErrUserDisabled):
+		return codes.FailedPrecondition, "user disabled"
 
 	case errors.Is(err, storage.ErrNotFound):
 		return codes.NotFound, "not found"

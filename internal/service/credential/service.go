@@ -105,8 +105,11 @@ func (s *Service) SetPassword(ctx context.Context, req SetPasswordRequest) error
 	if err != nil {
 		return err
 	}
-	if u == nil || u.Disabled() {
+	if u == nil {
 		return auth.ErrInvalidRequest
+	}
+	if u.Disabled() {
+		return auth.ErrUserDisabled
 	}
 
 	credID := req.CredentialID

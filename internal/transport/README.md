@@ -31,7 +31,7 @@ transport/
   │  RequestID → Auth → Negotiate → Logger → Recovery    │
   └──────────────────────────────────────────────────────┘
         │
-        │  context carries: requestID, identity, responder, renderMode
+        │  context carries: requestID, identity, responder, renderMode, errorSlot
         ▼
   handler/api.go  or  handler/ui.go
         │
@@ -45,7 +45,8 @@ transport/
         │
         └─ on error: response.NotFound / Unauthorized / …
                  │
-                 └─ same dual-format pattern (JSON body + error page)
+                 ├─ same dual-format pattern (JSON body + error page)
+                 └─ sets transportctx error slot → Logger middleware appends to log line
 ```
 
 ### gRPC
@@ -57,15 +58,16 @@ transport/
   │  UnaryRequestID → UnaryAuth → UnaryLogger → Recovery │
   └──────────────────────────────────────────────────────┘
         │
-        │  context carries: requestID, identity
+        │  context carries: requestID, identity, errorSlot
         ▼
   handler/discovery.go (GRPCDiscovery)
         │
         ├─ success → proto response
         └─ error   → status.FromError(ctx, err)  or  status.Errorf(ctx, code, msg)
                           │
-                          └─ maps domain errors to gRPC codes
-                             attaches requestID as errdetails.RequestInfo
+                          ├─ maps domain errors to gRPC codes
+                          ├─ attaches requestID as errdetails.RequestInfo
+                          └─ sets transportctx error slot → UnaryLogger appends to log line
 ```
 
 ## Format negotiation (HTTP)

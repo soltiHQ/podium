@@ -7,7 +7,8 @@ Everything here is internal to the control plane; agents never import it.
 uikit/
 ├── policy/       permission-based UI visibility flags
 ├── routepath/    URL constants for pages and API endpoints
-└── trigger/      HTMX events, polling intervals, and SSE notification hub
+├── timeformat/   human-readable time formatting (relative, session, uptime)
+└── trigger/      HTMX events, polling intervals, event recording, and SSE notification hub
 ```
 
 ## policy
@@ -34,41 +35,59 @@ routepath.PageUserInfoByID("abc")  // → "/users/info/abc"
 routepath.ApiAgentTasks("xyz")     // → "/api/v1/agents/xyz/tasks"
 ```
 
+## timeformat
+Human-readable time formatting helpers used by templ templates.
+
+```text
+  timeformat.Relative(t)   →  "just now", "5m ago", "2h ago", "3d ago"
+  timeformat.Session(t)    →  "Jan 02, 15:04" (current year) / "Jan 02 2006, 15:04"
+  timeformat.Uptime(secs)  →  "30s", "5m", "2h 15m", "3d 4h"
+```
+
 ## trigger
-Real-time UI update pipeline: HTMX events + SSE broadcast hub.
+Real-time UI update pipeline: HTMX events + SSE broadcast hub + event recording.
 
 ### Event flow
 ```text
   mutation (handler / runner)
           │
-          ├─ trigger.Set(w, event)     HX-Trigger header + SSE broadcast
-          └─ trigger.Notify(event)     SSE broadcast only (no ResponseWriter)
+          ├─ trigger.Set(w, event)       HX-Trigger header + SSE broadcast
+          ├─ trigger.Notify(event)       SSE broadcast only (no ResponseWriter)
+          └─ trigger.Record(kind, payload)  append to ring buffer for dashboard feed
           │
           ▼
      Hub.Notify(event)
           │
           ▼
-  ┌── SSE channel per browser tab ──┐
-  │  EventSource → htmx.trigger(    │
-  │    document.body, event)        │
-  └─────────────────────────────────┘
+  ┌───────────────── SSE channel per browser tab ────────────┐
+  │  EventSource → htmx.trigger(document.body, event)        │
+  └──────────────────────────────────────────────────────────┘
           │
           ▼
   hx-trigger="… event from:body"    Results div refetches
+```
+
+### Event kinds (dashboard feed)
+```text
+  agent_connected, agent_inactive, agent_disconnected, agent_deleted
+  spec_created, spec_updated, spec_deployed
+  user_created, user_updated, user_deleted, user_password_changed, user_status_changed
+  session_created, rate_limited
 ```
 
 ### File map
 ```text
 trigger/
 ├── trigger.go   event constants, polling config, Set() / Redirect()
-├── hub.go       Hub type — fan-out to subscribers, thread-safe
-├── global.go    package-level singleton (InitHub, CloseHub, Notify, Subscribe)
+├── hub.go       Hub type — fan-out, ring buffer (EventRecord, Record, RecentEvents)
+├── global.go    package-level singleton (InitHub, CloseHub, Notify, Record, RecentEvents, Subscribe)
 └── sse.go       SSEHandler() — text/event-stream HTTP endpoint
 ```
 
 ### Polling intervals (defaults)
 | Scope           | Interval | Getter                     |
 |-----------------|----------|----------------------------|
+| Dashboard       | 1 min    | `GetDashboardRefresh()`    |
 | User list       | 3 min    | `GetUsersRefresh()`        |
 | User detail     | 5 min    | `GetUserDetailRefresh()`   |
 | User sessions   | 3 min    | `GetUserSessionsRefresh()` |
@@ -88,13 +107,13 @@ This keeps the search input untouched during a refresh cycle:
   HTMXLoader (trigger="load")          ← one-time initial fetch
        │
        ▼
-  ┌─ List ──────────────────────────┐
-  │  SearchInput  ← stays in DOM    │
-  │                                 │
-  │  #results  (hx-trigger="every   │ ← handles SSE + polling
-  │     60s, agent_update from:body"│
-  │     hx-include="#search-input") │ ← preserves search query
-  │     hx-swap="outerHTML"         │
-  │     hx-select="#results"        │ ← picks only results from response
-  └─────────────────────────────────┘
+  ┌─ List ─────────────────────────────┐
+  │  SearchInput  ← stays in DOM       │
+  │                                    │
+  │  #results  (hx-trigger="every 60s, │ ← handles SSE + polling
+  │     agent_update from:body"        │
+  │     hx-include="#search-input"     │ ← preserves search query
+  │     hx-swap="outerHTML"            │
+  │     hx-select="#results")          │ ← picks only results from response
+  └────────────────────────────────────┘
 ```

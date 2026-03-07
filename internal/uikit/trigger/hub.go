@@ -11,11 +11,19 @@ const (
 	defaultMaxEvents = 100
 )
 
+// EventPayload describes who did what to whom.
+type EventPayload struct {
+	ID     string
+	Name   string
+	By     string
+	Detail string
+}
+
 // EventRecord is a single entry in the recent-activity ring buffer.
 type EventRecord struct {
 	Time    time.Time
 	Kind    string
-	Payload map[string]string
+	Payload EventPayload
 }
 
 // Hub broadcasts UI update notifications to all clients and keeps
@@ -73,7 +81,7 @@ func (h *Hub) Notify(event string) {
 }
 
 // Record appends an event to the ring buffer.
-func (h *Hub) Record(kind string, payload map[string]string) {
+func (h *Hub) Record(kind string, payload EventPayload) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 

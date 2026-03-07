@@ -5,7 +5,7 @@ import "github.com/soltiHQ/control-plane/internal/uikit/trigger"
 // issueBorderColor returns the left border accent class for an issue event.
 func issueBorderColor(kind string) string {
 	switch kind {
-	case trigger.EventAgentDisconnected, trigger.EventAgentDeleted:
+	case trigger.EventAgentDisconnected, trigger.EventAgentDeleted, trigger.EventRateLimited:
 		return "border-l-danger"
 	case trigger.EventAgentInactive:
 		return "border-l-warning"
@@ -17,15 +17,17 @@ func issueBorderColor(kind string) string {
 // eventLabelColor returns the text color class for an event label.
 func eventLabelColor(kind string) string {
 	switch kind {
-	case trigger.EventAgentConnected:
+	case trigger.EventAgentConnected, trigger.EventSessionCreated:
 		return "text-success"
-	case trigger.EventAgentDisconnected, trigger.EventAgentDeleted, trigger.EventUserDeleted:
+	case trigger.EventAgentDisconnected, trigger.EventAgentDeleted,
+		trigger.EventUserDeleted, trigger.EventRateLimited:
 		return "text-danger"
 	case trigger.EventAgentInactive:
 		return "text-warning"
 	case trigger.EventSpecCreated, trigger.EventUserCreated:
 		return "text-primary"
-	case trigger.EventSpecUpdated, trigger.EventSpecDeployed:
+	case trigger.EventSpecUpdated, trigger.EventSpecDeployed,
+		trigger.EventUserUpdated, trigger.EventUserPasswordChanged, trigger.EventUserStatusChanged:
 		return "text-secondary"
 	default:
 		return "text-muted"
@@ -51,38 +53,65 @@ func eventLabel(kind string) string {
 		return "deployed"
 	case trigger.EventUserCreated:
 		return "created"
+	case trigger.EventUserUpdated:
+		return "updated"
 	case trigger.EventUserDeleted:
 		return "deleted"
+	case trigger.EventUserPasswordChanged:
+		return "password changed"
+	case trigger.EventUserStatusChanged:
+		return "status changed"
+	case trigger.EventSessionCreated:
+		return "logged in"
+	case trigger.EventRateLimited:
+		return "rate limited"
 	default:
 		return kind
 	}
 }
 
-// eventEntity returns the entity type prefix for an event.
+// eventEntity returns the lowercase entity type for an event kind.
 func eventEntity(kind string) string {
 	switch kind {
 	case trigger.EventAgentConnected, trigger.EventAgentInactive,
 		trigger.EventAgentDisconnected, trigger.EventAgentDeleted:
-		return "Agent"
+		return "agent"
 	case trigger.EventSpecCreated, trigger.EventSpecUpdated, trigger.EventSpecDeployed:
-		return "Spec"
-	case trigger.EventUserCreated, trigger.EventUserDeleted:
-		return "User"
+		return "spec"
+	case trigger.EventUserCreated, trigger.EventUserUpdated, trigger.EventUserDeleted,
+		trigger.EventUserPasswordChanged, trigger.EventUserStatusChanged,
+		trigger.EventSessionCreated, trigger.EventRateLimited:
+		return "user"
 	default:
 		return ""
 	}
 }
 
-// eventName returns the entity name from an event.
-func eventName(ev trigger.EventRecord) string {
-	name := ev.Payload["name"]
-	if name == "" {
-		name = ev.Payload["id"]
+// eventTarget returns the entity display name (or ID as fallback).
+func eventTarget(ev trigger.EventRecord) string {
+	if ev.Payload.Name != "" {
+		return ev.Payload.Name
 	}
-	if name == "" {
-		name = ev.Payload["subject"]
+	return ev.Payload.ID
+}
+
+// eventActor returns the actor name when it differs from the target, empty otherwise.
+func eventActor(ev trigger.EventRecord) string {
+	target := eventTarget(ev)
+	if ev.Payload.By != "" && ev.Payload.By != target {
+		return ev.Payload.By
 	}
-	return name
+	return ""
+}
+
+// eventDescription builds a human-readable one-liner for the event.
+// Examples: "user asd by Admin", "agent gpu-3".
+func eventDescription(ev trigger.EventRecord) string {
+	desc := eventEntity(ev.Kind) + " " + eventTarget(ev)
+	if actor := eventActor(ev); actor != "" {
+		desc += " by " + actor
+	}
+	return desc
 }
 
 // word returns singular or plural form based on count.

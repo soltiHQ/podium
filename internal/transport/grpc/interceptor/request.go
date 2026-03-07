@@ -15,6 +15,7 @@ const metadataKeyRequestID = "x-request-id"
 func UnaryRequestID() grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		ctx = ensureRequestID(ctx)
+		ctx = transportctx.WithErrorSlot(ctx)
 		return handler(ctx, req)
 	}
 }
