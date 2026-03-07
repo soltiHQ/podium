@@ -59,10 +59,9 @@ Real-time UI update pipeline: HTMX events + SSE broadcast hub + event recording.
      Hub.Notify(event)
           │
           ▼
-  ┌── SSE channel per browser tab ──┐
-  │  EventSource → htmx.trigger(    │
-  │    document.body, event)        │
-  └─────────────────────────────────┘
+  ┌───────────────── SSE channel per browser tab ────────────┐
+  │  EventSource → htmx.trigger(document.body, event)        │
+  └──────────────────────────────────────────────────────────┘
           │
           ▼
   hx-trigger="… event from:body"    Results div refetches
@@ -108,13 +107,13 @@ This keeps the search input untouched during a refresh cycle:
   HTMXLoader (trigger="load")          ← one-time initial fetch
        │
        ▼
-  ┌─ List ──────────────────────────┐
-  │  SearchInput  ← stays in DOM    │
-  │                                 │
-  │  #results  (hx-trigger="every   │ ← handles SSE + polling
-  │     60s, agent_update from:body"│
-  │     hx-include="#search-input") │ ← preserves search query
-  │     hx-swap="outerHTML"         │
-  │     hx-select="#results"        │ ← picks only results from response
-  └─────────────────────────────────┘
+  ┌─ List ─────────────────────────────┐
+  │  SearchInput  ← stays in DOM       │
+  │                                    │
+  │  #results  (hx-trigger="every 60s, │ ← handles SSE + polling
+  │     agent_update from:body"        │
+  │     hx-include="#search-input"     │ ← preserves search query
+  │     hx-swap="outerHTML"            │
+  │     hx-select="#results")          │ ← picks only results from response
+  └────────────────────────────────────┘
 ```
