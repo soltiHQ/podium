@@ -34,6 +34,9 @@ func UnaryLogger(logger zerolog.Logger) grpc.UnaryServerInterceptor {
 		if rid, ok := transportctx.RequestID(ctx); ok {
 			evt = evt.Str("request_id", rid)
 		}
+		if reason := transportctx.TryError(ctx); reason != "" {
+			evt = evt.Str("error", reason)
+		}
 
 		evt.Msg("grpc request")
 		return resp, err

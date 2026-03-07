@@ -7,6 +7,8 @@ var (
 	ErrNilSyncRequest = errors.New("sync request cannot be nil")
 	// ErrInvalidSubject indicates that a subject is invalid or empty.
 	ErrInvalidSubject = errors.New("subject cannot be empty")
+	// ErrInvalidEmail indicates that the email address format is invalid.
+	ErrInvalidEmail = errors.New("invalid email address")
 	// ErrEmptyUserID indicates that user ID is empty.
 	ErrEmptyUserID = errors.New("user id cannot be empty")
 	// ErrFieldEmpty indicates that a required field is empty.

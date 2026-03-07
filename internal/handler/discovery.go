@@ -50,7 +50,6 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 
 	var in discoveryv1.SyncRequest
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		h.logger.Warn().Err(err).Msg("sync: failed to decode request body")
 		response.BadRequest(w, r, mode)
 		return
 	}
@@ -69,11 +68,6 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 		Metadata:           in.Metadata,
 	})
 	if err != nil {
-		h.logger.Warn().Err(err).
-			Str("agent_id", in.ID).
-			Int("endpoint_type", in.EndpointType).
-			Int("api_version", in.APIVersion).
-			Msg("invalid sync request")
 		response.BadRequest(w, r, mode)
 		return
 	}
@@ -126,7 +120,6 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *genv1.SyncRequest) (*genv
 		Metadata:           req.GetMetadata(),
 	})
 	if err != nil {
-		g.logger.Warn().Err(err).Msg("invalid sync request")
 		return nil, status.Errorf(ctx, codes.InvalidArgument, "invalid agent data: %v", err)
 	}
 

@@ -1,14 +1,16 @@
 // Package user implements user management use-cases:
 //   - Paginated listing and retrieval (by ID or subject)
-//   - Upsert
+//   - Upsert with field normalization and uniqueness checks
 //   - Cascading deletion (sessions → verifiers → credentials → user).
 package user
 
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/rs/zerolog"
+	"github.com/soltiHQ/control-plane/domain"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -119,12 +121,26 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 }
 
 // Upsert creates or replaces a user.
-//
-// If the user carries role IDs, every ID is verified against the role store
-// before persisting. Returns storage.ErrNotFound if any role does not exist.
 func (s *Service) Upsert(ctx context.Context, u *model.User) error {
 	if u == nil {
 		return storage.ErrInvalidArgument
+	}
+
+	subject := strings.TrimSpace(strings.ToLower(u.Subject()))
+	if subject == "" {
+		return domain.ErrInvalidSubject
+	}
+	u.SubjectAdd(subject)
+	u.NameAdd(strings.TrimSpace(u.Name()))
+
+	email := strings.TrimSpace(strings.ToLower(u.Email()))
+	if email != "" && !isValidEmail(email) {
+		return domain.ErrInvalidEmail
+	}
+	u.EmailAdd(email)
+
+	if existing, err := s.store.GetUserBySubject(ctx, subject); err == nil && existing.ID() != u.ID() {
+		return storage.ErrAlreadyExists
 	}
 	if ids := u.RoleIDsAll(); len(ids) > 0 {
 		if _, err := s.store.GetRoles(ctx, ids); err != nil {
@@ -132,4 +148,14 @@ func (s *Service) Upsert(ctx context.Context, u *model.User) error {
 		}
 	}
 	return s.store.UpsertUser(ctx, u)
+}
+
+// isValidEmail performs a basic email format check:
+func isValidEmail(email string) bool {
+	at := strings.IndexByte(email, '@')
+	if at < 1 || at == len(email)-1 {
+		return false
+	}
+	d := email[at+1:]
+	return strings.ContainsRune(d, '.') && !strings.HasSuffix(d, ".")
 }

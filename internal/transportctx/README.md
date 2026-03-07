@@ -2,14 +2,22 @@
 
 Transport-agnostic context values are shared across HTTP and gRPC layers.
   
-The package owns two typed context keys — **Identity** and **RequestID** — and provides getters/setters for each.  
+The package owns three typed context keys — **Identity**, **RequestID**, and **ErrorSlot** — and provides getters/setters for each.
 Because the keys are unexported structs, no other package can collide with them.
 
 ## What goes into context
-| Value                 | Writer                             | Reader                               |
-|-----------------------|------------------------------------|--------------------------------------|
-| `*identity.Identity`  | Auth middleware / interceptor      | Handlers, loggers, permission checks |
-| `string` (request ID) | RequestID middleware / interceptor | Loggers, error responders            |
+| Value                 | Writer                                          | Reader                               |
+|-----------------------|-------------------------------------------------|--------------------------------------|
+| `*identity.Identity`  | Auth middleware / interceptor                   | Handlers, loggers, permission checks |
+| `string` (request ID) | RequestID middleware / interceptor               | Loggers, error responders            |
+| `*errorHolder` (slot) | RequestID middleware / interceptor (`WithErrorSlot`) | Logger middleware / interceptor (`TryError`) |
+
+### Error slot
+A mutable `errorHolder` pointer stored in context so that error response helpers can write a reason **after** the logger middleware has already captured the context.
+
+- **Init**: `WithErrorSlot(ctx)` — called by RequestID middleware/interceptor before handler runs.
+- **Write**: `SetError(ctx, msg)` — called by `response.*` (HTTP) and `status.*` (gRPC) helpers. No-op if slot was not initialised.
+- **Read**: `TryError(ctx)` — called by Logger middleware/interceptor to append `"error"` field to the log line.
 
 ## Request lifecycle
 
@@ -19,7 +27,7 @@ Because the keys are unexported structs, no other package can collide with them.
     ▼
   ┌──────────────────────────────┐
   │  RequestID middleware        │  WithRequestID(ctx, rid)
-  │  ── extract or generate ──   │
+  │  ── extract or generate ──   │  WithErrorSlot(ctx)
   └──────────────┬───────────────┘
                  │
                  ▼
@@ -31,7 +39,13 @@ Because the keys are unexported structs, no other package can collide with them.
                  ▼
   ┌──────────────────────────────┐
   │  Handler / Interceptor       │  Identity(ctx), RequestID(ctx)
-  │  ── business logic ──        │
+  │  ── business logic ──        │  SetError(ctx, msg) via response/status helpers
+  └──────────────┬───────────────┘
+                 │
+                 ▼
+  ┌──────────────────────────────┐
+  │  Logger middleware           │  TryError(ctx) → "error" field in log
+  │  ── log request ──           │
   └──────────────────────────────┘
 ```
 

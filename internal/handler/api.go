@@ -12,6 +12,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/segmentio/ksuid"
+	"github.com/soltiHQ/control-plane/domain"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
@@ -415,7 +416,6 @@ func (a *API) agentPatchLabels(w http.ResponseWriter, r *http.Request, mode http
 	})
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			a.logger.Warn().Str("agent_id", id).Msg("agent not found")
 			response.NotFound(w, r, mode)
 			return
 		}
@@ -586,13 +586,9 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 
 	switch action {
 	case modeCreate:
-		if in.Subject == "" {
-			response.BadRequest(w, r, mode)
-			return
-		}
 		x, err := model.NewUser(ksuid.New().String(), in.Subject)
 		if err != nil {
-			response.BadRequest(w, r, mode)
+			response.BadRequestMsg(w, r, mode, "subject is required")
 			return
 		}
 		x.Enable()
@@ -634,13 +630,21 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		u.PermissionsNew(in.Permissions)
 	}
 	if err = a.userSVC.Upsert(r.Context(), u); err != nil {
-		a.logger.Error().Err(err).Str("user_id", u.ID()).Msg("user upsert failed")
-		response.Unavailable(w, r, mode)
+		switch {
+		case errors.Is(err, domain.ErrInvalidSubject):
+			response.BadRequestMsg(w, r, mode, "subject is required")
+		case errors.Is(err, domain.ErrInvalidEmail):
+			response.BadRequestMsg(w, r, mode, "invalid email address")
+		case errors.Is(err, storage.ErrAlreadyExists):
+			response.Conflict(w, r, mode, "user with this subject already exists")
+		default:
+			a.logger.Error().Err(err).Str("user_id", u.ID()).Msg("user upsert failed")
+			response.Unavailable(w, r, mode)
+		}
 		return
 	}
 
 	by := a.actor(r)
-
 	if action == modeCreate {
 		a.logger.Info().Str("user_id", u.ID()).Str("subject", u.Subject()).Msg("user created")
 		trigger.Record(trigger.EventUserCreated, trigger.EventPayload{
@@ -733,13 +737,13 @@ func (a *API) userSetPassword(w http.ResponseWriter, r *http.Request, mode httpc
 	if err != nil {
 		switch {
 		case errors.Is(err, storage.ErrNotFound):
-			a.logger.Warn().Str("user_id", userID).Msg("password change: user not found")
+			response.NotFound(w, r, mode)
 		case errors.Is(err, auth.ErrUserDisabled):
-			a.logger.Warn().Str("user_id", userID).Msg("password change: user is disabled")
+			response.BadRequestMsg(w, r, mode, "user is disabled")
 		default:
 			a.logger.Error().Err(err).Str("user_id", userID).Msg("password change failed")
+			response.Unavailable(w, r, mode)
 		}
-		response.Unavailable(w, r, mode)
 		return
 	}
 

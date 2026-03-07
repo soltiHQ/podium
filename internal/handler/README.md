@@ -52,17 +52,17 @@ UI checks permissions **at registration** (per-route granularity).
 ## API endpoints
 
 ### Users `/api/v1/users`
-| Method | Path                         | Permission    |
-|--------|------------------------------|---------------|
-| GET    | `/api/v1/users`              | `UsersGet`    |
-| POST   | `/api/v1/users`              | `UsersAdd`    |
-| GET    | `/api/v1/users/{id}`         | `UsersGet`    |
-| PUT    | `/api/v1/users/{id}`         | `UsersEdit`   |
-| DELETE | `/api/v1/users/{id}`         | `UsersDelete` |
-| GET    | `/api/v1/users/{id}/sessions`| `UsersGet`    |
-| POST   | `/api/v1/users/{id}/disable` | `UsersEdit`   |
-| POST   | `/api/v1/users/{id}/enable`  | `UsersEdit`   |
-| POST   | `/api/v1/users/{id}/password`| `UsersEdit`   |
+| Method | Path                          | Permission    |
+|--------|-------------------------------|---------------|
+| GET    | `/api/v1/users`               | `UsersGet`    |
+| POST   | `/api/v1/users`               | `UsersAdd`    |
+| GET    | `/api/v1/users/{id}`          | `UsersGet`    |
+| PUT    | `/api/v1/users/{id}`          | `UsersEdit`   |
+| DELETE | `/api/v1/users/{id}`          | `UsersDelete` |
+| GET    | `/api/v1/users/{id}/sessions` | `UsersGet`    |
+| POST   | `/api/v1/users/{id}/disable`  | `UsersEdit`   |
+| POST   | `/api/v1/users/{id}/enable`   | `UsersEdit`   |
+| POST   | `/api/v1/users/{id}/password` | `UsersEdit`   |
 
 ### Sessions `/api/v1/sessions`
 | Method | Path                                 | Permission    |
@@ -88,6 +88,11 @@ UI checks permissions **at registration** (per-route granularity).
 | POST   | `/api/v1/specs/{id}/deploy`  | `SpecsDeploy` |
 | GET    | `/api/v1/specs/{id}/sync`    | `SpecsGet`    |
 
+### Dashboard `/api/v1/dashboard`
+| Method | Path                  | Permission    |
+|--------|-----------------------|---------------|
+| GET    | `/api/v1/dashboard`   | (any authed)  |
+
 ### Other
 | Method | Path                  | Permission    |
 |--------|-----------------------|---------------|
@@ -103,18 +108,18 @@ UI checks permissions **at registration** (per-route granularity).
 Both parse the agent heartbeat payload, call `model.NewAgentFrom{Sync,Proto}`, then `agentSVC.Upsert`.
 
 ## UI pages
-| Path               | Handler          | Auth | Permission |
-|--------------------|------------------|------|------------|
-| `/login`           | `UI.Login`       | —    | —          |
-| `/logout`          | `UI.Logout`      | yes  | —          |
-| `/`                | `UI.Main`        | yes  | —          |
-| `/users`           | `UI.Users`       | yes  | —          |
-| `/users/info/{id}` | `UI.UserDetail`  | yes  | `UsersGet` |
-| `/agents`          | `UI.Agents`      | yes  | —          |
-| `/agents/info/{id}`| `UI.AgentDetail` | yes  | `AgentsGet`|
-| `/specs`           | `UI.Specs`       | yes  | `SpecsGet` |
-| `/specs/new`       | `UI.SpecNew`     | yes  | `SpecsAdd` |
-| `/specs/info/{id}` | `UI.SpecDetail`  | yes  | `SpecsGet` |
+| Path                | Handler          | Auth | Permission  |
+|---------------------|------------------|------|-------------|
+| `/login`            | `UI.Login`       | —    | —           |
+| `/logout`           | `UI.Logout`      | yes  | —           |
+| `/`                 | `UI.Main`        | yes  | —           |
+| `/users`            | `UI.Users`       | yes  | —           |
+| `/users/info/{id}`  | `UI.UserDetail`  | yes  | `UsersGet`  |
+| `/agents`           | `UI.Agents`      | yes  | —           |
+| `/agents/info/{id}` | `UI.AgentDetail` | yes  | `AgentsGet` |
+| `/specs`            | `UI.Specs`       | yes  | `SpecsGet`  |
+| `/specs/new`        | `UI.SpecNew`     | yes  | `SpecsAdd`  |
+| `/specs/info/{id}`  | `UI.SpecDetail`  | yes  | `SpecsGet`  |
 
 ## Response pattern
 All handlers detect render mode via `httpctx.ModeFromRequest(r)`:

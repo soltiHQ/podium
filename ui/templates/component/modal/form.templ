@@ -107,6 +107,12 @@ templ FormModal(
 							</div>
 						</div>
 					}
+					<p
+						x-show="error"
+						x-text="error"
+						x-cloak
+						class={ formError }
+					></p>
 				</div>
 
 				@Footer() {
