@@ -73,15 +73,14 @@ templ Identity(u restv1.User, p policy.UserDetail) {
 						}
 					</form>
 				}
+			}
 
+			if p.CanEdit {
 				@button.Button("", "button", false, button.VariantSecondary, false,
 					templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent("edit-user")},
 				) {
 					@asset.Icon("edit")
 				}
-			}
-
-			if p.CanEdit {
 				@button.Button("", "button", false, button.VariantWarning, false,
 					templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent("password-user")},
 				) {
