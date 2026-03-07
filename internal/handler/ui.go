@@ -115,7 +115,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, auth.ErrRateLimited):
 			u.logger.Warn().Str("subject", subject).Msg("login rate limited")
 			trigger.Record(trigger.EventRateLimited, trigger.EventPayload{
-				Name: subject,
+				Name: subject, By: "auth",
 			})
 			response.AuthRateLimit(w, r, mode)
 			return
@@ -133,8 +133,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 
 	u.logger.Info().Str("subject", subject).Msg("login success")
 	trigger.Record(trigger.EventSessionCreated, trigger.EventPayload{
-		ID:   id.UserID,
-		Name: id.Name,
+		ID: id.UserID, Name: id.Name, By: "auth",
 	})
 	cookie.SetAuth(w, r, res.AccessToken, res.RefreshToken, res.SessionID)
 	http.Redirect(w, r, redirect, http.StatusFound)
