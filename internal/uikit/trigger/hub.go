@@ -19,15 +19,15 @@ type EventPayload struct {
 	Detail string
 }
 
-// EventRecord is a single entry in the recent-activity ring buffer.
+// EventRecord is a single entry in the ring buffer.
 type EventRecord struct {
 	Time    time.Time
 	Kind    string
 	Payload EventPayload
 }
 
-// Hub broadcasts UI update notifications to all clients and keeps
-// a ring buffer of the most recent events for the dashboard feed.
+// Hub broadcasts UI update notifications to all SSE clients and keeps
+// separate ring buffers for activity events and issues.
 type Hub struct {
 	mu sync.RWMutex
 
@@ -35,15 +35,16 @@ type Hub struct {
 	nextID  uint64
 	closed  bool
 
-	events    []EventRecord
-	maxEvents int
+	events *Ring[EventRecord]
+	issues *Ring[EventRecord]
 }
 
 // NewHub creates a new notification hub.
 func NewHub() *Hub {
 	return &Hub{
-		clients:   make(map[uint64]chan string),
-		maxEvents: defaultMaxEvents,
+		clients: make(map[uint64]chan string),
+		events:  NewRing[EventRecord](defaultMaxEvents),
+		issues:  NewRing[EventRecord](defaultMaxEvents),
 	}
 }
 
@@ -80,78 +81,32 @@ func (h *Hub) Notify(event string) {
 	}
 }
 
-// Record appends an event to the ring buffer.
+// Record appends an event to the activity ring buffer.
+// Issue-classified events are also appended to the issues ring buffer.
 func (h *Hub) Record(kind string, payload EventPayload) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	h.events = append(h.events, EventRecord{
-		Time:    time.Now(),
-		Kind:    kind,
-		Payload: payload,
-	})
-
-	if len(h.events) > h.maxEvents {
-		h.events = h.events[len(h.events)-h.maxEvents:]
+	rec := EventRecord{Time: time.Now(), Kind: kind, Payload: payload}
+	h.events.Append(rec)
+	if IsIssueKind(kind) {
+		h.issues.Append(rec)
 	}
 }
 
-// RecentEvents returns the last n events in reverse chronological order.
+// RecentEvents returns the last n activity events in reverse chronological order.
 func (h *Hub) RecentEvents(n int) []EventRecord {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-
-	total := len(h.events)
-	if n <= 0 || total == 0 {
-		return nil
-	}
-	if n > total {
-		n = total
-	}
-
-	out := make([]EventRecord, n)
-	for i := range n {
-		out[i] = h.events[total-1-i]
-	}
-	return out
+	return h.events.Recent(n)
 }
 
-// RecentEventsOfKind returns the last n events matching any of the given kinds, in reverse chronological order.
-func (h *Hub) RecentEventsOfKind(n int, kinds ...string) []EventRecord {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-
-	kindSet := make(map[string]struct{}, len(kinds))
-	for _, k := range kinds {
-		kindSet[k] = struct{}{}
-	}
-
-	var out []EventRecord
-	for i := len(h.events) - 1; i >= 0 && len(out) < n; i-- {
-		if _, ok := kindSet[h.events[i].Kind]; ok {
-			out = append(out, h.events[i])
-		}
-	}
-	return out
+// RecentIssues returns the last n issues in reverse chronological order.
+func (h *Hub) RecentIssues(n int) []EventRecord {
+	return h.issues.Recent(n)
 }
 
-// DeleteEvents removes all events matching kind and payload ID from the ring buffer.
-// Returns the number of removed events.
-func (h *Hub) DeleteEvents(kind, id string) int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	n := 0
-	filtered := h.events[:0]
-	for _, ev := range h.events {
-		if ev.Kind == kind && ev.Payload.ID == id {
-			n++
-			continue
-		}
-		filtered = append(filtered, ev)
-	}
-	h.events = filtered
-	return n
+// DeleteIssues removes all issues matching kind and payload ID.
+// Returns the number of removed issues.
+func (h *Hub) DeleteIssues(kind, id string) int {
+	return h.issues.DeleteFunc(func(ev EventRecord) bool {
+		return ev.Kind == kind && ev.Payload.ID == id
+	})
 }
 
 // Subscribe registers a new listener.

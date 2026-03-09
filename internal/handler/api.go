@@ -217,12 +217,7 @@ func (a *API) Dashboard(w http.ResponseWriter, r *http.Request) {
 		DriftRollouts:      drift,
 
 		Events: trigger.RecentEvents(30),
-		Issues: contentHome.GroupIssues(trigger.RecentEventsOfKind(100,
-			trigger.EventAgentDisconnected,
-			trigger.EventAgentInactive,
-			trigger.EventAgentDeleted,
-			trigger.EventRateLimited,
-		)),
+		Issues: contentHome.GroupIssues(trigger.RecentIssues(100)),
 	}
 	response.OK(w, r, mode, &responder.View{
 		Data:      stats,
@@ -245,7 +240,7 @@ func (a *API) IssuesDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	n := trigger.DeleteEvents(kind, entity)
+	n := trigger.DeleteIssues(kind, entity)
 	if n > 0 {
 		name := r.FormValue("name")
 		if name == "" {

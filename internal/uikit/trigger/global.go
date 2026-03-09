@@ -21,14 +21,15 @@ func Notify(event string) {
 	}
 }
 
-// Record appends an event to the package-level hub ring buffer.
+// Record appends an event to the package-level hub.
+// Issue-classified events are stored in both activity and issues buffers.
 func Record(kind string, payload EventPayload) {
 	if defaultHub != nil {
 		defaultHub.Record(kind, payload)
 	}
 }
 
-// RecentEvents returns the last n events from the package-level hub.
+// RecentEvents returns the last n activity events from the package-level hub.
 func RecentEvents(n int) []EventRecord {
 	if defaultHub != nil {
 		return defaultHub.RecentEvents(n)
@@ -36,18 +37,18 @@ func RecentEvents(n int) []EventRecord {
 	return nil
 }
 
-// RecentEventsOfKind returns the last n events matching any of the given kinds.
-func RecentEventsOfKind(n int, kinds ...string) []EventRecord {
+// RecentIssues returns the last n issues from the package-level hub.
+func RecentIssues(n int) []EventRecord {
 	if defaultHub != nil {
-		return defaultHub.RecentEventsOfKind(n, kinds...)
+		return defaultHub.RecentIssues(n)
 	}
 	return nil
 }
 
-// DeleteEvents removes all events matching kind and entity ID from the package-level hub.
-func DeleteEvents(kind, entityID string) int {
+// DeleteIssues removes all issues matching kind and entity ID from the package-level hub.
+func DeleteIssues(kind, id string) int {
 	if defaultHub != nil {
-		return defaultHub.DeleteEvents(kind, entityID)
+		return defaultHub.DeleteIssues(kind, id)
 	}
 	return 0
 }
@@ -57,7 +58,7 @@ func Subscribe(ctx context.Context) <-chan string {
 	if defaultHub != nil {
 		return defaultHub.Subscribe(ctx)
 	}
-	
+
 	ch := make(chan string)
 	close(ch)
 	return ch

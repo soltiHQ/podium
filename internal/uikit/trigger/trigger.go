@@ -37,6 +37,20 @@ const (
 	EventIssueClosed         = "issue_closed"
 )
 
+// issueKinds defines which event kinds are classified as issues.
+var issueKinds = map[string]struct{}{
+	EventAgentDisconnected: {},
+	EventAgentInactive:     {},
+	EventAgentDeleted:      {},
+	EventRateLimited:       {},
+}
+
+// IsIssueKind reports whether the event kind is classified as an issue.
+func IsIssueKind(kind string) bool {
+	_, ok := issueKinds[kind]
+	return ok
+}
+
 const (
 	Every1m = "every 60s"
 	Every3m = "every 180s"
