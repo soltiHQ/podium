@@ -11,10 +11,11 @@ const (
 	Header         = "HX-Trigger"
 	RedirectHeader = "HX-Redirect"
 
-	SessionUpdate = "session_update"
-	AgentUpdate   = "agent_update"
-	SpecUpdate    = "spec_update"
-	UserUpdate    = "user_update"
+	SessionUpdate   = "session_update"
+	AgentUpdate     = "agent_update"
+	SpecUpdate      = "spec_update"
+	UserUpdate      = "user_update"
+	DashboardUpdate = "dashboard_update"
 )
 
 // Event kinds for the dashboard activity feed.
@@ -33,6 +34,7 @@ const (
 	EventUserStatusChanged   = "user_status_changed"
 	EventSessionCreated      = "session_created"
 	EventRateLimited         = "rate_limited"
+	EventIssueClosed         = "issue_closed"
 )
 
 const (

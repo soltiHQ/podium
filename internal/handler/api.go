@@ -130,6 +130,7 @@ func (a *API) Routes(mux *http.ServeMux, auth route.BaseMW, _ route.PermMW, comm
 	route.HandleFunc(mux, routepath.ApiSpecs, a.Specs, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiSpec, a.SpecsRouter, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiDashboard, a.Dashboard, append(common, auth)...)
+	route.HandleFunc(mux, routepath.ApiDashboardIssues, a.IssuesDelete, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiPermissions, a.Permissions, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiRoles, a.Roles, append(common, auth)...)
 }
@@ -216,17 +217,47 @@ func (a *API) Dashboard(w http.ResponseWriter, r *http.Request) {
 		DriftRollouts:      drift,
 
 		Events: trigger.RecentEvents(30),
-		Issues: trigger.RecentEventsOfKind(15,
+		Issues: contentHome.GroupIssues(trigger.RecentEventsOfKind(100,
 			trigger.EventAgentDisconnected,
 			trigger.EventAgentInactive,
 			trigger.EventAgentDeleted,
 			trigger.EventRateLimited,
-		),
+		)),
 	}
 	response.OK(w, r, mode, &responder.View{
 		Data:      stats,
 		Component: contentHome.Dashboard(stats),
 	})
+}
+
+// IssuesDelete handles DELETE /api/v1/dashboard/issues.
+func (a *API) IssuesDelete(w http.ResponseWriter, r *http.Request) {
+	mode := httpctx.ModeFromRequest(r)
+	if r.Method != http.MethodDelete {
+		response.NotAllowed(w, r, mode)
+		return
+	}
+
+	kind := r.FormValue("kind")
+	entity := r.FormValue("entity")
+	if kind == "" || entity == "" {
+		response.BadRequestMsg(w, r, mode, "kind and entity are required")
+		return
+	}
+
+	n := trigger.DeleteEvents(kind, entity)
+	if n > 0 {
+		name := r.FormValue("name")
+		if name == "" {
+			name = entity
+		}
+		trigger.Record(trigger.EventIssueClosed, trigger.EventPayload{
+			Name: name,
+			By:   a.actor(r),
+		})
+	}
+	trigger.Set(w, trigger.DashboardUpdate)
+	response.NoContent(w, r)
 }
 
 // Users handles /api/v1/users.

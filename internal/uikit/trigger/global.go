@@ -44,6 +44,14 @@ func RecentEventsOfKind(n int, kinds ...string) []EventRecord {
 	return nil
 }
 
+// DeleteEvents removes all events matching kind and entity ID from the package-level hub.
+func DeleteEvents(kind, entityID string) int {
+	if defaultHub != nil {
+		return defaultHub.DeleteEvents(kind, entityID)
+	}
+	return 0
+}
+
 // Subscribe registers a listener on the package-level hub.
 func Subscribe(ctx context.Context) <-chan string {
 	if defaultHub != nil {

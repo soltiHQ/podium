@@ -135,6 +135,25 @@ func (h *Hub) RecentEventsOfKind(n int, kinds ...string) []EventRecord {
 	return out
 }
 
+// DeleteEvents removes all events matching kind and payload ID from the ring buffer.
+// Returns the number of removed events.
+func (h *Hub) DeleteEvents(kind, id string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	n := 0
+	filtered := h.events[:0]
+	for _, ev := range h.events {
+		if ev.Kind == kind && ev.Payload.ID == id {
+			n++
+			continue
+		}
+		filtered = append(filtered, ev)
+	}
+	h.events = filtered
+	return n
+}
+
 // Subscribe registers a new listener.
 func (h *Hub) Subscribe(ctx context.Context) <-chan string {
 	ch := make(chan string, clientBufSize)

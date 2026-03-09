@@ -39,8 +39,9 @@ const (
 	ApiSpecs = "/api/v1/specs"
 	ApiSpec  = "/api/v1/specs/"
 
-	ApiDashboard   = "/api/v1/dashboard"
-	ApiEventStream = "/api/v1/events/stream"
+	ApiDashboard       = "/api/v1/dashboard"
+	ApiDashboardIssues = "/api/v1/dashboard/issues"
+	ApiEventStream     = "/api/v1/events/stream"
 )
 
 var (
