@@ -3,8 +3,8 @@ package restv1
 // User is the REST representation of a platform user.
 type User struct {
 	Permissions []string `json:"permissions,omitempty"`
-	RoleIDs     []string `json:"role_ids,omitempty"`
 	RoleNames   []string `json:"role_names,omitempty"`
+	RoleIDs     []string `json:"role_ids,omitempty"`
 
 	ID      string `json:"id"`
 	Subject string `json:"subject"`
