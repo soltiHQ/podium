@@ -16,8 +16,8 @@ type DetailPanel struct {
 // DetailPage renders a two-column sticky sidebar + scrollable main layout.
 templ DetailPage(title string, active string, nav policy.Nav, sidebar DetailPanel, main DetailPanel) {
 	@App(title, active, nav) {
-		<div class="p-6 lg:h-[calc(100vh-3rem)]">
-			<div class="grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-6 items-start h-full">
+		<div class="p-6">
+			<div class="grid grid-cols-1 lg:grid-cols-[380px_1fr] gap-6 items-start">
 
 				<div
 					id={ sidebar.ID }
@@ -36,7 +36,7 @@ templ DetailPage(title string, active string, nav policy.Nav, sidebar DetailPane
 					hx-trigger={ main.Trigger }
 					hx-target="this"
 					hx-swap="innerHTML"
-					class="lg:h-full lg:overflow-y-auto lg:pr-2 min-h-[140px]"
+					class="min-h-[140px]"
 				>
 					@status.Preload(main.PreloadMsg)
 				</div>

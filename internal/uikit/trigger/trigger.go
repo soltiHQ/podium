@@ -11,10 +11,11 @@ const (
 	Header         = "HX-Trigger"
 	RedirectHeader = "HX-Redirect"
 
-	SessionUpdate = "session_update"
-	AgentUpdate   = "agent_update"
-	SpecUpdate    = "spec_update"
-	UserUpdate    = "user_update"
+	SessionUpdate   = "session_update"
+	AgentUpdate     = "agent_update"
+	SpecUpdate      = "spec_update"
+	UserUpdate      = "user_update"
+	DashboardUpdate = "dashboard_update"
 )
 
 // Event kinds for the dashboard activity feed.
@@ -33,7 +34,22 @@ const (
 	EventUserStatusChanged   = "user_status_changed"
 	EventSessionCreated      = "session_created"
 	EventRateLimited         = "rate_limited"
+	EventIssueClosed         = "issue_closed"
 )
+
+// issueKinds defines which event kinds are classified as issues.
+var issueKinds = map[string]struct{}{
+	EventAgentDisconnected: {},
+	EventAgentInactive:     {},
+	EventAgentDeleted:      {},
+	EventRateLimited:       {},
+}
+
+// IsIssueKind reports whether the event kind is classified as an issue.
+func IsIssueKind(kind string) bool {
+	_, ok := issueKinds[kind]
+	return ok
+}
 
 const (
 	Every1m = "every 60s"

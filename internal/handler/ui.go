@@ -114,7 +114,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, auth.ErrRateLimited):
 			trigger.Record(trigger.EventRateLimited, trigger.EventPayload{
-				Name: subject, By: "auth",
+				ID: subject, Name: subject, By: "auth",
 			})
 			response.AuthRateLimit(w, r, mode)
 			return
