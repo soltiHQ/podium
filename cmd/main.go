@@ -38,9 +38,21 @@ import (
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 )
 
+type services struct {
+	credential *credential.Service
+	session    *session.Service
+	access     *access.Service
+	agent      *agent.Service
+	spec       *spec.Service
+	user       *user.Service
+	role       *role.Service
+}
+
 func main() {
-	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
-	cfg, err := config.Load()
+	var (
+		logger   = zerolog.New(os.Stdout).With().Timestamp().Logger()
+		cfg, err = config.Load()
+	)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to load config")
 	}
@@ -48,16 +60,9 @@ func main() {
 	var (
 		store     = inmemory.New()
 		authModel = wire.NewAuth(store, cfg.Auth)
-
-		authSVC       = access.New(authModel, store, logger)
-		credentialSVC = credential.New(store, logger)
-		userSVC       = user.New(store, logger)
-		sessionSVC    = session.New(store)
-		agentSVC      = agent.New(store)
-		specSVC       = spec.New(store)
-		roleSVC       = role.New(store)
+		svc       = initServices(store, authModel, logger)
 	)
-	if err = bootstrap.Run(context.Background(), logger, roleSVC, userSVC, credentialSVC); err != nil {
+	if err = bootstrap.Run(context.Background(), logger, svc.role, svc.user, svc.credential); err != nil {
 		logger.Fatal().Err(err).Msg("failed to bootstrap")
 	}
 
@@ -74,66 +79,19 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to create sync runner")
 	}
 
-	var (
-		apiHandler    = handler.NewAPI(logger, userSVC, authSVC, sessionSVC, credentialSVC, agentSVC, specSVC, proxyPool)
-		uiHandler     = handler.NewUI(logger, authSVC)
-		staticHandler = handler.NewStatic(logger)
-
-		authMW = middleware.Auth(authModel.Verifier, authModel.Session)
-		logMW  = middleware.Logger(logger)
-		ridMW  = middleware.RequestID()
-
-		permMW = route.PermMW(func(p kind.Permission) route.BaseMW {
-			return middleware.RequirePermission(p)
-		})
-		mux = http.NewServeMux()
-	)
-	apiHandler.Routes(mux, authMW, permMW, ridMW, logMW)
-	uiHandler.Routes(mux, authMW, permMW)
-	staticHandler.Routes(mux)
-
-	trigger.Configure(cfg.Triggers)
-	trigger.InitHub()
-	route.HandleFunc(mux, routepath.ApiEventStream, trigger.SSEHandler(), ridMW, logMW, authMW)
-
-	var mainHandler http.Handler = mux
-	mainHandler = middleware.Negotiate(responder.NewJSON(), responder.NewHTML())(mainHandler)
-	mainHandler = middleware.CORS(cfg.CORS)(mainHandler)
-	mainHandler = middleware.Recovery(logger)(mainHandler)
-
+	mainHandler := buildMainHandler(cfg, logger, svc, authModel, proxyPool)
 	httpRunner, err := httpserver.New(cfg.HTTP, logger, mainHandler)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create http server")
 	}
 
-	var (
-		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC)
-		discMux       = http.NewServeMux()
-	)
-	discMux.HandleFunc("/api/v1/discovery/sync", httpDiscovery.Sync)
-
-	var discHandler http.Handler = discMux
-	discHandler = middleware.Recovery(logger)(discHandler)
-	discHandler = middleware.Logger(logger)(discHandler)
-	discHandler = middleware.RequestID()(discHandler)
-
-	httpDiscoveryRunner, err := httpserver.New(cfg.HTTPDiscovery, logger, discHandler)
+	discoveryHandler := buildDiscoveryHandler(logger, svc.agent)
+	httpDiscoveryRunner, err := httpserver.New(cfg.HTTPDiscovery, logger, discoveryHandler)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create http discovery server")
 	}
 
-	var (
-		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC)
-		grpcSrv       = grpc.NewServer(
-			grpc.ChainUnaryInterceptor(
-				interceptor.UnaryRecovery(logger),
-				interceptor.UnaryRequestID(),
-				interceptor.UnaryLogger(logger),
-			),
-		)
-	)
-	genv1.RegisterDiscoverServiceServer(grpcSrv, grpcDiscovery)
-
+	grpcSrv := buildGRPCServer(logger, svc.agent)
 	grpcRunner, err := grpcserver.New(cfg.GRPC, logger, grpcSrv)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create grpc server")
@@ -156,4 +114,75 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info().Msg("server stopped")
+}
+
+func initServices(store *inmemory.Store, authModel *wire.Auth, logger zerolog.Logger) services {
+	return services{
+		access:     access.New(authModel, store, logger),
+		credential: credential.New(store, logger),
+		user:       user.New(store, logger),
+		session:    session.New(store),
+		agent:      agent.New(store),
+		spec:       spec.New(store),
+		role:       role.New(store),
+	}
+}
+
+func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *wire.Auth, proxyPool *proxy.Pool) http.Handler {
+	var (
+		apiHandler    = handler.NewAPI(logger, svc.user, svc.access, svc.session, svc.credential, svc.agent, svc.spec, proxyPool)
+		authMW        = middleware.Auth(authModel.Verifier, authModel.Session)
+		uiHandler     = handler.NewUI(logger, svc.access)
+		staticHandler = handler.NewStatic(logger)
+		logMW         = middleware.Logger(logger)
+		ridMW         = middleware.RequestID()
+		mux           = http.NewServeMux()
+
+		permMW = route.PermMW(func(p kind.Permission) route.BaseMW {
+			return middleware.RequirePermission(p)
+		})
+	)
+	apiHandler.Routes(mux, authMW, permMW, ridMW, logMW)
+	uiHandler.Routes(mux, authMW, permMW)
+	staticHandler.Routes(mux)
+
+	trigger.Configure(cfg.Triggers)
+	trigger.InitHub()
+
+	route.HandleFunc(mux, routepath.ApiEventStream, trigger.SSEHandler(), ridMW, logMW, authMW)
+
+	var h http.Handler = mux
+	h = middleware.Negotiate(responder.NewJSON(), responder.NewHTML())(h)
+	h = middleware.CORS(cfg.CORS)(h)
+	h = middleware.Recovery(logger)(h)
+	return h
+}
+
+func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service) http.Handler {
+	var (
+		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC)
+		mux           = http.NewServeMux()
+	)
+	mux.HandleFunc("/api/v1/discovery/sync", httpDiscovery.Sync)
+
+	var h http.Handler = mux
+	h = middleware.Recovery(logger)(h)
+	h = middleware.Logger(logger)(h)
+	h = middleware.RequestID()(h)
+	return h
+}
+
+func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service) *grpc.Server {
+	var (
+		srv = grpc.NewServer(
+			grpc.ChainUnaryInterceptor(
+				interceptor.UnaryRecovery(logger),
+				interceptor.UnaryRequestID(),
+				interceptor.UnaryLogger(logger),
+			),
+		)
+		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC)
+	)
+	genv1.RegisterDiscoverServiceServer(srv, grpcDiscovery)
+	return srv
 }
