@@ -163,16 +163,6 @@ func eventActor(ev trigger.EventRecord) string {
 	return ""
 }
 
-// eventDescription builds a human-readable one-liner for the event.
-// Examples: "user asd by Admin", "agent gpu-3".
-func eventDescription(ev trigger.EventRecord) string {
-	desc := eventEntity(ev.Kind) + " " + eventTarget(ev)
-	if actor := eventActor(ev); actor != "" {
-		desc += " by " + actor
-	}
-	return desc
-}
-
 // word returns singular or plural form based on count.
 func word(n int, singular, pl string) string {
 	if n == 1 {
