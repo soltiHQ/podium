@@ -2,7 +2,7 @@ package kind
 
 import "errors"
 
-// ErrUnknownEndpointType indicates an unrecognised endpoint type value.
+// ErrUnknownEndpointType indicates an unrecognized endpoint type value.
 var ErrUnknownEndpointType = errors.New("unknown endpoint type")
 
 // EndpointType describes the transport protocol an agent exposes.
