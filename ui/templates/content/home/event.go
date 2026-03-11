@@ -61,7 +61,8 @@ func issueDescription(g IssueGroup) string {
 // issueBorderColor returns the left border accent class for an issue event.
 func issueBorderColor(kind string) string {
 	switch kind {
-	case event.AgentDisconnected, event.AgentDeleted, event.RateLimited:
+	case event.AgentDisconnected, event.AgentDeleted, event.RateLimited,
+		event.SyncFailed:
 		return "border-l-danger"
 	case event.AgentInactive:
 		return "border-l-warning"
@@ -76,7 +77,7 @@ func eventLabelColor(kind string) string {
 	case event.AgentConnected, event.SessionCreated:
 		return "text-success"
 	case event.AgentDisconnected, event.AgentDeleted,
-		event.UserDeleted, event.RateLimited:
+		event.UserDeleted, event.RateLimited, event.SyncFailed:
 		return "text-danger"
 	case event.AgentInactive:
 		return "text-warning"
@@ -121,6 +122,8 @@ func eventLabel(kind string) string {
 		return "logged in"
 	case event.RateLimited:
 		return "rate limited"
+	case event.SyncFailed:
+		return "sync failed"
 	case event.IssueClosed:
 		return "closed"
 	default:
@@ -134,7 +137,8 @@ func eventEntity(kind string) string {
 	case event.AgentConnected, event.AgentInactive,
 		event.AgentDisconnected, event.AgentDeleted:
 		return "agent"
-	case event.SpecCreated, event.SpecUpdated, event.SpecDeployed:
+	case event.SpecCreated, event.SpecUpdated, event.SpecDeployed,
+		event.SyncFailed:
 		return "spec"
 	case event.UserCreated, event.UserUpdated, event.UserDeleted,
 		event.UserPasswordChanged, event.UserStatusChanged,

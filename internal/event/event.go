@@ -28,21 +28,28 @@ type Record struct {
 
 // Event kinds for the dashboard activity feed.
 const (
-	AgentConnected      = "agent_connected"
-	AgentInactive       = "agent_inactive"
-	AgentDisconnected   = "agent_disconnected"
-	AgentDeleted        = "agent_deleted"
-	SpecCreated         = "spec_created"
-	SpecUpdated         = "spec_updated"
-	SpecDeployed        = "spec_deployed"
+	AgentConnected    = "agent_connected"
+	AgentInactive     = "agent_inactive"
+	AgentDisconnected = "agent_disconnected"
+	AgentDeleted      = "agent_deleted"
+
+	SpecCreated  = "spec_created"
+	SpecUpdated  = "spec_updated"
+	SpecDeployed = "spec_deployed"
+
 	UserCreated         = "user_created"
 	UserUpdated         = "user_updated"
 	UserDeleted         = "user_deleted"
 	UserPasswordChanged = "user_password_changed"
 	UserStatusChanged   = "user_status_changed"
-	SessionCreated      = "session_created"
-	RateLimited         = "rate_limited"
-	IssueClosed         = "issue_closed"
+
+	SessionCreated = "session_created"
+
+	RateLimited = "rate_limited"
+
+	IssueClosed = "issue_closed"
+
+	SyncFailed = "sync_failed"
 )
 
 // issueKinds defines which event kinds are classified as issues.
@@ -51,6 +58,7 @@ var issueKinds = map[string]struct{}{
 	AgentInactive:     {},
 	AgentDeleted:      {},
 	RateLimited:       {},
+	SyncFailed:        {},
 }
 
 // IsIssueKind reports whether the event kind is classified as an issue.

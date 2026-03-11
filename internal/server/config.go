@@ -9,7 +9,6 @@ const (
 // Config controls server behavior.
 type Config struct {
 	// ShutdownTimeout is the maximum time allowed for a graceful shutdown.
-	// If <= 0, defaultShutdownTimeout is used.
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
 }
 

@@ -6,7 +6,6 @@ package lifecycle
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -52,7 +51,7 @@ func (r *Runner) Name() string { return r.cfg.Name }
 // Start runs the lifecycle check loop until Stop is called.
 func (r *Runner) Start(_ context.Context) error {
 	if !r.started.CompareAndSwap(false, true) {
-		return errors.New("lifecycle: already started")
+		return ErrAlreadyStarted
 	}
 
 	ticker := time.NewTicker(r.cfg.TickInterval)
