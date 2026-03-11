@@ -158,7 +158,7 @@ func (r *Runner) push(ctx context.Context, rID, specID, agentID string) {
 			Msg("push: get spec failed")
 
 		r.markFailed(ctx, rID, "spec not found: "+err.Error())
-		r.hub.Record(event.SyncFailed, event.Payload{ID: specID, Detail: agentID})
+		r.hub.Record(event.SyncFailed, event.Payload{ID: specID, Detail: agentID, By: "sync"})
 		return
 	}
 
@@ -170,7 +170,7 @@ func (r *Runner) push(ctx context.Context, rID, specID, agentID string) {
 			Msg("push: get agent failed")
 
 		r.markFailed(ctx, rID, "agent not found: "+err.Error())
-		r.hub.Record(event.SyncFailed, event.Payload{ID: specID, Name: ts.Name(), Detail: agentID})
+		r.hub.Record(event.SyncFailed, event.Payload{ID: specID, Name: ts.Name(), Detail: agentID, By: "sync"})
 		return
 	}
 
@@ -183,7 +183,7 @@ func (r *Runner) push(ctx context.Context, rID, specID, agentID string) {
 			Msg("push: get proxy failed")
 
 		r.markFailed(ctx, rID, "proxy error: "+err.Error())
-		r.hub.Record(event.SyncFailed, event.Payload{ID: specID, Name: ts.Name(), Detail: agentID})
+		r.hub.Record(event.SyncFailed, event.Payload{ID: specID, Name: ts.Name(), Detail: agentID, By: "sync"})
 		return
 	}
 
@@ -196,7 +196,7 @@ func (r *Runner) push(ctx context.Context, rID, specID, agentID string) {
 			Msg("push: submit task failed")
 		
 		r.markFailed(ctx, rID, "submit error: "+err.Error())
-		r.hub.Record(event.SyncFailed, event.Payload{ID: specID, Name: ts.Name(), Detail: agentID})
+		r.hub.Record(event.SyncFailed, event.Payload{ID: specID, Name: ts.Name(), Detail: agentID, By: "sync"})
 		return
 	}
 

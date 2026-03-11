@@ -2,6 +2,7 @@ package inmemory
 
 import (
 	"strings"
+	"time"
 
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
@@ -67,6 +68,16 @@ func (f *AgentFilter) Query(q string) *AgentFilter {
 			return true
 		}
 		return false
+	})
+	return f
+}
+
+// StaleAtBefore matches agents whose staleness deadline has passed or was never set.
+// Zero staleAt is treated as "always eligible" so agents without a computed
+// deadline (e.g., heartbeatInterval=0) are not silently dropped.
+func (f *AgentFilter) StaleAtBefore(t time.Time) *AgentFilter {
+	f.predicates = append(f.predicates, func(a *model.Agent) bool {
+		return a.StaleAt().IsZero() || a.StaleAt().Before(t)
 	})
 	return f
 }

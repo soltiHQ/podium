@@ -85,6 +85,9 @@ func (s *Service) Upsert(ctx context.Context, m *model.Agent) error {
 	default:
 		return err
 	}
+	if hb := m.HeartbeatInterval(); hb > 0 {
+		m.SetStaleAt(m.LastSeenAt().Add(hb))
+	}
 	return s.store.UpsertAgent(ctx, m)
 }
 

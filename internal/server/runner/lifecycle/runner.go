@@ -17,6 +17,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 )
 
@@ -96,10 +97,11 @@ func (r *Runner) Stop(_ context.Context) error {
 
 func (r *Runner) tick() {
 	var (
-		ctx = context.Background()
-		now = time.Now()
+		now    = time.Now()
+		ctx    = context.Background()
+		filter = inmemory.NewAgentFilter().StaleAtBefore(now)
 
-		res, err = r.store.ListAgents(ctx, nil, storage.ListOptions{
+		res, err = r.store.ListAgents(ctx, filter, storage.ListOptions{
 			Limit: storage.MaxListLimit,
 		})
 	)
@@ -144,7 +146,7 @@ func (r *Runner) reconcile(ctx context.Context, now time.Time, a *model.Agent) {
 			Dur("silence", silence).
 			Msg("agent deleted (stale)")
 
-		r.hub.Record(event.AgentDeleted, event.Payload{ID: a.ID(), Name: a.Name()})
+		r.hub.Record(event.AgentDeleted, event.Payload{ID: a.ID(), Name: a.Name(), By: "lifecycle"})
 		r.hub.Notify(htmx.AgentUpdate)
 
 	case silence > hb*time.Duration(r.cfg.DisconnectMultiplier):
@@ -159,7 +161,7 @@ func (r *Runner) reconcile(ctx context.Context, now time.Time, a *model.Agent) {
 				Str("agent_id", a.ID()).
 				Msg("agent → disconnected")
 
-			r.hub.Record(event.AgentDisconnected, event.Payload{ID: a.ID(), Name: a.Name()})
+			r.hub.Record(event.AgentDisconnected, event.Payload{ID: a.ID(), Name: a.Name(), By: "lifecycle"})
 			r.hub.Notify(htmx.AgentUpdate)
 		}
 
@@ -175,7 +177,7 @@ func (r *Runner) reconcile(ctx context.Context, now time.Time, a *model.Agent) {
 				Str("agent_id", a.ID()).
 				Msg("agent → inactive")
 
-			r.hub.Record(event.AgentInactive, event.Payload{ID: a.ID(), Name: a.Name()})
+			r.hub.Record(event.AgentInactive, event.Payload{ID: a.ID(), Name: a.Name(), By: "lifecycle"})
 			r.hub.Notify(htmx.AgentUpdate)
 		}
 	}

@@ -87,14 +87,14 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case errors.Is(getErr, storage.ErrNotFound):
-		h.eventHub.Record(event.AgentConnected, event.Payload{ID: in.ID, Name: in.Name})
+		h.eventHub.Record(event.AgentConnected, event.Payload{ID: in.ID, Name: in.Name, By: "discovery"})
 	case existing != nil && existing.Status() != kind.AgentStatusActive:
-		h.eventHub.Record(event.AgentConnected, event.Payload{ID: in.ID, Name: in.Name})
+		h.eventHub.Record(event.AgentConnected, event.Payload{ID: in.ID, Name: in.Name, By: "discovery"})
 
 		n := h.eventHub.DeleteIssues(event.AgentInactive, in.ID)
 		n += h.eventHub.DeleteIssues(event.AgentDisconnected, in.ID)
 		if n > 0 {
-			h.eventHub.Record(event.IssueClosed, event.Payload{ID: in.ID, Name: in.Name})
+			h.eventHub.Record(event.IssueClosed, event.Payload{ID: in.ID, Name: in.Name, By: "discovery"})
 			h.eventHub.Notify(htmx.DashboardUpdate)
 		}
 	}
@@ -153,14 +153,14 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *genv1.SyncRequest) (*genv
 	}
 	switch {
 	case errors.Is(getErr, storage.ErrNotFound):
-		g.hub.Record(event.AgentConnected, event.Payload{ID: req.GetId(), Name: req.GetName()})
+		g.hub.Record(event.AgentConnected, event.Payload{ID: req.GetId(), Name: req.GetName(), By: "discovery"})
 	case existing != nil && existing.Status() != kind.AgentStatusActive:
-		g.hub.Record(event.AgentConnected, event.Payload{ID: req.GetId(), Name: req.GetName()})
+		g.hub.Record(event.AgentConnected, event.Payload{ID: req.GetId(), Name: req.GetName(), By: "discovery"})
 
 		n := g.hub.DeleteIssues(event.AgentInactive, req.GetId())
 		n += g.hub.DeleteIssues(event.AgentDisconnected, req.GetId())
 		if n > 0 {
-			g.hub.Record(event.IssueClosed, event.Payload{ID: req.GetId(), Name: req.GetName()})
+			g.hub.Record(event.IssueClosed, event.Payload{ID: req.GetId(), Name: req.GetName(), By: "discovery"})
 			g.hub.Notify(htmx.DashboardUpdate)
 		}
 	}

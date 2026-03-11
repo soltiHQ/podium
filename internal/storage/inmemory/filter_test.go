@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -42,6 +43,38 @@ func TestAgentFilter_Matches_AllPredicatesANDed(t *testing.T) {
 		ByLabel("tier", "core")
 	if f2.Matches(a) {
 		t.Fatalf("expected no match for ANDed predicates")
+	}
+}
+
+func TestAgentFilter_StaleAtBefore(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	a := mkAgent(t, "a1")
+
+	// Zero staleAt: always matches (safe default).
+	if !NewAgentFilter().StaleAtBefore(now).Matches(a) {
+		t.Fatalf("zero staleAt must match")
+	}
+
+	// staleAt in the past: matches.
+	a.SetStaleAt(now.Add(-time.Minute))
+	if !NewAgentFilter().StaleAtBefore(now).Matches(a) {
+		t.Fatalf("past staleAt must match")
+	}
+
+	// staleAt in the future: does not match.
+	a.SetStaleAt(now.Add(time.Minute))
+	if NewAgentFilter().StaleAtBefore(now).Matches(a) {
+		t.Fatalf("future staleAt must not match")
+	}
+
+	// Combined with another predicate.
+	a.SetStaleAt(now.Add(-time.Minute))
+	a.LabelAdd("env", "prod")
+	f := NewAgentFilter().StaleAtBefore(now).ByLabel("env", "prod")
+	if !f.Matches(a) {
+		t.Fatalf("combined filter must match")
 	}
 }
 

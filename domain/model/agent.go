@@ -21,6 +21,7 @@ type Agent struct {
 	updatedAt         time.Time
 	lastSeenAt        time.Time
 	heartbeatInterval time.Duration
+	staleAt           time.Time
 
 	uptimeSeconds int64
 
@@ -170,6 +171,13 @@ func (a *Agent) SetStatus(s kind.AgentStatus) {
 // SetHeartbeatInterval sets the agent's heartbeat interval.
 func (a *Agent) SetHeartbeatInterval(d time.Duration) { a.heartbeatInterval = d }
 
+// StaleAt returns the time by which the next heartbeat is expected.
+// Zero value means the agent has no computed staleness deadline.
+func (a *Agent) StaleAt() time.Time { return a.staleAt }
+
+// SetStaleAt sets the staleness deadline for the agent.
+func (a *Agent) SetStaleAt(t time.Time) { a.staleAt = t }
+
 // CreatedAt returns the creation timestamp.
 func (a *Agent) CreatedAt() time.Time { return a.createdAt }
 
@@ -255,5 +263,6 @@ func (a *Agent) Clone() *Agent {
 		status:            a.status,
 		lastSeenAt:        a.lastSeenAt,
 		heartbeatInterval: a.heartbeatInterval,
+		staleAt:           a.staleAt,
 	}
 }
