@@ -7,7 +7,7 @@ import (
 
 	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
+	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
 	"github.com/soltiHQ/control-plane/ui/templates/component/form"
 	"github.com/soltiHQ/control-plane/ui/templates/component/list"
@@ -51,7 +51,7 @@ templ TaskResults(agentID string, items []proxyv1.Task, total int, q string, off
 	<div
 		id="tasks-results"
 		hx-get={ routepath.ApiAgentTasks(agentID) }
-		hx-trigger={ trigger.Poll(trigger.GetAgentTasksRefresh(), trigger.AgentUpdate) }
+		hx-trigger={ htmx.Poll(htmx.GetAgentTasksRefresh(), htmx.AgentUpdate) }
 		hx-target="this"
 		hx-swap="outerHTML"
 		hx-select="#tasks-results"

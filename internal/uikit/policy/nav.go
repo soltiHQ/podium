@@ -11,10 +11,10 @@ import "github.com/soltiHQ/control-plane/internal/auth/identity"
 // page template so that the sidebar/header can render conditionally
 // without importing the auth or permission packages directly.
 type Nav struct {
-	ShowUsers      bool
-	ShowTasks      bool
-	ShowAgents     bool
-	CanAddUser     bool
+	ShowUsers  bool
+	ShowTasks  bool
+	ShowAgents bool
+	CanAddUser bool
 	CanAddSpec bool
 }
 
@@ -26,10 +26,10 @@ func BuildNav(id *identity.Identity) Nav {
 
 	perms := permSet(id)
 	return Nav{
-		CanAddUser:     hasAny(perms, usersAdd),
-		ShowTasks:      hasAny(perms, specsGet),
+		CanAddUser: hasAny(perms, usersAdd),
+		ShowTasks:  hasAny(perms, specsGet),
 		CanAddSpec: hasAny(perms, specsAdd),
-		ShowAgents:     hasAny(perms, agentsGet, agentsEdit),
-		ShowUsers:      hasAny(perms, usersGet, usersAdd, usersEdit, usersDelete),
+		ShowAgents: hasAny(perms, agentsGet, agentsEdit),
+		ShowUsers:  hasAny(perms, usersGet, usersAdd, usersEdit, usersDelete),
 	}
 }

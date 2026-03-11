@@ -13,9 +13,10 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/segmentio/ksuid"
 	"github.com/soltiHQ/control-plane/domain"
+	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
+	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 
 	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
@@ -24,6 +25,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/proxy"
+	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
@@ -70,6 +72,7 @@ type API struct {
 	specSVC       *spec.Service
 	userSVC       *user.Service
 	proxyPool     *proxy.Pool
+	hub           *event.Hub
 
 	logger zerolog.Logger
 }
@@ -84,27 +87,31 @@ func NewAPI(
 	agentSVC *agent.Service,
 	specSVC *spec.Service,
 	proxyPool *proxy.Pool,
+	hub *event.Hub,
 ) *API {
 	if accessSVC == nil {
-		panic("handler.API: accessSVC is nil")
+		panic(service.ErrNilService)
 	}
 	if userSVC == nil {
-		panic("handler.API: userSVC is nil")
+		panic(service.ErrNilService)
 	}
 	if sessionSVC == nil {
-		panic("handler.API: sessionSVC is nil")
+		panic(service.ErrNilService)
 	}
 	if credentialSVC == nil {
-		panic("handler.API: credentialSVC is nil")
+		panic(service.ErrNilService)
 	}
 	if agentSVC == nil {
-		panic("handler.API: agentSVC is nil")
+		panic(service.ErrNilService)
 	}
 	if specSVC == nil {
-		panic("handler.API: specSVC is nil")
+		panic(service.ErrNilService)
 	}
 	if proxyPool == nil {
-		panic("handler.API: proxyPool is nil")
+		panic(proxy.ErrNilPool)
+	}
+	if hub == nil {
+		panic(event.ErrNilHub)
 	}
 	return &API{
 		logger: logger.With().Str("handler", "api").Logger(),
@@ -116,6 +123,7 @@ func NewAPI(
 		specSVC:       specSVC,
 		userSVC:       userSVC,
 		proxyPool:     proxyPool,
+		hub:           hub,
 	}
 }
 
@@ -216,8 +224,8 @@ func (a *API) Dashboard(w http.ResponseWriter, r *http.Request) {
 		FailedRollouts:     failed,
 		DriftRollouts:      drift,
 
-		Events: trigger.RecentEvents(30),
-		Issues: contentHome.GroupIssues(trigger.RecentIssues(100)),
+		Events: a.hub.RecentEvents(30),
+		Issues: contentHome.GroupIssues(a.hub.RecentIssues(100)),
 	}
 	response.OK(w, r, mode, &responder.View{
 		Data:      stats,
@@ -240,18 +248,19 @@ func (a *API) IssuesDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	n := trigger.DeleteIssues(kind, entity)
+	n := a.hub.DeleteIssues(kind, entity)
 	if n > 0 {
 		name := r.FormValue("name")
 		if name == "" {
 			name = entity
 		}
-		trigger.Record(trigger.EventIssueClosed, trigger.EventPayload{
-			Name: name,
+		a.hub.Record(event.IssueClosed, event.Payload{
 			By:   a.actor(r),
+			Name: name,
 		})
 	}
-	trigger.Set(w, trigger.DashboardUpdate)
+	htmx.Trigger(w, htmx.DashboardUpdate)
+	a.hub.Notify(htmx.DashboardUpdate)
 	response.NoContent(w, r)
 }
 
@@ -451,7 +460,8 @@ func (a *API) agentPatchLabels(w http.ResponseWriter, r *http.Request, mode http
 	}
 
 	a.logger.Info().Str("agent_id", id).Msg("agent labels updated")
-	trigger.Set(w, trigger.AgentUpdate)
+	htmx.Trigger(w, htmx.AgentUpdate)
+	a.hub.Notify(htmx.AgentUpdate)
 	response.NoContent(w, r)
 }
 
@@ -673,19 +683,18 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	by := a.actor(r)
 	if action == modeCreate {
 		a.logger.Info().Str("user_id", u.ID()).Str("subject", u.Subject()).Msg("user created")
-		trigger.Record(trigger.EventUserCreated, trigger.EventPayload{
-			ID: u.ID(), Name: u.Name(), By: by,
-		})
-		trigger.Notify(trigger.UserUpdate)
-		trigger.Redirect(w, routepath.PageUsers)
+		a.hub.Record(event.UserCreated, event.Payload{ID: u.ID(), Name: u.Name(), By: by})
+		a.hub.Notify(htmx.UserUpdate)
+		htmx.Redirect(w, routepath.PageUsers)
 		response.NoContent(w, r)
 		return
 	}
 	a.logger.Info().Str("user_id", id).Msg("user updated")
-	trigger.Record(trigger.EventUserUpdated, trigger.EventPayload{
+	a.hub.Record(event.UserUpdated, event.Payload{
 		ID: u.ID(), Name: u.Name(), By: by,
 	})
-	trigger.Set(w, trigger.UserUpdate)
+	htmx.Trigger(w, htmx.UserUpdate)
+	a.hub.Notify(htmx.UserUpdate)
 	response.NoContent(w, r)
 }
 
@@ -702,11 +711,11 @@ func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 	a.logger.Info().Str("user_id", id).Msg("user deleted")
-	trigger.Record(trigger.EventUserDeleted, trigger.EventPayload{
+	a.hub.Record(event.UserDeleted, event.Payload{
 		ID: id, Name: name, By: a.actor(r),
 	})
-	trigger.Notify(trigger.UserUpdate)
-	trigger.Redirect(w, routepath.PageUsers)
+	a.hub.Notify(htmx.UserUpdate)
+	htmx.Redirect(w, routepath.PageUsers)
 	response.NoContent(w, r)
 }
 
@@ -738,10 +747,11 @@ func (a *API) userSetStatus(w http.ResponseWriter, r *http.Request, mode httpctx
 	if status == userActive {
 		detail = "active"
 	}
-	trigger.Record(trigger.EventUserStatusChanged, trigger.EventPayload{
+	a.hub.Record(event.UserStatusChanged, event.Payload{
 		ID: u.ID(), Name: u.Name(), By: a.actor(r), Detail: detail,
 	})
-	trigger.Set(w, trigger.UserUpdate)
+	htmx.Trigger(w, htmx.UserUpdate)
+	a.hub.Notify(htmx.UserUpdate)
 	response.NoContent(w, r)
 }
 
@@ -778,10 +788,11 @@ func (a *API) userSetPassword(w http.ResponseWriter, r *http.Request, mode httpc
 	if u, err := a.userSVC.Get(r.Context(), userID); err == nil {
 		userName = u.Name()
 	}
-	trigger.Record(trigger.EventUserPasswordChanged, trigger.EventPayload{
+	a.hub.Record(event.UserPasswordChanged, event.Payload{
 		ID: userID, Name: userName, By: a.actor(r),
 	})
-	trigger.Set(w, trigger.UserUpdate)
+	htmx.Trigger(w, htmx.UserUpdate)
+	a.hub.Notify(htmx.UserUpdate)
 	response.NoContent(w, r)
 }
 
@@ -797,7 +808,8 @@ func (a *API) userRevokeSession(w http.ResponseWriter, r *http.Request, mode htt
 	}
 
 	a.logger.Info().Str("session_id", id).Msg("session revoked")
-	trigger.Set(w, trigger.SessionUpdate)
+	htmx.Trigger(w, htmx.SessionUpdate)
+	a.hub.Notify(htmx.SessionUpdate)
 	response.NoContent(w, r)
 }
 
@@ -1013,9 +1025,9 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 			return
 		}
 		a.logger.Info().Str("spec", ts.ID()).Str("name", ts.Name()).Msg("spec created")
-		trigger.Record(trigger.EventSpecCreated, trigger.EventPayload{ID: ts.ID(), Name: ts.Name()})
-		trigger.Notify(trigger.SpecUpdate)
-		trigger.Redirect(w, routepath.PageSpecs)
+		a.hub.Record(event.SpecCreated, event.Payload{ID: ts.ID(), Name: ts.Name()})
+		a.hub.Notify(htmx.SpecUpdate)
+		htmx.Redirect(w, routepath.PageSpecs)
 		response.NoContent(w, r)
 		return
 	}
@@ -1026,8 +1038,9 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 	a.logger.Info().Str("spec", id).Msg("spec updated")
-	trigger.Record(trigger.EventSpecUpdated, trigger.EventPayload{ID: id, Name: ts.Name()})
-	trigger.Set(w, trigger.SpecUpdate)
+	a.hub.Record(event.SpecUpdated, event.Payload{ID: id, Name: ts.Name()})
+	htmx.Trigger(w, htmx.SpecUpdate)
+	a.hub.Notify(htmx.SpecUpdate)
 	response.NoContent(w, r)
 }
 
@@ -1039,8 +1052,8 @@ func (a *API) specDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 	a.logger.Info().Str("spec", id).Msg("spec deleted")
-	trigger.Notify(trigger.SpecUpdate)
-	trigger.Redirect(w, routepath.PageSpecs)
+	a.hub.Notify(htmx.SpecUpdate)
+	htmx.Redirect(w, routepath.PageSpecs)
 	response.NoContent(w, r)
 }
 
@@ -1077,8 +1090,9 @@ func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	if ts, err := a.specSVC.Get(r.Context(), id); err == nil {
 		specName = ts.Name()
 	}
-	trigger.Record(trigger.EventSpecDeployed, trigger.EventPayload{ID: id, Name: specName})
-	trigger.Set(w, trigger.SpecUpdate)
+	a.hub.Record(event.SpecDeployed, event.Payload{ID: id, Name: specName})
+	htmx.Trigger(w, htmx.SpecUpdate)
+	a.hub.Notify(htmx.SpecUpdate)
 	response.NoContent(w, r)
 }
 

@@ -3,7 +3,7 @@ package spec
 import (
 	"github.com/soltiHQ/control-plane/internal/uikit/policy"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
+	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 	"github.com/soltiHQ/control-plane/ui/templates/layout"
 )
 
@@ -13,13 +13,13 @@ templ Detail(nav policy.Nav, specID string) {
 		layout.SectionPanel{
 			ID:         "spec-identity",
 			URL:        routepath.ApiSpecByID(specID),
-			Trigger:    trigger.LoadAndPoll(trigger.GetSpecDetailRefresh(), trigger.SpecUpdate),
+			Trigger:    htmx.LoadAndPoll(htmx.GetSpecDetailRefresh(), htmx.SpecUpdate),
 			PreloadMsg: "Loading spec...",
 		},
 		layout.SectionPanel{
 			ID:         "spec-rollouts",
 			URL:        routepath.ApiSpecSync(specID),
-			Trigger:    trigger.LoadAndPoll(trigger.GetSpecsRefresh(), trigger.SpecUpdate),
+			Trigger:    htmx.LoadAndPoll(htmx.GetSpecsRefresh(), htmx.SpecUpdate),
 			PreloadMsg: "Loading rollouts...",
 		},
 	)

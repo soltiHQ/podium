@@ -3,7 +3,7 @@ package user
 import (
 	"github.com/soltiHQ/control-plane/internal/uikit/policy"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
+	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 	"github.com/soltiHQ/control-plane/ui/templates/layout"
 )
 
@@ -13,13 +13,13 @@ templ Detail(nav policy.Nav, userID string) {
 		layout.DetailPanel{
 			ID:         "user-identity",
 			URL:        routepath.ApiUserCrudOp(userID),
-			Trigger:    trigger.LoadAndPoll(trigger.GetUserDetailRefresh(), trigger.UserUpdate),
+			Trigger:    htmx.LoadAndPoll(htmx.GetUserDetailRefresh(), htmx.UserUpdate),
 			PreloadMsg: "Details Loading...",
 		},
 		layout.DetailPanel{
 			ID:         "user-sessions",
 			URL:        routepath.ApiUserSessions(userID),
-			Trigger:    trigger.LoadAndPoll(trigger.GetUserSessionsRefresh(), trigger.SessionUpdate),
+			Trigger:    htmx.LoadAndPoll(htmx.GetUserSessionsRefresh(), htmx.SessionUpdate),
 			PreloadMsg: "Sessions Loading...",
 		},
 	)

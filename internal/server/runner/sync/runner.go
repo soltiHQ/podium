@@ -8,14 +8,16 @@ package sync
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
+	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 )
 
 // Runner is a server.Runner that periodically reconciles pending rollout
@@ -32,17 +34,21 @@ type Runner struct {
 	cfg     Config
 	store   storage.Storage
 	pool    *proxy.Pool
+	hub     *event.Hub
 	stop    chan struct{}
 	started atomic.Bool
 }
 
 // New creates a sync runner.
-func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.Pool) (*Runner, error) {
+func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.Pool, hub *event.Hub) (*Runner, error) {
 	if store == nil {
-		return nil, errors.New("sync: store is nil")
+		return nil, fmt.Errorf("sync: %w", storage.ErrNilStore)
 	}
 	if pool == nil {
-		return nil, errors.New("sync: proxy pool is nil")
+		return nil, fmt.Errorf("sync: %w", proxy.ErrNilPool)
+	}
+	if hub == nil {
+		return nil, fmt.Errorf("sync: %w", event.ErrNilHub)
 	}
 
 	cfg = cfg.withDefaults()
@@ -51,6 +57,7 @@ func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.P
 		cfg:    cfg,
 		store:  store,
 		pool:   pool,
+		hub:    hub,
 		stop:   make(chan struct{}),
 	}, nil
 }
@@ -189,7 +196,7 @@ func (r *Runner) markSynced(ctx context.Context, rID string, version int) {
 		r.logger.Error().Err(err).Str("rid", rID).Msg("markSynced: upsert failed")
 		return
 	}
-	trigger.Notify(trigger.SpecUpdate)
+	r.hub.Notify(htmx.SpecUpdate)
 }
 
 func (r *Runner) markFailed(ctx context.Context, rID, errMsg string) {
@@ -204,5 +211,5 @@ func (r *Runner) markFailed(ctx context.Context, rID, errMsg string) {
 		r.logger.Error().Err(err).Str("rid", rID).Msg("markFailed: upsert failed")
 		return
 	}
-	trigger.Notify(trigger.SpecUpdate)
+	r.hub.Notify(htmx.SpecUpdate)
 }

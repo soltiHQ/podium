@@ -7,13 +7,15 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
+	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 )
 
 // Runner is a server.Runner that periodically checks agent liveness.
@@ -21,20 +23,25 @@ type Runner struct {
 	logger  zerolog.Logger
 	cfg     Config
 	store   storage.AgentStore
+	hub     *event.Hub
 	stop    chan struct{}
 	started atomic.Bool
 }
 
 // New creates a lifecycle runner.
-func New(cfg Config, logger zerolog.Logger, store storage.AgentStore) (*Runner, error) {
+func New(cfg Config, logger zerolog.Logger, store storage.AgentStore, hub *event.Hub) (*Runner, error) {
 	if store == nil {
-		return nil, errors.New("lifecycle: store is nil")
+		return nil, fmt.Errorf("lifecycle: %w", storage.ErrNilStore)
+	}
+	if hub == nil {
+		return nil, fmt.Errorf("lifecycle: %w", event.ErrNilHub)
 	}
 	cfg = cfg.withDefaults()
 	return &Runner{
 		logger: logger.With().Str("runner", cfg.Name).Logger(),
 		cfg:    cfg,
 		store:  store,
+		hub:    hub,
 		stop:   make(chan struct{}),
 	}, nil
 }
@@ -117,8 +124,8 @@ func (r *Runner) tick() {
 				Str("agent_id", a.ID()).
 				Dur("silence", silence).
 				Msg("agent deleted (stale)")
-			trigger.Record(trigger.EventAgentDeleted, trigger.EventPayload{ID: a.ID(), Name: a.Name()})
-			trigger.Notify(trigger.AgentUpdate)
+			r.hub.Record(event.AgentDeleted, event.Payload{ID: a.ID(), Name: a.Name()})
+			r.hub.Notify(htmx.AgentUpdate)
 
 		case silence > hb*time.Duration(r.cfg.DisconnectMultiplier):
 			if a.Status() != kind.AgentStatusDisconnected {
@@ -131,8 +138,8 @@ func (r *Runner) tick() {
 				r.logger.Info().
 					Str("agent_id", a.ID()).
 					Msg("agent → disconnected")
-				trigger.Record(trigger.EventAgentDisconnected, trigger.EventPayload{ID: a.ID(), Name: a.Name()})
-				trigger.Notify(trigger.AgentUpdate)
+				r.hub.Record(event.AgentDisconnected, event.Payload{ID: a.ID(), Name: a.Name()})
+				r.hub.Notify(htmx.AgentUpdate)
 			}
 
 		case silence > hb*time.Duration(r.cfg.InactiveMultiplier):
@@ -146,8 +153,8 @@ func (r *Runner) tick() {
 				r.logger.Info().
 					Str("agent_id", a.ID()).
 					Msg("agent → inactive")
-				trigger.Record(trigger.EventAgentInactive, trigger.EventPayload{ID: a.ID(), Name: a.Name()})
-				trigger.Notify(trigger.AgentUpdate)
+				r.hub.Record(event.AgentInactive, event.Payload{ID: a.ID(), Name: a.Name()})
+				r.hub.Notify(htmx.AgentUpdate)
 			}
 		}
 	}

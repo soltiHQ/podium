@@ -8,7 +8,6 @@ import (
 	"syscall"
 
 	"github.com/rs/zerolog"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 	"google.golang.org/grpc"
 
 	genv1 "github.com/soltiHQ/control-plane/api/gen/v1"
@@ -16,6 +15,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth/wire"
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
 	"github.com/soltiHQ/control-plane/internal/config"
+	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/handler"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/server"
@@ -35,6 +35,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/route"
+	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 )
 
@@ -69,29 +70,34 @@ func main() {
 	proxyPool := proxy.NewPool()
 	defer proxyPool.Close()
 
-	lifecycleRunner, err := lifecycle.New(cfg.Lifecycle, logger, store)
+	eventHub := event.NewHub(logger)
+	defer eventHub.Close()
+
+	htmx.Configure(cfg.Triggers)
+
+	lifecycleRunner, err := lifecycle.New(cfg.Lifecycle, logger, store, eventHub)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create lifecycle runner")
 	}
 
-	syncRunner, err := syncrunner.New(cfg.Sync, logger, store, proxyPool)
+	syncRunner, err := syncrunner.New(cfg.Sync, logger, store, proxyPool, eventHub)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create sync runner")
 	}
 
-	mainHandler := buildMainHandler(cfg, logger, svc, authModel, proxyPool)
+	mainHandler := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub)
 	httpRunner, err := httpserver.New(cfg.HTTP, logger, mainHandler)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create http server")
 	}
 
-	discoveryHandler := buildDiscoveryHandler(logger, svc.agent)
+	discoveryHandler := buildDiscoveryHandler(logger, svc.agent, eventHub)
 	httpDiscoveryRunner, err := httpserver.New(cfg.HTTPDiscovery, logger, discoveryHandler)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create http discovery server")
 	}
 
-	grpcSrv := buildGRPCServer(logger, svc.agent)
+	grpcSrv := buildGRPCServer(logger, svc.agent, eventHub)
 	grpcRunner, err := grpcserver.New(cfg.GRPC, logger, grpcSrv)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create grpc server")
@@ -103,11 +109,6 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	go func() {
-		<-ctx.Done()
-		trigger.CloseHub()
-	}()
 
 	if err = srv.Run(ctx); err != nil {
 		logger.Error().Err(err).Msg("server exited")
@@ -128,11 +129,11 @@ func initServices(store *inmemory.Store, authModel *wire.Auth, logger zerolog.Lo
 	}
 }
 
-func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *wire.Auth, proxyPool *proxy.Pool) http.Handler {
+func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *wire.Auth, proxyPool *proxy.Pool, eventHub *event.Hub) http.Handler {
 	var (
-		apiHandler    = handler.NewAPI(logger, svc.user, svc.access, svc.session, svc.credential, svc.agent, svc.spec, proxyPool)
+		apiHandler    = handler.NewAPI(logger, svc.user, svc.access, svc.session, svc.credential, svc.agent, svc.spec, proxyPool, eventHub)
 		authMW        = middleware.Auth(authModel.Verifier, authModel.Session)
-		uiHandler     = handler.NewUI(logger, svc.access)
+		uiHandler     = handler.NewUI(logger, svc.access, eventHub)
 		staticHandler = handler.NewStatic(logger)
 		logMW         = middleware.Logger(logger)
 		ridMW         = middleware.RequestID()
@@ -146,10 +147,7 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 	uiHandler.Routes(mux, authMW, permMW)
 	staticHandler.Routes(mux)
 
-	trigger.Configure(cfg.Triggers)
-	trigger.InitHub()
-
-	route.HandleFunc(mux, routepath.ApiEventStream, trigger.SSEHandler(), ridMW, logMW, authMW)
+	route.HandleFunc(mux, routepath.ApiEventStream, eventHub.SSEHandler(), ridMW, logMW, authMW)
 
 	var h http.Handler = mux
 	h = middleware.Negotiate(responder.NewJSON(), responder.NewHTML())(h)
@@ -158,9 +156,9 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 	return h
 }
 
-func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service) http.Handler {
+func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub) http.Handler {
 	var (
-		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC)
+		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC, eventHub)
 		mux           = http.NewServeMux()
 	)
 	mux.HandleFunc("/api/v1/discovery/sync", httpDiscovery.Sync)
@@ -172,7 +170,7 @@ func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service) http.
 	return h
 }
 
-func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service) *grpc.Server {
+func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub) *grpc.Server {
 	var (
 		srv = grpc.NewServer(
 			grpc.ChainUnaryInterceptor(
@@ -181,7 +179,7 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service) *grpc.Serve
 				interceptor.UnaryLogger(logger),
 			),
 		)
-		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC)
+		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC, eventHub)
 	)
 	genv1.RegisterDiscoverServiceServer(srv, grpcDiscovery)
 	return srv

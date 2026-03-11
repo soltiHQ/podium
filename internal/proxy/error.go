@@ -27,4 +27,6 @@ var (
 	ErrSubmitTask = errors.New("proxy: submit task")
 	// ErrExportSpecs indicates an export call failed.
 	ErrExportSpecs = errors.New("proxy: export task specs")
+	// ErrNilPool indicates a required *Pool dependency is nil.
+	ErrNilPool = errors.New("proxy: nil pool")
 )

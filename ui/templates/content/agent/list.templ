@@ -5,7 +5,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 	"github.com/soltiHQ/control-plane/internal/uikit/timeformat"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
+	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
 	"github.com/soltiHQ/control-plane/ui/templates/component/form"
 	"github.com/soltiHQ/control-plane/ui/templates/component/list"
@@ -40,7 +40,7 @@ templ Results(items []*model.Agent, nextCursor string, q string) {
 	<div
 		id="agents-results"
 		hx-get={ routepath.ApiAgents }
-		hx-trigger={ trigger.Poll(trigger.GetAgentsRefresh(), trigger.AgentUpdate) }
+		hx-trigger={ htmx.Poll(htmx.GetAgentsRefresh(), htmx.AgentUpdate) }
 		hx-target="this"
 		hx-swap="outerHTML"
 		hx-select="#agents-results"

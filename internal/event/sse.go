@@ -1,4 +1,4 @@
-package trigger
+package event
 
 import (
 	"io"
@@ -7,16 +7,16 @@ import (
 )
 
 // SSEHandler returns an http.HandlerFunc that streams UI update notifications as Server-Sent Events.
-func SSEHandler() http.HandlerFunc {
+func (h *Hub) SSEHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			http.Error(w, ErrSSENotSupported.Error(), http.StatusInternalServerError)
 			return
 		}
 		rc := http.NewResponseController(w)
 		if err := rc.SetWriteDeadline(time.Time{}); err != nil {
-			http.Error(w, "cannot disable write deadline", http.StatusInternalServerError)
+			http.Error(w, ErrSSEDeadline.Error(), http.StatusInternalServerError)
 			return
 		}
 
@@ -25,7 +25,7 @@ func SSEHandler() http.HandlerFunc {
 		w.Header().Set("Connection", "keep-alive")
 		flusher.Flush()
 
-		ch := Subscribe(r.Context())
+		ch := h.Subscribe(r.Context())
 		for {
 			select {
 			case ev, ok := <-ch:

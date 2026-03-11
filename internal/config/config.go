@@ -19,7 +19,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
 	syncrunner "github.com/soltiHQ/control-plane/internal/server/runner/sync"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
+	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 )
 
 const (
@@ -33,7 +33,7 @@ type Config struct {
 	GRPC          grpcserver.Config     `yaml:"grpc"           envconfig:"GRPC"`
 	Sync          syncrunner.Config     `yaml:"sync"           envconfig:"SYNC"`
 	Lifecycle     lifecycle.Config      `yaml:"lifecycle"      envconfig:"LIFECYCLE"`
-	Triggers      trigger.Config        `yaml:"triggers"       envconfig:"TRIGGERS"`
+	Triggers      htmx.Config           `yaml:"triggers"       envconfig:"TRIGGERS"`
 	Server        server.Config         `yaml:"server"         envconfig:"SERVER"`
 	Auth          wire.Config           `yaml:"auth"           envconfig:"AUTH"`
 	CORS          middleware.CORSConfig `yaml:"cors"           envconfig:"CORS"`

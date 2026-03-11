@@ -14,28 +14,35 @@ import (
 	discoveryv1 "github.com/soltiHQ/control-plane/api/discovery/v1"
 	genv1 "github.com/soltiHQ/control-plane/api/gen/v1"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/event"
+	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
+	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 )
 
 // HTTPDiscovery handles agent discovery over HTTP.
 type HTTPDiscovery struct {
 	logger   zerolog.Logger
 	agentSVC *agent.Service
+	eventHub *event.Hub
 }
 
 // NewHTTPDiscovery creates a new HTTP discovery handler.
-func NewHTTPDiscovery(logger zerolog.Logger, agentSVC *agent.Service) *HTTPDiscovery {
+func NewHTTPDiscovery(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub) *HTTPDiscovery {
 	if agentSVC == nil {
-		panic("handler.HTTPDiscovery: agentSVC is nil")
+		panic(service.ErrNilService)
+	}
+	if eventHub == nil {
+		panic(event.ErrNilHub)
 	}
 	return &HTTPDiscovery{
 		logger:   logger.With().Str("handler", "discovery-http").Logger(),
 		agentSVC: agentSVC,
+		eventHub: eventHub,
 	}
 }
 
@@ -78,9 +85,9 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if errors.Is(getErr, storage.ErrNotFound) {
-		trigger.Record(trigger.EventAgentConnected, trigger.EventPayload{ID: in.ID, Name: in.Name})
+		h.eventHub.Record(event.AgentConnected, event.Payload{ID: in.ID, Name: in.Name})
 	}
-	trigger.Notify(trigger.AgentUpdate)
+	h.eventHub.Notify(htmx.AgentUpdate)
 	response.OK(w, r, mode, &responder.View{
 		Data: discoveryv1.SyncResponse{Success: true},
 	})
@@ -91,16 +98,21 @@ type GRPCDiscovery struct {
 	genv1.UnimplementedDiscoverServiceServer
 	logger   zerolog.Logger
 	agentSVC *agent.Service
+	hub      *event.Hub
 }
 
 // NewGRPCDiscovery creates a new gRPC discovery handler.
-func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service) *GRPCDiscovery {
+func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event.Hub) *GRPCDiscovery {
 	if agentSVC == nil {
-		panic("handler.GRPCDiscovery: agentSVC is nil")
+		panic(service.ErrNilService)
+	}
+	if hub == nil {
+		panic(event.ErrNilHub)
 	}
 	return &GRPCDiscovery{
 		logger:   logger.With().Str("handler", "discovery-grpc").Logger(),
 		agentSVC: agentSVC,
+		hub:      hub,
 	}
 }
 
@@ -129,8 +141,8 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *genv1.SyncRequest) (*genv
 		return nil, status.FromError(ctx, err).Err()
 	}
 	if errors.Is(getErr, storage.ErrNotFound) {
-		trigger.Record(trigger.EventAgentConnected, trigger.EventPayload{ID: req.GetId(), Name: req.GetName()})
+		g.hub.Record(event.AgentConnected, event.Payload{ID: req.GetId(), Name: req.GetName()})
 	}
-	trigger.Notify(trigger.AgentUpdate)
+	g.hub.Notify(htmx.AgentUpdate)
 	return &genv1.SyncResponse{Success: true}, nil
 }

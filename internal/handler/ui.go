@@ -9,6 +9,8 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/internal/auth"
+	"github.com/soltiHQ/control-plane/internal/event"
+	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/transport/http/cookie"
 	"github.com/soltiHQ/control-plane/internal/transport/http/ratelimitkey"
@@ -19,7 +21,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transportctx"
 	"github.com/soltiHQ/control-plane/internal/uikit/policy"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 	pageAgent "github.com/soltiHQ/control-plane/ui/templates/page/agent"
 	pageHome "github.com/soltiHQ/control-plane/ui/templates/page/home"
 	pageSpec "github.com/soltiHQ/control-plane/ui/templates/page/spec"
@@ -30,17 +31,22 @@ import (
 // UI handlers
 type UI struct {
 	accessSVC *access.Service
+	hub       *event.Hub
 	logger    zerolog.Logger
 }
 
 // NewUI creates a new UI handler.
-func NewUI(logger zerolog.Logger, accessSVC *access.Service) *UI {
+func NewUI(logger zerolog.Logger, accessSVC *access.Service, hub *event.Hub) *UI {
 	if accessSVC == nil {
-		panic("handler.UI: accessSVC is nil")
+		panic(service.ErrNilService)
+	}
+	if hub == nil {
+		panic(event.ErrNilHub)
 	}
 	return &UI{
 		logger:    logger.With().Str("handler", "ui").Logger(),
 		accessSVC: accessSVC,
+		hub:       hub,
 	}
 }
 
@@ -113,7 +119,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, auth.ErrRateLimited):
-			trigger.Record(trigger.EventRateLimited, trigger.EventPayload{
+			u.hub.Record(event.RateLimited, event.Payload{
 				ID: subject, Name: subject, By: "auth",
 			})
 			response.AuthRateLimit(w, r, mode)
@@ -131,7 +137,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u.logger.Info().Str("subject", subject).Msg("login success")
-	trigger.Record(trigger.EventSessionCreated, trigger.EventPayload{
+	u.hub.Record(event.SessionCreated, event.Payload{
 		ID: id.UserID, Name: id.Name, By: "auth",
 	})
 	cookie.SetAuth(w, r, res.AccessToken, res.RefreshToken, res.SessionID)
