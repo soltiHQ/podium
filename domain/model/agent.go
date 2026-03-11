@@ -17,26 +17,27 @@ var _ domain.Entity[*Agent] = (*Agent)(nil)
 //   - Metadata is agent-owned data reported by the agent (not modified).
 //   - Labels are control-plane owned annotations (operators/system), not reported by the agent.
 type Agent struct {
-	createdAt time.Time
-	updatedAt time.Time
-
-	metadata map[string]string
-	labels   map[string]string
-
-	id           string
-	name         string
-	endpoint     string
-	endpointType kind.EndpointType
-	apiVersion   kind.APIVersion
-	os           string
-	arch         string
-	platform     string
+	createdAt         time.Time
+	updatedAt         time.Time
+	lastSeenAt        time.Time
+	heartbeatInterval time.Duration
 
 	uptimeSeconds int64
 
-	status            kind.AgentStatus
-	lastSeenAt        time.Time
-	heartbeatInterval time.Duration
+	id       string
+	name     string
+	endpoint string
+
+	os       string
+	arch     string
+	platform string
+
+	endpointType kind.EndpointType
+	apiVersion   kind.APIVersion
+	status       kind.AgentStatus
+
+	metadata map[string]string
+	labels   map[string]string
 }
 
 // NewAgent creates a new agent domain entity.

@@ -14,20 +14,19 @@ var _ domain.Entity[*Rollout] = (*Rollout)(nil)
 // It records the desired version (what CP wants) vs actual version (what the agent has),
 // enabling the sync runner to detect drift and reconcile.
 type Rollout struct {
-	createdAt time.Time
-	updatedAt time.Time
-
+	createdAt    time.Time
+	updatedAt    time.Time
 	lastPushedAt time.Time
 	lastSyncedAt time.Time
+
+	desiredVersion int
+	actualVersion  int
+	attempts       int
 
 	id      string
 	specID  string
 	agentID string
 	errMsg  string
-
-	desiredVersion int
-	actualVersion  int
-	attempts       int
 
 	status kind.SyncStatus
 }

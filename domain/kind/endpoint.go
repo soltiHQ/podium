@@ -1,9 +1,8 @@
 package kind
 
-import "errors"
-
-// ErrUnknownEndpointType indicates an unrecognized endpoint type value.
-var ErrUnknownEndpointType = errors.New("unknown endpoint type")
+import (
+	"github.com/soltiHQ/control-plane/domain"
+)
 
 // EndpointType describes the transport protocol an agent exposes.
 type EndpointType string
@@ -23,6 +22,6 @@ func EndpointTypeFromInt(v int) (EndpointType, error) {
 	case 1:
 		return EndpointHTTP, nil
 	default:
-		return "", ErrUnknownEndpointType
+		return "", domain.ErrUnknownEndpointType
 	}
 }
