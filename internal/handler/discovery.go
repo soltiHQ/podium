@@ -90,6 +90,13 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 		h.eventHub.Record(event.AgentConnected, event.Payload{ID: in.ID, Name: in.Name})
 	case existing != nil && existing.Status() != kind.AgentStatusActive:
 		h.eventHub.Record(event.AgentConnected, event.Payload{ID: in.ID, Name: in.Name})
+
+		n := h.eventHub.DeleteIssues(event.AgentInactive, in.ID)
+		n += h.eventHub.DeleteIssues(event.AgentDisconnected, in.ID)
+		if n > 0 {
+			h.eventHub.Record(event.IssueClosed, event.Payload{ID: in.ID, Name: in.Name})
+			h.eventHub.Notify(htmx.DashboardUpdate)
+		}
 	}
 	h.eventHub.Notify(htmx.AgentUpdate)
 	response.OK(w, r, mode, &responder.View{
@@ -149,6 +156,13 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *genv1.SyncRequest) (*genv
 		g.hub.Record(event.AgentConnected, event.Payload{ID: req.GetId(), Name: req.GetName()})
 	case existing != nil && existing.Status() != kind.AgentStatusActive:
 		g.hub.Record(event.AgentConnected, event.Payload{ID: req.GetId(), Name: req.GetName()})
+
+		n := g.hub.DeleteIssues(event.AgentInactive, req.GetId())
+		n += g.hub.DeleteIssues(event.AgentDisconnected, req.GetId())
+		if n > 0 {
+			g.hub.Record(event.IssueClosed, event.Payload{ID: req.GetId(), Name: req.GetName()})
+			g.hub.Notify(htmx.DashboardUpdate)
+		}
 	}
 	g.hub.Notify(htmx.AgentUpdate)
 	return &genv1.SyncResponse{Success: true}, nil
