@@ -13,6 +13,7 @@ import (
 
 	discoveryv1 "github.com/soltiHQ/control-plane/api/discovery/v1"
 	genv1 "github.com/soltiHQ/control-plane/api/gen/v1"
+	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service"
@@ -78,13 +79,16 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 		response.BadRequest(w, r, mode)
 		return
 	}
-	_, getErr := h.agentSVC.Get(r.Context(), in.ID)
+	existing, getErr := h.agentSVC.Get(r.Context(), in.ID)
 	if err = h.agentSVC.Upsert(r.Context(), a); err != nil {
 		h.logger.Error().Err(err).Str("agent_id", in.ID).Msg("upsert failed")
 		response.Unavailable(w, r, mode)
 		return
 	}
-	if errors.Is(getErr, storage.ErrNotFound) {
+	switch {
+	case errors.Is(getErr, storage.ErrNotFound):
+		h.eventHub.Record(event.AgentConnected, event.Payload{ID: in.ID, Name: in.Name})
+	case existing != nil && existing.Status() != kind.AgentStatusActive:
 		h.eventHub.Record(event.AgentConnected, event.Payload{ID: in.ID, Name: in.Name})
 	}
 	h.eventHub.Notify(htmx.AgentUpdate)
@@ -135,12 +139,15 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *genv1.SyncRequest) (*genv
 		return nil, status.Errorf(ctx, codes.InvalidArgument, "invalid agent data: %v", err)
 	}
 
-	_, getErr := g.agentSVC.Get(ctx, req.GetId())
+	existing, getErr := g.agentSVC.Get(ctx, req.GetId())
 	if err = g.agentSVC.Upsert(ctx, a); err != nil {
 		g.logger.Error().Err(err).Str("agent_id", req.GetId()).Msg("upsert failed")
 		return nil, status.FromError(ctx, err).Err()
 	}
-	if errors.Is(getErr, storage.ErrNotFound) {
+	switch {
+	case errors.Is(getErr, storage.ErrNotFound):
+		g.hub.Record(event.AgentConnected, event.Payload{ID: req.GetId(), Name: req.GetName()})
+	case existing != nil && existing.Status() != kind.AgentStatusActive:
 		g.hub.Record(event.AgentConnected, event.Payload{ID: req.GetId(), Name: req.GetName()})
 	}
 	g.hub.Notify(htmx.AgentUpdate)
