@@ -259,6 +259,19 @@ func (f *RolloutFilter) ByStatus(s kind.SyncStatus) *RolloutFilter {
 	return f
 }
 
+// ByStatuses matches rollouts whose status is any of the provided values (OR).
+func (f *RolloutFilter) ByStatuses(statuses ...kind.SyncStatus) *RolloutFilter {
+	f.predicates = append(f.predicates, func(ss *model.Rollout) bool {
+		for _, s := range statuses {
+			if ss.Status() == s {
+				return true
+			}
+		}
+		return false
+	})
+	return f
+}
+
 // Matches reports whether the given rollout satisfies all predicates.
 func (f *RolloutFilter) Matches(ss *model.Rollout) bool {
 	for _, pred := range f.predicates {

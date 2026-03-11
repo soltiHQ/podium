@@ -18,6 +18,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 )
 
@@ -109,12 +110,16 @@ func (r *Runner) Stop(_ context.Context) error {
 }
 
 func (r *Runner) tick() {
-	var (
-		ctx      = context.Background()
-		res, err = r.store.ListRollouts(ctx, nil, storage.ListOptions{
-			Limit: storage.MaxListLimit,
-		})
+	ctx := context.Background()
+
+	filter := inmemory.NewRolloutFilter().ByStatuses(
+		kind.SyncStatusPending,
+		kind.SyncStatusDrift,
+		kind.SyncStatusFailed,
 	)
+	res, err := r.store.ListRollouts(ctx, filter, storage.ListOptions{
+		Limit: storage.MaxListLimit,
+	})
 	if err != nil {
 		r.logger.Error().Err(err).Msg("tick: list rollouts failed")
 		return
@@ -127,14 +132,7 @@ func (r *Runner) tick() {
 		if ss == nil {
 			continue
 		}
-
-		switch ss.Status() {
-		case kind.SyncStatusPending, kind.SyncStatusDrift:
-		case kind.SyncStatusFailed:
-			if ss.Attempts() >= r.cfg.MaxRetries {
-				continue
-			}
-		default:
+		if ss.Status() == kind.SyncStatusFailed && ss.Attempts() >= r.cfg.MaxRetries {
 			continue
 		}
 
