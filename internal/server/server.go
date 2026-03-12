@@ -133,7 +133,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	defer cancel()
 
 	s.logger.Info().
-		Dur("timeout", s.cfg.ShutdownTimeout).
+		Str("timeout", s.cfg.ShutdownTimeout.String()).
 		Int("runners", len(s.runners)).
 		Msg("shutdown starting")
 
@@ -170,7 +170,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	wg.Wait()
 
 	s.logger.Info().
-		Dur("elapsed", time.Since(start)).
+		Str("elapsed", time.Since(start).String()).
 		Msg("shutdown finished")
 	return errors.Join(errs...)
 }

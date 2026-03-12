@@ -7,9 +7,9 @@ import "time"
 type SessionStatus uint8
 
 const (
-	SessionStatusActive  SessionStatus = iota // valid and usable
-	SessionStatusExpired                      // past expiration time
-	SessionStatusRevoked                      // explicitly invalidated
+	SessionStatusActive SessionStatus = iota
+	SessionStatusExpired
+	SessionStatusRevoked
 )
 
 // Priority returns the sort weight (lower = more important).

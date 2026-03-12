@@ -5,6 +5,6 @@ type RestartType string
 
 const (
 	RestartNever     RestartType = "never"
-	RestartOnFailure RestartType = "onFailure"
 	RestartAlways    RestartType = "always"
+	RestartOnFailure RestartType = "onFailure"
 )

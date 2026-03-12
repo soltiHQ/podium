@@ -26,8 +26,8 @@ type Session struct {
 	userID       string
 	credentialID string
 
-	refreshHash []byte
 	auth        kind.Auth
+	refreshHash []byte
 }
 
 // NewSession creates a new session entity.

@@ -1,18 +1,18 @@
 package kind
 
 // TaskStatus describes the execution state of an agent task.
-// Constants are ordered by display priority: active states first, terminal last.
+// https://github.com/soltiHQ/taskvisor/blob/main/src/events/event.rs
 type TaskStatus uint8
 
 const (
-	TaskStatusRunning   TaskStatus = iota // actively executing
-	TaskStatusPending                     // queued, waiting for a slot
-	TaskStatusFailed                      // exited with an error
-	TaskStatusTimeout                     // exceeded deadline
-	TaskStatusExhausted                   // all retry attempts used
-	TaskStatusCanceled                    // explicitly canceled
-	TaskStatusSucceeded                   // completed successfully
-	TaskStatusUnknown                     // unrecognised status string
+	TaskStatusRunning TaskStatus = iota
+	TaskStatusPending
+	TaskStatusFailed
+	TaskStatusTimeout
+	TaskStatusExhausted
+	TaskStatusCanceled
+	TaskStatusSucceeded
+	TaskStatusUnknown
 )
 
 // Priority returns the sort weight (lower = more important).

@@ -4,9 +4,9 @@ package kind
 type AgentStatus uint8
 
 const (
-	AgentStatusActive       AgentStatus = iota // healthy, syncing on time
-	AgentStatusInactive                        // missed heartbeat window
-	AgentStatusDisconnected                    // long silence, likely dead
+	AgentStatusActive AgentStatus = iota
+	AgentStatusInactive
+	AgentStatusDisconnected
 )
 
 // String returns the human-readable status label.

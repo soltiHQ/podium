@@ -7,6 +7,7 @@ package role
 import (
 	"context"
 
+	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -14,15 +15,19 @@ import (
 
 // Service provides role management operations.
 type Service struct {
-	store storage.RoleStore
+	logger zerolog.Logger
+	store  storage.RoleStore
 }
 
 // New creates a new role service.
-func New(store storage.RoleStore) *Service {
+func New(store storage.RoleStore, logger zerolog.Logger) *Service {
 	if store == nil {
 		panic("role.Service: store is nil")
 	}
-	return &Service{store: store}
+	return &Service{
+		logger: logger.With().Str("service", "roles").Logger(),
+		store:  store,
+	}
 }
 
 // List returns a page of roles matching the query.
@@ -65,7 +70,12 @@ func (s *Service) Upsert(ctx context.Context, r *model.Role) error {
 	if r == nil {
 		return storage.ErrInvalidArgument
 	}
-	return s.store.UpsertRole(ctx, r)
+	if err := s.store.UpsertRole(ctx, r); err != nil {
+		return err
+	}
+
+	s.logger.Debug().Str("role_id", r.ID()).Msg("role upserted")
+	return nil
 }
 
 // Delete removes a role by ID.
@@ -73,5 +83,10 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	if id == "" {
 		return storage.ErrInvalidArgument
 	}
-	return s.store.DeleteRole(ctx, id)
+	if err := s.store.DeleteRole(ctx, id); err != nil {
+		return err
+	}
+	
+	s.logger.Debug().Str("role_id", id).Msg("role deleted")
+	return nil
 }

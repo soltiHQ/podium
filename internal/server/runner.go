@@ -9,6 +9,6 @@ import "context"
 // Name returns a human-readable identifier for logging.
 type Runner interface {
 	Name() string
-	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
+	Start(ctx context.Context) error
 }

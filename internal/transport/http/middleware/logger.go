@@ -32,14 +32,10 @@ func Logger(logger zerolog.Logger) func(http.Handler) http.Handler {
 				Str("path", r.URL.Path).
 				Int("status", m.Code).
 				Int64("bytes", m.Written).
-				Dur("duration", time.Since(start)).
-				Str("remote", r.RemoteAddr)
+				Str("duration", time.Since(start).String())
 
 			if rid, ok := transportctx.RequestID(r.Context()); ok {
 				evt = evt.Str("request_id", rid)
-			}
-			if ua := r.UserAgent(); ua != "" {
-				evt = evt.Str("user_agent", ua)
 			}
 			if sid, err := cookie.GetSessionID(r); err == nil {
 				evt = evt.Str("session_id", sid.Value)

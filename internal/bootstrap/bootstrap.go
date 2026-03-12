@@ -21,13 +21,14 @@ const (
 
 // Run service bootstrap operations.
 func Run(ctx context.Context, logger zerolog.Logger, roleSVC *role.Service, userSVC *user.Service, credSVC *credential.Service) error {
-	if err := seedRoles(ctx, roleSVC); err != nil {
+	logger.Debug().Msg("bootstrap: starting")
+	if err := seedRoles(ctx, logger, roleSVC); err != nil {
 		return err
 	}
 	return seedAdmin(ctx, logger, userSVC, credSVC)
 }
 
-func seedRoles(ctx context.Context, roleSVC *role.Service) error {
+func seedRoles(ctx context.Context, logger zerolog.Logger, roleSVC *role.Service) error {
 	for _, br := range kind.BuiltinRoles {
 		r, err := model.NewRole(br.ID, br.Name)
 		if err != nil {
@@ -42,6 +43,7 @@ func seedRoles(ctx context.Context, roleSVC *role.Service) error {
 		if err = roleSVC.Upsert(ctx, r); err != nil {
 			return err
 		}
+		logger.Debug().Str("role_id", br.ID).Str("name", br.Name).Msg("bootstrap: role seeded")
 	}
 	return nil
 }
@@ -60,6 +62,8 @@ func seedAdmin(ctx context.Context, logger zerolog.Logger, userSVC *user.Service
 	if err = userSVC.Upsert(ctx, u); err != nil {
 		return err
 	}
+	logger.Debug().Str("user_id", adminUserID).Msg("bootstrap: admin user seeded")
+
 	password, err := credentials.GeneratePassword(0)
 	if err != nil {
 		return err

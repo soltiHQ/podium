@@ -45,6 +45,8 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identi
 		return nil, LoginResult{}, iauth.ErrInvalidRequest
 	}
 
+	s.logger.Debug().Str("subject", req.Subject).Msg("login attempt")
+
 	now := s.auth.Clock.Now()
 	if s.auth.Limiter != nil && req.RateKey != "" {
 		if err := s.auth.Limiter.Check(req.RateKey, now); err != nil {
@@ -92,5 +94,7 @@ func (s *Service) Logout(ctx context.Context, req LogoutRequest) error {
 	if err := s.auth.Session.Revoke(ctx, req.SessionID); err != nil {
 		return err
 	}
+
+	s.logger.Debug().Str("session_id", req.SessionID).Msg("logout")
 	return nil
 }

@@ -23,10 +23,12 @@ const (
 var All = []Permission{
 	AgentsGet,
 	AgentsEdit,
+
 	UsersGet,
 	UsersAdd,
 	UsersEdit,
 	UsersDelete,
+
 	SpecsGet,
 	SpecsAdd,
 	SpecsEdit,

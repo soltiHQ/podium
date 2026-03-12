@@ -3,8 +3,6 @@ package domain
 import "errors"
 
 var (
-	// ErrNilSyncRequest indicates that sync request is nil.
-	ErrNilSyncRequest = errors.New("sync request cannot be nil")
 	// ErrInvalidSubject indicates that a subject is invalid or empty.
 	ErrInvalidSubject = errors.New("subject cannot be empty")
 	// ErrInvalidEmail indicates that the email address format is invalid.
@@ -17,4 +15,6 @@ var (
 	ErrEmptyName = errors.New("name cannot be empty")
 	// ErrEmptyID indicates that entity ID is empty.
 	ErrEmptyID = errors.New("id cannot be empty")
+	// ErrUnknownEndpointType indicates an unrecognized endpoint type value.
+	ErrUnknownEndpointType = errors.New("unknown endpoint type")
 )

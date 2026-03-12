@@ -6,10 +6,10 @@ The package owns three typed context keys — **Identity**, **RequestID**, and *
 Because the keys are unexported structs, no other package can collide with them.
 
 ## What goes into context
-| Value                 | Writer                                          | Reader                               |
-|-----------------------|-------------------------------------------------|--------------------------------------|
-| `*identity.Identity`  | Auth middleware / interceptor                   | Handlers, loggers, permission checks |
-| `string` (request ID) | RequestID middleware / interceptor               | Loggers, error responders            |
+| Value                 | Writer                                               | Reader                                       |
+|-----------------------|------------------------------------------------------|----------------------------------------------|
+| `*identity.Identity`  | Auth middleware / interceptor                        | Handlers, loggers, permission checks         |
+| `string` (request ID) | RequestID middleware / interceptor                   | Loggers, error responders                    |
 | `*errorHolder` (slot) | RequestID middleware / interceptor (`WithErrorSlot`) | Logger middleware / interceptor (`TryError`) |
 
 ### Error slot

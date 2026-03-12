@@ -5,7 +5,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/uikit/policy"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 	"github.com/soltiHQ/control-plane/internal/uikit/timeformat"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
+	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 	"github.com/soltiHQ/control-plane/ui/templates/asset"
 	"github.com/soltiHQ/control-plane/ui/templates/component/button"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
@@ -84,7 +84,7 @@ templ labelsEditor(a restv1.Agent) {
 	@modal.Modal("edit-agent-labels") {
 		<form
 			x-data={ kvEditorData(a.Labels) }
-			x-on:submit.prevent={ kvSubmitExpr(routepath.ApiAgentLabels(a.ID), trigger.AgentUpdate) }
+			x-on:submit.prevent={ kvSubmitExpr(routepath.ApiAgentLabels(a.ID), htmx.AgentUpdate) }
 		>
 			<div class="p-6 space-y-4">
 				<h3 class="text-base font-semibold text-fg">Edit labels</h3>

@@ -5,7 +5,10 @@ import "time"
 const (
 	defaultTickInterval = 10 * time.Second
 	defaultHeartbeat    = 30 * time.Second
-	
+
+	defaultName           = "lifecycle"
+	defaultMaxConcurrency = 4
+
 	defaultInactiveMultiplier   = 2
 	defaultDisconnectMultiplier = 5
 	defaultDeleteMultiplier     = 10
@@ -18,12 +21,13 @@ type Config struct {
 	InactiveMultiplier   int           `yaml:"inactive_multiplier"`
 	DisconnectMultiplier int           `yaml:"disconnect_multiplier"`
 	DeleteMultiplier     int           `yaml:"delete_multiplier"`
+	MaxConcurrency       int           `yaml:"max_concurrency"`
 	Name                 string        `yaml:"name"`
 }
 
 func (c Config) withDefaults() Config {
 	if c.Name == "" {
-		c.Name = "lifecycle"
+		c.Name = defaultName
 	}
 	if c.TickInterval <= 0 {
 		c.TickInterval = defaultTickInterval
@@ -39,6 +43,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.DefaultHeartbeat <= 0 {
 		c.DefaultHeartbeat = defaultHeartbeat
+	}
+	if c.MaxConcurrency <= 0 {
+		c.MaxConcurrency = defaultMaxConcurrency
 	}
 	if c.DisconnectMultiplier <= c.InactiveMultiplier {
 		c.DisconnectMultiplier = c.InactiveMultiplier + 1

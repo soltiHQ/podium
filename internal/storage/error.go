@@ -31,4 +31,6 @@ var (
 	//
 	// Callers may retry with backoff (timeouts, transient network errors, leader elections, etc).
 	ErrUnavailable = errors.New("storage: unavailable")
+	// ErrNilStore indicates a required store dependency is nil.
+	ErrNilStore = errors.New("storage: nil store")
 )

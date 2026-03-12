@@ -11,8 +11,8 @@ type Session struct {
 
 	ID           string `json:"id"`
 	UserID       string `json:"user_id"`
-	CredentialID string `json:"credential_id"`
 	AuthKind     string `json:"auth_kind"`
+	CredentialID string `json:"credential_id"`
 
 	Revoked bool `json:"revoked"`
 }

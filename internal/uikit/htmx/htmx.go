@@ -1,9 +1,6 @@
-// Package trigger defines HTMX event names, polling intervals, and a notification hub by SSE:
-//   - Named events shared by HTMX and SSE
-//   - Configurable polling intervals as fallback
-//   - Hub broadcasts mutations to all connected browsers
-//   - Set() combines HX-Trigger header with SSE broadcast.
-package trigger
+// Package htmx provides HTMX response helpers, named trigger events,
+// and configurable polling intervals for the control-plane UI.
+package htmx
 
 import "net/http"
 
@@ -17,39 +14,6 @@ const (
 	UserUpdate      = "user_update"
 	DashboardUpdate = "dashboard_update"
 )
-
-// Event kinds for the dashboard activity feed.
-const (
-	EventAgentConnected      = "agent_connected"
-	EventAgentInactive       = "agent_inactive"
-	EventAgentDisconnected   = "agent_disconnected"
-	EventAgentDeleted        = "agent_deleted"
-	EventSpecCreated         = "spec_created"
-	EventSpecUpdated         = "spec_updated"
-	EventSpecDeployed        = "spec_deployed"
-	EventUserCreated         = "user_created"
-	EventUserUpdated         = "user_updated"
-	EventUserDeleted         = "user_deleted"
-	EventUserPasswordChanged = "user_password_changed"
-	EventUserStatusChanged   = "user_status_changed"
-	EventSessionCreated      = "session_created"
-	EventRateLimited         = "rate_limited"
-	EventIssueClosed         = "issue_closed"
-)
-
-// issueKinds defines which event kinds are classified as issues.
-var issueKinds = map[string]struct{}{
-	EventAgentDisconnected: {},
-	EventAgentInactive:     {},
-	EventAgentDeleted:      {},
-	EventRateLimited:       {},
-}
-
-// IsIssueKind reports whether the event kind is classified as an issue.
-func IsIssueKind(kind string) bool {
-	_, ok := issueKinds[kind]
-	return ok
-}
 
 const (
 	Every1m = "every 60s"
@@ -168,13 +132,12 @@ func LoadAndPoll(interval, event string) string {
 	return "load, " + interval + ", " + event + " from:body"
 }
 
+// Trigger sets an HX-Trigger header on the response.
+func Trigger(w http.ResponseWriter, event string) {
+	w.Header().Set(Header, event)
+}
+
 // Redirect sets an HX-Redirect header on the response.
 func Redirect(w http.ResponseWriter, url string) {
 	w.Header().Set(RedirectHeader, url)
-}
-
-// Set sets an HX-Trigger header on the response and broadcasts the event to all connected SSE clients.
-func Set(w http.ResponseWriter, event string) {
-	w.Header().Set(Header, event)
-	Notify(event)
 }

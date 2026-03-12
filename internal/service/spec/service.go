@@ -8,6 +8,7 @@ package spec
 import (
 	"context"
 
+	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -15,15 +16,19 @@ import (
 
 // Service provides task spec management operations.
 type Service struct {
-	store storage.Storage
+	logger zerolog.Logger
+	store  storage.Storage
 }
 
 // New creates a new task spec service.
-func New(store storage.Storage) *Service {
+func New(store storage.Storage, logger zerolog.Logger) *Service {
 	if store == nil {
 		panic("spec.Service: store is nil")
 	}
-	return &Service{store: store}
+	return &Service{
+		logger: logger.With().Str("service", "specs").Logger(),
+		store:  store,
+	}
 }
 
 // List returns a page of task specs matching the query.
@@ -66,7 +71,12 @@ func (s *Service) Create(ctx context.Context, ts *model.Spec) error {
 	if ts == nil {
 		return storage.ErrInvalidArgument
 	}
-	return s.store.UpsertSpec(ctx, ts)
+	if err := s.store.UpsertSpec(ctx, ts); err != nil {
+		return err
+	}
+
+	s.logger.Debug().Str("spec_id", ts.ID()).Msg("spec created")
+	return nil
 }
 
 // Upsert persists changes to an existing task spec and increments its version.
@@ -79,7 +89,15 @@ func (s *Service) Upsert(ctx context.Context, ts *model.Spec) error {
 		return err
 	}
 	ts.IncrementVersion()
-	return s.store.UpsertSpec(ctx, ts)
+	if err := s.store.UpsertSpec(ctx, ts); err != nil {
+		return err
+	}
+
+	s.logger.Debug().
+		Str("spec_id", ts.ID()).
+		Int("version", ts.Version()).
+		Msg("spec updated")
+	return nil
 }
 
 // Delete removes a task spec and all associated rollouts.
@@ -90,7 +108,12 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	if err := s.store.DeleteRolloutsBySpec(ctx, id); err != nil {
 		return err
 	}
-	return s.store.DeleteSpec(ctx, id)
+	if err := s.store.DeleteSpec(ctx, id); err != nil {
+		return err
+	}
+
+	s.logger.Debug().Str("spec_id", id).Msg("spec deleted")
+	return nil
 }
 
 // Rollouts return all rollout records associated with a spec.
@@ -141,14 +164,23 @@ func (s *Service) Deploy(ctx context.Context, specID string) error {
 		return err
 	}
 
+	targets := ts.Targets()
+	s.logger.Debug().
+		Str("spec_id", specID).
+		Int("targets", len(targets)).
+		Int("version", ts.Version()).
+		Msg("deploy started")
+
 	var existing *model.Rollout
-	for _, agentID := range ts.Targets() {
+	for _, agentID := range targets {
 		existing, err = s.store.GetRollout(ctx, model.RolloutID(specID, agentID))
 		if err == nil {
 			existing.MarkPending(ts.Version())
 			if err = s.store.UpsertRollout(ctx, existing); err != nil {
 				return err
 			}
+
+			s.logger.Trace().Str("spec_id", specID).Str("agent_id", agentID).Msg("rollout updated")
 			continue
 		}
 
@@ -160,6 +192,8 @@ func (s *Service) Deploy(ctx context.Context, specID string) error {
 		if err = s.store.UpsertRollout(ctx, rollout); err != nil {
 			return err
 		}
+
+		s.logger.Trace().Str("spec_id", specID).Str("agent_id", agentID).Msg("rollout created")
 	}
 	return nil
 }

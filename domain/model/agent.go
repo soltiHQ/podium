@@ -17,26 +17,28 @@ var _ domain.Entity[*Agent] = (*Agent)(nil)
 //   - Metadata is agent-owned data reported by the agent (not modified).
 //   - Labels are control-plane owned annotations (operators/system), not reported by the agent.
 type Agent struct {
-	createdAt time.Time
-	updatedAt time.Time
-
-	metadata map[string]string
-	labels   map[string]string
-
-	id           string
-	name         string
-	endpoint     string
-	endpointType kind.EndpointType
-	apiVersion   kind.APIVersion
-	os           string
-	arch         string
-	platform     string
+	createdAt         time.Time
+	updatedAt         time.Time
+	lastSeenAt        time.Time
+	heartbeatInterval time.Duration
+	staleAt           time.Time
 
 	uptimeSeconds int64
 
-	status            kind.AgentStatus
-	lastSeenAt        time.Time
-	heartbeatInterval time.Duration
+	id       string
+	name     string
+	endpoint string
+
+	os       string
+	arch     string
+	platform string
+
+	endpointType kind.EndpointType
+	apiVersion   kind.APIVersion
+	status       kind.AgentStatus
+
+	metadata map[string]string
+	labels   map[string]string
 }
 
 // NewAgent creates a new agent domain entity.
@@ -169,6 +171,13 @@ func (a *Agent) SetStatus(s kind.AgentStatus) {
 // SetHeartbeatInterval sets the agent's heartbeat interval.
 func (a *Agent) SetHeartbeatInterval(d time.Duration) { a.heartbeatInterval = d }
 
+// StaleAt returns the time by which the next heartbeat is expected.
+// Zero value means the agent has no computed staleness deadline.
+func (a *Agent) StaleAt() time.Time { return a.staleAt }
+
+// SetStaleAt sets the staleness deadline for the agent.
+func (a *Agent) SetStaleAt(t time.Time) { a.staleAt = t }
+
 // CreatedAt returns the creation timestamp.
 func (a *Agent) CreatedAt() time.Time { return a.createdAt }
 
@@ -254,5 +263,6 @@ func (a *Agent) Clone() *Agent {
 		status:            a.status,
 		lastSeenAt:        a.lastSeenAt,
 		heartbeatInterval: a.heartbeatInterval,
+		staleAt:           a.staleAt,
 	}
 }

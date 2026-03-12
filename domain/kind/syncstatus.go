@@ -4,11 +4,11 @@ package kind
 type SyncStatus uint8
 
 const (
-	SyncStatusPending SyncStatus = iota // created/updated, not yet pushed
-	SyncStatusSynced                    // desiredVersion == actualVersion
-	SyncStatusDrift                     // export shows mismatch
-	SyncStatusFailed                    // push error
-	SyncStatusUnknown                   // agent unreachable
+	SyncStatusPending SyncStatus = iota
+	SyncStatusSynced
+	SyncStatusDrift
+	SyncStatusFailed
+	SyncStatusUnknown
 )
 
 // String returns the human-readable sync status label.

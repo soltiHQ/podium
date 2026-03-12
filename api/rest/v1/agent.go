@@ -2,10 +2,11 @@ package restv1
 
 // Agent is the REST representation of a connected agent.
 type Agent struct {
+	UptimeSeconds     int64 `json:"uptime_seconds"`
+	HeartbeatInterval int   `json:"heartbeat_interval_s,omitempty"`
+
 	Metadata map[string]string `json:"metadata,omitempty"`
 	Labels   map[string]string `json:"labels,omitempty"`
-
-	UptimeSeconds int64 `json:"uptime_seconds"`
 
 	ID           string `json:"id"`
 	Name         string `json:"name"`
@@ -17,8 +18,6 @@ type Agent struct {
 	Platform     string `json:"platform"`
 	Status       string `json:"status"`
 	LastSeenAt   string `json:"last_seen_at,omitempty"`
-
-	HeartbeatInterval int `json:"heartbeat_interval_s,omitempty"`
 }
 
 // AgentListResponse is the paginated list of agents.

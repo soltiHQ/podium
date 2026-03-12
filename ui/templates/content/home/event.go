@@ -4,24 +4,29 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
 )
 
 // IssueGroup aggregates identical issues into a single row with a count.
 type IssueGroup struct {
-	Kind    string
-	Payload trigger.EventPayload
-	Count   int
-	Time    time.Time
+	Time time.Time
+
+	Count int
+	Kind  string
+
+	Payload event.Payload
 }
 
 // GroupIssues aggregates events by kind + payload ID.
 // Input must be in reverse chronological order (newest first).
-func GroupIssues(events []trigger.EventRecord) []IssueGroup {
+func GroupIssues(events []event.Record) []IssueGroup {
 	type gkey struct{ kind, id string }
-	idx := map[gkey]int{}
-	var groups []IssueGroup
+
+	var (
+		idx    = map[gkey]int{}
+		groups []IssueGroup
+	)
 	for _, ev := range events {
 		k := gkey{ev.Kind, ev.Payload.ID}
 		if i, ok := idx[k]; ok {
@@ -50,19 +55,16 @@ func issueDeleteURL(g IssueGroup) string {
 
 // issueDescription builds a one-liner for a grouped issue.
 func issueDescription(g IssueGroup) string {
-	name := g.Payload.Name
-	if name == "" {
-		name = g.Payload.ID
-	}
-	return eventEntity(g.Kind) + " " + name
+	return eventEntity(g.Kind) + " " + g.Payload.DisplayName()
 }
 
 // issueBorderColor returns the left border accent class for an issue event.
 func issueBorderColor(kind string) string {
 	switch kind {
-	case trigger.EventAgentDisconnected, trigger.EventAgentDeleted, trigger.EventRateLimited:
+	case event.AgentDisconnected, event.AgentDeleted, event.RateLimited,
+		event.SyncFailed:
 		return "border-l-danger"
-	case trigger.EventAgentInactive:
+	case event.AgentInactive:
 		return "border-l-warning"
 	default:
 		return "border-l-border"
@@ -72,17 +74,17 @@ func issueBorderColor(kind string) string {
 // eventLabelColor returns the text color class for an event label.
 func eventLabelColor(kind string) string {
 	switch kind {
-	case trigger.EventAgentConnected, trigger.EventSessionCreated:
+	case event.AgentConnected, event.SessionCreated:
 		return "text-success"
-	case trigger.EventAgentDisconnected, trigger.EventAgentDeleted,
-		trigger.EventUserDeleted, trigger.EventRateLimited:
+	case event.AgentDisconnected, event.AgentDeleted,
+		event.UserDeleted, event.RateLimited, event.SyncFailed:
 		return "text-danger"
-	case trigger.EventAgentInactive:
+	case event.AgentInactive:
 		return "text-warning"
-	case trigger.EventSpecCreated, trigger.EventUserCreated:
+	case event.SpecCreated, event.UserCreated:
 		return "text-primary"
-	case trigger.EventSpecUpdated, trigger.EventSpecDeployed,
-		trigger.EventUserUpdated, trigger.EventUserPasswordChanged, trigger.EventUserStatusChanged:
+	case event.SpecUpdated, event.SpecDeployed,
+		event.UserUpdated, event.UserPasswordChanged, event.UserStatusChanged:
 		return "text-secondary"
 	default:
 		return "text-muted"
@@ -92,35 +94,37 @@ func eventLabelColor(kind string) string {
 // eventLabel returns a short verb for the event kind.
 func eventLabel(kind string) string {
 	switch kind {
-	case trigger.EventAgentConnected:
+	case event.AgentConnected:
 		return "connected"
-	case trigger.EventAgentInactive:
+	case event.AgentInactive:
 		return "inactive"
-	case trigger.EventAgentDisconnected:
+	case event.AgentDisconnected:
 		return "disconnected"
-	case trigger.EventAgentDeleted:
+	case event.AgentDeleted:
 		return "deleted"
-	case trigger.EventSpecCreated:
+	case event.SpecCreated:
 		return "created"
-	case trigger.EventSpecUpdated:
+	case event.SpecUpdated:
 		return "updated"
-	case trigger.EventSpecDeployed:
+	case event.SpecDeployed:
 		return "deployed"
-	case trigger.EventUserCreated:
+	case event.UserCreated:
 		return "created"
-	case trigger.EventUserUpdated:
+	case event.UserUpdated:
 		return "updated"
-	case trigger.EventUserDeleted:
+	case event.UserDeleted:
 		return "deleted"
-	case trigger.EventUserPasswordChanged:
+	case event.UserPasswordChanged:
 		return "password changed"
-	case trigger.EventUserStatusChanged:
+	case event.UserStatusChanged:
 		return "status changed"
-	case trigger.EventSessionCreated:
+	case event.SessionCreated:
 		return "logged in"
-	case trigger.EventRateLimited:
+	case event.RateLimited:
 		return "rate limited"
-	case trigger.EventIssueClosed:
+	case event.SyncFailed:
+		return "sync failed"
+	case event.IssueClosed:
 		return "closed"
 	default:
 		return kind
@@ -130,34 +134,26 @@ func eventLabel(kind string) string {
 // eventEntity returns the lowercase entity type for an event kind.
 func eventEntity(kind string) string {
 	switch kind {
-	case trigger.EventAgentConnected, trigger.EventAgentInactive,
-		trigger.EventAgentDisconnected, trigger.EventAgentDeleted:
+	case event.AgentConnected, event.AgentInactive,
+		event.AgentDisconnected, event.AgentDeleted:
 		return "agent"
-	case trigger.EventSpecCreated, trigger.EventSpecUpdated, trigger.EventSpecDeployed:
+	case event.SpecCreated, event.SpecUpdated, event.SpecDeployed,
+		event.SyncFailed:
 		return "spec"
-	case trigger.EventUserCreated, trigger.EventUserUpdated, trigger.EventUserDeleted,
-		trigger.EventUserPasswordChanged, trigger.EventUserStatusChanged,
-		trigger.EventSessionCreated, trigger.EventRateLimited:
+	case event.UserCreated, event.UserUpdated, event.UserDeleted,
+		event.UserPasswordChanged, event.UserStatusChanged,
+		event.SessionCreated, event.RateLimited:
 		return "user"
-	case trigger.EventIssueClosed:
+	case event.IssueClosed:
 		return "issue"
 	default:
 		return ""
 	}
 }
 
-// eventTarget returns the entity display name (or ID as fallback).
-func eventTarget(ev trigger.EventRecord) string {
-	if ev.Payload.Name != "" {
-		return ev.Payload.Name
-	}
-	return ev.Payload.ID
-}
-
 // eventActor returns the actor name when it differs from the target, empty otherwise.
-func eventActor(ev trigger.EventRecord) string {
-	target := eventTarget(ev)
-	if ev.Payload.By != "" && ev.Payload.By != target {
+func eventActor(ev event.Record) string {
+	if ev.Payload.By != "" && ev.Payload.By != ev.Payload.DisplayName() {
 		return ev.Payload.By
 	}
 	return ""

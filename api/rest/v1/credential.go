@@ -3,8 +3,8 @@ package restv1
 // Credential is the REST representation of an authentication credential.
 type Credential struct {
 	ID     string `json:"id"`
-	UserID string `json:"user_id"`
 	Auth   string `json:"auth"`
+	UserID string `json:"user_id"`
 }
 
 // CredentialListResponse is the list of credentials.

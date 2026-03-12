@@ -88,6 +88,8 @@ func (s *Service) Delete(ctx context.Context, req DeleteRequest) error {
 	if err := s.store.DeleteCredential(ctx, req.ID); err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return err
 	}
+
+	s.logger.Debug().Str("credential_id", req.ID).Msg("credential deleted")
 	return nil
 }
 
@@ -145,5 +147,10 @@ func (s *Service) SetPassword(ctx context.Context, req SetPasswordRequest) error
 	if err = s.store.UpsertVerifier(ctx, ver); err != nil {
 		return err
 	}
+	
+	s.logger.Debug().
+		Str("user_id", req.UserID).
+		Str("credential_id", credID).
+		Msg("password set")
 	return nil
 }

@@ -5,7 +5,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
+	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
 	"github.com/soltiHQ/control-plane/ui/templates/component/form"
 	"github.com/soltiHQ/control-plane/ui/templates/component/list"
@@ -40,7 +40,7 @@ templ Results(items []*model.Spec, nextCursor string, q string) {
 	<div
 		id="specs-results"
 		hx-get={ routepath.ApiSpecs }
-		hx-trigger={ trigger.Poll(trigger.GetSpecsRefresh(), trigger.SpecUpdate) }
+		hx-trigger={ htmx.Poll(htmx.GetSpecsRefresh(), htmx.SpecUpdate) }
 		hx-target="this"
 		hx-swap="outerHTML"
 		hx-select="#specs-results"

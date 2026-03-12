@@ -10,7 +10,6 @@ import "time"
 //   - UpdatedAt() changes on every state mutation.
 type Entity[T any] interface {
 	// ID returns the unique identifier for this entity.
-	// Must be non-empty for stored entities.
 	ID() string
 	// Clone creates a deep copy of the entity.
 	Clone() T

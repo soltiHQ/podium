@@ -3,7 +3,7 @@ package user
 import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
-	"github.com/soltiHQ/control-plane/internal/uikit/trigger"
+	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 	"github.com/soltiHQ/control-plane/ui/templates/component/card"
 	"github.com/soltiHQ/control-plane/ui/templates/component/form"
 	"github.com/soltiHQ/control-plane/ui/templates/component/list"
@@ -38,7 +38,7 @@ templ Results(items []*model.User, nextCursor string, q string) {
 	<div
 		id="users-results"
 		hx-get={ routepath.ApiUsers }
-		hx-trigger={ trigger.Poll(trigger.GetUsersRefresh(), trigger.UserUpdate) }
+		hx-trigger={ htmx.Poll(htmx.GetUsersRefresh(), htmx.UserUpdate) }
 		hx-target="this"
 		hx-swap="outerHTML"
 		hx-select="#users-results"
