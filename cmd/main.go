@@ -121,11 +121,11 @@ func initServices(store *inmemory.Store, authModel *wire.Auth, logger zerolog.Lo
 	return services{
 		access:     access.New(authModel, store, logger),
 		credential: credential.New(store, logger),
+		session:    session.New(store, logger),
+		agent:      agent.New(store, logger),
+		spec:       spec.New(store, logger),
+		role:       role.New(store, logger),
 		user:       user.New(store, logger),
-		session:    session.New(store),
-		agent:      agent.New(store),
-		spec:       spec.New(store),
-		role:       role.New(store),
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/model"
 
 	"github.com/soltiHQ/control-plane/internal/service"
@@ -17,15 +18,19 @@ import (
 
 // Service implements session-related use-cases on top of storage contracts.
 type Service struct {
-	store storage.SessionStore
+	logger zerolog.Logger
+	store  storage.SessionStore
 }
 
 // New creates a new sessions service.
-func New(store storage.SessionStore) *Service {
+func New(store storage.SessionStore, logger zerolog.Logger) *Service {
 	if store == nil {
 		panic("session.Service: store is nil")
 	}
-	return &Service{store: store}
+	return &Service{
+		logger: logger.With().Str("service", "sessions").Logger(),
+		store:  store,
+	}
 }
 
 // Get returns a single session by ID.
@@ -78,6 +83,8 @@ func (s *Service) Delete(ctx context.Context, req DeleteRequest) error {
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return err
 	}
+
+	s.logger.Debug().Str("session_id", req.ID).Msg("session deleted")
 	return nil
 }
 
@@ -86,7 +93,12 @@ func (s *Service) DeleteByUser(ctx context.Context, req DeleteByUserRequest) err
 	if req.UserID == "" {
 		return storage.ErrInvalidArgument
 	}
-	return s.store.DeleteSessionsByUser(ctx, req.UserID)
+	if err := s.store.DeleteSessionsByUser(ctx, req.UserID); err != nil {
+		return err
+	}
+
+	s.logger.Debug().Str("user_id", req.UserID).Msg("user sessions deleted")
+	return nil
 }
 
 // Revoke marks a session as revoked (idempotent).
@@ -104,5 +116,7 @@ func (s *Service) Revoke(ctx context.Context, req RevokeRequest) error {
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return err
 	}
+
+	s.logger.Debug().Str("session_id", req.ID).Msg("session revoked")
 	return nil
 }

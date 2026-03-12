@@ -117,6 +117,8 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 		s.logger.Warn().Err(err).Str("user_id", id).Msg("delete: failed to remove user record")
 		return err
 	}
+
+	s.logger.Debug().Str("user_id", id).Int("credentials", len(creds)).Msg("user deleted")
 	return nil
 }
 
@@ -147,7 +149,15 @@ func (s *Service) Upsert(ctx context.Context, u *model.User) error {
 			return err
 		}
 	}
-	return s.store.UpsertUser(ctx, u)
+	if err := s.store.UpsertUser(ctx, u); err != nil {
+		return err
+	}
+
+	s.logger.Debug().
+		Str("user_id", u.ID()).
+		Str("subject", subject).
+		Msg("user upserted")
+	return nil
 }
 
 // isValidEmail performs a basic email format check:

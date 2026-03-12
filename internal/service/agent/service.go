@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -15,15 +16,19 @@ import (
 
 // Service provides agent management operations.
 type Service struct {
-	store storage.AgentStore
+	logger zerolog.Logger
+	store  storage.AgentStore
 }
 
 // New creates a new agent service.
-func New(store storage.AgentStore) *Service {
+func New(store storage.AgentStore, logger zerolog.Logger) *Service {
 	if store == nil {
 		panic("agent.Service: store is nil")
 	}
-	return &Service{store: store}
+	return &Service{
+		logger: logger.With().Str("service", "agents").Logger(),
+		store:  store,
+	}
 }
 
 // List returns a page of agents matching the query.
@@ -71,9 +76,11 @@ func (s *Service) Get(ctx context.Context, id string) (*model.Agent, error) {
 // createdAt timestamp are preserved because they are not part of the
 // discovery payload reported by the agent.
 func (s *Service) Upsert(ctx context.Context, m *model.Agent) error {
+	var existed bool
 	existing, err := s.store.GetAgent(ctx, m.ID())
 	switch {
 	case err == nil:
+		existed = true
 		m.SetCreatedAt(existing.CreatedAt())
 		for k, v := range existing.LabelsAll() {
 			m.LabelAdd(k, v)
@@ -88,7 +95,16 @@ func (s *Service) Upsert(ctx context.Context, m *model.Agent) error {
 	if hb := m.HeartbeatInterval(); hb > 0 {
 		m.SetStaleAt(m.LastSeenAt().Add(hb))
 	}
-	return s.store.UpsertAgent(ctx, m)
+	if err = s.store.UpsertAgent(ctx, m); err != nil {
+		return err
+	}
+
+	s.logger.Debug().
+		Str("agent_id", m.ID()).
+		Bool("existed", existed).
+		Str("heartbeat", m.HeartbeatInterval().String()).
+		Msg("agent upserted")
+	return nil
 }
 
 // PatchLabels replaces labels for an agent.
@@ -109,6 +125,11 @@ func (s *Service) PatchLabels(ctx context.Context, req PatchLabels) (*model.Agen
 	if err = s.store.UpsertAgent(ctx, agent); err != nil {
 		return nil, err
 	}
+
+	s.logger.Debug().
+		Str("agent_id", req.ID).
+		Int("labels", len(req.Labels)).
+		Msg("labels patched")
 	return agent.Clone(), nil
 }
 
