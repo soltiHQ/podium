@@ -21,9 +21,10 @@ type Runner struct {
 	handler http.Handler
 	cfg     Config
 
-	srv   *http.Server
-	ln    net.Listener
-	ready chan struct{}
+	srv       *http.Server
+	ln        net.Listener
+	ready     chan struct{}
+	cancelCtx context.CancelFunc
 
 	started atomic.Bool
 }
@@ -73,7 +74,15 @@ func (r *Runner) Start(_ context.Context) error {
 		IdleTimeout:       r.cfg.IdleTimeout,
 		MaxHeaderBytes:    r.cfg.MaxHeaderBytes,
 
-		BaseContext: r.cfg.BaseContext,
+		BaseContext: func(l net.Listener) context.Context {
+			parent := context.Background()
+			if r.cfg.BaseContext != nil {
+				parent = r.cfg.BaseContext(l)
+			}
+			ctx, cancel := context.WithCancel(parent)
+			r.cancelCtx = cancel
+			return ctx
+		},
 		ConnContext: r.cfg.ConnContext,
 	}
 	close(r.ready)
@@ -110,6 +119,10 @@ func (r *Runner) Stop(ctx context.Context) error {
 	r.logger.Info().
 		Str("runner", r.cfg.Name).
 		Msg("http server shutdown requested")
+
+	if r.cancelCtx != nil {
+		r.cancelCtx()
+	}
 
 	if err := srv.Shutdown(ctx); err != nil {
 		_ = srv.Close()
