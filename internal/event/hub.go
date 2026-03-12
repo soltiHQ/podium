@@ -64,11 +64,12 @@ func (h *Hub) Notify(event string) {
 	for id, ch := range h.clients {
 		select {
 		case ch <- event:
+			h.logger.Trace().Uint64("client_id", id).Str("event", event).Msg("sse: event sent")
 		default:
 			h.logger.Warn().
 				Uint64("client_id", id).
 				Str("event", event).
-				Msg("event: dropped event, client buffer full")
+				Msg("sse: dropped event, client buffer full")
 		}
 	}
 }
@@ -118,7 +119,10 @@ func (h *Hub) Subscribe(ctx context.Context) <-chan string {
 	id := h.nextID
 	h.nextID++
 	h.clients[id] = ch
+	total := len(h.clients)
 	h.mu.Unlock()
+
+	h.logger.Debug().Uint64("client_id", id).Int("clients", total).Msg("sse: client subscribed")
 
 	go func() {
 		<-ctx.Done()
@@ -127,7 +131,9 @@ func (h *Hub) Subscribe(ctx context.Context) <-chan string {
 			delete(h.clients, id)
 			close(ch)
 		}
+		remaining := len(h.clients)
 		h.mu.Unlock()
+		h.logger.Debug().Uint64("client_id", id).Int("clients", remaining).Msg("sse: client unsubscribed")
 	}()
 	return ch
 }
