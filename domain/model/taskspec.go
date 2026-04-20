@@ -118,6 +118,14 @@ func (ts *Spec) Generation() int                   { return ts.generation }
 func (ts *Spec) DeletionRequested() bool           { return ts.deletionRequested }
 func (ts *Spec) CreatedAt() time.Time              { return ts.createdAt }
 func (ts *Spec) UpdatedAt() time.Time               { return ts.updatedAt }
+
+// SetCreatedAt / SetUpdatedAt / SetVersion / SetGeneration — used by
+// persistence adapters to restore exact state on reconstruction.
+func (ts *Spec) SetCreatedAt(t time.Time) { ts.createdAt = t }
+func (ts *Spec) SetUpdatedAt(t time.Time) { ts.updatedAt = t }
+func (ts *Spec) SetVersion(v int)         { ts.version = v }
+func (ts *Spec) SetGeneration(g int)      { ts.generation = g }
+func (ts *Spec) SetDeletionRequested(b bool) { ts.deletionRequested = b }
 func (ts *Spec) KindType() kind.TaskKindType       { return ts.kindType }
 func (ts *Spec) TimeoutMs() int64                  { return ts.timeoutMs }
 func (ts *Spec) RestartType() kind.RestartType     { return ts.restartType }

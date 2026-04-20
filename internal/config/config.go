@@ -13,6 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/soltiHQ/control-plane/internal/auth/wire"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/server"
 	"github.com/soltiHQ/control-plane/internal/server/runner/grpcserver"
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
@@ -37,6 +38,7 @@ type Config struct {
 	Server        server.Config         `yaml:"server"         envconfig:"SERVER"`
 	Auth          wire.Config           `yaml:"auth"           envconfig:"AUTH"`
 	CORS          middleware.CORSConfig `yaml:"cors"           envconfig:"CORS"`
+	Cluster       cluster.Config        `yaml:"cluster"        envconfig:"CLUSTER"`
 }
 
 // Default returns the default development configuration.
@@ -51,6 +53,7 @@ func Default() Config {
 		CORS: middleware.CORSConfig{
 			AllowOrigins: []string{"*"},
 		},
+		Cluster: cluster.DefaultConfig(),
 	}
 }
 

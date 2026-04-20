@@ -79,6 +79,10 @@ func (u *User) CreatedAt() time.Time { return u.createdAt }
 // UpdatedAt returns the timestamp of the last modification.
 func (u *User) UpdatedAt() time.Time { return u.updatedAt }
 
+// SetCreatedAt / SetUpdatedAt — used by persistence adapters.
+func (u *User) SetCreatedAt(t time.Time) { u.createdAt = t }
+func (u *User) SetUpdatedAt(t time.Time) { u.updatedAt = t }
+
 // EmailAdd updates the user's email.
 func (u *User) EmailAdd(email string) {
 	if u.email == email {

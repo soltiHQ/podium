@@ -89,36 +89,37 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 		return storage.ErrInvalidArgument
 	}
 
-	if err := s.store.DeleteSessionsByUser(ctx, id); err != nil {
-		s.logger.Warn().Err(err).Str("user_id", id).Msg("delete: failed to remove sessions")
-		return err
-	}
-
-	creds, err := s.store.ListCredentialsByUser(ctx, id)
+	var credCount int
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		if err := tx.DeleteSessionsByUser(ctx, id); err != nil {
+			return err
+		}
+		creds, err := tx.ListCredentialsByUser(ctx, id)
+		if err != nil {
+			return err
+		}
+		credCount = len(creds)
+		for _, c := range creds {
+			if c == nil {
+				continue
+			}
+			if err := tx.DeleteVerifierByCredential(ctx, c.ID()); err != nil {
+				return err
+			}
+			if err := tx.DeleteCredential(ctx, c.ID()); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				return err
+			}
+		}
+		if err := tx.DeleteUser(ctx, id); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return err
+		}
+		return nil
+	})
 	if err != nil {
-		s.logger.Warn().Err(err).Str("user_id", id).Msg("delete: failed to list credentials")
+		s.logger.Warn().Err(err).Str("user_id", id).Msg("delete failed")
 		return err
 	}
-	for _, c := range creds {
-		if c == nil {
-			continue
-		}
-
-		if err = s.store.DeleteVerifierByCredential(ctx, c.ID()); err != nil {
-			s.logger.Warn().Err(err).Str("user_id", id).Str("credential_id", c.ID()).Msg("delete: failed to remove verifier")
-			return err
-		}
-		if err = s.store.DeleteCredential(ctx, c.ID()); err != nil && !errors.Is(err, storage.ErrNotFound) {
-			s.logger.Warn().Err(err).Str("user_id", id).Str("credential_id", c.ID()).Msg("delete: failed to remove credential")
-			return err
-		}
-	}
-	if err = s.store.DeleteUser(ctx, id); err != nil && !errors.Is(err, storage.ErrNotFound) {
-		s.logger.Warn().Err(err).Str("user_id", id).Msg("delete: failed to remove user record")
-		return err
-	}
-
-	s.logger.Debug().Str("user_id", id).Int("credentials", len(creds)).Msg("user deleted")
+	s.logger.Debug().Str("user_id", id).Int("credentials", credCount).Msg("user deleted")
 	return nil
 }
 

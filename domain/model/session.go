@@ -93,6 +93,12 @@ func (s *Session) CreatedAt() time.Time { return s.createdAt }
 // UpdatedAt returns the timestamp of the last modification.
 func (s *Session) UpdatedAt() time.Time { return s.updatedAt }
 
+// SetCreatedAt / SetUpdatedAt / SetRevokedAt — used by persistence adapters
+// to restore original timestamps when reconstructing from stored state.
+func (s *Session) SetCreatedAt(t time.Time) { s.createdAt = t }
+func (s *Session) SetUpdatedAt(t time.Time) { s.updatedAt = t }
+func (s *Session) SetRevokedAt(t time.Time) { s.revokedAt = t }
+
 // Expired reports whether the session is expired at the given time.
 func (s *Session) Expired(at time.Time) bool {
 	return !s.expiresAt.IsZero() && !at.Before(s.expiresAt)

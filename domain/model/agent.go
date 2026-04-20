@@ -210,6 +210,46 @@ func (a *Agent) SetCreatedAt(t time.Time) { a.createdAt = t }
 // UpdatedAt returns the last modification timestamp.
 func (a *Agent) UpdatedAt() time.Time { return a.updatedAt }
 
+// SetUpdatedAt overrides the modification timestamp (used by persistence
+// adapters to restore exact state).
+func (a *Agent) SetUpdatedAt(t time.Time) { a.updatedAt = t }
+
+// SetLastSeenAt / SetEndpointType / SetAPIVersion / SetOS / SetArch /
+// SetPlatform / SetUptimeSeconds / SetMetadata / SetLabels / SetCapabilities
+// are persistence-adapter hooks that restore every field on reconstruction.
+func (a *Agent) SetLastSeenAt(t time.Time)           { a.lastSeenAt = t }
+func (a *Agent) SetEndpointType(e kind.EndpointType) { a.endpointType = e }
+func (a *Agent) SetAPIVersion(v kind.APIVersion)     { a.apiVersion = v }
+func (a *Agent) SetOS(s string)                      { a.os = s }
+func (a *Agent) SetArch(s string)                    { a.arch = s }
+func (a *Agent) SetPlatform(s string)                { a.platform = s }
+func (a *Agent) SetUptimeSeconds(v int64)            { a.uptimeSeconds = v }
+
+// SetMetadata replaces the full metadata map with a defensive copy.
+func (a *Agent) SetMetadata(m map[string]string) {
+	cp := make(map[string]string, len(m))
+	for k, v := range m {
+		cp[k] = v
+	}
+	a.metadata = cp
+}
+
+// SetLabels replaces the full label map with a defensive copy.
+func (a *Agent) SetLabels(m map[string]string) {
+	cp := make(map[string]string, len(m))
+	for k, v := range m {
+		cp[k] = v
+	}
+	a.labels = cp
+}
+
+// SetCapabilities replaces the capability list with a defensive copy.
+func (a *Agent) SetCapabilities(c []string) {
+	cp := make([]string, len(c))
+	copy(cp, c)
+	a.capabilities = cp
+}
+
 // Metadata returns the metadata value for the given key.
 func (a *Agent) Metadata(key string) (string, bool) {
 	v, ok := a.metadata[key]

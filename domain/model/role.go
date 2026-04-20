@@ -57,6 +57,11 @@ func (r *Role) CreatedAt() time.Time { return r.createdAt }
 // UpdatedAt returns the timestamp of the last modification.
 func (r *Role) UpdatedAt() time.Time { return r.updatedAt }
 
+// SetCreatedAt / SetUpdatedAt — used by persistence adapters to restore
+// original timestamps when reconstructing from stored state.
+func (r *Role) SetCreatedAt(t time.Time) { r.createdAt = t }
+func (r *Role) SetUpdatedAt(t time.Time) { r.updatedAt = t }
+
 // PermissionsAll returns a copy of all permissions assigned to the role.
 func (r *Role) PermissionsAll() []kind.Permission {
 	out := make([]kind.Permission, len(r.permissions))

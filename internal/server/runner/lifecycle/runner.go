@@ -15,6 +15,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
@@ -23,7 +24,8 @@ import (
 
 // Runner is a server.Runner that periodically checks agent liveness.
 type Runner struct {
-	hub *event.Hub
+	hub        *event.Hub
+	leadership cluster.Leadership
 
 	logger zerolog.Logger
 	store  storage.AgentStore
@@ -34,34 +36,35 @@ type Runner struct {
 }
 
 // New creates a lifecycle runner.
-func New(cfg Config, logger zerolog.Logger, store storage.AgentStore, hub *event.Hub) (*Runner, error) {
+func New(cfg Config, logger zerolog.Logger, store storage.AgentStore, hub *event.Hub, leadership cluster.Leadership) (*Runner, error) {
 	if store == nil {
 		return nil, fmt.Errorf("lifecycle: %w", storage.ErrNilStore)
 	}
 	if hub == nil {
 		return nil, fmt.Errorf("lifecycle: %w", event.ErrNilHub)
 	}
+	if leadership == nil {
+		return nil, fmt.Errorf("lifecycle: nil leadership")
+	}
 	cfg = cfg.withDefaults()
 	return &Runner{
-		logger: logger.With().Str("runner", cfg.Name).Logger(),
-		cfg:    cfg,
-		store:  store,
-		hub:    hub,
-		stop:   make(chan struct{}),
+		logger:     logger.With().Str("runner", cfg.Name).Logger(),
+		cfg:        cfg,
+		store:      store,
+		hub:        hub,
+		leadership: leadership,
+		stop:       make(chan struct{}),
 	}, nil
 }
 
 // Name returns the runner name.
 func (r *Runner) Name() string { return r.cfg.Name }
 
-// Start runs the lifecycle check loop until Stop is called.
-func (r *Runner) Start(_ context.Context) error {
+// Start runs the lifecycle check loop while this replica is leader.
+func (r *Runner) Start(ctx context.Context) error {
 	if !r.started.CompareAndSwap(false, true) {
 		return ErrAlreadyStarted
 	}
-
-	ticker := time.NewTicker(r.cfg.TickInterval)
-	defer ticker.Stop()
 
 	r.logger.Debug().
 		Dur("tick", r.cfg.TickInterval).
@@ -71,15 +74,29 @@ func (r *Runner) Start(_ context.Context) error {
 		Int("max_concurrency", r.cfg.MaxConcurrency).
 		Msg("lifecycle runner started")
 
-	for {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
 		select {
-		case <-ticker.C:
-			r.tick()
 		case <-r.stop:
-			r.logger.Info().Msg("lifecycle runner stopped")
-			return nil
+			cancel()
+		case <-runCtx.Done():
 		}
-	}
+	}()
+
+	return r.leadership.WhenLeader(runCtx, func(leaderCtx context.Context) error {
+		ticker := time.NewTicker(r.cfg.TickInterval)
+		defer ticker.Stop()
+		r.logger.Info().Msg("lifecycle runner acquired leadership")
+		for {
+			select {
+			case <-ticker.C:
+				r.tick()
+			case <-leaderCtx.Done():
+				return nil
+			}
+		}
+	})
 }
 
 // Stop signals the runner to exit. Safe to call multiple times.

@@ -53,7 +53,7 @@ func defaultConfig() Config {
 	}
 }
 
-// Configure overrides default polling intervals. Must be called before server start.
+// Configure overrides default polling intervals. Must be called before server starts.
 func Configure(c Config) {
 	if c.DashboardRefresh != "" {
 		cfg.DashboardRefresh = c.DashboardRefresh
@@ -126,7 +126,7 @@ func PollMulti(interval string, events ...string) string {
 	return s
 }
 
-// LoadAndPoll returns an hx-trigger value that fires once on a load, then keeps
+// LoadAndPoll returns a hx-trigger value that fires once on a load, then keeps
 // refreshing via polling and SSE. Use on DetailPanel containers.
 func LoadAndPoll(interval, event string) string {
 	return "load, " + interval + ", " + event + " from:body"

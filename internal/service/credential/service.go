@@ -82,13 +82,18 @@ func (s *Service) Delete(ctx context.Context, req DeleteRequest) error {
 		return storage.ErrInvalidArgument
 	}
 
-	if err := s.store.DeleteVerifierByCredential(ctx, req.ID); err != nil {
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		if err := tx.DeleteVerifierByCredential(ctx, req.ID); err != nil {
+			return err
+		}
+		if err := tx.DeleteCredential(ctx, req.ID); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
 		return err
 	}
-	if err := s.store.DeleteCredential(ctx, req.ID); err != nil && !errors.Is(err, storage.ErrNotFound) {
-		return err
-	}
-
 	s.logger.Debug().Str("credential_id", req.ID).Msg("credential deleted")
 	return nil
 }
@@ -103,51 +108,54 @@ func (s *Service) SetPassword(ctx context.Context, req SetPasswordRequest) error
 		return auth.ErrInvalidRequest
 	}
 
-	u, err := s.store.GetUser(ctx, req.UserID)
-	if err != nil {
-		return err
-	}
-	if u == nil {
-		return auth.ErrInvalidRequest
-	}
-	if u.Disabled() {
-		return auth.ErrUserDisabled
-	}
-
-	credID := req.CredentialID
-	if credID == "" {
-		existing, err := s.store.GetCredentialByUserAndAuth(ctx, req.UserID, kind.Password)
+	var credID string
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		u, err := tx.GetUser(ctx, req.UserID)
 		if err != nil {
-			if !errors.Is(err, storage.ErrNotFound) {
-				return err
-			}
-			credID = "cred-" + req.UserID
-		} else {
-			credID = existing.ID()
+			return err
 		}
-	}
+		if u == nil {
+			return auth.ErrInvalidRequest
+		}
+		if u.Disabled() {
+			return auth.ErrUserDisabled
+		}
 
-	cred, err := model.NewCredential(credID, req.UserID, kind.Password)
+		credID = req.CredentialID
+		if credID == "" {
+			existing, err := tx.GetCredentialByUserAndAuth(ctx, req.UserID, kind.Password)
+			if err != nil {
+				if !errors.Is(err, storage.ErrNotFound) {
+					return err
+				}
+				credID = "cred-" + req.UserID
+			} else {
+				credID = existing.ID()
+			}
+		}
+
+		cred, err := model.NewCredential(credID, req.UserID, kind.Password)
+		if err != nil {
+			return storage.ErrInvalidArgument
+		}
+		if err := tx.UpsertCredential(ctx, cred); err != nil {
+			return err
+		}
+
+		verifierID := "ver-" + credID
+		ver, err := authcred.NewPasswordVerifier(verifierID, credID, req.Password, req.Cost)
+		if err != nil {
+			return err
+		}
+		if err := tx.DeleteVerifierByCredential(ctx, credID); err != nil {
+			return err
+		}
+		return tx.UpsertVerifier(ctx, ver)
+	})
 	if err != nil {
-		return storage.ErrInvalidArgument
-	}
-	if err = s.store.UpsertCredential(ctx, cred); err != nil {
 		return err
 	}
 
-	verifierID := "ver-" + credID
-	ver, err := authcred.NewPasswordVerifier(verifierID, credID, req.Password, req.Cost)
-	if err != nil {
-		return err
-	}
-
-	if err = s.store.DeleteVerifierByCredential(ctx, credID); err != nil {
-		return err
-	}
-	if err = s.store.UpsertVerifier(ctx, ver); err != nil {
-		return err
-	}
-	
 	s.logger.Debug().
 		Str("user_id", req.UserID).
 		Str("credential_id", credID).

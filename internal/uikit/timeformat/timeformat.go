@@ -33,8 +33,7 @@ func Relative(t time.Time) string {
 	}
 }
 
-// Session formats a session timestamp. Shows "Jan 02, 15:04" for the
-// current year, "Jan 02 2006, 15:04" for past years, and "—" for zero time.
+// Session formats a session timestamp.
 func Session(t time.Time) string {
 	if t.IsZero() {
 		return "—"

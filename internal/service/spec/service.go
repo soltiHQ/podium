@@ -160,52 +160,54 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 		return storage.ErrInvalidArgument
 	}
 
-	ts, err := s.store.GetSpec(ctx, id)
-	if err != nil {
-		// NotFound is fine — caller-visible idempotency: deleting a
-		// missing spec is a no-op.
-		return err
-	}
-
-	rolloutsRes, err := s.store.ListRollouts(ctx,
-		s.store.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: id}),
-		storage.ListOptions{Limit: storage.MaxListLimit},
+	var (
+		fastPath bool
+		pending  int
 	)
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		ts, err := tx.GetSpec(ctx, id)
+		if err != nil {
+			return err
+		}
+		rolloutsRes, err := tx.ListRollouts(ctx,
+			tx.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: id}),
+			storage.ListOptions{Limit: storage.MaxListLimit},
+		)
+		if err != nil {
+			return err
+		}
+
+		if len(rolloutsRes.Items) == 0 {
+			fastPath = true
+			return tx.DeleteSpec(ctx, id)
+		}
+
+		ts.MarkForDeletion()
+		if err := tx.UpsertSpec(ctx, ts); err != nil {
+			return err
+		}
+		for _, r := range rolloutsRes.Items {
+			if r == nil {
+				continue
+			}
+			r.SetIntent(kind.RolloutIntentUninstall)
+			r.MarkPending(ts.Version())
+			if err := tx.UpsertRollout(ctx, r); err != nil {
+				return err
+			}
+		}
+		pending = len(rolloutsRes.Items)
+		return nil
+	})
 	if err != nil {
 		return err
 	}
 
-	// Fast path: no rollouts, nothing to tear down.
-	if len(rolloutsRes.Items) == 0 {
-		if err := s.store.DeleteSpec(ctx, id); err != nil {
-			return err
-		}
+	if fastPath {
 		s.logger.Debug().Str("spec_id", id).Msg("spec deleted (no rollouts)")
-		return nil
+	} else {
+		s.logger.Debug().Str("spec_id", id).Int("pending_uninstalls", pending).Msg("spec soft-deleted")
 	}
-
-	// Soft delete: tombstone the spec, queue Uninstall intents. The
-	// sync runner finalizer will call `DeleteSpec` once rollouts drain.
-	ts.MarkForDeletion()
-	if err := s.store.UpsertSpec(ctx, ts); err != nil {
-		return err
-	}
-
-	for _, r := range rolloutsRes.Items {
-		if r == nil {
-			continue
-		}
-		r.SetIntent(kind.RolloutIntentUninstall)
-		r.MarkPending(ts.Version())
-		if err := s.store.UpsertRollout(ctx, r); err != nil {
-			return err
-		}
-	}
-
-	s.logger.Debug().
-		Str("spec_id", id).
-		Int("pending_uninstalls", len(rolloutsRes.Items)).
-		Msg("spec soft-deleted; rollouts queued for uninstall")
 	return nil
 }
 
@@ -223,10 +225,13 @@ func (s *Service) ForceDelete(ctx context.Context, id string) error {
 		return storage.ErrInvalidArgument
 	}
 
-	if err := s.store.DeleteRolloutsBySpec(ctx, id); err != nil {
-		return err
-	}
-	if err := s.store.DeleteSpec(ctx, id); err != nil {
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		if err := tx.DeleteRolloutsBySpec(ctx, id); err != nil {
+			return err
+		}
+		return tx.DeleteSpec(ctx, id)
+	})
+	if err != nil {
 		return err
 	}
 	s.logger.Warn().Str("spec_id", id).Msg("spec force-deleted; agent tasks may be orphaned")
@@ -298,115 +303,107 @@ func (s *Service) Deploy(ctx context.Context, specID string) error {
 		return storage.ErrInvalidArgument
 	}
 
-	ts, err := s.store.GetSpec(ctx, specID)
-	if err != nil {
-		return err
-	}
-	if ts.DeletionRequested() {
-		return storage.ErrInvalidArgument
-	}
-
-	targets := ts.Targets()
-
-	// Validate every declared target exists before touching any rollout
-	// state. Stops silent zombie rollouts that otherwise would churn
-	// through sync-runner retries and end up stuck in Failed forever.
-	// Pre-check is cheap (single GetAgent per target); rolling back
-	// already-persisted rollouts halfway through is not.
-	var missing []string
-	for _, agentID := range targets {
-		if _, err := s.store.GetAgent(ctx, agentID); err != nil {
-			missing = append(missing, agentID)
-		}
-	}
-	if len(missing) > 0 {
-		s.logger.Warn().
-			Str("spec_id", specID).
-			Strs("missing_agents", missing).
-			Msg("deploy rejected: unknown target agents")
-		return &UnknownTargetsError{Agents: missing}
-	}
-
-	wanted := make(map[string]struct{}, len(targets))
-	for _, id := range targets {
-		wanted[id] = struct{}{}
-	}
-
-	rolloutsRes, err := s.store.ListRollouts(ctx,
-		s.store.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: specID}),
-		storage.ListOptions{Limit: storage.MaxListLimit},
-	)
-	if err != nil {
-		return err
-	}
-
-	// Start with the existing rollouts keyed by agent — we'll mutate /
-	// create / mark-uninstall below.
-	existing := make(map[string]*model.Rollout, len(rolloutsRes.Items))
-	for _, r := range rolloutsRes.Items {
-		if r != nil {
-			existing[r.AgentID()] = r
-		}
-	}
-
 	var (
+		generation                       int
 		install, update, uninstall, noop int
+		missing                          []string
 	)
-
-	// Targets side: Install or Update or Noop.
-	for _, agentID := range targets {
-		if r, ok := existing[agentID]; ok {
-			if r.ObservedGeneration() == ts.Generation() && r.Status() == kind.SyncStatusSynced {
-				// Already synced at the current generation. Don't disturb.
-				noop++
-				continue
-			}
-			// Either behind generation or in a transient/failed state —
-			// queue an update. Intent=Update is honest even when actual
-			// task id is empty (the runner treats it like Install with
-			// a pre-delete guarded by ActualTaskID != "").
-			if r.ActualTaskID() == "" {
-				r.SetIntent(kind.RolloutIntentInstall)
-				install++
-			} else {
-				r.SetIntent(kind.RolloutIntentUpdate)
-				update++
-			}
-			r.MarkPending(ts.Version())
-			if err := s.store.UpsertRollout(ctx, r); err != nil {
-				return err
-			}
-			continue
-		}
-		// Fresh rollout for a newly added target.
-		r, err := model.NewRollout(specID, agentID, ts.Version())
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		ts, err := tx.GetSpec(ctx, specID)
 		if err != nil {
 			return err
 		}
-		// NewRollout defaults intent to Install; explicit for clarity.
-		r.SetIntent(kind.RolloutIntentInstall)
-		if err := s.store.UpsertRollout(ctx, r); err != nil {
-			return err
+		if ts.DeletionRequested() {
+			return storage.ErrInvalidArgument
 		}
-		install++
-	}
+		generation = ts.Generation()
+		targets := ts.Targets()
 
-	// Orphan side: agent removed from targets → queue Uninstall.
-	for agentID, r := range existing {
-		if _, kept := wanted[agentID]; kept {
-			continue
+		for _, agentID := range targets {
+			if _, err := tx.GetAgent(ctx, agentID); err != nil {
+				missing = append(missing, agentID)
+			}
 		}
-		r.SetIntent(kind.RolloutIntentUninstall)
-		r.MarkPending(ts.Version())
-		if err := s.store.UpsertRollout(ctx, r); err != nil {
+		if len(missing) > 0 {
+			return &UnknownTargetsError{Agents: missing}
+		}
+
+		wanted := make(map[string]struct{}, len(targets))
+		for _, id := range targets {
+			wanted[id] = struct{}{}
+		}
+
+		rolloutsRes, err := tx.ListRollouts(ctx,
+			tx.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: specID}),
+			storage.ListOptions{Limit: storage.MaxListLimit},
+		)
+		if err != nil {
 			return err
 		}
-		uninstall++
+
+		existing := make(map[string]*model.Rollout, len(rolloutsRes.Items))
+		for _, r := range rolloutsRes.Items {
+			if r != nil {
+				existing[r.AgentID()] = r
+			}
+		}
+
+		for _, agentID := range targets {
+			if r, ok := existing[agentID]; ok {
+				if r.ObservedGeneration() == ts.Generation() && r.Status() == kind.SyncStatusSynced {
+					noop++
+					continue
+				}
+				if r.ActualTaskID() == "" {
+					r.SetIntent(kind.RolloutIntentInstall)
+					install++
+				} else {
+					r.SetIntent(kind.RolloutIntentUpdate)
+					update++
+				}
+				r.MarkPending(ts.Version())
+				if err := tx.UpsertRollout(ctx, r); err != nil {
+					return err
+				}
+				continue
+			}
+			r, err := model.NewRollout(specID, agentID, ts.Version())
+			if err != nil {
+				return err
+			}
+			r.SetIntent(kind.RolloutIntentInstall)
+			if err := tx.UpsertRollout(ctx, r); err != nil {
+				return err
+			}
+			install++
+		}
+
+		for agentID, r := range existing {
+			if _, kept := wanted[agentID]; kept {
+				continue
+			}
+			r.SetIntent(kind.RolloutIntentUninstall)
+			r.MarkPending(ts.Version())
+			if err := tx.UpsertRollout(ctx, r); err != nil {
+				return err
+			}
+			uninstall++
+		}
+		return nil
+	})
+	if err != nil {
+		if unknown, ok := err.(*UnknownTargetsError); ok {
+			s.logger.Warn().
+				Str("spec_id", specID).
+				Strs("missing_agents", unknown.Agents).
+				Msg("deploy rejected: unknown target agents")
+		}
+		return err
 	}
 
 	s.logger.Debug().
 		Str("spec_id", specID).
-		Int("generation", ts.Generation()).
+		Int("generation", generation).
 		Int("install", install).
 		Int("update", update).
 		Int("uninstall", uninstall).

@@ -70,6 +70,10 @@ func (v *Verifier) CreatedAt() time.Time { return v.createdAt }
 // UpdatedAt returns the timestamp of the last modification.
 func (v *Verifier) UpdatedAt() time.Time { return v.updatedAt }
 
+// SetCreatedAt / SetUpdatedAt — used by persistence adapters.
+func (v *Verifier) SetCreatedAt(t time.Time) { v.createdAt = t }
+func (v *Verifier) SetUpdatedAt(t time.Time) { v.updatedAt = t }
+
 // DataGet returns a verifier data value by key.
 func (v *Verifier) DataGet(key string) (string, bool) {
 	val, ok := v.data[key]

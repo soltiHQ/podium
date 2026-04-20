@@ -124,6 +124,11 @@ func (ss *Rollout) CreatedAt() time.Time { return ss.createdAt }
 // UpdatedAt returns the last modification timestamp.
 func (ss *Rollout) UpdatedAt() time.Time { return ss.updatedAt }
 
+// SetCreatedAt / SetUpdatedAt — used by persistence adapters to restore
+// original timestamps when reconstructing from stored state.
+func (ss *Rollout) SetCreatedAt(t time.Time) { ss.createdAt = t }
+func (ss *Rollout) SetUpdatedAt(t time.Time) { ss.updatedAt = t }
+
 // --- Setters / transitions ---
 
 // SetIntent records the next reconciliation action the sync runner should

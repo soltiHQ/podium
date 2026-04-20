@@ -30,6 +30,7 @@ import (
 	genv1 "github.com/soltiHQ/control-plane/api/gen/v1"
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -47,8 +48,9 @@ type proxyGetter interface {
 // Runner periodically reconciles Rollout records against live state on
 // agents. See the package doc for the full dispatch matrix.
 type Runner struct {
-	pool proxyGetter
-	hub  *event.Hub
+	pool       proxyGetter
+	hub        *event.Hub
+	leadership cluster.Leadership
 
 	logger zerolog.Logger
 	store  storage.Storage
@@ -59,7 +61,7 @@ type Runner struct {
 }
 
 // New creates a sync runner.
-func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.Pool, hub *event.Hub) (*Runner, error) {
+func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.Pool, hub *event.Hub, leadership cluster.Leadership) (*Runner, error) {
 	if store == nil {
 		return nil, fmt.Errorf("sync: %w", storage.ErrNilStore)
 	}
@@ -69,11 +71,15 @@ func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.P
 	if hub == nil {
 		return nil, fmt.Errorf("sync: %w", event.ErrNilHub)
 	}
+	if leadership == nil {
+		return nil, fmt.Errorf("sync: nil leadership")
+	}
 
 	cfg = cfg.withDefaults()
 	return &Runner{
-		logger: logger.With().Str("runner", cfg.Name).Logger(),
-		stop:   make(chan struct{}),
+		logger:     logger.With().Str("runner", cfg.Name).Logger(),
+		stop:       make(chan struct{}),
+		leadership: leadership,
 
 		store: store,
 		pool:  pool,
@@ -85,14 +91,13 @@ func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.P
 // Name returns the runner name.
 func (r *Runner) Name() string { return r.cfg.Name }
 
-// Start runs the sync reconciliation loop until Stop is called.
-func (r *Runner) Start(_ context.Context) error {
+// Start runs the sync reconciliation loop while this replica is leader.
+// In standalone mode leadership is constant, so this behaves like a plain
+// ticker.
+func (r *Runner) Start(ctx context.Context) error {
 	if !r.started.CompareAndSwap(false, true) {
 		return ErrAlreadyStarted
 	}
-
-	ticker := time.NewTicker(r.cfg.TickInterval)
-	defer ticker.Stop()
 
 	r.logger.Debug().
 		Dur("tick", r.cfg.TickInterval).
@@ -100,15 +105,29 @@ func (r *Runner) Start(_ context.Context) error {
 		Int("max_concurrency", r.cfg.MaxConcurrency).
 		Msg("sync runner started")
 
-	for {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
 		select {
-		case <-ticker.C:
-			r.tick()
 		case <-r.stop:
-			r.logger.Info().Msg("sync runner stopped")
-			return nil
+			cancel()
+		case <-runCtx.Done():
 		}
-	}
+	}()
+
+	return r.leadership.WhenLeader(runCtx, func(leaderCtx context.Context) error {
+		ticker := time.NewTicker(r.cfg.TickInterval)
+		defer ticker.Stop()
+		r.logger.Info().Msg("sync runner acquired leadership")
+		for {
+			select {
+			case <-ticker.C:
+				r.tick()
+			case <-leaderCtx.Done():
+				return nil
+			}
+		}
+	})
 }
 
 // Stop signals the runner to exit. Safe to call multiple times.

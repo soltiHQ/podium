@@ -467,6 +467,19 @@ type FilterFactory interface {
 	BuildSpecFilter(c SpecQueryCriteria) SpecFilter
 }
 
+// TxStore groups transactional operations.
+//
+// WithTx runs fn inside a single atomic transaction: mutations become visible
+// after fn returns nil; on error the transaction is rolled back and no
+// changes are observed.
+//
+// Contract: fn must contain only calls to tx. No network I/O, no event
+// publication, no stateful side-effects — in a Raft-replicated backend fn
+// runs on every replica at apply time and must be deterministic.
+type TxStore interface {
+	WithTx(ctx context.Context, fn func(tx Storage) error) error
+}
+
 // Storage aggregates all storage capabilities for domain entities.
 type Storage interface {
 	CredentialStore
@@ -478,4 +491,5 @@ type Storage interface {
 	RoleStore
 	UserStore
 	SpecStore
+	TxStore
 }
