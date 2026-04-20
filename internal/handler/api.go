@@ -25,7 +25,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
-	apimapv1 "github.com/soltiHQ/control-plane/internal/transport/http/apimap/v1"
+	wire "github.com/soltiHQ/control-plane/domain/wire"
 )
 
 // upsertMode selects create/update branch in upsert handlers.
@@ -135,7 +135,7 @@ func (a *API) permissionsList(w http.ResponseWriter, r *http.Request, mode httpc
 
 	items := make([]string, 0, len(perms))
 	for _, p := range perms {
-		items = append(items, apimapv1.Permission(p))
+		items = append(items, wire.PermissionToREST(p))
 	}
 	response.OK(w, r, mode, &responder.View{
 		Data: restv1.PermissionListResponse{Items: items},
@@ -150,7 +150,7 @@ func (a *API) rolesList(w http.ResponseWriter, r *http.Request, mode httpctx.Ren
 		return
 	}
 
-	items := mapSlice(roles, apimapv1.Role)
+	items := mapSlice(roles, wire.RoleToREST)
 	response.OK(w, r, mode, &responder.View{
 		Data: restv1.RoleListResponse{Items: items},
 	})

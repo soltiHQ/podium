@@ -5,7 +5,7 @@ import (
 	"encoding/gob"
 	"fmt"
 
-	"github.com/soltiHQ/control-plane/internal/raft/dto"
+	"github.com/soltiHQ/control-plane/domain/wire"
 )
 
 // OpCode identifies the mutation carried by an [Op].
@@ -47,18 +47,18 @@ const (
 // Op is a single mutation to apply as part of a [Command].
 //
 // Only the field matching Code is meaningful; the rest are zero. Encoded
-// with gob, so any non-exported fields must be registered via dto.Register.
+// with gob, so any non-exported fields must be registered via wire.Register.
 type Op struct {
 	Code OpCode
 
-	AgentUpsert      *dto.AgentDTO
-	UserUpsert       *dto.UserDTO
-	RoleUpsert       *dto.RoleDTO
-	CredentialUpsert *dto.CredentialDTO
-	VerifierUpsert   *dto.VerifierDTO
-	SessionCreate    *dto.SessionDTO
-	SpecUpsert       *dto.SpecDTO
-	RolloutUpsert    *dto.RolloutDTO
+	AgentUpsert      *wire.AgentDTO
+	UserUpsert       *wire.UserDTO
+	RoleUpsert       *wire.RoleDTO
+	CredentialUpsert *wire.CredentialDTO
+	VerifierUpsert   *wire.VerifierDTO
+	SessionCreate    *wire.SessionDTO
+	SpecUpsert       *wire.SpecDTO
+	RolloutUpsert    *wire.RolloutDTO
 
 	// ID fields. Which one is populated depends on Code (matches the
 	// Delete / DeleteBy* variants).
@@ -81,7 +81,7 @@ type Command struct {
 
 // Encode serialises with gob so custom DTO types roundtrip faithfully.
 func (c Command) Encode() ([]byte, error) {
-	dto.Register()
+	wire.Register()
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(c); err != nil {
 		return nil, fmt.Errorf("raft: encode command: %w", err)
@@ -91,7 +91,7 @@ func (c Command) Encode() ([]byte, error) {
 
 // DecodeCommand inverts Encode.
 func DecodeCommand(data []byte) (Command, error) {
-	dto.Register()
+	wire.Register()
 	var c Command
 	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&c); err != nil {
 		return Command{}, fmt.Errorf("raft: decode command: %w", err)

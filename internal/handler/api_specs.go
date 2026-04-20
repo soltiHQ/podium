@@ -19,7 +19,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
-	apimapv1 "github.com/soltiHQ/control-plane/internal/transport/http/apimap/v1"
+	wire "github.com/soltiHQ/control-plane/domain/wire"
 	contentSpec "github.com/soltiHQ/control-plane/ui/templates/content/spec"
 )
 
@@ -75,7 +75,7 @@ func (a *API) specList(w http.ResponseWriter, r *http.Request, mode httpctx.Rend
 		return
 	}
 
-	items := mapSlice(res.Items, apimapv1.Spec)
+	items := mapSlice(res.Items, wire.SpecToREST)
 	response.OK(w, r, mode, &responder.View{
 		Data: restv1.SpecListResponse{
 			Items:      items,
@@ -104,7 +104,7 @@ func (a *API) specDetails(w http.ResponseWriter, r *http.Request, mode httpctx.R
 		return
 	}
 
-	dto := apimapv1.RolloutSpec(ts, states)
+	dto := wire.RolloutSpecToREST(ts, states)
 	response.OK(w, r, mode, &responder.View{
 		Data:      dto,
 		Component: contentSpec.Detail(dto, policy.BuildSpecDetail(a.identity(r))),
@@ -338,7 +338,7 @@ func (a *API) specRollouts(w http.ResponseWriter, r *http.Request, mode httpctx.
 
 	a.logger.Info().Str("spec", id).Int("count", len(states)).Msg("spec rollouts loaded")
 
-	items := mapSlice(states, apimapv1.RolloutEntry)
+	items := mapSlice(states, wire.RolloutEntryToREST)
 	response.OK(w, r, mode, &responder.View{
 		Data:      items,
 		Component: contentSpec.Rollouts(items),

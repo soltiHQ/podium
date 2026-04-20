@@ -1,4 +1,4 @@
-package dto_test
+package wire_test
 
 import (
 	"bytes"
@@ -8,11 +8,11 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
-	"github.com/soltiHQ/control-plane/internal/raft/dto"
+	"github.com/soltiHQ/control-plane/domain/wire"
 )
 
 func TestAgent_Roundtrip(t *testing.T) {
-	dto.Register()
+	wire.Register()
 	a, err := model.NewAgent("a1", "agent", "http://a:1")
 	if err != nil {
 		t.Fatal(err)
@@ -28,17 +28,17 @@ func TestAgent_Roundtrip(t *testing.T) {
 	a.SetUpdatedAt(a.CreatedAt())
 	a.SetLastSeenAt(a.CreatedAt())
 
-	d := dto.AgentToDTO(a)
+	d := wire.AgentToDTO(a)
 
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(d); err != nil {
 		t.Fatal(err)
 	}
-	var decoded dto.AgentDTO
+	var decoded wire.AgentDTO
 	if err := gob.NewDecoder(&buf).Decode(&decoded); err != nil {
 		t.Fatal(err)
 	}
-	back, err := dto.AgentFromDTO(&decoded)
+	back, err := wire.AgentFromDTO(&decoded)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,8 +65,8 @@ func TestUser_Roundtrip(t *testing.T) {
 	_ = u.PermissionAdd(kind.Permission("specs:get"))
 	u.SetCreatedAt(time.Now().Truncate(time.Microsecond))
 
-	d := dto.UserToDTO(u)
-	back, err := dto.UserFromDTO(d)
+	d := wire.UserToDTO(u)
+	back, err := wire.UserFromDTO(d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,8 +92,8 @@ func TestSpec_Roundtrip(t *testing.T) {
 	ts.MarkForDeletion()
 	ts.SetCreatedAt(time.Now().Truncate(time.Microsecond))
 
-	d := dto.SpecToDTO(ts)
-	back, err := dto.SpecFromDTO(d)
+	d := wire.SpecToDTO(ts)
+	back, err := wire.SpecFromDTO(d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestSpec_Roundtrip(t *testing.T) {
 // что gob их корректно проноcит через Encode/Decode, иначе raft.Apply
 // упадёт с "type not registered for interface".
 func TestSpec_KindConfigWithNestedMapGobRoundtrip(t *testing.T) {
-	dto.Register()
+	wire.Register()
 
 	ts, _ := model.NewSpec("s1", "my-spec", "slot")
 	ts.SetKindConfig(map[string]any{
@@ -125,18 +125,18 @@ func TestSpec_KindConfigWithNestedMapGobRoundtrip(t *testing.T) {
 	})
 	ts.SetCreatedAt(time.Now().Truncate(time.Microsecond))
 
-	d := dto.SpecToDTO(ts)
+	d := wire.SpecToDTO(ts)
 
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(d); err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	var decoded dto.SpecDTO
+	var decoded wire.SpecDTO
 	if err := gob.NewDecoder(&buf).Decode(&decoded); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 
-	back, err := dto.SpecFromDTO(&decoded)
+	back, err := wire.SpecFromDTO(&decoded)
 	if err != nil {
 		t.Fatalf("FromDTO: %v", err)
 	}
@@ -156,8 +156,8 @@ func TestRollout_Roundtrip(t *testing.T) {
 	r.SetActualTaskID("task-xyz")
 	r.MarkSynced(5)
 
-	d := dto.RolloutToDTO(r)
-	back, err := dto.RolloutFromDTO(d)
+	d := wire.RolloutToDTO(r)
+	back, err := wire.RolloutFromDTO(d)
 	if err != nil {
 		t.Fatal(err)
 	}

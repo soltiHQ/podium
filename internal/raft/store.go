@@ -10,7 +10,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
-	"github.com/soltiHQ/control-plane/internal/raft/dto"
+	"github.com/soltiHQ/control-plane/domain/wire"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
@@ -81,7 +81,7 @@ func (s *Store) UpsertAgent(ctx context.Context, a *model.Agent) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return s.applyOp(Op{Code: OpAgentUpsert, AgentUpsert: dto.AgentToDTO(a)})
+	return s.applyOp(Op{Code: OpAgentUpsert, AgentUpsert: wire.AgentToDTO(a)})
 }
 
 func (s *Store) GetAgent(ctx context.Context, id string) (*model.Agent, error) {
@@ -102,7 +102,7 @@ func (s *Store) UpsertUser(ctx context.Context, u *model.User) error {
 	if u == nil {
 		return storage.ErrInvalidArgument
 	}
-	return s.applyOp(Op{Code: OpUserUpsert, UserUpsert: dto.UserToDTO(u)})
+	return s.applyOp(Op{Code: OpUserUpsert, UserUpsert: wire.UserToDTO(u)})
 }
 
 func (s *Store) GetUser(ctx context.Context, id string) (*model.User, error) {
@@ -127,7 +127,7 @@ func (s *Store) UpsertRole(ctx context.Context, r *model.Role) error {
 	if r == nil {
 		return storage.ErrInvalidArgument
 	}
-	return s.applyOp(Op{Code: OpRoleUpsert, RoleUpsert: dto.RoleToDTO(r)})
+	return s.applyOp(Op{Code: OpRoleUpsert, RoleUpsert: wire.RoleToDTO(r)})
 }
 
 func (s *Store) GetRole(ctx context.Context, id string) (*model.Role, error) {
@@ -156,7 +156,7 @@ func (s *Store) UpsertCredential(ctx context.Context, c *model.Credential) error
 	if c == nil {
 		return storage.ErrInvalidArgument
 	}
-	return s.applyOp(Op{Code: OpCredentialUpsert, CredentialUpsert: dto.CredentialToDTO(c)})
+	return s.applyOp(Op{Code: OpCredentialUpsert, CredentialUpsert: wire.CredentialToDTO(c)})
 }
 
 func (s *Store) GetCredential(ctx context.Context, id string) (*model.Credential, error) {
@@ -181,7 +181,7 @@ func (s *Store) UpsertVerifier(ctx context.Context, v *model.Verifier) error {
 	if v == nil {
 		return storage.ErrInvalidArgument
 	}
-	return s.applyOp(Op{Code: OpVerifierUpsert, VerifierUpsert: dto.VerifierToDTO(v)})
+	return s.applyOp(Op{Code: OpVerifierUpsert, VerifierUpsert: wire.VerifierToDTO(v)})
 }
 
 func (s *Store) GetVerifier(ctx context.Context, id string) (*model.Verifier, error) {
@@ -206,7 +206,7 @@ func (s *Store) CreateSession(ctx context.Context, ss *model.Session) error {
 	if ss == nil {
 		return storage.ErrInvalidArgument
 	}
-	return s.applyOp(Op{Code: OpSessionCreate, SessionCreate: dto.SessionToDTO(ss)})
+	return s.applyOp(Op{Code: OpSessionCreate, SessionCreate: wire.SessionToDTO(ss)})
 }
 
 func (s *Store) GetSession(ctx context.Context, id string) (*model.Session, error) {
@@ -248,7 +248,7 @@ func (s *Store) UpsertSpec(ctx context.Context, ts *model.Spec) error {
 	if ts == nil {
 		return storage.ErrInvalidArgument
 	}
-	return s.applyOp(Op{Code: OpSpecUpsert, SpecUpsert: dto.SpecToDTO(ts)})
+	return s.applyOp(Op{Code: OpSpecUpsert, SpecUpsert: wire.SpecToDTO(ts)})
 }
 
 func (s *Store) GetSpec(ctx context.Context, id string) (*model.Spec, error) {
@@ -269,7 +269,7 @@ func (s *Store) UpsertRollout(ctx context.Context, r *model.Rollout) error {
 	if r == nil {
 		return storage.ErrInvalidArgument
 	}
-	return s.applyOp(Op{Code: OpRolloutUpsert, RolloutUpsert: dto.RolloutToDTO(r)})
+	return s.applyOp(Op{Code: OpRolloutUpsert, RolloutUpsert: wire.RolloutToDTO(r)})
 }
 
 func (s *Store) GetRollout(ctx context.Context, id string) (*model.Rollout, error) {

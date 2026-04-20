@@ -9,7 +9,7 @@ import (
 
 	hraft "github.com/hashicorp/raft"
 
-	"github.com/soltiHQ/control-plane/internal/raft/dto"
+	"github.com/soltiHQ/control-plane/domain/wire"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
@@ -49,7 +49,7 @@ func (f *FSM) Apply(l *hraft.Log) any {
 func applyOp(ctx context.Context, tx storage.Storage, op Op) error {
 	switch op.Code {
 	case OpAgentUpsert:
-		a, err := dto.AgentFromDTO(op.AgentUpsert)
+		a, err := wire.AgentFromDTO(op.AgentUpsert)
 		if err != nil {
 			return err
 		}
@@ -58,7 +58,7 @@ func applyOp(ctx context.Context, tx storage.Storage, op Op) error {
 		return tx.DeleteAgent(ctx, op.ID)
 
 	case OpUserUpsert:
-		u, err := dto.UserFromDTO(op.UserUpsert)
+		u, err := wire.UserFromDTO(op.UserUpsert)
 		if err != nil {
 			return err
 		}
@@ -67,7 +67,7 @@ func applyOp(ctx context.Context, tx storage.Storage, op Op) error {
 		return tx.DeleteUser(ctx, op.ID)
 
 	case OpRoleUpsert:
-		r, err := dto.RoleFromDTO(op.RoleUpsert)
+		r, err := wire.RoleFromDTO(op.RoleUpsert)
 		if err != nil {
 			return err
 		}
@@ -76,7 +76,7 @@ func applyOp(ctx context.Context, tx storage.Storage, op Op) error {
 		return tx.DeleteRole(ctx, op.ID)
 
 	case OpCredentialUpsert:
-		c, err := dto.CredentialFromDTO(op.CredentialUpsert)
+		c, err := wire.CredentialFromDTO(op.CredentialUpsert)
 		if err != nil {
 			return err
 		}
@@ -85,7 +85,7 @@ func applyOp(ctx context.Context, tx storage.Storage, op Op) error {
 		return tx.DeleteCredential(ctx, op.ID)
 
 	case OpVerifierUpsert:
-		v, err := dto.VerifierFromDTO(op.VerifierUpsert)
+		v, err := wire.VerifierFromDTO(op.VerifierUpsert)
 		if err != nil {
 			return err
 		}
@@ -96,7 +96,7 @@ func applyOp(ctx context.Context, tx storage.Storage, op Op) error {
 		return tx.DeleteVerifierByCredential(ctx, op.ID)
 
 	case OpSessionCreate:
-		s, err := dto.SessionFromDTO(op.SessionCreate)
+		s, err := wire.SessionFromDTO(op.SessionCreate)
 		if err != nil {
 			return err
 		}
@@ -111,7 +111,7 @@ func applyOp(ctx context.Context, tx storage.Storage, op Op) error {
 		return tx.RevokeSession(ctx, op.ID, time.Unix(0, op.RevokedAtNs))
 
 	case OpSpecUpsert:
-		ts, err := dto.SpecFromDTO(op.SpecUpsert)
+		ts, err := wire.SpecFromDTO(op.SpecUpsert)
 		if err != nil {
 			return err
 		}
@@ -120,7 +120,7 @@ func applyOp(ctx context.Context, tx storage.Storage, op Op) error {
 		return tx.DeleteSpec(ctx, op.ID)
 
 	case OpRolloutUpsert:
-		r, err := dto.RolloutFromDTO(op.RolloutUpsert)
+		r, err := wire.RolloutFromDTO(op.RolloutUpsert)
 		if err != nil {
 			return err
 		}

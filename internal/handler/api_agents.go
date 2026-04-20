@@ -22,7 +22,7 @@ import (
 
 	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
-	apimapv1 "github.com/soltiHQ/control-plane/internal/transport/http/apimap/v1"
+	wire "github.com/soltiHQ/control-plane/domain/wire"
 	contentAgent "github.com/soltiHQ/control-plane/ui/templates/content/agent"
 )
 
@@ -73,7 +73,7 @@ func (a *API) agentList(w http.ResponseWriter, r *http.Request, mode httpctx.Ren
 		return
 	}
 
-	items := mapSlice(res.Items, apimapv1.Agent)
+	items := mapSlice(res.Items, wire.AgentToREST)
 	response.OK(w, r, mode, &responder.View{
 		Data: restv1.AgentListResponse{
 			Items:      items,
@@ -95,7 +95,7 @@ func (a *API) agentDetails(w http.ResponseWriter, r *http.Request, mode httpctx.
 		return
 	}
 
-	apiAgent := apimapv1.Agent(ag)
+	apiAgent := wire.AgentToREST(ag)
 	response.OK(w, r, mode, &responder.View{
 		Data:      apiAgent,
 		Component: contentAgent.Detail(apiAgent, policy.BuildAgentDetail(a.identity(r))),

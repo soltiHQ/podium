@@ -1,14 +1,15 @@
-// Package dto holds serialisable mirrors of domain entities used to
-// transport state through Raft log entries.
+// Package wire holds the canonical serialisable mirrors of domain entities.
+// One DTO per domain type, one layer for every transport/persistence path:
 //
-// Each domain type has a matching DTO with all fields exported. ToDTO /
-// FromDTO functions roundtrip state through domain constructors plus
-// persistence setters (SetCreatedAt, SetUpdatedAt, …) so that replicas
-// reconstruct the entity byte-for-byte from what the leader submitted.
+//   - Raft replication (gob encoding inside raft.Op)
+//   - REST API shapes (ToREST helpers)
+//   - Snapshot / export (future)
 //
-// Encoding: standard encoding/gob. Register() wires all DTOs with gob so
-// they can be carried inside [raft.Op].
-package dto
+// ToDTO / FromDTO round-trip via domain constructors + persistence setters
+// to reconstruct the entity byte-for-byte on the receiving side.
+//
+// Register wires every DTO with encoding/gob.
+package wire
 
 import (
 	"encoding/gob"

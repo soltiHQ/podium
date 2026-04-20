@@ -6,7 +6,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
-	"github.com/soltiHQ/control-plane/internal/raft/dto"
+	"github.com/soltiHQ/control-plane/domain/wire"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
@@ -76,7 +76,7 @@ func (v *txView) UpsertAgent(ctx context.Context, a *model.Agent) error {
 		return storage.ErrInvalidArgument
 	}
 	v.agents[a.ID()] = a
-	v.ops = append(v.ops, Op{Code: OpAgentUpsert, AgentUpsert: dto.AgentToDTO(a)})
+	v.ops = append(v.ops, Op{Code: OpAgentUpsert, AgentUpsert: wire.AgentToDTO(a)})
 	return nil
 }
 
@@ -107,7 +107,7 @@ func (v *txView) UpsertUser(ctx context.Context, u *model.User) error {
 		return storage.ErrInvalidArgument
 	}
 	v.users[u.ID()] = u
-	v.ops = append(v.ops, Op{Code: OpUserUpsert, UserUpsert: dto.UserToDTO(u)})
+	v.ops = append(v.ops, Op{Code: OpUserUpsert, UserUpsert: wire.UserToDTO(u)})
 	return nil
 }
 
@@ -142,7 +142,7 @@ func (v *txView) UpsertRole(ctx context.Context, r *model.Role) error {
 		return storage.ErrInvalidArgument
 	}
 	v.roles[r.ID()] = r
-	v.ops = append(v.ops, Op{Code: OpRoleUpsert, RoleUpsert: dto.RoleToDTO(r)})
+	v.ops = append(v.ops, Op{Code: OpRoleUpsert, RoleUpsert: wire.RoleToDTO(r)})
 	return nil
 }
 
@@ -181,7 +181,7 @@ func (v *txView) UpsertCredential(ctx context.Context, c *model.Credential) erro
 		return storage.ErrInvalidArgument
 	}
 	v.credentials[c.ID()] = c
-	v.ops = append(v.ops, Op{Code: OpCredentialUpsert, CredentialUpsert: dto.CredentialToDTO(c)})
+	v.ops = append(v.ops, Op{Code: OpCredentialUpsert, CredentialUpsert: wire.CredentialToDTO(c)})
 	return nil
 }
 
@@ -216,7 +216,7 @@ func (v *txView) UpsertVerifier(ctx context.Context, ver *model.Verifier) error 
 		return storage.ErrInvalidArgument
 	}
 	v.verifiers[ver.ID()] = ver
-	v.ops = append(v.ops, Op{Code: OpVerifierUpsert, VerifierUpsert: dto.VerifierToDTO(ver)})
+	v.ops = append(v.ops, Op{Code: OpVerifierUpsert, VerifierUpsert: wire.VerifierToDTO(ver)})
 	return nil
 }
 
@@ -252,7 +252,7 @@ func (v *txView) CreateSession(ctx context.Context, s *model.Session) error {
 		return storage.ErrInvalidArgument
 	}
 	v.sessions[s.ID()] = s
-	v.ops = append(v.ops, Op{Code: OpSessionCreate, SessionCreate: dto.SessionToDTO(s)})
+	v.ops = append(v.ops, Op{Code: OpSessionCreate, SessionCreate: wire.SessionToDTO(s)})
 	return nil
 }
 
@@ -307,7 +307,7 @@ func (v *txView) UpsertSpec(ctx context.Context, ts *model.Spec) error {
 		return storage.ErrInvalidArgument
 	}
 	v.specs[ts.ID()] = ts
-	v.ops = append(v.ops, Op{Code: OpSpecUpsert, SpecUpsert: dto.SpecToDTO(ts)})
+	v.ops = append(v.ops, Op{Code: OpSpecUpsert, SpecUpsert: wire.SpecToDTO(ts)})
 	return nil
 }
 
@@ -338,7 +338,7 @@ func (v *txView) UpsertRollout(ctx context.Context, r *model.Rollout) error {
 		return storage.ErrInvalidArgument
 	}
 	v.rollouts[r.ID()] = r
-	v.ops = append(v.ops, Op{Code: OpRolloutUpsert, RolloutUpsert: dto.RolloutToDTO(r)})
+	v.ops = append(v.ops, Op{Code: OpRolloutUpsert, RolloutUpsert: wire.RolloutToDTO(r)})
 	return nil
 }
 

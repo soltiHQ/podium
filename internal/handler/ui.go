@@ -13,7 +13,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
-	apimapv1 "github.com/soltiHQ/control-plane/internal/transport/http/apimap/v1"
+	wire "github.com/soltiHQ/control-plane/domain/wire"
 	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
@@ -228,7 +228,7 @@ func (u *UI) SpecEdit(w http.ResponseWriter, r *http.Request) {
 			// would be preferable but pageParam doesn't surface errors.
 			return pageSpec.New(nav)
 		}
-		initial := apimapv1.Spec(ts)
+		initial := wire.SpecToREST(ts)
 		return pageSpec.Edit(nav, &initial)
 	})
 }

@@ -1,4 +1,4 @@
-package dto
+package wire
 
 import (
 	"time"

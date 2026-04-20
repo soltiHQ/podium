@@ -1,4 +1,4 @@
-package dto
+package wire
 
 import "github.com/soltiHQ/control-plane/domain/kind"
 

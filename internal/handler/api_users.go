@@ -28,7 +28,7 @@ import (
 	"slices"
 
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
-	apimapv1 "github.com/soltiHQ/control-plane/internal/transport/http/apimap/v1"
+	wire "github.com/soltiHQ/control-plane/domain/wire"
 	contentUser "github.com/soltiHQ/control-plane/ui/templates/content/user"
 )
 
@@ -115,7 +115,7 @@ func (a *API) userList(w http.ResponseWriter, r *http.Request, mode httpctx.Rend
 		return
 	}
 
-	items := mapSlice(res.Items, apimapv1.User)
+	items := mapSlice(res.Items, wire.UserToREST)
 	response.OK(w, r, mode, &responder.View{
 		Data: restv1.UserListResponse{
 			Items:      items,
@@ -137,7 +137,7 @@ func (a *API) usersDetails(w http.ResponseWriter, r *http.Request, mode httpctx.
 		return
 	}
 
-	apiUser := apimapv1.User(u)
+	apiUser := wire.UserToREST(u)
 	response.OK(w, r, mode, &responder.View{
 		Data:      apiUser,
 		Component: contentUser.Detail(apiUser, policy.BuildUserDetail(a.identity(r), id)),
@@ -152,7 +152,7 @@ func (a *API) usersSessions(w http.ResponseWriter, r *http.Request, mode httpctx
 		return
 	}
 
-	items := mapSlice(res.Items, apimapv1.Session)
+	items := mapSlice(res.Items, wire.SessionToREST)
 	slices.SortFunc(items, func(a, b restv1.Session) int {
 		pa := kind.DeriveSessionStatus(a.Revoked, a.ExpiresAt).Priority()
 		pb := kind.DeriveSessionStatus(b.Revoked, b.ExpiresAt).Priority()
