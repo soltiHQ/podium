@@ -136,23 +136,7 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 		response.Unavailable(w, r, mode)
 		return
 	}
-	response.OK(w, r, mode, &responder.View{
-		Data: protoJSONPayload(respBytes),
-	})
-}
-
-// protoJSONPayload wraps a pre-marshaled proto-JSON body as a
-// json.Marshaler so that response.OK emits the bytes verbatim without
-// re-encoding through encoding/json (which would mangle the canonical
-// camelCase format).
-type protoJSONPayload []byte
-
-// MarshalJSON implements json.Marshaler by returning the raw bytes.
-func (p protoJSONPayload) MarshalJSON() ([]byte, error) {
-	if len(p) == 0 {
-		return []byte("null"), nil
-	}
-	return p, nil
+	response.OK(w, r, mode, &responder.View{RawJSON: respBytes})
 }
 
 // GRPCDiscovery implements genv1.DiscoverServiceServer.
