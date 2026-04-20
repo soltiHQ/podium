@@ -1,8 +1,4 @@
-// Package response provides one-call HTTP response helpers
-// that delegate to the negotiated Responder from httpctx.
-//
-// Each helper builds a [responder.View] with both JSON body and templ component,
-// so the same call works for API clients and for Browser/HTMX rendering.
+// Package response provides one-call HTTP response helpers that delegate to the negotiated Responder from httpctx.
 package response
 
 import (
@@ -11,8 +7,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
-
-	pageSystem "github.com/soltiHQ/control-plane/ui/templates/page/system"
 
 	"github.com/a-h/templ"
 )
@@ -44,7 +38,7 @@ func NotFound(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
 		},
 		Component: func(m httpctx.RenderMode) templ.Component {
 			if m == httpctx.RenderPage {
-				return pageSystem.ErrorPage(
+				return renderErrorPage(
 					http.StatusNotFound,
 					"Page not found",
 					"The page you are looking for doesn't exist or has been moved.",
@@ -71,7 +65,7 @@ func BadRequestMsg(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMo
 		},
 		Component: func(m httpctx.RenderMode) templ.Component {
 			if m == httpctx.RenderPage {
-				return pageSystem.ErrorPage(
+				return renderErrorPage(
 					http.StatusBadRequest,
 					"Invalid request",
 					msg,
@@ -93,7 +87,7 @@ func Conflict(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, m
 		},
 		Component: func(m httpctx.RenderMode) templ.Component {
 			if m == httpctx.RenderPage {
-				return pageSystem.ErrorPage(
+				return renderErrorPage(
 					http.StatusConflict,
 					"Conflict",
 					msg,
@@ -115,7 +109,7 @@ func NotAllowed(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode)
 		},
 		Component: func(m httpctx.RenderMode) templ.Component {
 			if m == httpctx.RenderPage {
-				return pageSystem.ErrorPage(
+				return renderErrorPage(
 					http.StatusMethodNotAllowed,
 					"Method not allowed",
 					"The method you used is not allowed on this resource.",
@@ -137,7 +131,7 @@ func Forbidden(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) 
 		},
 		Component: func(m httpctx.RenderMode) templ.Component {
 			if m == httpctx.RenderPage {
-				return pageSystem.ErrorPage(
+				return renderErrorPage(
 					http.StatusForbidden,
 					"Forbidden",
 					"You are not allowed to access this page.",
@@ -159,7 +153,7 @@ func Unauthorized(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMod
 		},
 		Component: func(m httpctx.RenderMode) templ.Component {
 			if m == httpctx.RenderPage {
-				return pageSystem.ErrorPage(
+				return renderErrorPage(
 					http.StatusUnauthorized,
 					"Unauthorized",
 					"You are not authorized to access this page.",
@@ -181,7 +175,7 @@ func Unavailable(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode
 		},
 		Component: func(m httpctx.RenderMode) templ.Component {
 			if m == httpctx.RenderPage {
-				return pageSystem.ErrorPage(
+				return renderErrorPage(
 					http.StatusServiceUnavailable,
 					"Service unavailable",
 					"The server is temporarily unable to handle the request.",
@@ -203,7 +197,7 @@ func AuthRateLimit(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMo
 		},
 		Component: func(m httpctx.RenderMode) templ.Component {
 			if m == httpctx.RenderPage {
-				return pageSystem.ErrorPage(
+				return renderErrorPage(
 					http.StatusTooManyRequests,
 					"Too many auth attempts",
 					"Account temporarily locked. Please try again later.",

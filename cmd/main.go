@@ -44,9 +44,12 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transport/grpc/interceptor"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
+	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/http/route"
 	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
+
+	pageSystem "github.com/soltiHQ/control-plane/ui/templates/page/system"
 )
 
 type services struct {
@@ -101,6 +104,14 @@ func main() {
 	defer eventHub.Close()
 
 	htmx.Configure(cfg.Triggers)
+
+	// UI → transport hooks: plug the templ-based error page and the login
+	// redirect path into the generic response/responder layer. Without these
+	// calls the binary still works — error HTML bodies are empty and 401
+	// responses stay as JSON, which is the correct behaviour when the UI is
+	// disabled.
+	response.ErrorPageRenderer = pageSystem.ErrorPage
+	responder.LoginPath = routepath.PageLogin
 
 	lifecycleRunner, err := lifecycle.New(cfg.Lifecycle, logger, store, eventHub, leadership)
 	if err != nil {
