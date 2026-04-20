@@ -16,6 +16,7 @@ import (
 
 	genv1 "github.com/soltiHQ/control-plane/api/gen/v1"
 	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/auth/wire"
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
 	"github.com/soltiHQ/control-plane/internal/cluster"
@@ -117,13 +118,13 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to create http server")
 	}
 
-	discoveryHandler := buildDiscoveryHandler(logger, svc.agent, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr))
+	discoveryHandler := buildDiscoveryHandler(logger, svc.agent, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), authModel.Limiter)
 	httpDiscoveryRunner, err := httpserver.New(cfg.HTTPDiscovery, logger, discoveryHandler)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create http discovery server")
 	}
 
-	grpcSrv := buildGRPCServer(logger, svc.agent, eventHub, leadership)
+	grpcSrv := buildGRPCServer(logger, svc.agent, eventHub, leadership, authModel.Limiter)
 	grpcRunner, err := grpcserver.New(cfg.GRPC, logger, grpcSrv)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to create grpc server")
@@ -250,12 +251,13 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 	h = middleware.Leader(leadership, middleware.LeaderOptions{
 		ForwardPort: addrPort(cfg.HTTP.Addr),
 	})(h)
+	h = middleware.RateLimit(authModel.Limiter)(h)
 	h = middleware.CORS(cfg.CORS)(h)
 	h = middleware.Recovery(logger)(h)
 	return h
 }
 
-func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int) http.Handler {
+func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter) http.Handler {
 	var (
 		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC, eventHub)
 		mux           = http.NewServeMux()
@@ -264,6 +266,7 @@ func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, event
 
 	var h http.Handler = mux
 	h = middleware.Leader(leadership, middleware.LeaderOptions{ForwardPort: httpPort})(h)
+	h = middleware.RateLimit(limiter)(h)
 	h = middleware.Recovery(logger)(h)
 	h = middleware.Logger(logger)(h)
 	h = middleware.RequestID()(h)
@@ -284,7 +287,7 @@ func addrPort(addr string) int {
 	return n
 }
 
-func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership) *grpc.Server {
+func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, limiter *ratelimit.Limiter) *grpc.Server {
 	// Write methods (must run on leader). Sync is the only agent-facing
 	// mutation; everything else is pure read.
 	writeMethods := map[string]struct{}{
@@ -298,6 +301,7 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *e
 				interceptor.UnaryRecovery(logger),
 				interceptor.UnaryRequestID(),
 				interceptor.UnaryLogger(logger),
+				interceptor.UnaryRateLimit(limiter),
 				interceptor.UnaryLeader(leadership, interceptor.LeaderOptions{IsWrite: isWrite}),
 			),
 		)

@@ -15,7 +15,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/spec"
 	apimapv1 "github.com/soltiHQ/control-plane/internal/transport/http/apimap/v1"
 	"github.com/soltiHQ/control-plane/internal/transport/http/cookie"
-	"github.com/soltiHQ/control-plane/internal/transport/http/ratelimitkey"
+	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/http/route"
@@ -114,7 +114,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 		subject  = r.FormValue("subject")
 		password = r.FormValue("password")
 		redirect = r.FormValue("redirect")
-		rateKey  = ratelimitkey.LoginKey(r, subject)
+		rateKey  = ratelimit.LoginKey(r, subject)
 	)
 	if redirect == "" {
 		redirect = routepath.PageHome
