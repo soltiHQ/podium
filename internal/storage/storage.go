@@ -408,9 +408,6 @@ type SpecStore interface {
 }
 
 // RolloutStore defines persistence operations for rollout entities.
-//
-// A rollout (model.Rollout) tracks the delivery state of a single Spec
-// on a specific agent: desired vs actual version, sync status, and attempts.
 type RolloutStore interface {
 	// UpsertRollout creates a new rollout or replaces an existing one.
 	//
@@ -459,9 +456,21 @@ type RolloutStore interface {
 	DeleteRolloutsBySpec(ctx context.Context, specID string) error
 }
 
+// FilterFactory defines constructors for backend-specific filters built from backend-agnostic query criteria.
+type FilterFactory interface {
+	// BuildRolloutFilter constructs a RolloutFilter for this backend from the supplied criteria.
+	// Empty criteria match every rollout.
+	BuildRolloutFilter(c RolloutQueryCriteria) RolloutFilter
+
+	// BuildSpecFilter constructs a SpecFilter for this backend from the supplied criteria.
+	// Empty criteria match every spec.
+	BuildSpecFilter(c SpecQueryCriteria) SpecFilter
+}
+
 // Storage aggregates all storage capabilities for domain entities.
 type Storage interface {
 	CredentialStore
+	FilterFactory
 	VerifierStore
 	SessionStore
 	RolloutStore

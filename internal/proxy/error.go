@@ -27,6 +27,12 @@ var (
 	ErrSubmitTask = errors.New("proxy: submit task")
 	// ErrExportSpecs indicates an export call failed.
 	ErrExportSpecs = errors.New("proxy: export task specs")
+	// ErrGetTask indicates a GetTask call failed.
+	ErrGetTask = errors.New("proxy: get task")
+	// ErrListTaskRuns indicates a ListTaskRuns call failed.
+	ErrListTaskRuns = errors.New("proxy: list task runs")
+	// ErrDeleteTask indicates a DeleteTask call failed.
+	ErrDeleteTask = errors.New("proxy: delete task")
 	// ErrNilPool indicates a required *Pool dependency is nil.
 	ErrNilPool = errors.New("proxy: nil pool")
 )

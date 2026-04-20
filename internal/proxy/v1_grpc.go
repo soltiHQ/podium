@@ -38,15 +38,7 @@ func (p *grpcProxyV1) ListTasks(ctx context.Context, f TaskFilter) (*proxyv1.Tas
 
 	tasks := make([]proxyv1.Task, len(resp.GetTasks()))
 	for i, t := range resp.GetTasks() {
-		tasks[i] = proxyv1.Task{
-			ID:        t.GetId(),
-			Slot:      t.GetSlot(),
-			Status:    v1TaskStatusString(t.GetStatus()),
-			Attempt:   int(t.GetAttempt()),
-			CreatedAt: t.GetCreatedAt(),
-			UpdatedAt: t.GetUpdatedAt(),
-			Error:     t.GetError(),
-		}
+		tasks[i] = taskDataToProxy(t)
 	}
 
 	return &proxyv1.TaskListResponse{
@@ -55,9 +47,106 @@ func (p *grpcProxyV1) ListTasks(ctx context.Context, f TaskFilter) (*proxyv1.Tas
 	}, nil
 }
 
-// SubmitTask is not yet supported over gRPC — the proto does not define the RPC.
-func (p *grpcProxyV1) SubmitTask(_ context.Context, _ TaskSubmission) error {
-	return fmt.Errorf("%w: not available over gRPC (no proto RPC defined)", ErrSubmitTask)
+func (p *grpcProxyV1) SubmitTask(ctx context.Context, sub TaskSubmission) (string, error) {
+	if sub.Spec == nil {
+		return "", fmt.Errorf("%w: nil spec", ErrSubmitTask)
+	}
+	client := genv1.NewSoltiApiClient(p.conn)
+
+	resp, err := client.SubmitTask(ctx, &genv1.SubmitTaskRequest{Spec: sub.Spec})
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrSubmitTask, err)
+	}
+	taskID := resp.GetTaskId()
+	if taskID == "" {
+		// SDK contract: on success the response must carry a non-empty
+		// task id. Empty means the agent accepted the request but gave
+		// us nothing to cancel/delete later — treat as a soft failure
+		// so the sync runner retries instead of pretending it's synced.
+		return "", fmt.Errorf("%w: agent returned empty task id", ErrSubmitTask)
+	}
+	return taskID, nil
+}
+
+func (p *grpcProxyV1) GetTask(ctx context.Context, taskID string) (*proxyv1.TaskStatusResponse, error) {
+	client := genv1.NewSoltiApiClient(p.conn)
+
+	resp, err := client.GetTaskStatus(ctx, &genv1.GetTaskStatusRequest{TaskId: taskID})
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrGetTask, err)
+	}
+
+	var task *proxyv1.Task
+	if data := resp.GetTask(); data != nil {
+		t := taskDataToProxy(data)
+		task = &t
+	}
+
+	return &proxyv1.TaskStatusResponse{Info: task}, nil
+}
+
+func (p *grpcProxyV1) ListTaskRuns(ctx context.Context, taskID string) (*proxyv1.TaskRunListResponse, error) {
+	client := genv1.NewSoltiApiClient(p.conn)
+
+	resp, err := client.ListTaskRuns(ctx, &genv1.ListTaskRunsRequest{TaskId: taskID})
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrListTaskRuns, err)
+	}
+
+	runs := make([]proxyv1.TaskRun, len(resp.GetRuns()))
+	for i, r := range resp.GetRuns() {
+		run := proxyv1.TaskRun{
+			Attempt:   int(r.GetAttempt()),
+			Status:    v1TaskStatusString(r.GetStatus()),
+			StartedAt: r.GetStartedAt(),
+		}
+		if r.FinishedAt != nil {
+			run.FinishedAt = *r.FinishedAt
+		}
+		if r.Error != nil {
+			run.Error = *r.Error
+		}
+		if r.ExitCode != nil {
+			run.ExitCode = r.ExitCode
+		}
+		runs[i] = run
+	}
+
+	return &proxyv1.TaskRunListResponse{Runs: runs}, nil
+}
+
+func (p *grpcProxyV1) DeleteTask(ctx context.Context, taskID string) error {
+	client := genv1.NewSoltiApiClient(p.conn)
+
+	_, err := client.DeleteTask(ctx, &genv1.DeleteTaskRequest{TaskId: taskID})
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrDeleteTask, err)
+	}
+
+	return nil
+}
+
+// taskDataToProxy converts a proto TaskData (nested metadata + spec + status)
+// into the flat proxy-level Task type consumed by podium's own REST/UI.
+func taskDataToProxy(t *genv1.TaskData) proxyv1.Task {
+	meta := t.GetMetadata()
+	st := t.GetStatus()
+	spec := t.GetSpec()
+
+	task := proxyv1.Task{
+		ID:              meta.GetId(),
+		Slot:            spec.GetSlot(),
+		Status:          v1TaskStatusString(st.GetPhase()),
+		Attempt:         int(st.GetAttempt()),
+		CreatedAt:       meta.GetCreatedAt(),
+		UpdatedAt:       meta.GetUpdatedAt(),
+		Error:           st.GetError(),
+		ResourceVersion: meta.GetResourceVersion(),
+	}
+	if st.ExitCode != nil {
+		task.ExitCode = st.ExitCode
+	}
+	return task
 }
 
 // v1TaskStatusString converts a v1 proto TaskStatus enum to a lowercase string.

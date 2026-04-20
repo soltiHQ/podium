@@ -12,15 +12,15 @@ import (
 
 // Compile-time checks that Store implements the required interfaces.
 var (
-	_ storage.Storage        = (*Store)(nil)
-	_ storage.AgentStore     = (*Store)(nil)
-	_ storage.UserStore      = (*Store)(nil)
+	_ storage.Storage         = (*Store)(nil)
+	_ storage.AgentStore      = (*Store)(nil)
+	_ storage.UserStore       = (*Store)(nil)
 	_ storage.CredentialStore = (*Store)(nil)
-	_ storage.RoleStore      = (*Store)(nil)
-	_ storage.VerifierStore  = (*Store)(nil)
-	_ storage.SessionStore   = (*Store)(nil)
-	_ storage.SpecStore  = (*Store)(nil)
-	_ storage.RolloutStore = (*Store)(nil)
+	_ storage.RoleStore       = (*Store)(nil)
+	_ storage.VerifierStore   = (*Store)(nil)
+	_ storage.SessionStore    = (*Store)(nil)
+	_ storage.SpecStore       = (*Store)(nil)
+	_ storage.RolloutStore    = (*Store)(nil)
 )
 
 // Store provides an in-memory implementation of storage.Storage using GenericStore.
@@ -31,8 +31,8 @@ type Store struct {
 	credentials *GenericStore[*model.Credential]
 	verifiers   *GenericStore[*model.Verifier]
 	sessions    *GenericStore[*model.Session]
-	specs   *GenericStore[*model.Spec]
-	rollouts *GenericStore[*model.Rollout]
+	specs       *GenericStore[*model.Spec]
+	rollouts    *GenericStore[*model.Rollout]
 }
 
 // New creates a new in-memory store with an empty state.
@@ -44,8 +44,8 @@ func New() *Store {
 		credentials: NewGenericStore[*model.Credential](),
 		verifiers:   NewGenericStore[*model.Verifier](),
 		sessions:    NewGenericStore[*model.Session](),
-		specs:   NewGenericStore[*model.Spec](),
-		rollouts: NewGenericStore[*model.Rollout](),
+		specs:       NewGenericStore[*model.Spec](),
+		rollouts:    NewGenericStore[*model.Rollout](),
 	}
 }
 
@@ -563,4 +563,28 @@ func (s *Store) DeleteRolloutsBySpec(ctx context.Context, specID string) error {
 		_ = s.rollouts.Delete(ctx, id)
 	}
 	return nil
+}
+
+// --- FilterFactory ---
+
+func (s *Store) BuildRolloutFilter(c storage.RolloutQueryCriteria) storage.RolloutFilter {
+	f := NewRolloutFilter()
+	if c.SpecID != "" {
+		f.BySpecID(c.SpecID)
+	}
+	if c.AgentID != "" {
+		f.ByAgentID(c.AgentID)
+	}
+	if len(c.Statuses) > 0 {
+		f.ByStatuses(c.Statuses...)
+	}
+	return f
+}
+
+func (s *Store) BuildSpecFilter(c storage.SpecQueryCriteria) storage.SpecFilter {
+	f := NewSpecFilter()
+	if c.Query != "" {
+		f.Query(c.Query)
+	}
+	return f
 }

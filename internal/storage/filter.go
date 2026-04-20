@@ -1,5 +1,7 @@
 package storage
 
+import "github.com/soltiHQ/control-plane/domain/kind"
+
 // AgentFilter defines a backend-specific query object for agents.
 //
 // A filter must be constructed by the same storage backend that consumes it.
@@ -32,3 +34,27 @@ type SpecFilter interface{}
 
 // RolloutFilter defines a backend-specific query object for rollouts.
 type RolloutFilter interface{}
+
+// RolloutQueryCriteria defines a backend-agnostic query description for rollouts.
+//
+// Each field is optional and zero values are ignored during filter construction.
+// Passing a fully zeroed struct therefore matches every rollout in storage.
+//
+// Note: This struct is consumed by FilterFactory.BuildRolloutFilter, which
+// translates it into the backend-specific RolloutFilter.
+type RolloutQueryCriteria struct {
+	SpecID   string
+	AgentID  string
+	Statuses []kind.SyncStatus
+}
+
+// SpecQueryCriteria defines a backend-agnostic query description for specs.
+//
+// Each field is optional and zero values are ignored during filter construction.
+// Passing a fully zeroed struct therefore matches every spec in storage.
+//
+// Note: This struct is consumed by FilterFactory.BuildSpecFilter, which
+// translates it into the backend-specific SpecFilter.
+type SpecQueryCriteria struct {
+	Query string
+}

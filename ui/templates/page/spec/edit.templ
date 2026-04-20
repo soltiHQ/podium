@@ -1,0 +1,23 @@
+package spec
+
+import (
+	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
+	"github.com/soltiHQ/control-plane/internal/uikit/policy"
+	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
+	compnav "github.com/soltiHQ/control-plane/ui/templates/component/nav"
+	"github.com/soltiHQ/control-plane/ui/templates/layout"
+	contentSpec "github.com/soltiHQ/control-plane/ui/templates/content/spec"
+)
+
+// Edit renders the same builder UI as New, pre-populated with the
+// current state of the spec so the form acts as an edit form. Save
+// submits PUT /api/v1/specs/{id} (via BuilderPage's internal submit
+// expression) and leaves rollouts untouched — the user must click
+// Deploy on the detail page to apply.
+templ Edit(nav policy.Nav, initial *restv1.Spec) {
+	@layout.App("Edit Spec", "tasks", nav) {
+		@compnav.BackLink(routepath.PageSpecInfoByID(initial.ID), "Back to Spec")
+
+		@contentSpec.BuilderPage(initial)
+	}
+}

@@ -8,6 +8,7 @@ package proxy
 import (
 	"context"
 
+	genv1 "github.com/soltiHQ/control-plane/api/gen/v1"
 	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
 )
 
@@ -20,9 +21,11 @@ type TaskFilter struct {
 }
 
 // TaskSubmission describes a task to push to an agent.
-// The Spec field is the agent CreateSpec JSON (slot, kind, timeoutMs, restart, backoff, admission, labels).
+//
+// Spec uses the generated proto type so that both HTTP (via protojson) and
+// gRPC transports share a single wire schema (solti.v1.CreateSpec).
 type TaskSubmission struct {
-	Spec map[string]any `json:"spec"`
+	Spec *genv1.CreateSpec
 }
 
 // SpecExport describes a task spec as reported by an agent via export.
@@ -33,7 +36,27 @@ type SpecExport struct {
 }
 
 // AgentProxy is the interface for outbound communication with an agent.
+//
+// Methods beyond ListTasks/SubmitTask require the agent to declare the
+// corresponding capability ("task_runs", "task_delete"). Callers must
+// check agent.HasCapability before invoking these.
 type AgentProxy interface {
 	ListTasks(ctx context.Context, filter TaskFilter) (*proxyv1.TaskListResponse, error)
-	SubmitTask(ctx context.Context, sub TaskSubmission) error
+
+	// SubmitTask pushes a spec to the agent and returns the TaskId the
+	// agent assigned to the new execution. The returned id is what CP
+	// must remember so it can later DeleteTask / GetTask for this exact
+	// run — critical for update (DeleteTask old + SubmitTask new) and
+	// uninstall (DeleteTask on target removal) paths.
+	SubmitTask(ctx context.Context, sub TaskSubmission) (taskID string, err error)
+
+	// GetTask returns a single task by ID.
+	GetTask(ctx context.Context, taskID string) (*proxyv1.TaskStatusResponse, error)
+	// ListTaskRuns returns execution history for a specific task.
+	ListTaskRuns(ctx context.Context, taskID string) (*proxyv1.TaskRunListResponse, error)
+	// DeleteTask stops a task on the agent and purges its run history.
+	// Idempotent — the agent returns success whether or not the task is
+	// currently registered. Single teardown primitive: there is no
+	// "cancel without purge" on the wire (taskvisor has no paused state).
+	DeleteTask(ctx context.Context, taskID string) error
 }

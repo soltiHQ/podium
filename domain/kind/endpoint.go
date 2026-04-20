@@ -14,12 +14,18 @@ const (
 
 // EndpointTypeFromInt maps the proto/JSON integer enum to EndpointType.
 //
-//	0 → gRPC, 1 → HTTP.
+//	1 → gRPC, 2 → HTTP. 0 (UNSPECIFIED) is rejected.
+//
+// Values match solti.discover.v1.EndpointType:
+//
+//	ENDPOINT_TYPE_UNSPECIFIED = 0
+//	ENDPOINT_TYPE_GRPC        = 1
+//	ENDPOINT_TYPE_HTTP        = 2
 func EndpointTypeFromInt(v int) (EndpointType, error) {
 	switch v {
-	case 0:
-		return EndpointGRPC, nil
 	case 1:
+		return EndpointGRPC, nil
+	case 2:
 		return EndpointHTTP, nil
 	default:
 		return "", domain.ErrUnknownEndpointType

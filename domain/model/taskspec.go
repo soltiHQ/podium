@@ -1,6 +1,7 @@
 package model
 
 import (
+	"reflect"
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain"
@@ -22,19 +23,45 @@ type BackoffConfig struct {
 // A Spec defines what task should run on which agents. It is the "desired state"
 // in the reconciliation model — the sync runner compares it against what agents actually have.
 //
-// The spec fields mirror the agent's CreateSpec format: slot, kind, timeout, restart,
-// backoff, admission, and runner labels.
+// # Versioning: two counters
+//
+// A Spec exposes two monotonic counters with different meanings:
+//
+//   - **Version** bumps on every `Upsert`, even if only metadata changed
+//     (rename, target-list edit, etc.). UI-facing "edits counter" useful
+//     for audit and for identifying which save the user is looking at.
+//   - **Generation** bumps only when runtime fields (those that end up in
+//     `SpecToProto` — slot, kind, timeout, restart, backoff, runnerLabels)
+//     change. Rollouts track `ObservedGeneration`; a re-create on the agent
+//     is triggered only when `ObservedGeneration != Generation`. This
+//     prevents pure metadata edits from churning live tasks on every agent.
+//
+// # Soft delete
+//
+// `DeletionRequested` flips on `DELETE /specs/{id}`: the Spec record stays
+// around so the sync runner can honor rollout uninstalls (DeleteTask on each
+// agent) before the finalizer actually drops the Spec row. This mirrors
+// the k8s `deletionTimestamp` + finalizer pattern.
+//
+// The spec fields mirror the agent's CreateSpec format: slot, kind, timeout,
+// restart, backoff, admission, and runner labels.
 type Spec struct {
 	// CP metadata
-	id           string
-	name         string
-	version      int
-	targets      []string          // concrete agent IDs
-	targetLabels map[string]string // label selector for dynamic targeting
-	createdAt    time.Time
-	updatedAt    time.Time
+	id                string
+	name              string
+	version           int
+	generation        int
+	deletionRequested bool
+	targets           []string          // concrete agent IDs
+	targetLabels      map[string]string // label selector for dynamic targeting
+	createdAt         time.Time
+	updatedAt         time.Time
 
 	// Spec (mirrors agent CreateSpec)
+	//
+	// Admission is intentionally absent: CP-managed agents always get
+	// `admission=Replace` on the wire (see internal/proxy/convert.go),
+	// so storing a per-spec value would be dead state.
 	slot         string
 	kindType     kind.TaskKindType
 	kindConfig   map[string]any // e.g. {command, args, env, cwd, failOnNonZero} for subprocess
@@ -42,7 +69,6 @@ type Spec struct {
 	restartType  kind.RestartType
 	intervalMs   int64 // only for RestartAlways
 	backoff      BackoffConfig
-	admission    kind.AdmissionStrategy
 	runnerLabels map[string]string
 }
 
@@ -59,10 +85,11 @@ func NewSpec(id, name, slot string) (*Spec, error) {
 		createdAt: now,
 		updatedAt: now,
 
-		id:      id,
-		name:    name,
-		slot:    slot,
-		version: 1,
+		id:         id,
+		name:       name,
+		slot:       slot,
+		version:    1,
+		generation: 1,
 
 		targets:      nil,
 		targetLabels: make(map[string]string),
@@ -77,25 +104,25 @@ func NewSpec(id, name, slot string) (*Spec, error) {
 			MaxMs:   5000,
 			Factor:  2.0,
 		},
-		admission:    kind.AdmissionDropIfRunning,
 		runnerLabels: make(map[string]string),
 	}, nil
 }
 
 // --- Getters ---
 
-func (ts *Spec) ID() string            { return ts.id }
-func (ts *Spec) Name() string           { return ts.name }
-func (ts *Spec) Slot() string           { return ts.slot }
-func (ts *Spec) Version() int           { return ts.version }
-func (ts *Spec) CreatedAt() time.Time   { return ts.createdAt }
-func (ts *Spec) UpdatedAt() time.Time   { return ts.updatedAt }
+func (ts *Spec) ID() string                        { return ts.id }
+func (ts *Spec) Name() string                      { return ts.name }
+func (ts *Spec) Slot() string                      { return ts.slot }
+func (ts *Spec) Version() int                      { return ts.version }
+func (ts *Spec) Generation() int                   { return ts.generation }
+func (ts *Spec) DeletionRequested() bool           { return ts.deletionRequested }
+func (ts *Spec) CreatedAt() time.Time              { return ts.createdAt }
+func (ts *Spec) UpdatedAt() time.Time               { return ts.updatedAt }
 func (ts *Spec) KindType() kind.TaskKindType       { return ts.kindType }
-func (ts *Spec) TimeoutMs() int64                   { return ts.timeoutMs }
-func (ts *Spec) RestartType() kind.RestartType      { return ts.restartType }
-func (ts *Spec) IntervalMs() int64                  { return ts.intervalMs }
-func (ts *Spec) Backoff() BackoffConfig             { return ts.backoff }
-func (ts *Spec) Admission() kind.AdmissionStrategy  { return ts.admission }
+func (ts *Spec) TimeoutMs() int64                  { return ts.timeoutMs }
+func (ts *Spec) RestartType() kind.RestartType     { return ts.restartType }
+func (ts *Spec) IntervalMs() int64                 { return ts.intervalMs }
+func (ts *Spec) Backoff() BackoffConfig            { return ts.backoff }
 
 // KindConfig returns a defensive copy of the kind configuration.
 func (ts *Spec) KindConfig() map[string]any {
@@ -177,11 +204,6 @@ func (ts *Spec) SetBackoff(b BackoffConfig) {
 	ts.updatedAt = time.Now()
 }
 
-func (ts *Spec) SetAdmission(a kind.AdmissionStrategy) {
-	ts.admission = a
-	ts.updatedAt = time.Now()
-}
-
 func (ts *Spec) SetTargets(targets []string) {
 	cp := make([]string, len(targets))
 	copy(cp, targets)
@@ -207,53 +229,30 @@ func (ts *Spec) SetRunnerLabels(labels map[string]string) {
 	ts.updatedAt = time.Now()
 }
 
-// IncrementVersion bumps the version number and updates the timestamp.
+// IncrementVersion bumps the edits counter (version) and updates the
+// timestamp. Callers should invoke this on every Upsert.
 func (ts *Spec) IncrementVersion() {
 	ts.version++
 	ts.updatedAt = time.Now()
 }
 
-// ToCreateSpec builds a map[string]any in the agent's CreateSpec JSON format.
-//
-// Example output:
-//
-//	{"slot":"worker","kind":{"subprocess":{"command":"sleep","args":["30"]}},"timeoutMs":60000,
-//	 "restart":{"type":"never"},"backoff":{"jitter":"none","firstMs":1000,"maxMs":5000,"factor":2.0},
-//	 "admission":"dropIfRunning"}
-func (ts *Spec) ToCreateSpec() map[string]any {
-	// kind
-	kindCfg := make(map[string]any, len(ts.kindConfig))
-	for k, v := range ts.kindConfig {
-		kindCfg[k] = v
-	}
+// BumpGeneration bumps the runtime-change counter. Callers should invoke
+// this on Upsert **only if** a field that `SpecToProto` reads has
+// changed (slot, kind, timeout, restart/interval, backoff, admission,
+// runnerLabels). Pure metadata edits (name, targets) must NOT bump
+// generation — otherwise every rename would force a re-create on every
+// agent.
+func (ts *Spec) BumpGeneration() {
+	ts.generation++
+	ts.updatedAt = time.Now()
+}
 
-	// restart
-	restart := map[string]any{"type": string(ts.restartType)}
-	if ts.restartType == kind.RestartAlways && ts.intervalMs > 0 {
-		restart["intervalMs"] = ts.intervalMs
-	}
-
-	spec := map[string]any{
-		"slot":      ts.slot,
-		"kind":      map[string]any{string(ts.kindType): kindCfg},
-		"timeoutMs": ts.timeoutMs,
-		"restart":   restart,
-		"backoff": map[string]any{
-			"jitter":  string(ts.backoff.Jitter),
-			"firstMs": ts.backoff.FirstMs,
-			"maxMs":   ts.backoff.MaxMs,
-			"factor":  ts.backoff.Factor,
-		},
-		"admission": string(ts.admission),
-	}
-	if len(ts.runnerLabels) > 0 {
-		labels := make(map[string]string, len(ts.runnerLabels))
-		for k, v := range ts.runnerLabels {
-			labels[k] = v
-		}
-		spec["labels"] = labels
-	}
-	return spec
+// MarkForDeletion flips the soft-delete flag. The Spec record survives
+// until every Rollout for it is uninstalled; the sync runner's finalizer
+// pass then calls `DeleteSpec` for real.
+func (ts *Spec) MarkForDeletion() {
+	ts.deletionRequested = true
+	ts.updatedAt = time.Now()
 }
 
 // Clone creates a deep copy of the Spec.
@@ -274,13 +273,15 @@ func (ts *Spec) Clone() *Spec {
 	}
 
 	return &Spec{
-		id:           ts.id,
-		name:         ts.name,
-		version:      ts.version,
-		targets:      targets,
-		targetLabels: targetLabels,
-		createdAt:    ts.createdAt,
-		updatedAt:    ts.updatedAt,
+		id:                ts.id,
+		name:              ts.name,
+		version:           ts.version,
+		generation:        ts.generation,
+		deletionRequested: ts.deletionRequested,
+		targets:           targets,
+		targetLabels:      targetLabels,
+		createdAt:         ts.createdAt,
+		updatedAt:         ts.updatedAt,
 
 		slot:         ts.slot,
 		kindType:     ts.kindType,
@@ -289,7 +290,70 @@ func (ts *Spec) Clone() *Spec {
 		restartType:  ts.restartType,
 		intervalMs:   ts.intervalMs,
 		backoff:      ts.backoff,
-		admission:    ts.admission,
 		runnerLabels: runnerLabels,
 	}
 }
+
+// RuntimeEquals reports whether two specs are identical in every field
+// that `SpecToProto` reads — i.e. every field that affects what the
+// agent actually runs. Returns `true` for pure-metadata edits (name,
+// targets, targetLabels, timestamps), which must NOT rotate the
+// generation counter.
+//
+// Fields compared: slot, kindType, kindConfig, timeoutMs, restartType,
+// intervalMs, backoff, runnerLabels.
+//
+// Reason this lives in the domain package and not in the service: it's
+// a pure property of the Spec value type, used by Upsert to decide
+// whether to call `BumpGeneration`. Keeping the list of runtime fields
+// next to the struct definition is the easiest way to keep it honest
+// when someone adds a new field and forgets to update the comparator.
+func (ts *Spec) RuntimeEquals(other *Spec) bool {
+	if ts == nil || other == nil {
+		return ts == other
+	}
+	if ts.slot != other.slot ||
+		ts.kindType != other.kindType ||
+		ts.timeoutMs != other.timeoutMs ||
+		ts.restartType != other.restartType ||
+		ts.intervalMs != other.intervalMs ||
+		ts.backoff != other.backoff {
+		return false
+	}
+	if !stringMapEqual(ts.runnerLabels, other.runnerLabels) {
+		return false
+	}
+	return anyMapEqual(ts.kindConfig, other.kindConfig)
+}
+
+// stringMapEqual returns true when both maps hold the same set of
+// (key, value) pairs.
+func stringMapEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
+// anyMapEqual compares two `map[string]any`. Nested values fall back to
+// `reflect.DeepEqual` because kindConfig is user-supplied JSON — there is
+// no richer type information to exploit. Called only on Upsert, not in a
+// hot path.
+func anyMapEqual(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		bv, ok := b[k]
+		if !ok || !reflect.DeepEqual(v, bv) {
+			return false
+		}
+	}
+	return true
+}
+

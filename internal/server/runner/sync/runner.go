@@ -1,38 +1,53 @@
-// Package sync implements a server.Runner that reconciles pending rollouts
-// by pushing specs to agents via the proxy pool:
-//   - Lists actionable rollouts (pending, drift, failed under max retries)
-//   - Resolves spec and agent, gets a proxy, calls SubmitTask
-//   - Marks rollout synced on success, failed (with attempt increment) on error.
+// Package sync implements a server.Runner that reconciles Rollout records
+// against the live state on agents:
+//
+//  1. Lists actionable rollouts (status Pending, Drift, or retry-eligible Failed).
+//  2. Dispatches each by its [kind.RolloutIntent]:
+//     - Install    → SubmitTask(spec)                               → save TaskId
+//     - Update     → DeleteTask(oldID); SubmitTask(spec)            → save new TaskId
+//     - Uninstall  → DeleteTask(actualTaskID) (or noop if empty)    → drop rollout
+//     - Noop       → skip (safety; filter shouldn't hand these out)
+//
+//  3. After processing rollouts, the finalizer pass actually removes any
+//     `Spec.DeletionRequested=true` spec whose last rollout has drained.
+//
+// The runner is crash-safe across the Update re-create: once DeleteTask
+// succeeds we clear ActualTaskID in storage immediately, so a process
+// restart before SubmitTask resumes as a clean Install-like flow.
 package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
 
+	genv1 "github.com/soltiHQ/control-plane/api/gen/v1"
 	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 )
 
-// Runner is a server.Runner that periodically reconciles pending rollout
-// records by pushing Specs to agents via the proxy pool.
-//
-// On each tick it:
-//  1. Lists all rollouts with status pending, drift, or failed (under max retries).
-//  2. For each, resolves the Spec and agent.
-//  3. Gets an AgentProxy from the pool and calls "SubmitTask".
-//  4. On success: marks the rollout as synced.
-//  5. On failure: marks the rollout as failed (increment attempts).
+// proxyGetter is the small subset of *proxy.Pool that the sync runner
+// actually needs. Declaring an interface here (instead of consuming the
+// concrete *proxy.Pool) keeps the runner testable against fakes without
+// spinning up real HTTP/gRPC transport.
+type proxyGetter interface {
+	Get(endpoint string, epType kind.EndpointType, apiVersion kind.APIVersion) (proxy.AgentProxy, error)
+}
+
+// Runner periodically reconciles Rollout records against live state on
+// agents. See the package doc for the full dispatch matrix.
 type Runner struct {
-	pool *proxy.Pool
+	pool proxyGetter
 	hub  *event.Hub
 
 	logger zerolog.Logger
@@ -109,17 +124,26 @@ func (r *Runner) Stop(_ context.Context) error {
 	return nil
 }
 
+// tick runs a single reconciliation pass.
 func (r *Runner) tick() {
 	ctx := context.Background()
 
-	filter := inmemory.NewRolloutFilter().ByStatuses(
-		kind.SyncStatusPending,
-		kind.SyncStatusDrift,
-		kind.SyncStatusFailed,
-	)
-	res, err := r.store.ListRollouts(ctx, filter, storage.ListOptions{
-		Limit: storage.MaxListLimit,
+	r.reconcileRollouts(ctx)
+	r.finalizeDeletedSpecs(ctx)
+}
+
+// reconcileRollouts picks up every actionable rollout and dispatches it
+// by intent. Retry-exhausted Failed rollouts are skipped (they need
+// human action or a fresh Deploy click to reset attempts).
+func (r *Runner) reconcileRollouts(ctx context.Context) {
+	filter := r.store.BuildRolloutFilter(storage.RolloutQueryCriteria{
+		Statuses: []kind.SyncStatus{
+			kind.SyncStatusPending,
+			kind.SyncStatusDrift,
+			kind.SyncStatusFailed,
+		},
 	})
+	res, err := r.store.ListRollouts(ctx, filter, storage.ListOptions{Limit: storage.MaxListLimit})
 	if err != nil {
 		r.logger.Error().Err(err).Msg("tick: list rollouts failed")
 		return
@@ -135,87 +159,205 @@ func (r *Runner) tick() {
 		if ss.Status() == kind.SyncStatusFailed && ss.Attempts() >= r.cfg.MaxRetries {
 			continue
 		}
-
+		rolloutID := ss.ID()
 		g.Go(func() error {
 			pushCtx, cancel := context.WithTimeout(ctx, r.cfg.PushTimeout)
 			defer cancel()
-
-			r.push(pushCtx, ss.ID(), ss.SpecID(), ss.AgentID())
+			r.reconcile(pushCtx, rolloutID)
 			return nil
 		})
 	}
-	if err = g.Wait(); err != nil {
-		r.logger.Error().Err(err).Msg("tick: push failed")
+	_ = g.Wait()
+}
+
+// reconcile loads the rollout fresh (to pick up any changes since tick
+// started) and dispatches by intent.
+func (r *Runner) reconcile(ctx context.Context, rolloutID string) {
+	ss, err := r.store.GetRollout(ctx, rolloutID)
+	if err != nil {
+		r.logger.Warn().Err(err).Str("rid", rolloutID).Msg("reconcile: load rollout failed")
+		return
+	}
+
+	switch ss.Intent() {
+	case kind.RolloutIntentUninstall:
+		r.reconcileUninstall(ctx, ss)
+	case kind.RolloutIntentInstall, kind.RolloutIntentUpdate:
+		r.reconcileSubmit(ctx, ss)
+	case kind.RolloutIntentNoop:
+		// Filter should have excluded these, but belt-and-braces.
+		return
 	}
 }
 
-func (r *Runner) push(ctx context.Context, rID, specID, agentID string) {
-	ts, err := r.store.GetSpec(ctx, specID)
-	if err != nil {
-		r.logger.Warn().Err(err).
-			Str("rid", rID).
-			Str("spec_id", specID).
-			Msg("push: get spec failed")
-
-		r.markFailed(ctx, rID, "spec not found: "+err.Error())
-		r.hub.Record(event.SyncFailed, event.Payload{ID: specID, Detail: agentID, By: "sync"})
+// reconcileUninstall removes the task from the agent and drops the
+// rollout row. Missing task on the agent (404) is treated as success —
+// agent may have rebooted and lost state; we still want to clean up CP.
+func (r *Runner) reconcileUninstall(ctx context.Context, ss *model.Rollout) {
+	if ss.ActualTaskID() == "" {
+		// Nothing ever installed on the agent for this rollout. Just
+		// drop the CP record.
+		if err := r.store.DeleteRollout(ctx, ss.ID()); err != nil {
+			r.logger.Error().Err(err).Str("rid", ss.ID()).Msg("reconcile/uninstall: delete rollout failed")
+			return
+		}
+		r.hub.Notify(htmx.SpecUpdate)
 		return
 	}
 
-	ag, err := r.store.GetAgent(ctx, agentID)
-	if err != nil {
-		r.logger.Warn().Err(err).
-			Str("rid", rID).
-			Str("agent_id", agentID).
-			Msg("push: get agent failed")
-
-		r.markFailed(ctx, rID, "agent not found: "+err.Error())
-		r.hub.Record(event.SyncFailed, event.Payload{ID: specID, Name: ts.Name(), Detail: agentID, By: "sync"})
+	ap, ok := r.getProxy(ctx, ss)
+	if !ok {
 		return
 	}
 
+	if err := ap.DeleteTask(ctx, ss.ActualTaskID()); err != nil && !isNotFound(err) {
+		r.markFailed(ctx, ss, "delete task: "+err.Error())
+		return
+	}
+
+	if err := r.store.DeleteRollout(ctx, ss.ID()); err != nil {
+		r.logger.Error().Err(err).Str("rid", ss.ID()).Msg("reconcile/uninstall: delete rollout failed")
+		return
+	}
+	r.logger.Info().
+		Str("rid", ss.ID()).
+		Str("spec_id", ss.SpecID()).
+		Str("agent_id", ss.AgentID()).
+		Msg("rollout uninstalled")
+	r.hub.Notify(htmx.SpecUpdate)
+}
+
+// reconcileSubmit applies the current spec to the agent. Shared between
+// Install and Update intents: the only difference is whether a prior
+// task exists and therefore must be torn down first.
+//
+// Between DeleteTask and SubmitTask we persist ActualTaskID="" so that
+// a runner crash resumes cleanly on the next tick — the rollout falls
+// into the "no prior task" branch and proceeds straight to SubmitTask.
+func (r *Runner) reconcileSubmit(ctx context.Context, ss *model.Rollout) {
+	ts, ap, protoSpec, ok := r.prepareSubmit(ctx, ss)
+	if !ok {
+		return
+	}
+
+	isUpdate := ss.ActualTaskID() != ""
+	if isUpdate {
+		if err := ap.DeleteTask(ctx, ss.ActualTaskID()); err != nil && !isNotFound(err) {
+			r.markFailed(ctx, ss, "delete old task: "+err.Error())
+			return
+		}
+		ss.SetActualTaskID("")
+		if err := r.store.UpsertRollout(ctx, ss); err != nil {
+			r.logger.Error().Err(err).Str("rid", ss.ID()).Msg("reconcile/update: persist cleared task id failed")
+			return
+		}
+	}
+
+	newID, err := ap.SubmitTask(ctx, proxy.TaskSubmission{Spec: protoSpec})
+	if err != nil {
+		r.markFailed(ctx, ss, "submit task: "+err.Error())
+		return
+	}
+
+	r.markSynced(ctx, ss.ID(), ts.Generation(), newID)
+	verb := "installed"
+	if isUpdate {
+		verb = "updated"
+	}
+	r.logger.Info().
+		Str("rid", ss.ID()).
+		Str("spec_id", ss.SpecID()).
+		Str("agent_id", ss.AgentID()).
+		Str("task_id", newID).
+		Int("generation", ts.Generation()).
+		Msgf("rollout %s", verb)
+}
+
+// prepareSubmit loads spec + agent + proxy + proto conversion. Any
+// failure at this stage calls markFailed and returns ok=false.
+func (r *Runner) prepareSubmit(ctx context.Context, ss *model.Rollout) (*model.Spec, proxy.AgentProxy, *genv1.CreateSpec, bool) {
+	ts, err := r.store.GetSpec(ctx, ss.SpecID())
+	if err != nil {
+		r.markFailed(ctx, ss, "spec not found: "+err.Error())
+		return nil, nil, nil, false
+	}
+
+	ap, ok := r.getProxy(ctx, ss)
+	if !ok {
+		return nil, nil, nil, false
+	}
+
+	protoSpec, err := proxy.SpecToProto(ts)
+	if err != nil {
+		r.markFailed(ctx, ss, "spec conversion: "+err.Error())
+		return nil, nil, nil, false
+	}
+
+	return ts, ap, protoSpec, true
+}
+
+// getProxy resolves an AgentProxy for the rollout's target agent. On
+// failure it marks the rollout failed and returns ok=false.
+func (r *Runner) getProxy(ctx context.Context, ss *model.Rollout) (proxy.AgentProxy, bool) {
+	ag, err := r.store.GetAgent(ctx, ss.AgentID())
+	if err != nil {
+		r.markFailed(ctx, ss, "agent not found: "+err.Error())
+		return nil, false
+	}
 	ap, err := r.pool.Get(ag.Endpoint(), ag.EndpointType(), ag.APIVersion())
 	if err != nil {
-		r.logger.Warn().Err(err).
-			Str("rid", rID).
-			Str("agent_id", agentID).
-			Str("endpoint", ag.Endpoint()).
-			Msg("push: get proxy failed")
-
-		r.markFailed(ctx, rID, "proxy error: "+err.Error())
-		r.hub.Record(event.SyncFailed, event.Payload{ID: specID, Name: ts.Name(), Detail: agentID, By: "sync"})
-		return
+		r.markFailed(ctx, ss, "proxy error: "+err.Error())
+		return nil, false
 	}
-
-	err = ap.SubmitTask(ctx, proxy.TaskSubmission{Spec: ts.ToCreateSpec()})
-	if err != nil {
-		r.logger.Warn().Err(err).
-			Str("rid", rID).
-			Str("spec_id", specID).
-			Str("agent_id", agentID).
-			Msg("push: submit task failed")
-		
-		r.markFailed(ctx, rID, "submit error: "+err.Error())
-		r.hub.Record(event.SyncFailed, event.Payload{ID: specID, Name: ts.Name(), Detail: agentID, By: "sync"})
-		return
-	}
-
-	r.markSynced(ctx, rID, ts.Version())
-	r.logger.Info().
-		Str("spec_id", specID).
-		Str("agent_id", agentID).
-		Int("version", ts.Version()).
-		Msg("spec pushed to agent")
+	return ap, true
 }
 
-func (r *Runner) markSynced(ctx context.Context, rID string, version int) {
+// finalizeDeletedSpecs removes any spec with DeletionRequested=true
+// whose last rollout has drained. This is the finalizer pass of a
+// soft-delete flow.
+//
+// We emit a single `htmx.SpecUpdate` if any spec was actually deleted
+// — not one per spec — so a single tick cleaning up N tombstones does
+// not fan out N SSE broadcasts to every connected UI.
+func (r *Runner) finalizeDeletedSpecs(ctx context.Context) {
+	specsRes, err := r.store.ListSpecs(ctx, nil, storage.ListOptions{Limit: storage.MaxListLimit})
+	if err != nil {
+		return
+	}
+	finalized := 0
+	for _, ts := range specsRes.Items {
+		if ts == nil || !ts.DeletionRequested() {
+			continue
+		}
+		rolloutsRes, err := r.store.ListRollouts(ctx,
+			r.store.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: ts.ID()}),
+			storage.ListOptions{Limit: 1},
+		)
+		if err != nil || len(rolloutsRes.Items) > 0 {
+			continue
+		}
+		if err := r.store.DeleteSpec(ctx, ts.ID()); err != nil {
+			r.logger.Error().Err(err).Str("spec_id", ts.ID()).Msg("finalize: delete spec failed")
+			continue
+		}
+		r.logger.Info().Str("spec_id", ts.ID()).Msg("spec finalized (deletion complete)")
+		finalized++
+	}
+	if finalized > 0 {
+		r.hub.Notify(htmx.SpecUpdate)
+	}
+}
+
+// markSynced transitions a rollout to synced state with the TaskId the
+// agent returned. Clears Intent to Noop so the filter skips it next tick.
+func (r *Runner) markSynced(ctx context.Context, rID string, generation int, taskID string) {
 	ss, err := r.store.GetRollout(ctx, rID)
 	if err != nil {
 		r.logger.Error().Err(err).Str("rid", rID).Msg("markSynced: get failed")
 		return
 	}
-
-	ss.MarkSynced(version)
+	ss.SetActualTaskID(taskID)
+	ss.MarkSynced(generation)
 	if err = r.store.UpsertRollout(ctx, ss); err != nil {
 		r.logger.Error().Err(err).Str("rid", rID).Msg("markSynced: upsert failed")
 		return
@@ -223,17 +365,43 @@ func (r *Runner) markSynced(ctx context.Context, rID string, version int) {
 	r.hub.Notify(htmx.SpecUpdate)
 }
 
-func (r *Runner) markFailed(ctx context.Context, rID, errMsg string) {
-	ss, err := r.store.GetRollout(ctx, rID)
-	if err != nil {
-		r.logger.Error().Err(err).Str("rid", rID).Msg("markFailed: get failed")
+// markFailed records a reconciliation failure. Intent stays — the sync
+// runner will retry the same action on the next tick up to MaxRetries.
+//
+// It also emits the `event.SyncFailed` domain event so dashboards and
+// audit logs see one entry per failed tick. Callers should no longer
+// emit `SyncFailed` manually alongside `markFailed`.
+func (r *Runner) markFailed(ctx context.Context, ss *model.Rollout, errMsg string) {
+	ss.MarkFailed(errMsg)
+	if err := r.store.UpsertRollout(ctx, ss); err != nil {
+		r.logger.Error().Err(err).Str("rid", ss.ID()).Msg("markFailed: upsert failed")
 		return
 	}
 
-	ss.MarkFailed(errMsg)
-	if err = r.store.UpsertRollout(ctx, ss); err != nil {
-		r.logger.Error().Err(err).Str("rid", rID).Msg("markFailed: upsert failed")
-		return
+	// Lookup spec name best-effort — missing/deleted spec isn't a reason
+	// to hide the failure, we just leave the Name field empty.
+	var specName string
+	if ts, err := r.store.GetSpec(ctx, ss.SpecID()); err == nil {
+		specName = ts.Name()
 	}
+	r.hub.Record(event.SyncFailed, event.Payload{
+		ID: ss.SpecID(), Name: specName, Detail: ss.AgentID(), By: "sync",
+	})
 	r.hub.Notify(htmx.SpecUpdate)
 }
+
+// isNotFound heuristically matches "task not found" responses from the
+// SDK's error envelope (`{error: "TaskNotFound", …}` surfaced by
+// formatUnexpectedStatus) or the bare gRPC `NotFound` status message.
+// Lets Uninstall/Update proceed when the agent lost state on restart.
+func isNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "TaskNotFound") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "NotFound") ||
+		errors.Is(err, proxy.ErrUnexpectedStatus) && strings.Contains(msg, " 404")
+}
+

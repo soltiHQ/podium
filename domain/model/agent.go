@@ -37,8 +37,9 @@ type Agent struct {
 	apiVersion   kind.APIVersion
 	status       kind.AgentStatus
 
-	metadata map[string]string
-	labels   map[string]string
+	metadata     map[string]string
+	labels       map[string]string
+	capabilities []string
 }
 
 // NewAgent creates a new agent domain entity.
@@ -80,7 +81,8 @@ type AgentParams struct {
 	UptimeSeconds      int64
 	HeartbeatIntervalS int
 
-	Metadata map[string]string
+	Metadata     map[string]string
+	Capabilities []string
 }
 
 // NewAgentFrom constructs an Agent from transport-agnostic AgentParams.
@@ -102,12 +104,16 @@ func NewAgentFrom(p AgentParams) (*Agent, error) {
 		md[k] = v
 	}
 
+	caps := make([]string, len(p.Capabilities))
+	copy(caps, p.Capabilities)
+
 	return &Agent{
 		createdAt: now,
 		updatedAt: now,
 
-		metadata: md,
-		labels:   make(map[string]string),
+		metadata:     md,
+		labels:       make(map[string]string),
+		capabilities: caps,
 
 		id:           p.ID,
 		name:         p.Name,
@@ -152,6 +158,23 @@ func (a *Agent) Arch() string { return a.arch }
 
 // Platform returns the agent's platform.
 func (a *Agent) Platform() string { return a.platform }
+
+// Capabilities returns the agent's declared capabilities.
+func (a *Agent) Capabilities() []string {
+	out := make([]string, len(a.capabilities))
+	copy(out, a.capabilities)
+	return out
+}
+
+// HasCapability checks whether the agent declares a specific capability.
+func (a *Agent) HasCapability(cap string) bool {
+	for _, c := range a.capabilities {
+		if c == cap {
+			return true
+		}
+	}
+	return false
+}
 
 // Status returns the agent's lifecycle status.
 func (a *Agent) Status() kind.AgentStatus { return a.status }
@@ -234,6 +257,7 @@ func (a *Agent) Clone() *Agent {
 	var (
 		md     = make(map[string]string, len(a.metadata))
 		labels = make(map[string]string, len(a.labels))
+		caps   = make([]string, len(a.capabilities))
 	)
 	for k, v := range a.metadata {
 		md[k] = v
@@ -241,13 +265,15 @@ func (a *Agent) Clone() *Agent {
 	for k, v := range a.labels {
 		labels[k] = v
 	}
+	copy(caps, a.capabilities)
 
 	return &Agent{
 		createdAt: a.createdAt,
 		updatedAt: a.updatedAt,
 
-		metadata: md,
-		labels:   labels,
+		metadata:     md,
+		labels:       labels,
+		capabilities: caps,
 
 		id:           a.id,
 		name:         a.name,

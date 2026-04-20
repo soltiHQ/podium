@@ -12,6 +12,15 @@ func RolloutSpec(ts *model.Spec, states []*model.Rollout) restv1.RolloutSpec {
 	dto := restv1.RolloutSpec{
 		Spec: Spec(ts),
 	}
+	if ts != nil {
+		gen := ts.Generation()
+		for _, ss := range states {
+			if ss.IsStaleFor(gen) {
+				dto.Spec.DirtyForRollout = true
+				break
+			}
+		}
+	}
 	if len(states) > 0 {
 		dto.Entries = make([]restv1.RolloutEntry, 0, len(states))
 		for _, ss := range states {
@@ -27,11 +36,13 @@ func RolloutEntry(ss *model.Rollout) restv1.RolloutEntry {
 		return restv1.RolloutEntry{}
 	}
 	dto := restv1.RolloutEntry{
-		Status:         ss.Status().String(),
-		DesiredVersion: ss.DesiredVersion(),
-		ActualVersion:  ss.ActualVersion(),
-		Attempts:       ss.Attempts(),
-		AgentID:        ss.AgentID(),
+		Status:             ss.Status().String(),
+		Intent:             ss.Intent().String(),
+		DesiredGeneration:  ss.DesiredGeneration(),
+		ObservedGeneration: ss.ObservedGeneration(),
+		Attempts:           ss.Attempts(),
+		AgentID:            ss.AgentID(),
+		ActualTaskID:       ss.ActualTaskID(),
 	}
 	if !ss.LastPushedAt().IsZero() {
 		dto.LastPushedAt = ss.LastPushedAt().Format(time.RFC3339)

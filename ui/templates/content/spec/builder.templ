@@ -1,26 +1,36 @@
 package spec
 
 import (
+	"net/http"
+
+	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 	"github.com/soltiHQ/control-plane/ui/templates/component/button"
 	"github.com/soltiHQ/control-plane/ui/templates/component/form"
 	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
 )
 
-// BuilderPage renders the full-page split-panel spec builder.
+// BuilderPage renders the full-page split-panel spec builder. Pass
+// `initial = nil` for create mode; pass a populated `*restv1.Spec` for
+// edit mode — Alpine seeds itself from it and the form posts PUT
+// `/specs/{id}` instead of POST `/specs`.
 // Left: form sections (identity, kind, lifecycle, targets).
 // Right: live JSON preview updated reactively via Alpine.js.
-templ BuilderPage() {
+templ BuilderPage(initial *restv1.Spec) {
 	<form
-		x-data={ builderXData(routepath.ApiAgents) }
+		x-data={ builderXData(routepath.ApiAgents, builderSeed(initial)) }
 		x-init={ builderInitExpr() }
-		x-on:submit.prevent={ builderSubmitExpr(routepath.ApiSpecs) }
+		x-on:submit.prevent={ builderSubmitExpr(formEndpoint(initial), formMethod(initial)) }
 		class="rounded-[var(--r-lg)] border border-border bg-card shadow-3 overflow-clip"
 	>
 		<div class="flex flex-col lg:flex-row">
 			<!-- Left: form -->
 			<div class="flex-1 p-6 space-y-6 lg:border-r lg:border-border lg:max-w-[520px]">
-				<h2 class="text-lg font-semibold text-fg">Create Spec</h2>
+				if initial == nil {
+					<h2 class="text-lg font-semibold text-fg">Create Spec</h2>
+				} else {
+					<h2 class="text-lg font-semibold text-fg">Edit Spec</h2>
+				}
 
 				<!-- Identity -->
 				@builderSection("Identity") {
@@ -39,11 +49,91 @@ templ BuilderPage() {
 						</select>
 					</div>
 
-					<!-- Subprocess fields -->
+					<!-- Subprocess fields (command | script modes share env/cwd/fail flag) -->
 					<template x-if="kind_type === 'subprocess'">
-						<div class="space-y-3">
-							@builderField("cmd", "Command", "e.g. sleep", true)
-							@builderField("args", "Args (space-separated)", "e.g. 30", false)
+						<div class="space-y-4">
+							<!-- Mode toggle -->
+							<div>
+								<label class={ form.LabelClass }>Mode</label>
+								<div class="flex flex-wrap gap-2">
+									@subprocessModeChip("command", "Command")
+									@subprocessModeChip("script", "Script")
+								</div>
+							</div>
+
+							<!-- Command mode -->
+							<template x-if="subprocess_mode === 'command'">
+								<div class="space-y-3">
+									@builderField("cmd", "Command", "e.g. sleep", true)
+									@builderField("args", "Args (space-separated)", "e.g. 30", false)
+								</div>
+							</template>
+
+							<!-- Script mode -->
+							<template x-if="subprocess_mode === 'script'">
+								<div class="space-y-3">
+									<div>
+										<label class={ form.LabelClass }>Runtime</label>
+										<div class="flex flex-wrap gap-2">
+											@scriptRuntimeChip("wellKnown", "SCRIPT_RUNTIME_BASH", "Bash")
+											@scriptRuntimeChip("wellKnown", "SCRIPT_RUNTIME_PYTHON", "Python")
+											@scriptRuntimeChip("wellKnown", "SCRIPT_RUNTIME_NODE", "Node")
+											<button type="button"
+												class="px-3 py-1.5 text-xs rounded-full border transition-colors"
+												x-bind:class="script_runtime_kind === 'custom' ? 'bg-primary/10 border-primary text-primary' : 'border-border text-muted hover:text-fg'"
+												x-on:click="script_runtime_kind = 'custom'">Custom</button>
+										</div>
+									</div>
+
+									<template x-if="script_runtime_kind === 'custom'">
+										<div class="grid grid-cols-2 gap-3">
+											<div>
+												<label for="script_rt_cmd" class={ form.LabelClass }>Interpreter</label>
+												@form.Input(
+													"script_rt_cmd", "text", "", "e.g. ruby",
+													true, false, "",
+													templ.Attributes{"x-model": "script_runtime_custom_command"},
+												)
+											</div>
+											<div>
+												<label for="script_rt_flag" class={ form.LabelClass }>Flag</label>
+												@form.Input(
+													"script_rt_flag", "text", "", "e.g. -e",
+													true, false, "",
+													templ.Attributes{"x-model": "script_runtime_custom_flag"},
+												)
+											</div>
+										</div>
+									</template>
+
+									<!-- Drag-drop + file picker -->
+									<div>
+										<label class={ form.LabelClass }>Script body</label>
+										<div
+											x-on:dragover.prevent="script_drag_over = true"
+											x-on:dragleave.prevent="script_drag_over = false"
+											x-on:drop.prevent="onScriptFileDrop($event)"
+											x-bind:class="script_drag_over ? 'border-primary bg-primary/5' : 'border-dashed border-border bg-surface-dim'"
+											class="rounded-[var(--r-xs)] border px-3 py-2 text-xs text-muted flex items-center justify-between gap-3 transition-colors mb-2">
+											<span>
+												<span x-show="!script_body">Drag &amp; drop a file here, or</span>
+												<span x-show="script_body" x-cloak>Script loaded — drop a new file to replace, or</span>
+											</span>
+											<label class="cursor-pointer text-primary hover:text-primary/80">
+												<input type="file" class="hidden" x-on:change="onScriptFileChange($event)"/>
+												browse
+											</label>
+										</div>
+										<textarea x-model="script_body" rows="12" spellcheck="false"
+											class={ textareaClass }
+											placeholder="#!/usr/bin/env bash&#10;echo hello"></textarea>
+									</div>
+
+									@builderField("args", "Args (space-separated)", "passed after body", false)
+								</div>
+							</template>
+
+							<!-- Common subprocess fields -->
 							@builderField("cwd", "Working Directory", "/path/to/dir", false)
 
 							<div class="flex items-center gap-2">
@@ -52,7 +142,6 @@ templ BuilderPage() {
 								<label for="fail_on_non_zero" class="text-sm text-fg">Fail on non-zero exit</label>
 							</div>
 
-							<!-- Env vars -->
 							<div>
 								<label class={ form.LabelClass }>Environment Variables</label>
 								@kvEditor("env_rows")
@@ -101,14 +190,8 @@ templ BuilderPage() {
 						</div>
 					</template>
 
-					<div>
-						<label class={ form.LabelClass }>Admission</label>
-						<select x-model="admission" class={ form.SelectClass(false, false) }>
-							<option value="dropIfRunning">Drop if Running</option>
-							<option value="replace">Replace</option>
-							<option value="queue">Queue</option>
-						</select>
-					</div>
+					<!-- Admission is not user-visible: the control-plane always
+					     sends admission=Replace when pushing specs to agents. -->
 				}
 
 				<!-- Backoff -->
@@ -199,16 +282,46 @@ templ BuilderPage() {
 
 		<!-- Footer -->
 		<div class="flex items-center justify-between gap-3 px-6 py-4 border-t border-border bg-surface-dim">
-			<a href={ templ.SafeURL(routepath.PageSpecs) }
+			<a href={ templ.SafeURL(formCancelHref(initial)) }
 				class="text-sm text-muted hover:text-fg transition-colors">Cancel</a>
 			@button.Button("", "submit", false, button.VariantPrimary, false,
 				templ.Attributes{"x-bind:disabled": "submitting || !name || !slot"},
 			) {
-				<span x-show="!submitting">Create Spec</span>
-				<span x-show="submitting" x-cloak>Creating...</span>
+				if initial == nil {
+					<span x-show="!submitting">Create Spec</span>
+					<span x-show="submitting" x-cloak>Creating...</span>
+				} else {
+					<span x-show="!submitting">Save Changes</span>
+					<span x-show="submitting" x-cloak>Saving...</span>
+				}
 			}
 		</div>
 	</form>
+}
+
+// formEndpoint returns the REST endpoint the builder should POST/PUT to.
+func formEndpoint(initial *restv1.Spec) string {
+	if initial == nil {
+		return routepath.ApiSpecs
+	}
+	return routepath.ApiSpecByID(initial.ID)
+}
+
+// formMethod returns the HTTP method the builder submit uses.
+func formMethod(initial *restv1.Spec) string {
+	if initial == nil {
+		return http.MethodPost
+	}
+	return http.MethodPut
+}
+
+// formCancelHref points Cancel back to either the list (create) or the
+// spec detail page (edit) — whichever the user would expect to return to.
+func formCancelHref(initial *restv1.Spec) string {
+	if initial == nil {
+		return routepath.PageSpecs
+	}
+	return routepath.PageSpecInfoByID(initial.ID)
 }
 
 // builderSection renders a labelled form section.
@@ -237,6 +350,28 @@ templ presetButton(preset string, label string) {
 		class="px-3 py-1.5 text-xs rounded-full border transition-colors"
 		x-bind:class={ "backoff_preset === '" + preset + "' ? 'bg-primary/10 border-primary text-primary' : 'border-border text-muted hover:text-fg'" }
 		x-on:click={ "applyPreset('" + preset + "')" }>{ label }</button>
+}
+
+// subprocessModeChip renders a toggle between Command and Script modes
+// for Subprocess tasks. Active state is signalled with the primary
+// colour band to match the backoff-preset chip family.
+templ subprocessModeChip(mode string, label string) {
+	<button type="button"
+		class="px-3 py-1.5 text-xs rounded-full border transition-colors"
+		x-bind:class={ "subprocess_mode === '" + mode + "' ? 'bg-primary/10 border-primary text-primary' : 'border-border text-muted hover:text-fg'" }
+		x-on:click={ "subprocess_mode = '" + mode + "'" }>{ label }</button>
+}
+
+// scriptRuntimeChip renders a single well-known runtime option. The
+// `kind` argument is always "wellKnown" here (Custom is handled in the
+// template directly because it toggles extra fields). `value` is the
+// full proto enum name (e.g. SCRIPT_RUNTIME_BASH) — pbjson on the
+// agent parses that form.
+templ scriptRuntimeChip(kind string, value string, label string) {
+	<button type="button"
+		class="px-3 py-1.5 text-xs rounded-full border transition-colors"
+		x-bind:class={ "(script_runtime_kind === '" + kind + "' && script_runtime_well_known === '" + value + "') ? 'bg-primary/10 border-primary text-primary' : 'border-border text-muted hover:text-fg'" }
+		x-on:click={ "script_runtime_kind = '" + kind + "'; script_runtime_well_known = '" + value + "'" }>{ label }</button>
 }
 
 // agentMultiSelect renders the agent multi-select dropdown.

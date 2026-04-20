@@ -133,7 +133,7 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 	var (
 		apiHandler    = handler.NewAPI(logger, svc.user, svc.access, svc.session, svc.credential, svc.agent, svc.spec, proxyPool, eventHub)
 		authMW        = middleware.Auth(authModel.Verifier, authModel.Session)
-		uiHandler     = handler.NewUI(logger, svc.access, eventHub)
+		uiHandler     = handler.NewUI(logger, svc.access, svc.spec, eventHub)
 		staticHandler = handler.NewStatic(logger)
 		logMW         = middleware.Logger(logger)
 		ridMW         = middleware.RequestID()

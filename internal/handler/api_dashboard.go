@@ -64,7 +64,7 @@ func (a *API) Dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rollouts, err := a.specSVC.Rollouts(ctx, nil)
+	rollouts, err := a.specSVC.Rollouts(ctx, storage.RolloutQueryCriteria{})
 	if err != nil {
 		a.logger.Error().Err(err).Msg("dashboard: rollouts list failed")
 		response.Unavailable(w, r, mode)

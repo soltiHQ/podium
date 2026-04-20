@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -18,6 +19,13 @@ import (
 
 // Detail renders the spec identity section: header with actions,
 // properties grid, and CreateSpec JSON preview.
+//
+// Header behaviour:
+//   - Soft-delete mode (`DeletionRequested=true`) hides Edit/Deploy and
+//     shows a "Deleting…" badge. The sync runner is draining rollouts;
+//     the spec row will go away when done.
+//   - Drift mode (`DirtyForRollout=true`) surfaces an "apply pending"
+//     badge + a banner nudging the user to click Deploy.
 templ Detail(ts restv1.RolloutSpec, p policy.SpecDetail) {
 	<div class="space-y-6">
 		<!-- Header: name + version + actions -->
@@ -30,22 +38,50 @@ templ Detail(ts restv1.RolloutSpec, p policy.SpecDetail) {
 					</div>
 					<div class="flex items-center gap-2 shrink-0">
 						@visual.Badge(fmt.Sprintf("v%d", ts.Version), visual.VariantMuted)
-						if p.CanDeploy {
-							@button.Button("Deploy", "button", false, button.VariantPrimary, false,
-								templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent("deploy-spec")},
-							) {
-								@asset.Icon("tasks")
+						@visual.Badge(fmt.Sprintf("gen %d", ts.Generation), visual.VariantMuted)
+						if ts.DeletionRequested {
+							@visual.Badge("Deleting…", visual.VariantDanger)
+							if p.CanDelete && hasStuckRollouts(ts) {
+								@button.Button("Force delete", "button", false, button.VariantDanger, false,
+									templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent("force-delete-spec")},
+								) {
+									@asset.Icon("delete")
+								}
 							}
-						}
-						if p.CanDelete {
-							@button.Button("Delete", "button", false, button.VariantDanger, false,
-								templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent("delete-spec")},
-							) {
-								@asset.Icon("delete")
+						} else {
+							if ts.DirtyForRollout {
+								@visual.Badge("apply pending", visual.VariantPrimary)
+							}
+							if p.CanEdit {
+								<a href={ templ.SafeURL(routepath.PageSpecEditByID(ts.ID)) }
+									class="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-[var(--r-xs)] border border-border text-fg hover:bg-surface-dim transition-colors">
+									Edit
+								</a>
+							}
+							if p.CanDeploy {
+								@button.Button("Deploy", "button", false, button.VariantPrimary, false,
+									templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent("deploy-spec")},
+								) {
+									@asset.Icon("tasks")
+								}
+							}
+							if p.CanDelete {
+								@button.Button("Delete", "button", false, button.VariantDanger, false,
+									templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent("delete-spec")},
+								) {
+									@asset.Icon("delete")
+								}
 							}
 						}
 					</div>
 				</div>
+				if ts.DirtyForRollout && !ts.DeletionRequested {
+					<div class="mt-4 p-3 rounded-[var(--r-xs)] border border-warning/30 bg-warning/10 text-xs text-fg">
+						Spec at generation { fmt.Sprintf("%d", ts.Generation) }, but one or more
+						rollouts are still at older generations.
+						Click <span class="font-semibold">Deploy</span> to apply.
+					</div>
+				}
 			}
 		}
 
@@ -60,7 +96,6 @@ templ Detail(ts restv1.RolloutSpec, p policy.SpecDetail) {
 					if ts.IntervalMs > 0 {
 						@visual.KV("Interval", fmt.Sprintf("%dms", ts.IntervalMs))
 					}
-					@visual.KV("Admission", ts.Admission)
 					@visual.KV("Backoff", fmt.Sprintf("jitter=%s first=%dms max=%dms factor=%.1f",
 						ts.Jitter, ts.BackoffFirstMs, ts.BackoffMaxMs, ts.BackoffFactor))
 					if len(ts.Targets) > 0 {
@@ -71,7 +106,7 @@ templ Detail(ts restv1.RolloutSpec, p policy.SpecDetail) {
 		}
 
 		<!-- CreateSpec JSON -->
-		if len(ts.CreateSpec) > 0 {
+		if ts.CreateSpec != nil {
 			@card.Card("") {
 				@card.CardBody() {
 					<div class="flex items-center justify-between mb-3">
@@ -108,7 +143,35 @@ templ Detail(ts restv1.RolloutSpec, p policy.SpecDetail) {
 			modal.MethodDelete,
 			modal.VariantDanger,
 		)
+		if ts.DeletionRequested && hasStuckRollouts(ts) {
+			@modal.Confirm(
+				"force-delete-spec",
+				"Force delete",
+				"One or more rollouts are stuck on unreachable agents. "+
+					"Force-deleting the spec will drop all rollouts immediately. "+
+					"Any task still running on an agent will be left orphaned — "+
+					"the agent operator will have to clean it up manually. Continue?",
+				"Force delete",
+				routepath.ApiSpecForceDelete(ts.ID),
+				modal.MethodDelete,
+				modal.VariantDanger,
+			)
+		}
 	}
+}
+
+// hasStuckRollouts reports whether the spec has at least one rollout
+// whose sync status is Failed. That is the signal that the sync
+// runner has given up (it skips retry-exhausted rollouts until they
+// drop out of the actionable filter) and a normal soft-delete can
+// never complete. The UI surfaces the Force delete button only then.
+func hasStuckRollouts(ts restv1.RolloutSpec) bool {
+	for _, r := range ts.Entries {
+		if r.Status == "failed" {
+			return true
+		}
+	}
+	return false
 }
 
 // Rollouts renders the per-agent rollout entries.
@@ -128,11 +191,20 @@ templ Rollouts(states []restv1.RolloutEntry) {
 								</div>
 								<div class="flex items-center gap-1.5 flex-wrap">
 									@syncStatusBadge(ss.Status)
-									@visual.Badge(fmt.Sprintf("desired: v%d", ss.DesiredVersion), visual.VariantMuted)
-									@visual.Badge(fmt.Sprintf("actual: v%d", ss.ActualVersion), visual.VariantMuted)
+									@intentBadge(ss.Intent)
+									@visual.Badge(fmt.Sprintf("desired: gen %d", ss.DesiredGeneration), visual.VariantMuted)
+									@visual.Badge(fmt.Sprintf("observed: gen %d", ss.ObservedGeneration), visual.VariantMuted)
+									if ss.ObservedGeneration > 0 {
+										@visual.Badge(fmt.Sprintf("gen %d", ss.ObservedGeneration), visual.VariantMuted)
+									}
 								</div>
 							</div>
 							<div class="text-right shrink-0">
+								if ss.ActualTaskID != "" {
+									<div class="text-[11px] font-mono text-muted truncate max-w-[220px]" title={ ss.ActualTaskID }>
+										{ ss.ActualTaskID }
+									</div>
+								}
 								if ss.Error != "" {
 									<div class="text-xs text-danger max-w-[200px] truncate" title={ ss.Error }>
 										{ ss.Error }
@@ -152,15 +224,44 @@ templ Rollouts(states []restv1.RolloutEntry) {
 	}
 }
 
-func prettyJSON(m map[string]any) string {
-	b, err := json.MarshalIndent(m, "", "  ")
+// intentBadge renders a coloured chip for the rollout's next-action
+// intent. Noop is rendered as no badge at all — it would just be
+// visual noise for a fully synced rollout.
+templ intentBadge(intent string) {
+	switch intent {
+		case "install":
+			@visual.Badge("install", visual.VariantPrimary) {
+				@visual.StatusDot("primary")
+			}
+		case "update":
+			@visual.Badge("update", visual.VariantPrimary) {
+				@visual.StatusDot("primary")
+			}
+		case "uninstall":
+			@visual.Badge("uninstall", visual.VariantDanger) {
+				@visual.StatusDot("danger")
+			}
+	}
+}
+
+func prettyJSON(v any) string {
+	// CreateSpec comes through as json.RawMessage holding canonical
+	// proto-JSON. Re-indent it so the UI preview stays readable; fall back
+	// to MarshalIndent for any other value (maps, structs, …).
+	if raw, ok := v.(json.RawMessage); ok && len(raw) > 0 {
+		var buf bytes.Buffer
+		if err := json.Indent(&buf, raw, "", "  "); err == nil {
+			return buf.String()
+		}
+	}
+	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return "{}"
 	}
 	return string(b)
 }
 
-script copySpec(spec map[string]any) {
+script copySpec(spec any) {
 	const text = JSON.stringify(spec, null, 2)
 	navigator.clipboard.writeText(text)
 }

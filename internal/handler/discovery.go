@@ -2,16 +2,16 @@ package handler
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/soltiHQ/control-plane/internal/transport/grpc/status"
 
-	discoveryv1 "github.com/soltiHQ/control-plane/api/discovery/v1"
 	genv1 "github.com/soltiHQ/control-plane/api/gen/v1"
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
@@ -24,6 +24,22 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
 	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 )
+
+// discoverySyncUnmarshal is a protojson.UnmarshalOptions with
+// DiscardUnknown=true so that forward-compatible extensions of SyncRequest
+// from newer agents don't hard-fail old control-planes.
+var discoverySyncUnmarshal = protojson.UnmarshalOptions{DiscardUnknown: true}
+
+// discoverySyncMarshal keeps the canonical proto-JSON contract: camelCase
+// field names and enum-as-string, symmetric with the SDK's pbjson output.
+var discoverySyncMarshal = protojson.MarshalOptions{
+	UseProtoNames:   false,
+	EmitUnpopulated: false,
+}
+
+// maxSyncBodyBytes caps SyncRequest bodies to defend against runaway clients.
+// Matches the 256 KiB limit used by the SDK's HttpApi RequestBodyLimitLayer.
+const maxSyncBodyBytes = 256 * 1024
 
 // HTTPDiscovery handles agent discovery over HTTP.
 type HTTPDiscovery struct {
@@ -48,6 +64,11 @@ func NewHTTPDiscovery(logger zerolog.Logger, agentSVC *agent.Service, eventHub *
 }
 
 // Sync handles POST /api/v1/discovery/sync.
+//
+// The request body is expected to be canonical proto-JSON (camelCase +
+// enum-as-string) matching solti.discover.v1.SyncRequest. The SDK emits
+// this format via pbjson; both HTTP and gRPC paths therefore share a single
+// wire schema.
 func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 	mode := httpctx.ModeFromRequest(r)
 
@@ -56,52 +77,82 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var in discoveryv1.SyncRequest
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxSyncBodyBytes))
+	if err != nil {
+		response.BadRequest(w, r, mode)
+		return
+	}
+
+	var in genv1.SyncRequest
+	if err := discoverySyncUnmarshal.Unmarshal(body, &in); err != nil {
 		response.BadRequest(w, r, mode)
 		return
 	}
 
 	a, err := model.NewAgentFrom(model.AgentParams{
-		ID:                 in.ID,
-		Name:               in.Name,
-		Endpoint:           in.Endpoint,
-		EndpointType:       in.EndpointType,
-		APIVersion:         in.APIVersion,
-		OS:                 in.OS,
-		Arch:               in.Arch,
-		Platform:           in.Platform,
-		UptimeSeconds:      in.UptimeSeconds,
-		HeartbeatIntervalS: in.HeartbeatIntervalS,
-		Metadata:           in.Metadata,
+		ID:                 in.GetId(),
+		Name:               in.GetName(),
+		Endpoint:           in.GetEndpoint(),
+		EndpointType:       int(in.GetEndpointType()),
+		APIVersion:         int(in.GetApiVersion()),
+		OS:                 in.GetOs(),
+		Arch:               in.GetArch(),
+		Platform:           in.GetPlatform(),
+		UptimeSeconds:      in.GetUptimeSeconds(),
+		HeartbeatIntervalS: int(in.GetHeartbeatIntervalS()),
+		Metadata:           in.GetMetadata(),
+		Capabilities:       in.GetCapabilities(),
 	})
 	if err != nil {
 		response.BadRequest(w, r, mode)
 		return
 	}
-	existing, getErr := h.agentSVC.Get(r.Context(), in.ID)
+
+	existing, getErr := h.agentSVC.Get(r.Context(), in.GetId())
 	if err = h.agentSVC.Upsert(r.Context(), a); err != nil {
-		h.logger.Error().Err(err).Str("agent_id", in.ID).Msg("upsert failed")
+		h.logger.Error().Err(err).Str("agent_id", in.GetId()).Msg("upsert failed")
 		response.Unavailable(w, r, mode)
 		return
 	}
 	switch {
 	case errors.Is(getErr, storage.ErrNotFound):
-		h.eventHub.Record(event.AgentConnected, event.Payload{ID: in.ID, Name: in.Name, By: "discovery"})
+		h.eventHub.Record(event.AgentConnected, event.Payload{ID: in.GetId(), Name: in.GetName(), By: "discovery"})
 	case existing != nil && existing.Status() != kind.AgentStatusActive:
-		h.eventHub.Record(event.AgentConnected, event.Payload{ID: in.ID, Name: in.Name, By: "discovery"})
+		h.eventHub.Record(event.AgentConnected, event.Payload{ID: in.GetId(), Name: in.GetName(), By: "discovery"})
 
-		n := h.eventHub.DeleteIssues(event.AgentInactive, in.ID)
-		n += h.eventHub.DeleteIssues(event.AgentDisconnected, in.ID)
+		n := h.eventHub.DeleteIssues(event.AgentInactive, in.GetId())
+		n += h.eventHub.DeleteIssues(event.AgentDisconnected, in.GetId())
 		if n > 0 {
-			h.eventHub.Record(event.IssueClosed, event.Payload{ID: in.ID, Name: in.Name, By: "discovery"})
+			h.eventHub.Record(event.IssueClosed, event.Payload{ID: in.GetId(), Name: in.GetName(), By: "discovery"})
 			h.eventHub.Notify(htmx.DashboardUpdate)
 		}
 	}
 	h.eventHub.Notify(htmx.AgentUpdate)
+
+	resp := &genv1.SyncResponse{Success: true}
+	respBytes, err := discoverySyncMarshal.Marshal(resp)
+	if err != nil {
+		h.logger.Error().Err(err).Msg("marshal SyncResponse")
+		response.Unavailable(w, r, mode)
+		return
+	}
 	response.OK(w, r, mode, &responder.View{
-		Data: discoveryv1.SyncResponse{Success: true},
+		Data: protoJSONPayload(respBytes),
 	})
+}
+
+// protoJSONPayload wraps a pre-marshaled proto-JSON body as a
+// json.Marshaler so that response.OK emits the bytes verbatim without
+// re-encoding through encoding/json (which would mangle the canonical
+// camelCase format).
+type protoJSONPayload []byte
+
+// MarshalJSON implements json.Marshaler by returning the raw bytes.
+func (p protoJSONPayload) MarshalJSON() ([]byte, error) {
+	if len(p) == 0 {
+		return []byte("null"), nil
+	}
+	return p, nil
 }
 
 // GRPCDiscovery implements genv1.DiscoverServiceServer.
@@ -141,6 +192,7 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *genv1.SyncRequest) (*genv
 		UptimeSeconds:      req.GetUptimeSeconds(),
 		HeartbeatIntervalS: int(req.GetHeartbeatIntervalS()),
 		Metadata:           req.GetMetadata(),
+		Capabilities:       req.GetCapabilities(),
 	})
 	if err != nil {
 		return nil, status.Errorf(ctx, codes.InvalidArgument, "invalid agent data: %v", err)

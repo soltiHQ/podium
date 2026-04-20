@@ -4,14 +4,12 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/rs/zerolog"
 	"github.com/segmentio/ksuid"
 	"github.com/soltiHQ/control-plane/domain/kind"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/http/route"
@@ -45,6 +43,7 @@ func (a *API) Specs(w http.ResponseWriter, r *http.Request) {
 //   - GET    /api/v1/specs/{id}
 //   - PUT    /api/v1/specs/{id}
 //   - DELETE /api/v1/specs/{id}
+//   - DELETE /api/v1/specs/{id}/force
 //   - POST   /api/v1/specs/{id}/deploy
 //   - GET    /api/v1/specs/{id}/sync
 func (a *API) SpecsRouter(w http.ResponseWriter, r *http.Request) {
@@ -54,27 +53,21 @@ func (a *API) SpecsRouter(w http.ResponseWriter, r *http.Request) {
 			a.specUpsert(w, r, m, id, modeUpdate)
 		}},
 		route.Subroute{Action: "", Method: http.MethodDelete, Perm: kind.SpecsEdit, Fn: a.specDelete},
+		route.Subroute{Action: "force", Method: http.MethodDelete, Perm: kind.SpecsEdit, Fn: a.specForceDelete},
 		route.Subroute{Action: "deploy", Method: http.MethodPost, Perm: kind.SpecsDeploy, Fn: a.specDeploy},
 		route.Subroute{Action: "sync", Method: http.MethodGet, Perm: kind.SpecsGet, Fn: a.specRollouts},
 	)
 }
 
 func (a *API) specList(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
-	var (
-		limit  = queryInt(r, "limit", 0)
-		filter storage.SpecFilter
-
-		cursor = r.URL.Query().Get("cursor")
-		q      = r.URL.Query().Get("q")
-	)
-	if q != "" {
-		filter = inmemory.NewSpecFilter().Query(q)
-	}
+	limit := queryInt(r, "limit", 0)
+	cursor := r.URL.Query().Get("cursor")
+	q := r.URL.Query().Get("q")
 
 	res, err := a.specSVC.List(r.Context(), spec.ListQuery{
-		Limit:  limit,
-		Cursor: cursor,
-		Filter: filter,
+		Limit:    limit,
+		Cursor:   cursor,
+		Criteria: storage.SpecQueryCriteria{Query: q},
 	})
 	if err != nil {
 		a.logger.Error().Err(err).Msg("spec list failed")
@@ -104,7 +97,7 @@ func (a *API) specDetails(w http.ResponseWriter, r *http.Request, mode httpctx.R
 		return
 	}
 
-	states, err := a.specSVC.RolloutsBySpec(r.Context(), id, inmemory.NewRolloutFilter().BySpecID(id))
+	states, err := a.specSVC.RolloutsBySpec(r.Context(), id)
 	if err != nil {
 		a.logger.Error().Err(err).Str("spec", id).Msg("spec rollouts failed")
 		response.Unavailable(w, r, mode)
@@ -203,9 +196,6 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		}
 		ts.SetBackoff(b)
 	}
-	if in.Admission != "" {
-		ts.SetAdmission(kind.AdmissionStrategy(in.Admission))
-	}
 
 	// Targets
 	if action == modeCreate {
@@ -244,15 +234,33 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 
-	if err = a.specSVC.Upsert(r.Context(), ts); err != nil {
+	if err = a.specSVC.Upsert(r.Context(), ts, in.Version); err != nil {
+		var conflict *spec.ConflictError
+		if errors.As(err, &conflict) {
+			a.logger.Warn().Str("spec", id).
+				Int("expected", conflict.Expected).
+				Int("actual", conflict.Actual).
+				Msg("spec update rejected: version conflict")
+			response.Conflict(w, r, mode, conflict.Error())
+			return
+		}
+		if errors.Is(err, storage.ErrInvalidArgument) {
+			response.BadRequest(w, r, mode)
+			return
+		}
 		a.logger.Error().Err(err).Str("spec", id).Msg("spec update failed")
 		response.Unavailable(w, r, mode)
 		return
 	}
 	a.logger.Info().Str("spec", id).Msg("spec updated")
 	a.hub.Record(event.SpecUpdated, event.Payload{ID: id, Name: ts.Name()})
-	htmx.Trigger(w, htmx.SpecUpdate)
 	a.hub.Notify(htmx.SpecUpdate)
+	// Mirror the create path: after Save Changes send the user back to
+	// the specs list. The edit form's Alpine submit handler honors the
+	// HX-Redirect header. The old htmx.Trigger(SpecUpdate) no longer
+	// fires from this response — redirect obviates it, and the list page
+	// picks up the updated spec through its own poll/SSE stream.
+	htmx.Redirect(w, routepath.PageSpecs)
 	response.NoContent(w, r)
 }
 
@@ -269,10 +277,33 @@ func (a *API) specDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	response.NoContent(w, r)
 }
 
+// specForceDelete drops the spec and its rollouts immediately, without
+// waiting for agents to uninstall their tasks. Logs a warning because
+// any running task on an agent becomes orphaned: the agent keeps it
+// alive until a human intervenes. UI surfaces this option only when a
+// normal Delete got stuck on retry-exhausted Uninstall rollouts.
+func (a *API) specForceDelete(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
+	if err := a.specSVC.ForceDelete(r.Context(), id); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		a.logger.Error().Err(err).Str("spec", id).Msg("spec force-delete failed")
+		response.Unavailable(w, r, mode)
+		return
+	}
+	a.logger.Warn().Str("spec", id).Msg("spec force-deleted; agent tasks may be orphaned")
+	a.hub.Notify(htmx.SpecUpdate)
+	htmx.Redirect(w, routepath.PageSpecs)
+	response.NoContent(w, r)
+}
+
 func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	if err := a.specSVC.Deploy(r.Context(), id); err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			response.NotFound(w, r, mode)
+			return
+		}
+		var unknown *spec.UnknownTargetsError
+		if errors.As(err, &unknown) {
+			a.logger.Warn().Str("spec", id).Strs("missing_agents", unknown.Agents).Msg("spec deploy rejected")
+			response.BadRequest(w, r, mode)
 			return
 		}
 		a.logger.Error().Err(err).Str("spec", id).Msg("spec deploy failed")
@@ -280,22 +311,11 @@ func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 
-	rollouts, err := a.specSVC.RolloutsBySpec(r.Context(), id, inmemory.NewRolloutFilter().BySpecID(id))
+	rollouts, err := a.specSVC.RolloutsBySpec(r.Context(), id)
 	if err != nil {
 		a.logger.Warn().Err(err).Str("spec", id).Msg("spec deployed but rollout query failed")
 	} else {
 		a.logger.Info().Str("spec", id).Int("rollouts", len(rollouts)).Msg("spec deployed")
-		if a.logger.GetLevel() <= zerolog.DebugLevel {
-			for _, ss := range rollouts {
-				a.logger.Debug().
-					Str("rollout_id", ss.ID()).
-					Str("agent_id", ss.AgentID()).
-					Str("status", ss.Status().String()).
-					Int("desired", ss.DesiredVersion()).
-					Int("actual", ss.ActualVersion()).
-					Msg("deploy rollout")
-			}
-		}
 	}
 
 	var specName string
@@ -309,7 +329,7 @@ func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 }
 
 func (a *API) specRollouts(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
-	states, err := a.specSVC.RolloutsBySpec(r.Context(), id, inmemory.NewRolloutFilter().BySpecID(id))
+	states, err := a.specSVC.RolloutsBySpec(r.Context(), id)
 	if err != nil {
 		a.logger.Error().Err(err).Str("spec", id).Msg("spec rollouts failed")
 		response.Unavailable(w, r, mode)
@@ -317,19 +337,6 @@ func (a *API) specRollouts(w http.ResponseWriter, r *http.Request, mode httpctx.
 	}
 
 	a.logger.Info().Str("spec", id).Int("count", len(states)).Msg("spec rollouts loaded")
-	if a.logger.GetLevel() <= zerolog.DebugLevel {
-		for _, ss := range states {
-			a.logger.Debug().
-				Str("rollout_id", ss.ID()).
-				Str("agent_id", ss.AgentID()).
-				Str("status", ss.Status().String()).
-				Int("desired", ss.DesiredVersion()).
-				Int("actual", ss.ActualVersion()).
-				Int("attempts", ss.Attempts()).
-				Str("error", ss.Error()).
-				Msg("rollout entry")
-		}
-	}
 
 	items := mapSlice(states, apimapv1.RolloutEntry)
 	response.OK(w, r, mode, &responder.View{

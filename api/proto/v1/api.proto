@@ -1,40 +1,56 @@
 syntax = "proto3";
 
-package solti.api.v1;
+package solti.v1;
 
 option go_package = "github.com/soltiHQ/control-plane/api/gen/v1;genv1";
 
-// Task execution state.
-enum TaskStatus {
-  TASK_STATUS_UNSPECIFIED = 0;
-  TASK_STATUS_PENDING     = 1;
-  TASK_STATUS_RUNNING     = 2;
-  TASK_STATUS_SUCCEEDED   = 3;
-  TASK_STATUS_FAILED      = 4;
-  TASK_STATUS_TIMEOUT     = 5;
-  TASK_STATUS_CANCELED    = 6;
-  TASK_STATUS_EXHAUSTED   = 7;
-}
-
-// Task information with current state.
-message TaskInfo {
-  string id          = 1;
-  string slot        = 2;
-  TaskStatus status  = 3;
-  uint32 attempt     = 4;
-  int64 created_at   = 5; // Unix timestamp.
-  int64 updated_at   = 6; // Unix timestamp.
-  optional string error = 7;
-}
+import "v1/types.proto";
 
 // SoltiApi provides task management on the agent side.
-// The control-plane acts as a gRPC client calling into the agent.
+// The control-plane acts as a client calling into the agent.
 service SoltiApi {
-  // ListTasks returns tasks matching the given filters with pagination.
+  // Submit a new task for execution.
+  rpc SubmitTask(SubmitTaskRequest) returns (SubmitTaskResponse);
+
+  // Get current task status by ID.
+  rpc GetTaskStatus(GetTaskStatusRequest) returns (GetTaskStatusResponse);
+
+  // Query tasks with combined filters and pagination.
   rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+
+  // List execution history for a specific task.
+  rpc ListTaskRuns(ListTaskRunsRequest) returns (ListTaskRunsResponse);
+
+  // Stop a task and purge its run history. Idempotent: succeeds
+  // whether or not the task is currently registered on the agent —
+  // gone is gone, not an error. This is the single teardown primitive;
+  // "cancel without purge" is not exposed because taskvisor has no
+  // concept of a paused task anyway (cancel = final on its side).
+  rpc DeleteTask(DeleteTaskRequest) returns (DeleteTaskResponse);
 }
 
-// ListTasksRequest — unified query with optional filters and pagination.
+// --- SubmitTask ---
+
+message SubmitTaskRequest {
+  CreateSpec spec = 1;
+}
+
+message SubmitTaskResponse {
+  string task_id = 1;
+}
+
+// --- GetTaskStatus ---
+
+message GetTaskStatusRequest {
+  string task_id = 1;
+}
+
+message GetTaskStatusResponse {
+  optional TaskData task = 1;
+}
+
+// --- ListTasks ---
+
 message ListTasksRequest {
   optional string slot       = 1;
   optional TaskStatus status = 2;
@@ -42,8 +58,25 @@ message ListTasksRequest {
   uint32 offset              = 4; // default 0.
 }
 
-// ListTasksResponse — paginated result.
 message ListTasksResponse {
-  repeated TaskInfo tasks = 1;
+  repeated TaskData tasks = 1;
   uint32 total            = 2;
 }
+
+// --- ListTaskRuns ---
+
+message ListTaskRunsRequest {
+  string task_id = 1;
+}
+
+message ListTaskRunsResponse {
+  repeated TaskRunInfo runs = 1;
+}
+
+// --- DeleteTask ---
+
+message DeleteTaskRequest {
+  string task_id = 1;
+}
+
+message DeleteTaskResponse {}

@@ -12,6 +12,8 @@ import (
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/service/access"
+	"github.com/soltiHQ/control-plane/internal/service/spec"
+	apimapv1 "github.com/soltiHQ/control-plane/internal/transport/http/apimap/v1"
 	"github.com/soltiHQ/control-plane/internal/transport/http/cookie"
 	"github.com/soltiHQ/control-plane/internal/transport/http/ratelimitkey"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
@@ -31,13 +33,17 @@ import (
 // UI handlers
 type UI struct {
 	accessSVC *access.Service
+	specSVC   *spec.Service
 	hub       *event.Hub
 	logger    zerolog.Logger
 }
 
 // NewUI creates a new UI handler.
-func NewUI(logger zerolog.Logger, accessSVC *access.Service, hub *event.Hub) *UI {
+func NewUI(logger zerolog.Logger, accessSVC *access.Service, specSVC *spec.Service, hub *event.Hub) *UI {
 	if accessSVC == nil {
+		panic(service.ErrNilService)
+	}
+	if specSVC == nil {
 		panic(service.ErrNilService)
 	}
 	if hub == nil {
@@ -46,6 +52,7 @@ func NewUI(logger zerolog.Logger, accessSVC *access.Service, hub *event.Hub) *UI
 	return &UI{
 		logger:    logger.With().Str("handler", "ui").Logger(),
 		accessSVC: accessSVC,
+		specSVC:   specSVC,
 		hub:       hub,
 	}
 }
@@ -63,6 +70,7 @@ func (u *UI) Routes(mux *http.ServeMux, auth route.BaseMW, perm route.PermMW, co
 
 	route.HandleFunc(mux, routepath.PageSpecs, u.Specs, append(common, auth, perm(kind.SpecsGet))...)
 	route.HandleFunc(mux, routepath.PageSpecNew, u.SpecNew, append(common, auth, perm(kind.SpecsAdd))...)
+	route.HandleFunc(mux, routepath.PageSpecEdit, u.SpecEdit, append(common, auth, perm(kind.SpecsEdit))...)
 	route.HandleFunc(mux, routepath.PageSpecInfo, u.SpecDetail, append(common, auth, perm(kind.SpecsGet))...)
 
 	route.HandleFunc(mux, routepath.PageHome, u.Main, append(common, auth)...)
@@ -203,6 +211,26 @@ func (u *UI) SpecNew(w http.ResponseWriter, r *http.Request) {
 // SpecDetail handle GET /specs/info/{}.
 func (u *UI) SpecDetail(w http.ResponseWriter, r *http.Request) {
 	u.pageParam(w, r, http.MethodGet, routepath.PageSpecInfo, func(nav policy.Nav, specID string) templ.Component { return pageSpec.Detail(nav, specID) })
+}
+
+// SpecEdit handle GET /specs/edit/{}.
+//
+// The edit page cannot lazy-load the initial spec via HTMX (the builder
+// form needs the values baked into Alpine's x-data on first paint to
+// pre-populate inputs). We pre-fetch via specSVC, convert to the REST
+// DTO, and hand it to the templ component.
+func (u *UI) SpecEdit(w http.ResponseWriter, r *http.Request) {
+	u.pageParam(w, r, http.MethodGet, routepath.PageSpecEdit, func(nav policy.Nav, specID string) templ.Component {
+		ts, err := u.specSVC.Get(r.Context(), specID)
+		if err != nil {
+			// Fall back to the create-mode builder so the user doesn't
+			// get a blank page; the handler-level NotFound check below
+			// would be preferable but pageParam doesn't surface errors.
+			return pageSpec.New(nav)
+		}
+		initial := apimapv1.Spec(ts)
+		return pageSpec.Edit(nav, &initial)
+	})
 }
 
 func (u *UI) page(w http.ResponseWriter, r *http.Request, m, p string, render func(nav policy.Nav) templ.Component) {

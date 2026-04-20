@@ -1,8 +1,8 @@
 // Package routepath declares all URL constants used by the control-plane UI and API.
 //
 // Constants are split into two groups:
-//   - Page* — browser-facing paths served by the UI handler (HTML pages).
-//   - Api*  — JSON/REST endpoints served by the API handler.
+//   - Page* - browser-facing paths served by the UI handler (HTML pages).
+//   - Api*  - JSON/REST endpoints served by the API handler.
 //
 // Path-builder functions (var block) append an entity ID to a base path, keeping URL construction consistent
 // and typo-free across handlers, templates, and Alpine.js fetch calls.
@@ -23,6 +23,7 @@ const (
 
 	PageSpecs    = "/specs"
 	PageSpecNew  = "/specs/new"
+	PageSpecEdit = "/specs/edit/"
 	PageSpecInfo = "/specs/info/"
 
 	ApiSession = "/api/v1/session/"
@@ -58,10 +59,12 @@ var (
 	ApiAgentLabels    = func(id string) string { return ApiAgent + id + "/labels" }
 	ApiAgentTasks     = func(id string) string { return ApiAgent + id + "/tasks" }
 
-	PageSpecInfoByID = func(id string) string { return PageSpecInfo + id }
-	ApiSpecByID      = func(id string) string { return ApiSpec + id }
-	ApiSpecDeploy    = func(id string) string { return ApiSpec + id + "/deploy" }
-	ApiSpecSync      = func(id string) string { return ApiSpec + id + "/sync" }
+	PageSpecInfoByID   = func(id string) string { return PageSpecInfo + id }
+	PageSpecEditByID   = func(id string) string { return PageSpecEdit + id }
+	ApiSpecByID        = func(id string) string { return ApiSpec + id }
+	ApiSpecDeploy      = func(id string) string { return ApiSpec + id + "/deploy" }
+	ApiSpecSync        = func(id string) string { return ApiSpec + id + "/sync" }
+	ApiSpecForceDelete = func(id string) string { return ApiSpec + id + "/force" }
 )
 
 // CursorURL appends optional cursor and query parameters to a base API path.

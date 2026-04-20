@@ -137,10 +137,18 @@ func (a *API) agentTasksList(w http.ResponseWriter, r *http.Request, mode httpct
 			response.NotFound(w, r, mode)
 			return
 		}
+		a.logger.Error().Err(err).
+			Str("agent_id", agentID).
+			Msg("agent tasks: agent lookup failed")
 		response.Unavailable(w, r, mode)
 		return
 	}
 	if ag.Endpoint() == "" {
+		a.logger.Warn().
+			Str("agent_id", agentID).
+			Str("endpoint_type", string(ag.EndpointType())).
+			Str("api_version", ag.APIVersion().String()).
+			Msg("agent tasks: agent has empty endpoint (discovery never completed or dropped it)")
 		response.Unavailable(w, r, mode)
 		return
 	}

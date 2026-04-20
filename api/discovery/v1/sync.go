@@ -1,24 +1,11 @@
+// Package discoveryv1 is retained only to preserve the Go import path while
+// the discovery HTTP DTO has been retired.
+//
+// Agent-facing discovery now speaks canonical proto-JSON (pbjson) matching
+// solti.discover.v1.SyncRequest / SyncResponse defined in
+// api/proto/v1/discovery.proto. HTTP handlers marshal/unmarshal via
+// google.golang.org/protobuf/encoding/protojson against the generated
+// genv1 types — see internal/handler/discovery.go.
+//
+// Do not add ad-hoc JSON DTOs here; extend the proto schema instead.
 package discoveryv1
-
-// SyncRequest is the payload agents send periodically to report their state.
-type SyncRequest struct {
-	UptimeSeconds      int64 `json:"uptime_seconds"`
-	Ts                 int64 `json:"ts,omitempty"`
-	EndpointType       int   `json:"endpoint_type"`
-	APIVersion         int   `json:"api_version,omitempty"`
-	HeartbeatIntervalS int   `json:"heartbeat_interval_s,omitempty"`
-
-	Metadata map[string]string `json:"metadata,omitempty"`
-
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Endpoint string `json:"endpoint"`
-	OS       string `json:"os"`
-	Arch     string `json:"arch"`
-	Platform string `json:"platform"`
-}
-
-// SyncResponse is returned to the agent after a successful sync.
-type SyncResponse struct {
-	Success bool `json:"success"`
-}

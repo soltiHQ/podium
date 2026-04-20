@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 )
 
 // httpClient is the subset of *http.Client used by the proxy helpers.
@@ -14,34 +17,79 @@ type httpClient interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
-// doGet performs a GET request and JSON-decodes the response body.
-func doGet[T any](ctx context.Context, client httpClient, url string) (*T, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrCreateRequest, err)
+// maxErrorBodyBytes caps how much of a non-2xx response body is read back for
+// diagnostic purposes. The SDK emits compact JSON error bodies (~ tens of bytes);
+// 4 KiB leaves enough headroom for a stack-style message without letting a
+// misbehaving agent balloon our log lines.
+const maxErrorBodyBytes = 4 * 1024
+
+// sdkErrorBody is the HTTP error envelope emitted by solti-api:
+// {"error":"<label>","message":"<detail>"}. We tolerate missing/extra fields
+// so a broken or older agent is still diagnosable.
+type sdkErrorBody struct {
+	Error   string `json:"error"`
+	Message string `json:"message"`
+}
+
+// formatUnexpectedStatus reads a bounded preview of the response body and
+// returns an error that surfaces the SDK's structured {error,message} payload
+// when present, or the raw body snippet otherwise. Bytes consumed here are
+// lost for further processing, so callers must only invoke this on the
+// non-success branch.
+func formatUnexpectedStatus(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+	if len(body) == 0 {
+		return fmt.Errorf("%w: %d", ErrUnexpectedStatus, resp.StatusCode)
 	}
-	req.Header.Set("Accept", "application/json")
+	var e sdkErrorBody
+	if err := json.Unmarshal(body, &e); err == nil && (e.Error != "" || e.Message != "") {
+		switch {
+		case e.Error != "" && e.Message != "":
+			return fmt.Errorf("%w: %d %s: %s", ErrUnexpectedStatus, resp.StatusCode, e.Error, e.Message)
+		case e.Error != "":
+			return fmt.Errorf("%w: %d %s", ErrUnexpectedStatus, resp.StatusCode, e.Error)
+		default:
+			return fmt.Errorf("%w: %d %s", ErrUnexpectedStatus, resp.StatusCode, e.Message)
+		}
+	}
+	return fmt.Errorf("%w: %d: %s", ErrUnexpectedStatus, resp.StatusCode, string(body))
+}
+
+// doDelete performs a DELETE request [statuses: 200, 204].
+func doDelete(ctx context.Context, client httpClient, url string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrCreateRequest, err)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrRequest, err)
+		return fmt.Errorf("%w: %v", ErrRequest, err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: %d", ErrUnexpectedStatus, resp.StatusCode)
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusNoContent:
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil
+	default:
+		return formatUnexpectedStatus(resp)
 	}
-
-	var dst T
-	if err = json.NewDecoder(resp.Body).Decode(&dst); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrDecode, err)
-	}
-	return &dst, nil
 }
 
-// doPost performs a POST request with a JSON body [statuses: 200, 201, 204].
-func doPost(ctx context.Context, client httpClient, url string, body any) error {
-	payload, err := json.Marshal(body)
+// doProtoJSONPostDecoding posts `in` as canonical proto-JSON and decodes
+// the response body into `out`. Use when the response carries
+// meaningful data — e.g. SubmitTaskResponse.task_id.
+//
+// On a non-2xx response, `formatUnexpectedStatus` pulls the SDK error
+// envelope into the returned error so callers see the agent's reason
+// verbatim. Any 2xx body is decoded with `DiscardUnknown: true` so the
+// agent can add fields without breaking older control planes.
+func doProtoJSONPostDecoding(ctx context.Context, client httpClient, url string, in, out proto.Message) error {
+	payload, err := protojson.MarshalOptions{
+		UseProtoNames:   false,
+		EmitUnpopulated: false,
+	}.Marshal(in)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrCreateRequest, err)
 	}
@@ -51,6 +99,7 @@ func doPost(ctx context.Context, client httpClient, url string, body any) error 
 		return fmt.Errorf("%w: %v", ErrCreateRequest, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -58,13 +107,24 @@ func doPost(ctx context.Context, client httpClient, url string, body any) error 
 	}
 	defer resp.Body.Close()
 
-	// Drain body to allow connection reuse.
-	_, _ = io.Copy(io.Discard, resp.Body)
-
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated, http.StatusNoContent:
+		if resp.StatusCode == http.StatusNoContent {
+			return nil
+		}
+		body, rerr := io.ReadAll(resp.Body)
+		if rerr != nil {
+			return fmt.Errorf("%w: %v", ErrDecode, rerr)
+		}
+		if len(body) == 0 {
+			return nil
+		}
+		if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(body, out); err != nil {
+			return fmt.Errorf("%w: %v", ErrDecode, err)
+		}
 		return nil
 	default:
-		return fmt.Errorf("%w: %d", ErrUnexpectedStatus, resp.StatusCode)
+		return formatUnexpectedStatus(resp)
 	}
 }
+
