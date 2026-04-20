@@ -1,33 +1,43 @@
-// Package cookie manages site cookies, used by the browser-facing UI flow.
-package cookie
+// Package httpcookie carries auth tokens over HTTP cookies.
+// Owns the three auth-cookie names and their SameSite/Secure policy.
+package httpcookie
 
 import "net/http"
 
+// Cookie names used by the auth flow.
+const (
+	NameAccessToken  = "access_token"
+	NameRefreshToken = "refresh_token"
+	NameSessionID    = "session_id"
+)
+
 // SetAuth writes the three auth cookies to the response.
 func SetAuth(w http.ResponseWriter, r *http.Request, accessToken, refreshToken, sessionID string) {
+	secure := r.TLS != nil
+
 	http.SetCookie(w, &http.Cookie{
-		Name:     "access_token",
+		Name:     NameAccessToken,
 		Value:    accessToken,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
+		Secure:   secure,
 	})
 	http.SetCookie(w, &http.Cookie{
-		Name:     "refresh_token",
+		Name:     NameRefreshToken,
 		Value:    refreshToken,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   r.TLS != nil,
+		Secure:   secure,
 	})
 	http.SetCookie(w, &http.Cookie{
-		Name:     "session_id",
+		Name:     NameSessionID,
 		Value:    sessionID,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
+		Secure:   secure,
 	})
 }
 
@@ -36,7 +46,7 @@ func DeleteAuth(w http.ResponseWriter, r *http.Request) {
 	secure := r.TLS != nil
 
 	http.SetCookie(w, &http.Cookie{
-		Name:     "access_token",
+		Name:     NameAccessToken,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
@@ -45,7 +55,7 @@ func DeleteAuth(w http.ResponseWriter, r *http.Request) {
 		Secure:   secure,
 	})
 	http.SetCookie(w, &http.Cookie{
-		Name:     "refresh_token",
+		Name:     NameRefreshToken,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
@@ -54,7 +64,7 @@ func DeleteAuth(w http.ResponseWriter, r *http.Request) {
 		Secure:   secure,
 	})
 	http.SetCookie(w, &http.Cookie{
-		Name:     "session_id",
+		Name:     NameSessionID,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
@@ -64,17 +74,17 @@ func DeleteAuth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GetAccessToken returns the access token cookie.
+// GetAccessToken returns the access_token cookie.
 func GetAccessToken(r *http.Request) (*http.Cookie, error) {
-	return r.Cookie("access_token")
+	return r.Cookie(NameAccessToken)
 }
 
-// GetRefreshToken returns the refresh token cookie.
+// GetRefreshToken returns the refresh_token cookie.
 func GetRefreshToken(r *http.Request) (*http.Cookie, error) {
-	return r.Cookie("refresh_token")
+	return r.Cookie(NameRefreshToken)
 }
 
-// GetSessionID returns the session ID cookie.
+// GetSessionID returns the session_id cookie.
 func GetSessionID(r *http.Request) (*http.Cookie, error) {
-	return r.Cookie("session_id")
+	return r.Cookie(NameSessionID)
 }

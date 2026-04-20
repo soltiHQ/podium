@@ -8,7 +8,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/auth/session"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
-	"github.com/soltiHQ/control-plane/internal/transport/http/cookie"
+	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
@@ -75,27 +75,27 @@ func extractBearer(r *http.Request) (token string, fromHeader bool) {
 			return strings.TrimSpace(h[len(prefix):]), true
 		}
 	}
-	if c, err := cookie.GetAccessToken(r); err == nil && c.Value != "" {
+	if c, err := httpcookie.GetAccessToken(r); err == nil && c.Value != "" {
 		return c.Value, false
 	}
 	return "", false
 }
 
 func tryRefresh(w http.ResponseWriter, r *http.Request, svc *session.Service) (*identity.Identity, error) {
-	refreshCookie, err := cookie.GetRefreshToken(r)
+	refreshCookie, err := httpcookie.GetRefreshToken(r)
 	if err != nil || refreshCookie.Value == "" {
 		return nil, err
 	}
-	sessionCookie, err := cookie.GetSessionID(r)
+	sessionCookie, err := httpcookie.GetSessionID(r)
 	if err != nil || sessionCookie.Value == "" {
 		return nil, err
 	}
 
 	pair, id, err := svc.Refresh(r.Context(), sessionCookie.Value, refreshCookie.Value)
 	if err != nil {
-		cookie.DeleteAuth(w, r)
+		httpcookie.DeleteAuth(w, r)
 		return nil, err
 	}
-	cookie.SetAuth(w, r, pair.AccessToken, pair.RefreshToken, id.SessionID)
+	httpcookie.SetAuth(w, r, pair.AccessToken, pair.RefreshToken, id.SessionID)
 	return id, nil
 }

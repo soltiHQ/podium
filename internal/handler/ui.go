@@ -14,7 +14,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
 	apimapv1 "github.com/soltiHQ/control-plane/internal/transport/http/apimap/v1"
-	"github.com/soltiHQ/control-plane/internal/transport/http/cookie"
+	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
@@ -148,7 +148,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 	u.hub.Record(event.SessionCreated, event.Payload{
 		ID: id.UserID, Name: id.Name, By: "auth",
 	})
-	cookie.SetAuth(w, r, res.AccessToken, res.RefreshToken, res.SessionID)
+	httpcookie.SetAuth(w, r, res.AccessToken, res.RefreshToken, res.SessionID)
 	http.Redirect(w, r, redirect, http.StatusFound)
 }
 
@@ -164,12 +164,12 @@ func (u *UI) Logout(w http.ResponseWriter, r *http.Request) {
 		response.NotAllowed(w, r, mode)
 		return
 	}
-	if c, err := cookie.GetSessionID(r); err == nil && c != nil && c.Value != "" {
+	if c, err := httpcookie.GetSessionID(r); err == nil && c != nil && c.Value != "" {
 		_ = u.accessSVC.Logout(r.Context(), access.LogoutRequest{SessionID: c.Value})
 	}
 
 	u.logger.Info().Msg("logout")
-	cookie.DeleteAuth(w, r)
+	httpcookie.DeleteAuth(w, r)
 	http.Redirect(w, r, routepath.PageLogin, http.StatusFound)
 }
 
