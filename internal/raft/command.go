@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/soltiHQ/control-plane/domain/wire"
+	"github.com/soltiHQ/control-plane/internal/event"
 )
 
 // OpCode identifies the mutation carried by an [Op].
@@ -42,6 +43,10 @@ const (
 	OpRolloutUpsert
 	OpRolloutDelete
 	OpRolloutDeleteBySpec
+
+	OpEventNotify
+	OpEventRecord
+	OpEventDeleteIssues
 )
 
 // Op is a single mutation to apply as part of a [Command].
@@ -71,6 +76,11 @@ type Op struct {
 
 	// SessionRevoke param.
 	RevokedAtNs int64
+
+	// Event ops.
+	EventName    string        // OpEventNotify
+	EventKind    string        // OpEventRecord, OpEventDeleteIssues
+	EventPayload event.Payload // OpEventRecord
 }
 
 // Command is the unit of log entry submitted to Raft. One command maps to

@@ -71,13 +71,14 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to load config")
 	}
 
-	store, leadership, raftShutdown, err := buildCluster(cfg.Cluster, logger)
+	store, leadership, eventHub, raftShutdown, err := buildCluster(cfg.Cluster, logger)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to build cluster")
 	}
 	if raftShutdown != nil {
 		defer raftShutdown()
 	}
+	defer eventHub.Close()
 
 	var (
 		authModel = wire.NewAuth(store, cfg.Auth)
@@ -99,9 +100,6 @@ func main() {
 
 	proxyPool := proxy.NewPool()
 	defer proxyPool.Close()
-
-	eventHub := event.NewHub(logger)
-	defer eventHub.Close()
 
 	htmx.Configure(cfg.Triggers)
 
@@ -167,17 +165,20 @@ func initServices(store storage.Storage, authModel *wire.Auth, logger zerolog.Lo
 	}
 }
 
-// buildCluster constructs the storage.Storage + cluster.Leadership pair
-// declared by cfg. Returns (store, leadership, shutdownFunc, err).
-func buildCluster(cfg cluster.Config, logger zerolog.Logger) (storage.Storage, cluster.Leadership, func(), error) {
+// buildCluster assembles the storage + leadership + event-hub trio declared
+// by cfg. In raft mode the hub is also wired to replicate mutations through
+// the Raft log. Returns the store/leadership/hub the rest of main.go uses,
+// plus a shutdown function for the Raft node (nil in standalone).
+func buildCluster(cfg cluster.Config, logger zerolog.Logger) (storage.Storage, cluster.Leadership, *event.Hub, func(), error) {
 	inner := inmemory.New()
+	hub := event.NewHub(logger)
 	switch cfg.Backend {
 	case "", cluster.BackendStandalone:
-		return inner, standalone.NewLeadership(), nil, nil
+		return inner, standalone.NewLeadership(), hub, nil, nil
 	case cluster.BackendRaft:
 		disco, err := buildDiscovery(cfg.Discovery)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		p, err := raftpkg.New(raftpkg.Config{
 			NodeID:             cfg.Raft.NodeID,
@@ -186,13 +187,13 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger) (storage.Storage, c
 			DataDir:            cfg.Raft.DataDir,
 			ElectionTimeout:    msToDuration(cfg.Raft.ElectionTimeoutMs),
 			HeartbeatTimeout:   msToDuration(cfg.Raft.HeartbeatTimeoutMs),
-		}, inner, disco, logger)
+		}, inner, hub, disco, logger)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
-		return p.Store(), p.Leadership(), func() { _ = p.Shutdown() }, nil
+		return p.Store(), p.Leadership(), hub, func() { _ = p.Shutdown() }, nil
 	default:
-		return nil, nil, nil, fmt.Errorf("cluster: unknown backend %q", cfg.Backend)
+		return nil, nil, nil, nil, fmt.Errorf("cluster: unknown backend %q", cfg.Backend)
 	}
 }
 

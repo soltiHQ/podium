@@ -25,6 +25,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/soltiHQ/control-plane/internal/cluster"
+	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
@@ -59,6 +60,7 @@ type Profile struct {
 
 	inner      storage.Storage
 	store      *Store
+	hub        *event.Hub
 	leadership *Leadership
 	raft       *hraft.Raft
 	transport  *hraft.NetworkTransport
@@ -74,7 +76,7 @@ type Profile struct {
 // On first start (empty DataDir) the node bootstraps a cluster consisting of
 // every peer returned by disco.Peers() plus itself. On subsequent starts the
 // on-disk state is loaded and the cluster re-formed automatically.
-func New(cfg Config, inner storage.Storage, disco cluster.Discovery, logger zerolog.Logger) (*Profile, error) {
+func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discovery, logger zerolog.Logger) (*Profile, error) {
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("raft: NodeID is required")
 	}
@@ -86,6 +88,9 @@ func New(cfg Config, inner storage.Storage, disco cluster.Discovery, logger zero
 	}
 	if inner == nil {
 		return nil, fmt.Errorf("raft: nil inner store")
+	}
+	if hub == nil {
+		return nil, fmt.Errorf("raft: nil hub")
 	}
 
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
@@ -139,7 +144,7 @@ func New(cfg Config, inner storage.Storage, disco cluster.Discovery, logger zero
 		return nil, fmt.Errorf("raft: snapshot store: %w", err)
 	}
 
-	fsm := NewFSM(inner)
+	fsm := NewFSM(inner, hub)
 	r, err := hraft.NewRaft(rcfg, fsm, logStore, stable, snap, transport)
 	if err != nil {
 		return nil, fmt.Errorf("raft: new raft: %w", err)
@@ -167,6 +172,7 @@ func New(cfg Config, inner storage.Storage, disco cluster.Discovery, logger zero
 	p := &Profile{
 		cfg:        cfg,
 		inner:      inner,
+		hub:        hub,
 		raft:       r,
 		transport:  transport,
 		logStore:   logStore,
@@ -176,6 +182,10 @@ func New(cfg Config, inner storage.Storage, disco cluster.Discovery, logger zero
 		leadership: NewLeadership(r),
 	}
 	p.store = NewStore(inner, r)
+	// Plug the event-writer so hub mutations replicate through Raft. From
+	// this point Notify/Record/DeleteIssues on any replica go via the log;
+	// the FSM fires ApplyLocal* on every node.
+	hub.SetWriter(NewEventWriter(r, hub))
 	return p, nil
 }
 
@@ -184,6 +194,10 @@ func (p *Profile) Store() storage.Storage { return p.store }
 
 // Leadership returns the raft-based Leadership.
 func (p *Profile) Leadership() cluster.Leadership { return p.leadership }
+
+// Hub returns the local event.Hub. Writes go through Raft (see EventWriter);
+// reads are local. Exposed primarily for tests and main-wiring.
+func (p *Profile) Hub() *event.Hub { return p.hub }
 
 // Shutdown gracefully stops the raft node and releases log/stable stores.
 func (p *Profile) Shutdown() error {

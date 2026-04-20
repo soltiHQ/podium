@@ -9,6 +9,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/cluster/discovery"
+	"github.com/soltiHQ/control-plane/internal/event"
 	raftpkg "github.com/soltiHQ/control-plane/internal/raft"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
@@ -25,7 +26,7 @@ func newSingleNode(t *testing.T) *raftpkg.Profile {
 		DataDir:            dir,
 		ElectionTimeout:    50 * time.Millisecond,
 		HeartbeatTimeout:   50 * time.Millisecond,
-	}, inmemory.New(), discovery.NewStatic(nil), zerolog.Nop())
+	}, inmemory.New(), event.NewHub(zerolog.Nop()), discovery.NewStatic(nil), zerolog.Nop())
 	if err != nil {
 		t.Fatalf("raft.New: %v", err)
 	}
@@ -123,5 +124,45 @@ func TestRaft_DeleteAgent(t *testing.T) {
 	}
 	if _, err := p.Store().GetAgent(ctx, "a1"); err == nil {
 		t.Fatal("agent still present after delete")
+	}
+}
+
+func TestRaft_EventNotifyFlowsThroughFSM(t *testing.T) {
+	p := newSingleNode(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := p.Hub().Subscribe(ctx)
+
+	p.Hub().Notify("raft-event")
+
+	select {
+	case got := <-ch:
+		if got != "raft-event" {
+			t.Fatalf("got %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no event received through raft")
+	}
+}
+
+func TestRaft_EventRecordFlowsThroughFSM(t *testing.T) {
+	p := newSingleNode(t)
+
+	p.Hub().Record("agent_connected", event.Payload{ID: "a1", Name: "Agent 1"})
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if len(p.Hub().RecentEvents(10)) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	events := p.Hub().RecentEvents(10)
+	if len(events) == 0 {
+		t.Fatal("no events recorded")
+	}
+	if events[0].Kind != "agent_connected" || events[0].Payload.ID != "a1" {
+		t.Fatalf("unexpected record: %+v", events[0])
 	}
 }

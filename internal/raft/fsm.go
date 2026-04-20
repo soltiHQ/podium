@@ -10,40 +10,90 @@ import (
 	hraft "github.com/hashicorp/raft"
 
 	"github.com/soltiHQ/control-plane/domain/wire"
+	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
 // Compile-time check.
 var _ hraft.FSM = (*FSM)(nil)
 
-// FSM applies replicated commands to the underlying storage.
+// FSM applies replicated commands to the underlying storage and hub.
 //
-// Every Apply runs inside one inner WithTx: either all ops commit, or none.
-// The FSM runs on every replica on every committed log entry, keeping state
-// identical across the cluster.
+// Store mutations run inside one WithTx per command (all-or-nothing).
+// Event ops (Notify/Record/DeleteIssues) are applied to the hub outside
+// the transaction — they are append-only and have no rollback semantics.
+// The FSM runs on every replica on every committed log entry.
 type FSM struct {
 	store storage.Storage
+	hub   *event.Hub
 }
 
-// NewFSM builds an FSM wrapping store. store must be the plain inmemory one
-// (NOT a Raft-backed wrapper) to avoid recursive Apply.
-func NewFSM(store storage.Storage) *FSM { return &FSM{store: store} }
+// NewFSM builds an FSM wrapping store and hub. store must be the plain
+// inmemory one (NOT a Raft-backed wrapper) to avoid recursive Apply; hub
+// must be the local *event.Hub whose ApplyLocal* methods we call directly.
+func NewFSM(store storage.Storage, hub *event.Hub) *FSM {
+	return &FSM{store: store, hub: hub}
+}
 
-// Apply decodes the log entry and executes every op inside a single WithTx.
+// Apply decodes the log entry, runs store ops under a single WithTx, and
+// fires event ops on the local hub afterwards.
 func (f *FSM) Apply(l *hraft.Log) any {
 	cmd, err := DecodeCommand(l.Data)
 	if err != nil {
 		return err
 	}
 	ctx := context.Background()
-	return f.store.WithTx(ctx, func(tx storage.Storage) error {
-		for i, op := range cmd.Ops {
-			if err := applyOp(ctx, tx, op); err != nil {
-				return fmt.Errorf("op[%d] %d: %w", i, op.Code, err)
-			}
+
+	// Split ops: store-ops go through WithTx, event-ops are applied
+	// directly on the hub after the tx commits successfully.
+	var (
+		storeOps []Op
+		eventOps []Op
+	)
+	for _, op := range cmd.Ops {
+		if isEventOp(op.Code) {
+			eventOps = append(eventOps, op)
+		} else {
+			storeOps = append(storeOps, op)
 		}
-		return nil
-	})
+	}
+
+	if len(storeOps) > 0 {
+		err := f.store.WithTx(ctx, func(tx storage.Storage) error {
+			for i, op := range storeOps {
+				if err := applyOp(ctx, tx, op); err != nil {
+					return fmt.Errorf("op[%d] %d: %w", i, op.Code, err)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	for _, op := range eventOps {
+		applyEventOp(f.hub, op)
+	}
+	return nil
+}
+
+func isEventOp(c OpCode) bool {
+	return c == OpEventNotify || c == OpEventRecord || c == OpEventDeleteIssues
+}
+
+func applyEventOp(hub *event.Hub, op Op) {
+	if hub == nil {
+		return
+	}
+	switch op.Code {
+	case OpEventNotify:
+		hub.ApplyLocalNotify(op.EventName)
+	case OpEventRecord:
+		hub.ApplyLocalRecord(op.EventKind, op.EventPayload)
+	case OpEventDeleteIssues:
+		hub.ApplyLocalDeleteIssues(op.EventKind, op.ID)
+	}
 }
 
 func applyOp(ctx context.Context, tx storage.Storage, op Op) error {
