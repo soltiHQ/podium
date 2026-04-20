@@ -12,7 +12,7 @@ type JSONResponder struct{}
 func NewJSON() *JSONResponder { return &JSONResponder{} }
 
 // Respond writes the view body as JSON.
-func (x *JSONResponder) Respond(w http.ResponseWriter, r *http.Request, code int, v *View) {
+func (x *JSONResponder) Respond(w http.ResponseWriter, _ *http.Request, code int, v *View) {
 	if v == nil {
 		x.writeHeaders(w, code)
 		return
