@@ -27,6 +27,13 @@ service SoltiApi {
   // "cancel without purge" is not exposed because taskvisor has no
   // concept of a paused task anyway (cancel = final on its side).
   rpc DeleteTask(DeleteTaskRequest) returns (DeleteTaskResponse);
+
+  // Subscribe to the live-tail stream of stdout/stderr events for a task.
+  // Server-streaming RPC: one subscription covers all retries of the task,
+  // with explicit run-boundary markers. The agent never persists output —
+  // late subscribers receive only events that are still in the broadcast
+  // ring; missed events are signaled via LaggedProto.
+  rpc StreamTaskLogs(StreamTaskLogsRequest) returns (stream OutputEventProto);
 }
 
 // --- SubmitTask ---
@@ -80,3 +87,50 @@ message DeleteTaskRequest {
 }
 
 message DeleteTaskResponse {}
+
+// --- StreamTaskLogs ---
+
+message StreamTaskLogsRequest {
+  string task_id = 1;
+}
+
+enum OutputStreamKind {
+  OUTPUT_STREAM_KIND_UNSPECIFIED = 0;
+  OUTPUT_STREAM_KIND_STDOUT      = 1;
+  OUTPUT_STREAM_KIND_STDERR      = 2;
+}
+
+message OutputChunkProto {
+  uint32 attempt          = 1; // which run attempt produced this line
+  OutputStreamKind stream = 2; // stdout or stderr
+  uint64 seq              = 3; // monotonic, per-stream, resets each attempt
+  int64  ts               = 4; // unix milliseconds when the agent read it
+  bytes  line             = 5; // truncated/cleaned line content (UTF-8)
+}
+
+message RunStartedProto {
+  uint32 attempt    = 1;
+  int64  started_at = 2; // unix milliseconds
+}
+
+// Current run finished. Consumers can stop accumulating chunks for this attempt.
+message RunFinishedProto {
+  uint32 attempt           = 1;
+  optional int32 exit_code = 2;
+  int64  finished_at       = 3; // unix milliseconds
+}
+
+// Subscriber fell behind the broadcast ring window.
+message LaggedProto {
+  uint64 skipped = 1; // number of events the subscriber missed
+}
+
+// Tagged wrapper — one of the four variants is set per stream item.
+message OutputEventProto {
+  oneof kind {
+    OutputChunkProto chunk        = 1;
+    RunStartedProto  run_started  = 2;
+    RunFinishedProto run_finished = 3;
+    LaggedProto      lagged       = 4;
+  }
+}
