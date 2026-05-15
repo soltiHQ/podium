@@ -12,20 +12,20 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	iauth "github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
-	"github.com/soltiHQ/control-plane/internal/auth/wire"
+	"github.com/soltiHQ/control-plane/internal/auth/kit"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
 // Service implements shared authentication use-cases.
 type Service struct {
-	auth *wire.Auth
+	auth *kit.Auth
 
 	logger zerolog.Logger
 	store  storage.Storage
 }
 
 // New creates a new authentication service.
-func New(authSvc *wire.Auth, store storage.Storage, logger zerolog.Logger) *Service {
+func New(authSvc *kit.Auth, store storage.Storage, logger zerolog.Logger) *Service {
 	if authSvc == nil {
 		panic("access.Service: nil auth service")
 	}

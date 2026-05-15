@@ -12,7 +12,7 @@ import (
 	"github.com/kelseyhightower/envconfig"
 	"gopkg.in/yaml.v3"
 
-	"github.com/soltiHQ/control-plane/internal/auth/wire"
+	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/server"
 	"github.com/soltiHQ/control-plane/internal/server/runner/grpcserver"
@@ -36,7 +36,7 @@ type Config struct {
 	Lifecycle     lifecycle.Config      `yaml:"lifecycle"      envconfig:"LIFECYCLE"`
 	Triggers      htmx.Config           `yaml:"triggers"       envconfig:"TRIGGERS"`
 	Server        server.Config         `yaml:"server"         envconfig:"SERVER"`
-	Auth          wire.Config           `yaml:"auth"           envconfig:"AUTH"`
+	Auth          auth.Config           `yaml:"auth"           envconfig:"AUTH"`
 	CORS          middleware.CORSConfig `yaml:"cors"           envconfig:"CORS"`
 	Cluster       cluster.Config        `yaml:"cluster"        envconfig:"CLUSTER"`
 }
@@ -47,7 +47,7 @@ func Default() Config {
 		HTTP:          httpserver.Config{Name: "http", Addr: ":8080"},
 		HTTPDiscovery: httpserver.Config{Name: "http-discovery", Addr: ":8082"},
 		GRPC:          grpcserver.Config{Name: "grpc-discovery", Addr: ":50051"},
-		Auth: wire.Config{
+		Auth: auth.Config{
 			JWTSecret: "solti-fkhk5qo48thkads-85gnsdAdtXZvo9r",
 		},
 		CORS: middleware.CORSConfig{

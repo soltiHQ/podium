@@ -16,8 +16,8 @@ import (
 
 	genv1 "github.com/soltiHQ/control-plane/api/gen/v1"
 	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/internal/auth/kit"
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
-	"github.com/soltiHQ/control-plane/internal/auth/wire"
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/cluster/discovery"
@@ -81,7 +81,7 @@ func main() {
 	defer eventHub.Close()
 
 	var (
-		authModel = wire.NewAuth(store, cfg.Auth)
+		authModel = kit.New(store, cfg.Auth)
 		svc       = initServices(store, authModel, logger)
 	)
 
@@ -153,7 +153,7 @@ func main() {
 	logger.Info().Msg("server stopped")
 }
 
-func initServices(store storage.Storage, authModel *wire.Auth, logger zerolog.Logger) services {
+func initServices(store storage.Storage, authModel *kit.Auth, logger zerolog.Logger) services {
 	return services{
 		access:     access.New(authModel, store, logger),
 		credential: credential.New(store, logger),
@@ -238,7 +238,7 @@ func waitForLeader(ctx context.Context, l cluster.Leadership, timeout time.Durat
 	return l.AmLeader() || l.CurrentLeader() != ""
 }
 
-func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *wire.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership) http.Handler {
+func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership) http.Handler {
 	var (
 		apiHandler    = handler.NewAPI(logger, svc.user, svc.access, svc.session, svc.credential, svc.agent, svc.spec, proxyPool, eventHub)
 		authMW        = middleware.Auth(authModel.Verifier, authModel.Session)
