@@ -5,7 +5,7 @@ import (
 	"time"
 
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 )
@@ -38,7 +38,7 @@ func AgentToREST(a *model.Agent) restv1.Agent {
 }
 
 // UserToREST maps a domain User to its REST DTO. Role-ID → Role-name lookup
-// uses the built-in role catalogue (kind.BuiltinRoles); unknown IDs fall
+// uses the built-in role catalogue (enum.BuiltinRoles); unknown IDs fall
 // through as themselves.
 func UserToREST(u *model.User) restv1.User {
 	if u == nil {
@@ -82,7 +82,7 @@ func RoleToREST(r *model.Role) restv1.Role {
 }
 
 // PermissionToREST returns the string form of a domain permission.
-func PermissionToREST(p kind.Permission) string {
+func PermissionToREST(p enum.Permission) string {
 	return string(p)
 }
 
@@ -199,8 +199,8 @@ func RolloutEntryToREST(ss *model.Rollout) restv1.RolloutEntry {
 // roleNameByID maps built-in role IDs to display names. Unknown IDs are
 // surfaced as themselves by UserToREST.
 var roleNameByID = func() map[string]string {
-	m := make(map[string]string, len(kind.BuiltinRoles))
-	for _, r := range kind.BuiltinRoles {
+	m := make(map[string]string, len(enum.BuiltinRoles))
+	for _, r := range enum.BuiltinRoles {
 		m[r.ID] = r.Name
 	}
 	return m

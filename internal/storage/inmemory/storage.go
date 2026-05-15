@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
@@ -159,7 +159,7 @@ func (s *Store) GetCredential(ctx context.Context, id string) (*model.Credential
 	return s.credentials.Get(ctx, id)
 }
 
-func (s *Store) GetCredentialByUserAndAuth(ctx context.Context, userID string, auth kind.Auth) (*model.Credential, error) {
+func (s *Store) GetCredentialByUserAndAuth(ctx context.Context, userID string, auth enum.Auth) (*model.Credential, error) {
 	if userID == "" {
 		return nil, storage.ErrInvalidArgument
 	}

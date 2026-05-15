@@ -2,7 +2,7 @@
 // against the live state on agents:
 //
 //  1. Lists actionable rollouts (status Pending, Drift, or retry-eligible Failed).
-//  2. Dispatches each by its [kind.RolloutIntent]:
+//  2. Dispatches each by its [enum.RolloutIntent]:
 //     - Install    → SubmitTask(spec)                               → save TaskId
 //     - Update     → DeleteTask(oldID); SubmitTask(spec)            → save new TaskId
 //     - Uninstall  → DeleteTask(actualTaskID) (or noop if empty)    → drop rollout
@@ -28,7 +28,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	genv1 "github.com/soltiHQ/control-plane/api/gen/v1"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/event"
@@ -42,7 +42,7 @@ import (
 // concrete *proxy.Pool) keeps the runner testable against fakes without
 // spinning up real HTTP/gRPC transport.
 type proxyGetter interface {
-	Get(endpoint string, epType kind.EndpointType, apiVersion kind.APIVersion) (proxy.AgentProxy, error)
+	Get(endpoint string, epType enum.EndpointType, apiVersion enum.APIVersion) (proxy.AgentProxy, error)
 }
 
 // Runner periodically reconciles Rollout records against live state on
@@ -156,10 +156,10 @@ func (r *Runner) tick() {
 // human action or a fresh Deploy click to reset attempts).
 func (r *Runner) reconcileRollouts(ctx context.Context) {
 	filter := r.store.BuildRolloutFilter(storage.RolloutQueryCriteria{
-		Statuses: []kind.SyncStatus{
-			kind.SyncStatusPending,
-			kind.SyncStatusDrift,
-			kind.SyncStatusFailed,
+		Statuses: []enum.SyncStatus{
+			enum.SyncStatusPending,
+			enum.SyncStatusDrift,
+			enum.SyncStatusFailed,
 		},
 	})
 	res, err := r.store.ListRollouts(ctx, filter, storage.ListOptions{Limit: storage.MaxListLimit})
@@ -175,7 +175,7 @@ func (r *Runner) reconcileRollouts(ctx context.Context) {
 		if ss == nil {
 			continue
 		}
-		if ss.Status() == kind.SyncStatusFailed && ss.Attempts() >= r.cfg.MaxRetries {
+		if ss.Status() == enum.SyncStatusFailed && ss.Attempts() >= r.cfg.MaxRetries {
 			continue
 		}
 		rolloutID := ss.ID()
@@ -199,11 +199,11 @@ func (r *Runner) reconcile(ctx context.Context, rolloutID string) {
 	}
 
 	switch ss.Intent() {
-	case kind.RolloutIntentUninstall:
+	case enum.RolloutIntentUninstall:
 		r.reconcileUninstall(ctx, ss)
-	case kind.RolloutIntentInstall, kind.RolloutIntentUpdate:
+	case enum.RolloutIntentInstall, enum.RolloutIntentUpdate:
 		r.reconcileSubmit(ctx, ss)
-	case kind.RolloutIntentNoop:
+	case enum.RolloutIntentNoop:
 		// Filter should have excluded these, but belt-and-braces.
 		return
 	}

@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 var _ domain.Entity[*Session] = (*Session)(nil)
@@ -26,12 +26,12 @@ type Session struct {
 	userID       string
 	credentialID string
 
-	auth        kind.Auth
+	auth        enum.Auth
 	refreshHash []byte
 }
 
 // NewSession creates a new session entity.
-func NewSession(id, userID, credentialID string, auth kind.Auth, refreshHash []byte, expiresAt time.Time) (*Session, error) {
+func NewSession(id, userID, credentialID string, auth enum.Auth, refreshHash []byte, expiresAt time.Time) (*Session, error) {
 	if id == "" {
 		return nil, domain.ErrEmptyID
 	}
@@ -74,7 +74,7 @@ func (s *Session) UserID() string { return s.userID }
 func (s *Session) CredentialID() string { return s.credentialID }
 
 // AuthKind returns the authentication kind used for this session.
-func (s *Session) AuthKind() kind.Auth { return s.auth }
+func (s *Session) AuthKind() enum.Auth { return s.auth }
 
 // RefreshHash returns a copy of the stored refresh token hash.
 func (s *Session) RefreshHash() []byte {

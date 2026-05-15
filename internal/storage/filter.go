@@ -1,6 +1,6 @@
 package storage
 
-import "github.com/soltiHQ/control-plane/domain/kind"
+import "github.com/soltiHQ/control-plane/domain/enum"
 
 // AgentFilter defines a backend-specific query object for agents.
 //
@@ -45,7 +45,7 @@ type RolloutFilter interface{}
 type RolloutQueryCriteria struct {
 	SpecID   string
 	AgentID  string
-	Statuses []kind.SyncStatus
+	Statuses []enum.SyncStatus
 }
 
 // SpecQueryCriteria defines a backend-agnostic query description for specs.

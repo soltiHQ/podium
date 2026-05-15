@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 var _ domain.Entity[*Rollout] = (*Rollout)(nil)
@@ -13,11 +13,11 @@ var _ domain.Entity[*Rollout] = (*Rollout)(nil)
 //
 // The record captures three orthogonal pieces of information:
 //
-//   - **Intent** ([kind.RolloutIntent]) — what the sync runner should do
+//   - **Intent** ([enum.RolloutIntent]) — what the sync runner should do
 //     next: Install, Update, Uninstall, or Noop. Populated by the service
 //     layer (Deploy/Delete reconcilers) based on spec-level changes and
 //     cleared back to Noop once the agent confirms the action.
-//   - **Status** ([kind.SyncStatus]) — what happened last time the sync
+//   - **Status** ([enum.SyncStatus]) — what happened last time the sync
 //     runner touched this rollout: Pending, Synced, Failed, Drift, or
 //     Unknown.
 //   - **Generation tracking** — `ObservedGeneration` is the last
@@ -45,8 +45,8 @@ type Rollout struct {
 	actualTaskID string
 	errMsg       string
 
-	status kind.SyncStatus
-	intent kind.RolloutIntent
+	status enum.SyncStatus
+	intent enum.RolloutIntent
 }
 
 // RolloutID returns the deterministic identifier for a Spec-Agent pair.
@@ -70,8 +70,8 @@ func NewRollout(specID, agentID string, desiredGeneration int) (*Rollout, error)
 		agentID: agentID,
 
 		desiredGeneration: desiredGeneration,
-		status:            kind.SyncStatusPending,
-		intent:            kind.RolloutIntentInstall,
+		status:            enum.SyncStatusPending,
+		intent:            enum.RolloutIntentInstall,
 	}, nil
 }
 
@@ -97,10 +97,10 @@ func (ss *Rollout) DesiredGeneration() int { return ss.desiredGeneration }
 func (ss *Rollout) ObservedGeneration() int { return ss.observedGeneration }
 
 // Status returns the current sync status.
-func (ss *Rollout) Status() kind.SyncStatus { return ss.status }
+func (ss *Rollout) Status() enum.SyncStatus { return ss.status }
 
 // Intent returns what the sync runner should do on the next tick.
-func (ss *Rollout) Intent() kind.RolloutIntent { return ss.intent }
+func (ss *Rollout) Intent() enum.RolloutIntent { return ss.intent }
 
 // ActualTaskID returns the TaskId the agent reported on the last
 // successful SubmitTask, or empty if nothing is installed.
@@ -134,7 +134,7 @@ func (ss *Rollout) SetUpdatedAt(t time.Time) { ss.updatedAt = t }
 // SetIntent records the next reconciliation action the sync runner should
 // take. Callers should typically also call [MarkPending] to reset
 // attempts/error and signal that the runner should pick this rollout up.
-func (ss *Rollout) SetIntent(intent kind.RolloutIntent) {
+func (ss *Rollout) SetIntent(intent enum.RolloutIntent) {
 	ss.intent = intent
 	ss.updatedAt = time.Now()
 }
@@ -153,7 +153,7 @@ func (ss *Rollout) SetActualTaskID(taskID string) {
 // be set (Install/Update/Uninstall).
 func (ss *Rollout) MarkPending(desiredGeneration int) {
 	ss.desiredGeneration = desiredGeneration
-	ss.status = kind.SyncStatusPending
+	ss.status = enum.SyncStatusPending
 	ss.attempts = 0
 	ss.errMsg = ""
 	ss.updatedAt = time.Now()
@@ -165,8 +165,8 @@ func (ss *Rollout) MarkPending(desiredGeneration int) {
 // of `Noop`.
 func (ss *Rollout) MarkSynced(observedGeneration int) {
 	ss.observedGeneration = observedGeneration
-	ss.status = kind.SyncStatusSynced
-	ss.intent = kind.RolloutIntentNoop
+	ss.status = enum.SyncStatusSynced
+	ss.intent = enum.RolloutIntentNoop
 	ss.lastSyncedAt = time.Now()
 	ss.errMsg = ""
 	ss.updatedAt = time.Now()
@@ -174,7 +174,7 @@ func (ss *Rollout) MarkSynced(observedGeneration int) {
 
 // MarkDrift marks a version mismatch detected via export.
 func (ss *Rollout) MarkDrift() {
-	ss.status = kind.SyncStatusDrift
+	ss.status = enum.SyncStatusDrift
 	ss.updatedAt = time.Now()
 }
 
@@ -182,7 +182,7 @@ func (ss *Rollout) MarkDrift() {
 // runner retries the same action on the next tick (bounded by
 // `MaxRetries`).
 func (ss *Rollout) MarkFailed(errMsg string) {
-	ss.status = kind.SyncStatusFailed
+	ss.status = enum.SyncStatusFailed
 	ss.errMsg = errMsg
 	ss.attempts++
 	ss.lastPushedAt = time.Now()
@@ -191,7 +191,7 @@ func (ss *Rollout) MarkFailed(errMsg string) {
 
 // MarkUnknown sets the state when the agent is unreachable.
 func (ss *Rollout) MarkUnknown() {
-	ss.status = kind.SyncStatusUnknown
+	ss.status = enum.SyncStatusUnknown
 	ss.updatedAt = time.Now()
 }
 
@@ -210,7 +210,7 @@ func (ss *Rollout) IsStaleFor(generation int) bool {
 	if ss == nil {
 		return false
 	}
-	return ss.intent != kind.RolloutIntentNoop || ss.observedGeneration < generation
+	return ss.intent != enum.RolloutIntentNoop || ss.observedGeneration < generation
 }
 
 // Clone creates a deep copy of the Rollout.

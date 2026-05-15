@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	"github.com/segmentio/ksuid"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
@@ -30,8 +30,8 @@ import (
 //   - POST /api/v1/specs
 func (a *API) Specs(w http.ResponseWriter, r *http.Request) {
 	route.Resource(w, r, routepath.ApiSpecs,
-		route.Endpoint{Method: http.MethodGet, Perm: kind.SpecsGet, Fn: a.specList},
-		route.Endpoint{Method: http.MethodPost, Perm: kind.SpecsAdd, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode) {
+		route.Endpoint{Method: http.MethodGet, Perm: enum.SpecsGet, Fn: a.specList},
+		route.Endpoint{Method: http.MethodPost, Perm: enum.SpecsAdd, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode) {
 			a.specUpsert(w, r, m, "", modeCreate)
 		}},
 	)
@@ -48,14 +48,14 @@ func (a *API) Specs(w http.ResponseWriter, r *http.Request) {
 //   - GET    /api/v1/specs/{id}/sync
 func (a *API) SpecsRouter(w http.ResponseWriter, r *http.Request) {
 	route.Router(w, r, routepath.ApiSpec,
-		route.Subroute{Action: "", Method: http.MethodGet, Perm: kind.SpecsGet, Fn: a.specDetails},
-		route.Subroute{Action: "", Method: http.MethodPut, Perm: kind.SpecsEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
+		route.Subroute{Action: "", Method: http.MethodGet, Perm: enum.SpecsGet, Fn: a.specDetails},
+		route.Subroute{Action: "", Method: http.MethodPut, Perm: enum.SpecsEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
 			a.specUpsert(w, r, m, id, modeUpdate)
 		}},
-		route.Subroute{Action: "", Method: http.MethodDelete, Perm: kind.SpecsEdit, Fn: a.specDelete},
-		route.Subroute{Action: "force", Method: http.MethodDelete, Perm: kind.SpecsEdit, Fn: a.specForceDelete},
-		route.Subroute{Action: "deploy", Method: http.MethodPost, Perm: kind.SpecsDeploy, Fn: a.specDeploy},
-		route.Subroute{Action: "sync", Method: http.MethodGet, Perm: kind.SpecsGet, Fn: a.specRollouts},
+		route.Subroute{Action: "", Method: http.MethodDelete, Perm: enum.SpecsEdit, Fn: a.specDelete},
+		route.Subroute{Action: "force", Method: http.MethodDelete, Perm: enum.SpecsEdit, Fn: a.specForceDelete},
+		route.Subroute{Action: "deploy", Method: http.MethodPost, Perm: enum.SpecsDeploy, Fn: a.specDeploy},
+		route.Subroute{Action: "sync", Method: http.MethodGet, Perm: enum.SpecsGet, Fn: a.specRollouts},
 	)
 }
 
@@ -157,7 +157,7 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 
 	// Kind
 	if in.KindType != "" {
-		ts.SetKindType(kind.TaskKindType(in.KindType))
+		ts.SetKindType(enum.TaskKindType(in.KindType))
 	}
 	if in.KindConfig != nil {
 		ts.SetKindConfig(in.KindConfig)
@@ -168,14 +168,14 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		ts.SetTimeoutMs(in.TimeoutMs)
 	}
 	if in.RestartType != "" {
-		ts.SetRestartType(kind.RestartType(in.RestartType))
+		ts.SetRestartType(enum.RestartType(in.RestartType))
 	}
 	if in.IntervalMs > 0 {
 		ts.SetIntervalMs(in.IntervalMs)
 	}
 	if action == modeCreate {
 		ts.SetBackoff(model.BackoffConfig{
-			Jitter:  kind.JitterStrategy(in.Jitter),
+			Jitter:  enum.JitterStrategy(in.Jitter),
 			FirstMs: in.BackoffFirstMs,
 			MaxMs:   in.BackoffMaxMs,
 			Factor:  in.BackoffFactor,
@@ -183,7 +183,7 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	} else if in.Jitter != "" || in.BackoffFirstMs > 0 || in.BackoffMaxMs > 0 || in.BackoffFactor > 0 {
 		b := ts.Backoff()
 		if in.Jitter != "" {
-			b.Jitter = kind.JitterStrategy(in.Jitter)
+			b.Jitter = enum.JitterStrategy(in.Jitter)
 		}
 		if in.BackoffFirstMs > 0 {
 			b.FirstMs = in.BackoffFirstMs

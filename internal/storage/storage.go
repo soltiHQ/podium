@@ -36,7 +36,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 )
 
@@ -180,7 +180,7 @@ type CredentialStore interface {
 	//   - ErrInvalidArgument if userID is empty.
 	//   - ErrUnavailable if the backend is temporarily unavailable.
 	//   - ErrInternal for unexpected storage failures.
-	GetCredentialByUserAndAuth(ctx context.Context, userID string, auth kind.Auth) (*model.Credential, error)
+	GetCredentialByUserAndAuth(ctx context.Context, userID string, auth enum.Auth) (*model.Credential, error)
 
 	// ListCredentialsByUser retrieves all credentials for a specific user.
 	//

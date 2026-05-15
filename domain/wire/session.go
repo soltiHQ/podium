@@ -10,7 +10,7 @@ type SessionDTO struct {
 	ID           string
 	UserID       string
 	CredentialID string
-	Auth         string // kind.Auth
+	Auth         string // enum.Auth
 	RefreshHash  []byte
 	ExpiresAt    time.Time
 	RevokedAt    time.Time

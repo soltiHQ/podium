@@ -9,7 +9,7 @@ import (
 	"github.com/rs/zerolog"
 
 	genv1 "github.com/soltiHQ/control-plane/api/gen/v1"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
@@ -70,7 +70,7 @@ func (f *fakeProxy) ListTaskRuns(ctx context.Context, id string) (*proxyv1.TaskR
 
 type fakePool struct{ ap *fakeProxy }
 
-func (p *fakePool) Get(_ string, _ kind.EndpointType, _ kind.APIVersion) (proxy.AgentProxy, error) {
+func (p *fakePool) Get(_ string, _ enum.EndpointType, _ enum.APIVersion) (proxy.AgentProxy, error) {
 	return p.ap, nil
 }
 
@@ -127,7 +127,7 @@ func TestReconcileInstallSavesTaskIDAndSyncs(t *testing.T) {
 	_ = seedSpecAndAgent(t, store, "sp-1", "agent-a")
 
 	ro, _ := model.NewRollout("sp-1", "agent-a", 1)
-	ro.SetIntent(kind.RolloutIntentInstall)
+	ro.SetIntent(enum.RolloutIntentInstall)
 	_ = store.UpsertRollout(context.Background(), ro)
 
 	r.reconcile(context.Background(), ro.ID())
@@ -143,10 +143,10 @@ func TestReconcileInstallSavesTaskIDAndSyncs(t *testing.T) {
 	if after.ActualTaskID() != "sub-slot-1" {
 		t.Errorf("actualTaskID: got %q, want sub-slot-1", after.ActualTaskID())
 	}
-	if after.Status() != kind.SyncStatusSynced {
+	if after.Status() != enum.SyncStatusSynced {
 		t.Errorf("status: got %s, want synced", after.Status())
 	}
-	if after.Intent() != kind.RolloutIntentNoop {
+	if after.Intent() != enum.RolloutIntentNoop {
 		t.Errorf("intent: got %s, want noop after synced", after.Intent())
 	}
 }
@@ -160,7 +160,7 @@ func TestReconcileUpdateReCreatesAndSwapsTaskID(t *testing.T) {
 	ro, _ := model.NewRollout("sp-1", "agent-a", 1)
 	ro.SetActualTaskID("sub-slot-old")
 	ro.MarkSynced(1)
-	ro.SetIntent(kind.RolloutIntentUpdate)
+	ro.SetIntent(enum.RolloutIntentUpdate)
 	ro.MarkPending(2)
 	_ = store.UpsertRollout(context.Background(), ro)
 
@@ -177,7 +177,7 @@ func TestReconcileUpdateReCreatesAndSwapsTaskID(t *testing.T) {
 	if after.ActualTaskID() != "sub-slot-2" {
 		t.Errorf("actualTaskID: got %q, want sub-slot-2", after.ActualTaskID())
 	}
-	if after.Status() != kind.SyncStatusSynced {
+	if after.Status() != enum.SyncStatusSynced {
 		t.Errorf("status: got %s, want synced", after.Status())
 	}
 }
@@ -196,7 +196,7 @@ func TestReconcileUpdateClearsActualTaskIDBeforeSubmitOnSubmitFailure(t *testing
 	ro, _ := model.NewRollout("sp-1", "agent-a", 1)
 	ro.SetActualTaskID("sub-slot-old")
 	ro.MarkSynced(1)
-	ro.SetIntent(kind.RolloutIntentUpdate)
+	ro.SetIntent(enum.RolloutIntentUpdate)
 	ro.MarkPending(2)
 	_ = store.UpsertRollout(context.Background(), ro)
 
@@ -206,11 +206,11 @@ func TestReconcileUpdateClearsActualTaskIDBeforeSubmitOnSubmitFailure(t *testing
 	if after.ActualTaskID() != "" {
 		t.Errorf("ActualTaskID must be cleared after successful DeleteTask (got %q)", after.ActualTaskID())
 	}
-	if after.Status() != kind.SyncStatusFailed {
+	if after.Status() != enum.SyncStatusFailed {
 		t.Errorf("status: got %s, want failed", after.Status())
 	}
 	// Intent stays so the next tick retries.
-	if after.Intent() != kind.RolloutIntentUpdate {
+	if after.Intent() != enum.RolloutIntentUpdate {
 		t.Errorf("intent: got %s, want update", after.Intent())
 	}
 }
@@ -228,14 +228,14 @@ func TestReconcileUpdateTreatsDeleteTaskNotFoundAsSuccess(t *testing.T) {
 	ro, _ := model.NewRollout("sp-1", "agent-a", 1)
 	ro.SetActualTaskID("sub-slot-old")
 	ro.MarkSynced(1)
-	ro.SetIntent(kind.RolloutIntentUpdate)
+	ro.SetIntent(enum.RolloutIntentUpdate)
 	ro.MarkPending(2)
 	_ = store.UpsertRollout(context.Background(), ro)
 
 	r.reconcile(context.Background(), ro.ID())
 
 	after, _ := store.GetRollout(context.Background(), ro.ID())
-	if after.Status() != kind.SyncStatusSynced {
+	if after.Status() != enum.SyncStatusSynced {
 		t.Errorf("status: got %s, want synced (NotFound should be treated as success)", after.Status())
 	}
 	if after.ActualTaskID() != "sub-slot-new" {
@@ -252,7 +252,7 @@ func TestReconcileUninstallDeletesTaskAndRolloutRow(t *testing.T) {
 	ro, _ := model.NewRollout("sp-1", "agent-a", 1)
 	ro.SetActualTaskID("sub-slot-bye")
 	ro.MarkSynced(1)
-	ro.SetIntent(kind.RolloutIntentUninstall)
+	ro.SetIntent(enum.RolloutIntentUninstall)
 	ro.MarkPending(1)
 	_ = store.UpsertRollout(context.Background(), ro)
 
@@ -276,7 +276,7 @@ func TestReconcileUninstallSkipsNetworkForEmptyTaskID(t *testing.T) {
 	_ = seedSpecAndAgent(t, store, "sp-1", "agent-a")
 
 	ro, _ := model.NewRollout("sp-1", "agent-a", 1)
-	ro.SetIntent(kind.RolloutIntentUninstall)
+	ro.SetIntent(enum.RolloutIntentUninstall)
 	ro.MarkPending(1)
 	_ = store.UpsertRollout(context.Background(), ro)
 

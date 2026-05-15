@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 var _ domain.Entity[*Agent] = (*Agent)(nil)
@@ -33,9 +33,9 @@ type Agent struct {
 	arch     string
 	platform string
 
-	endpointType kind.EndpointType
-	apiVersion   kind.APIVersion
-	status       kind.AgentStatus
+	endpointType enum.EndpointType
+	apiVersion   enum.APIVersion
+	status       enum.AgentStatus
 
 	metadata     map[string]string
 	labels       map[string]string
@@ -60,7 +60,7 @@ func NewAgent(id, name, endpoint string) (*Agent, error) {
 		metadata: make(map[string]string),
 		labels:   make(map[string]string),
 
-		status: kind.AgentStatusActive,
+		status: enum.AgentStatusActive,
 	}, nil
 }
 
@@ -93,7 +93,7 @@ func NewAgentFrom(p AgentParams) (*Agent, error) {
 		return nil, domain.ErrEmptyID
 	}
 
-	epType, err := kind.EndpointTypeFromInt(p.EndpointType)
+	epType, err := enum.EndpointTypeFromInt(p.EndpointType)
 	if err != nil {
 		return nil, err
 	}
@@ -119,14 +119,14 @@ func NewAgentFrom(p AgentParams) (*Agent, error) {
 		name:         p.Name,
 		endpoint:     p.Endpoint,
 		endpointType: epType,
-		apiVersion:   kind.APIVersionFromInt(p.APIVersion),
+		apiVersion:   enum.APIVersionFromInt(p.APIVersion),
 		os:           p.OS,
 		arch:         p.Arch,
 		platform:     p.Platform,
 
 		uptimeSeconds: p.UptimeSeconds,
 
-		status:            kind.AgentStatusActive,
+		status:            enum.AgentStatusActive,
 		lastSeenAt:        now,
 		heartbeatInterval: time.Duration(p.HeartbeatIntervalS) * time.Second,
 	}, nil
@@ -142,10 +142,10 @@ func (a *Agent) Name() string { return a.name }
 func (a *Agent) Endpoint() string { return a.endpoint }
 
 // EndpointType returns the agent's transport protocol.
-func (a *Agent) EndpointType() kind.EndpointType { return a.endpointType }
+func (a *Agent) EndpointType() enum.EndpointType { return a.endpointType }
 
 // APIVersion returns the agent's API version.
-func (a *Agent) APIVersion() kind.APIVersion { return a.apiVersion }
+func (a *Agent) APIVersion() enum.APIVersion { return a.apiVersion }
 
 // UptimeSeconds returns the agent-reported uptime in seconds.
 func (a *Agent) UptimeSeconds() int64 { return a.uptimeSeconds }
@@ -177,7 +177,7 @@ func (a *Agent) HasCapability(cap string) bool {
 }
 
 // Status returns the agent's lifecycle status.
-func (a *Agent) Status() kind.AgentStatus { return a.status }
+func (a *Agent) Status() enum.AgentStatus { return a.status }
 
 // LastSeenAt returns the timestamp of the agent's last successful sync.
 func (a *Agent) LastSeenAt() time.Time { return a.lastSeenAt }
@@ -186,7 +186,7 @@ func (a *Agent) LastSeenAt() time.Time { return a.lastSeenAt }
 func (a *Agent) HeartbeatInterval() time.Duration { return a.heartbeatInterval }
 
 // SetStatus updates the agent's lifecycle status.
-func (a *Agent) SetStatus(s kind.AgentStatus) {
+func (a *Agent) SetStatus(s enum.AgentStatus) {
 	a.status = s
 	a.updatedAt = time.Now()
 }
@@ -218,8 +218,8 @@ func (a *Agent) SetUpdatedAt(t time.Time) { a.updatedAt = t }
 // SetPlatform / SetUptimeSeconds / SetMetadata / SetLabels / SetCapabilities
 // are persistence-adapter hooks that restore every field on reconstruction.
 func (a *Agent) SetLastSeenAt(t time.Time)           { a.lastSeenAt = t }
-func (a *Agent) SetEndpointType(e kind.EndpointType) { a.endpointType = e }
-func (a *Agent) SetAPIVersion(v kind.APIVersion)     { a.apiVersion = v }
+func (a *Agent) SetEndpointType(e enum.EndpointType) { a.endpointType = e }
+func (a *Agent) SetAPIVersion(v enum.APIVersion)     { a.apiVersion = v }
 func (a *Agent) SetOS(s string)                      { a.os = s }
 func (a *Agent) SetArch(s string)                    { a.arch = s }
 func (a *Agent) SetPlatform(s string)                { a.platform = s }

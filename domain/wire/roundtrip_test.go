@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/domain/wire"
 )
@@ -17,11 +17,11 @@ func TestAgent_Roundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.SetEndpointType(kind.EndpointHTTP)
-	a.SetAPIVersion(kind.APIVersion(1))
+	a.SetEndpointType(enum.EndpointHTTP)
+	a.SetAPIVersion(enum.APIVersion(1))
 	a.SetOS("linux")
 	a.SetArch("amd64")
-	a.SetStatus(kind.AgentStatusActive)
+	a.SetStatus(enum.AgentStatusActive)
 	a.LabelAdd("env", "prod")
 	// Truncate to microsecond granularity — gob drops sub-ns precision.
 	a.SetCreatedAt(time.Now().Truncate(time.Microsecond))
@@ -62,7 +62,7 @@ func TestUser_Roundtrip(t *testing.T) {
 	u.EmailAdd("a@b.c")
 	u.NameAdd("Alice")
 	_ = u.RoleAdd("role-a")
-	_ = u.PermissionAdd(kind.Permission("specs:get"))
+	_ = u.PermissionAdd(enum.Permission("specs:get"))
 	u.SetCreatedAt(time.Now().Truncate(time.Microsecond))
 
 	d := wire.UserToDTO(u)
@@ -76,14 +76,14 @@ func TestUser_Roundtrip(t *testing.T) {
 	if !back.RoleHas("role-a") {
 		t.Fatal("role lost")
 	}
-	if !back.PermissionHas(kind.Permission("specs:get")) {
+	if !back.PermissionHas(enum.Permission("specs:get")) {
 		t.Fatal("perm lost")
 	}
 }
 
 func TestSpec_Roundtrip(t *testing.T) {
 	ts, _ := model.NewSpec("s1", "my-spec", "slot-a")
-	ts.SetKindType(kind.TaskKindType("subprocess"))
+	ts.SetKindType(enum.TaskKindType("subprocess"))
 	ts.SetKindConfig(map[string]any{"cmd": "echo"})
 	ts.SetTimeoutMs(1000)
 	ts.SetTargets([]string{"a1", "a2"})
@@ -152,7 +152,7 @@ func TestSpec_KindConfigWithNestedMapGobRoundtrip(t *testing.T) {
 
 func TestRollout_Roundtrip(t *testing.T) {
 	r, _ := model.NewRollout("s1", "a1", 5)
-	r.SetIntent(kind.RolloutIntentUpdate)
+	r.SetIntent(enum.RolloutIntentUpdate)
 	r.SetActualTaskID("task-xyz")
 	r.MarkSynced(5)
 
@@ -164,7 +164,7 @@ func TestRollout_Roundtrip(t *testing.T) {
 	if back.ActualTaskID() != "task-xyz" {
 		t.Fatalf("task id: %s", back.ActualTaskID())
 	}
-	if back.Status() != kind.SyncStatusSynced {
+	if back.Status() != enum.SyncStatusSynced {
 		t.Fatalf("status: %v", back.Status())
 	}
 	if back.ObservedGeneration() != 5 {

@@ -13,7 +13,7 @@ import (
 	"github.com/rs/zerolog"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/event"
@@ -167,8 +167,8 @@ func (r *Runner) reconcile(ctx context.Context, now time.Time, a *model.Agent) {
 		r.hub.Notify(htmx.AgentUpdate)
 
 	case silence > hb*time.Duration(r.cfg.DisconnectMultiplier):
-		if a.Status() != kind.AgentStatusDisconnected {
-			a.SetStatus(kind.AgentStatusDisconnected)
+		if a.Status() != enum.AgentStatusDisconnected {
+			a.SetStatus(enum.AgentStatusDisconnected)
 
 			if err := r.store.UpsertAgent(ctx, a); err != nil {
 				r.logger.Warn().Err(err).Str("agent_id", a.ID()).Msg("reconcile: upsert disconnected failed")
@@ -183,8 +183,8 @@ func (r *Runner) reconcile(ctx context.Context, now time.Time, a *model.Agent) {
 		}
 
 	case silence > hb*time.Duration(r.cfg.InactiveMultiplier):
-		if a.Status() != kind.AgentStatusInactive {
-			a.SetStatus(kind.AgentStatusInactive)
+		if a.Status() != enum.AgentStatusInactive {
+			a.SetStatus(enum.AgentStatusInactive)
 
 			if err := r.store.UpsertAgent(ctx, a); err != nil {
 				r.logger.Warn().Err(err).Str("agent_id", a.ID()).Msg("reconcile: upsert inactive failed")

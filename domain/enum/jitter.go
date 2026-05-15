@@ -1,4 +1,4 @@
-package kind
+package enum
 
 // JitterStrategy controls how random jitter is applied to backoff delays.
 type JitterStrategy string

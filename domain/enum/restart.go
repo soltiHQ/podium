@@ -1,4 +1,4 @@
-package kind
+package enum
 
 // RestartType determines whether a task should be automatically restarted.
 type RestartType string

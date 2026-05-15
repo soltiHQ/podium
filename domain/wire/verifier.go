@@ -9,7 +9,7 @@ import (
 type VerifierDTO struct {
 	ID           string
 	CredentialID string
-	Auth         string // kind.Auth
+	Auth         string // enum.Auth
 	Data         map[string]string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time

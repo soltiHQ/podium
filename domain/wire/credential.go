@@ -9,7 +9,7 @@ import (
 type CredentialDTO struct {
 	ID        string
 	UserID    string
-	Auth      string // kind.Auth
+	Auth      string // enum.Auth
 	Secrets   map[string]string
 	CreatedAt time.Time
 	UpdatedAt time.Time

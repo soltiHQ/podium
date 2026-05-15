@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 )
 
@@ -124,7 +124,7 @@ func (f *UserFilter) ByRoleID(roleID string) *UserFilter {
 }
 
 // ByPermission matches users who have the specified direct permission.
-func (f *UserFilter) ByPermission(p kind.Permission) *UserFilter {
+func (f *UserFilter) ByPermission(p enum.Permission) *UserFilter {
 	f.predicates = append(f.predicates, func(u *model.User) bool { return u.PermissionHas(p) })
 	return f
 }
@@ -183,7 +183,7 @@ func (f *RoleFilter) ByName(name string) *RoleFilter {
 }
 
 // ByPermission matches roles that contain the specified permission.
-func (f *RoleFilter) ByPermission(p kind.Permission) *RoleFilter {
+func (f *RoleFilter) ByPermission(p enum.Permission) *RoleFilter {
 	f.predicates = append(f.predicates, func(r *model.Role) bool { return r.PermissionHas(p) })
 	return f
 }
@@ -265,13 +265,13 @@ func (f *RolloutFilter) ByAgentID(id string) *RolloutFilter {
 }
 
 // ByStatus matches rollouts with a given sync status.
-func (f *RolloutFilter) ByStatus(s kind.SyncStatus) *RolloutFilter {
+func (f *RolloutFilter) ByStatus(s enum.SyncStatus) *RolloutFilter {
 	f.predicates = append(f.predicates, func(ss *model.Rollout) bool { return ss.Status() == s })
 	return f
 }
 
 // ByStatuses matches rollouts whose status is any of the provided values (OR).
-func (f *RolloutFilter) ByStatuses(statuses ...kind.SyncStatus) *RolloutFilter {
+func (f *RolloutFilter) ByStatuses(statuses ...enum.SyncStatus) *RolloutFilter {
 	f.predicates = append(f.predicates, func(ss *model.Rollout) bool {
 		for _, s := range statuses {
 			if ss.Status() == s {

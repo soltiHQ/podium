@@ -1,4 +1,4 @@
-package kind
+package enum
 
 // APIVersion describes the agent API version the control-plane should use when communicating with the agent.
 type APIVersion uint8

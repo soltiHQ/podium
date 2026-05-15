@@ -1,4 +1,4 @@
-package kind
+package enum
 
 // RolloutIntent describes what the sync runner should do on the next tick
 // for a Rollout record.

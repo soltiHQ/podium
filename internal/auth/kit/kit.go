@@ -10,7 +10,7 @@
 package kit
 
 import (
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/providers"
 	passwordprovider "github.com/soltiHQ/control-plane/internal/auth/providers/password"
@@ -66,8 +66,8 @@ func New(store storage.Storage, cfg auth.Config) *Auth {
 			clock,
 			sesCfg,
 			resolver,
-			map[kind.Auth]providers.Provider{
-				kind.Password: passwordprovider.New(store),
+			map[enum.Auth]providers.Provider{
+				enum.Password: passwordprovider.New(store),
 			},
 		),
 		Limiter: ratelimit.New(ratelimit.Config{

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	jwtlib "github.com/golang-jwt/jwt/v5"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
@@ -27,7 +27,7 @@ func baseIdentity(now time.Time, iss, aud string) *identity.Identity {
 		TokenID:   "tid",
 		SessionID: "sid",
 
-		Permissions: []kind.Permission{"perm.read"},
+		Permissions: []enum.Permission{"perm.read"},
 	}
 }
 

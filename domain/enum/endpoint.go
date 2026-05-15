@@ -1,4 +1,4 @@
-package kind
+package enum
 
 import (
 	"github.com/soltiHQ/control-plane/domain"

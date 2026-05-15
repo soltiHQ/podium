@@ -7,7 +7,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 
 	genv1 "github.com/soltiHQ/control-plane/api/gen/v1"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 )
 
@@ -55,7 +55,7 @@ func SpecToProto(ts *model.Spec) (*genv1.CreateSpec, error) {
 		Admission: genv1.AdmissionStrategy_ADMISSION_STRATEGY_REPLACE,
 	}
 
-	if ts.RestartType() == kind.RestartAlways && ts.IntervalMs() > 0 {
+	if ts.RestartType() == enum.RestartAlways && ts.IntervalMs() > 0 {
 		iv := uint64(ts.IntervalMs())
 		out.RestartIntervalMs = &iv
 	}
@@ -96,7 +96,7 @@ func CreateSpecWirePreview(spec *genv1.CreateSpec) (json.RawMessage, error) {
 // misnamed fields (`{"mode":{...}}`) get dropped. We therefore run a
 // post-decode sanity check that raises a loud error instead of handing a
 // half-populated TaskKind to the agent.
-func buildTaskKind(kt kind.TaskKindType, cfg map[string]any) (*genv1.TaskKind, error) {
+func buildTaskKind(kt enum.TaskKindType, cfg map[string]any) (*genv1.TaskKind, error) {
 	name, err := taskKindName(kt)
 	if err != nil {
 		return nil, err
@@ -120,12 +120,12 @@ func buildTaskKind(kt kind.TaskKindType, cfg map[string]any) (*genv1.TaskKind, e
 // protojson dropped the entire oneof payload (the common symptom is a caller
 // that wrapped it in an extra envelope field), we report exactly which key
 // the caller supplied that we could not map onto the proto schema.
-func sanityCheckTaskKind(tk *genv1.TaskKind, kt kind.TaskKindType, cfg map[string]any) error {
+func sanityCheckTaskKind(tk *genv1.TaskKind, kt enum.TaskKindType, cfg map[string]any) error {
 	if tk.GetKind() == nil {
 		return fmt.Errorf("proxy: TaskKind.kind unset after decode for %q (likely bad JSON shape)", kt)
 	}
 	switch kt {
-	case kind.TaskKindSubprocess:
+	case enum.TaskKindSubprocess:
 		sub := tk.GetSubprocess()
 		if sub == nil {
 			return fmt.Errorf("proxy: SubprocessTask unset after decode")
@@ -146,11 +146,11 @@ func sanityCheckTaskKind(tk *genv1.TaskKind, kt kind.TaskKindType, cfg map[strin
 			return fmt.Errorf("proxy: SubprocessTask.mode unset after decode " +
 				"(neither \"command\" nor \"script\" found at top level)")
 		}
-	case kind.TaskKindWasm:
+	case enum.TaskKindWasm:
 		if tk.GetWasm() == nil {
 			return fmt.Errorf("proxy: WasmTask unset after decode")
 		}
-	case kind.TaskKindContainer:
+	case enum.TaskKindContainer:
 		if tk.GetContainer() == nil {
 			return fmt.Errorf("proxy: ContainerTask unset after decode")
 		}
@@ -158,41 +158,41 @@ func sanityCheckTaskKind(tk *genv1.TaskKind, kt kind.TaskKindType, cfg map[strin
 	return nil
 }
 
-func taskKindName(kt kind.TaskKindType) (string, error) {
+func taskKindName(kt enum.TaskKindType) (string, error) {
 	switch kt {
-	case kind.TaskKindSubprocess:
+	case enum.TaskKindSubprocess:
 		return "subprocess", nil
-	case kind.TaskKindContainer:
+	case enum.TaskKindContainer:
 		return "container", nil
-	case kind.TaskKindWasm:
+	case enum.TaskKindWasm:
 		return "wasm", nil
 	default:
 		return "", fmt.Errorf("unknown task kind: %q", kt)
 	}
 }
 
-func restartStrategyToProto(rt kind.RestartType) genv1.RestartStrategy {
+func restartStrategyToProto(rt enum.RestartType) genv1.RestartStrategy {
 	switch rt {
-	case kind.RestartNever:
+	case enum.RestartNever:
 		return genv1.RestartStrategy_RESTART_STRATEGY_NEVER
-	case kind.RestartOnFailure:
+	case enum.RestartOnFailure:
 		return genv1.RestartStrategy_RESTART_STRATEGY_ON_FAILURE
-	case kind.RestartAlways:
+	case enum.RestartAlways:
 		return genv1.RestartStrategy_RESTART_STRATEGY_ALWAYS
 	default:
 		return genv1.RestartStrategy_RESTART_STRATEGY_UNSPECIFIED
 	}
 }
 
-func jitterStrategyToProto(j kind.JitterStrategy) genv1.JitterStrategy {
+func jitterStrategyToProto(j enum.JitterStrategy) genv1.JitterStrategy {
 	switch j {
-	case kind.JitterNone:
+	case enum.JitterNone:
 		return genv1.JitterStrategy_JITTER_STRATEGY_NONE
-	case kind.JitterFull:
+	case enum.JitterFull:
 		return genv1.JitterStrategy_JITTER_STRATEGY_FULL
-	case kind.JitterEqual:
+	case enum.JitterEqual:
 		return genv1.JitterStrategy_JITTER_STRATEGY_EQUAL
-	case kind.JitterDecorrelated:
+	case enum.JitterDecorrelated:
 		return genv1.JitterStrategy_JITTER_STRATEGY_DECORRELATED
 	default:
 		return genv1.JitterStrategy_JITTER_STRATEGY_UNSPECIFIED

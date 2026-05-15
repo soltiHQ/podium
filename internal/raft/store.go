@@ -8,7 +8,7 @@ import (
 
 	hraft "github.com/hashicorp/raft"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/domain/wire"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -163,7 +163,7 @@ func (s *Store) GetCredential(ctx context.Context, id string) (*model.Credential
 	return s.inner.GetCredential(ctx, id)
 }
 
-func (s *Store) GetCredentialByUserAndAuth(ctx context.Context, userID string, auth kind.Auth) (*model.Credential, error) {
+func (s *Store) GetCredentialByUserAndAuth(ctx context.Context, userID string, auth enum.Auth) (*model.Credential, error) {
 	return s.inner.GetCredentialByUserAndAuth(ctx, userID, auth)
 }
 

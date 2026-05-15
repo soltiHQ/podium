@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/credentials"
@@ -15,11 +15,11 @@ import (
 
 type badKindReq struct{}
 
-func (badKindReq) AuthKind() kind.Auth { return kind.APIKey }
+func (badKindReq) AuthKind() enum.Auth { return enum.APIKey }
 
 type wrongTypeReq struct{}
 
-func (wrongTypeReq) AuthKind() kind.Auth { return kind.Password }
+func (wrongTypeReq) AuthKind() enum.Auth { return enum.Password }
 
 type wrapStore struct {
 	storage.Storage
@@ -36,7 +36,7 @@ func (w wrapStore) GetUserBySubject(ctx context.Context, subject string) (*model
 	return w.Storage.GetUserBySubject(ctx, subject)
 }
 
-func (w wrapStore) GetCredentialByUserAndAuth(ctx context.Context, userID string, authKind kind.Auth) (*model.Credential, error) {
+func (w wrapStore) GetCredentialByUserAndAuth(ctx context.Context, userID string, authKind enum.Auth) (*model.Credential, error) {
 	if w.getCredErr != nil {
 		return nil, w.getCredErr
 	}
@@ -257,8 +257,8 @@ func TestProvider_Authenticate_Success(t *testing.T) {
 	if res.Credential.ID() != cred.ID() {
 		t.Fatalf("expected cred id %q, got %q", cred.ID(), res.Credential.ID())
 	}
-	if res.Credential.AuthKind() != kind.Password {
-		t.Fatalf("expected auth kind %q, got %q", kind.Password, res.Credential.AuthKind())
+	if res.Credential.AuthKind() != enum.Password {
+		t.Fatalf("expected auth kind %q, got %q", enum.Password, res.Credential.AuthKind())
 	}
 }
 

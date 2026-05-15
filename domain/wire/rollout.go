@@ -3,17 +3,17 @@ package wire
 import (
 	"time"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 )
 
 // Status shorthand for the switch inside RolloutFromDTO.
 var (
-	syncStatusPending = kind.SyncStatusPending
-	syncStatusSynced  = kind.SyncStatusSynced
-	syncStatusDrift   = kind.SyncStatusDrift
-	syncStatusFailed  = kind.SyncStatusFailed
-	syncStatusUnknown = kind.SyncStatusUnknown
+	syncStatusPending = enum.SyncStatusPending
+	syncStatusSynced  = enum.SyncStatusSynced
+	syncStatusDrift   = enum.SyncStatusDrift
+	syncStatusFailed  = enum.SyncStatusFailed
+	syncStatusUnknown = enum.SyncStatusUnknown
 )
 
 type RolloutDTO struct {
@@ -27,8 +27,8 @@ type RolloutDTO struct {
 	ObservedGeneration int
 	Attempts           int
 
-	Status uint8 // kind.SyncStatus
-	Intent uint8 // kind.RolloutIntent
+	Status uint8 // enum.SyncStatus
+	Intent uint8 // enum.RolloutIntent
 
 	CreatedAt    time.Time
 	UpdatedAt    time.Time

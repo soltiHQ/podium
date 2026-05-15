@@ -1,4 +1,4 @@
-package kind
+package enum
 
 // BuiltinRole describes a well-known role seeded at startup.
 type BuiltinRole struct {

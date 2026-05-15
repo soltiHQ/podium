@@ -3,7 +3,7 @@ package providers
 import (
 	"context"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 )
 
@@ -18,8 +18,8 @@ import (
 //   - The provider's Kind() matches the request's AuthKind().
 //   - Mismatched request/provider combinations are rejected with ErrInvalidRequest.
 type Request interface {
-	// AuthKind returns the authentication mechanism this request is intended for (e.g., kind.Password, kind.APIKey).
-	AuthKind() kind.Auth
+	// AuthKind returns the authentication mechanism this request is intended for (e.g., enum.Password, enum.APIKey).
+	AuthKind() enum.Auth
 }
 
 // Result is the output of authentication (NOT authorization).
@@ -35,6 +35,6 @@ type Result struct {
 //   - Authenticate must not perform authorization (RBAC) or token issuance.
 //   - Authenticate must not mutate returned user/credential (treat as read-only).
 type Provider interface {
-	Kind() kind.Auth
+	Kind() enum.Auth
 	Authenticate(ctx context.Context, req Request) (*Result, error)
 }

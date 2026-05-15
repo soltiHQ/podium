@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 var _ domain.Entity[*Role] = (*Role)(nil)
@@ -23,7 +23,7 @@ type Role struct {
 	id   string
 	name string
 
-	permissions []kind.Permission
+	permissions []enum.Permission
 }
 
 // NewRole creates a new role entity.
@@ -41,7 +41,7 @@ func NewRole(id, name string) (*Role, error) {
 		updatedAt:   now,
 		id:          id,
 		name:        name,
-		permissions: make([]kind.Permission, 0),
+		permissions: make([]enum.Permission, 0),
 	}, nil
 }
 
@@ -63,14 +63,14 @@ func (r *Role) SetCreatedAt(t time.Time) { r.createdAt = t }
 func (r *Role) SetUpdatedAt(t time.Time) { r.updatedAt = t }
 
 // PermissionsAll returns a copy of all permissions assigned to the role.
-func (r *Role) PermissionsAll() []kind.Permission {
-	out := make([]kind.Permission, len(r.permissions))
+func (r *Role) PermissionsAll() []enum.Permission {
+	out := make([]enum.Permission, len(r.permissions))
 	copy(out, r.permissions)
 	return out
 }
 
 // PermissionHas returns true if the role contains the given permission.
-func (r *Role) PermissionHas(p kind.Permission) bool {
+func (r *Role) PermissionHas(p enum.Permission) bool {
 	for _, x := range r.permissions {
 		if x == p {
 			return true
@@ -81,7 +81,7 @@ func (r *Role) PermissionHas(p kind.Permission) bool {
 
 // PermissionAdd grants a permission to the role.
 // It is idempotent: adding an existing permission does nothing.
-func (r *Role) PermissionAdd(p kind.Permission) error {
+func (r *Role) PermissionAdd(p enum.Permission) error {
 	if p == "" {
 		return domain.ErrFieldEmpty
 	}
@@ -96,7 +96,7 @@ func (r *Role) PermissionAdd(p kind.Permission) error {
 
 // PermissionDelete revokes a permission from the role.
 // If permission does not exist, nothing happens.
-func (r *Role) PermissionDelete(p kind.Permission) {
+func (r *Role) PermissionDelete(p enum.Permission) {
 	for i, x := range r.permissions {
 		if x == p {
 			r.permissions = append(r.permissions[:i], r.permissions[i+1:]...)
@@ -123,7 +123,7 @@ func (r *Role) Rename(name string) error {
 
 // Clone creates a deep copy of the role entity.
 func (r *Role) Clone() *Role {
-	out := make([]kind.Permission, len(r.permissions))
+	out := make([]enum.Permission, len(r.permissions))
 	copy(out, r.permissions)
 
 	return &Role{

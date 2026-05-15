@@ -5,7 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
@@ -17,7 +17,7 @@ import (
 
 // RBACResolver defines the contract for resolving effective permissions.
 type RBACResolver interface {
-	ResolveUserPermissions(ctx context.Context, u *model.User) ([]kind.Permission, error)
+	ResolveUserPermissions(ctx context.Context, u *model.User) ([]enum.Permission, error)
 }
 
 // Service provides session and token business logic.
@@ -33,7 +33,7 @@ type Service struct {
 	cfg  Config
 	rbac RBACResolver
 
-	providers map[kind.Auth]providers.Provider
+	providers map[enum.Auth]providers.Provider
 }
 
 // New creates a new session service.
@@ -46,13 +46,13 @@ func New(
 	clk token.Clock,
 	cfg Config,
 	rbac RBACResolver,
-	provs map[kind.Auth]providers.Provider,
+	provs map[enum.Auth]providers.Provider,
 ) *Service {
 	if clk == nil {
 		clk = token.RealClock()
 	}
 	if provs == nil {
-		provs = make(map[kind.Auth]providers.Provider, 4)
+		provs = make(map[enum.Auth]providers.Provider, 4)
 	}
 	return &Service{
 		store:     store,
@@ -73,7 +73,7 @@ func (s *Service) ensureReady() error {
 }
 
 // provider returns a provider for the given kind and validates its kind contract.
-func (s *Service) provider(kind kind.Auth) (providers.Provider, error) {
+func (s *Service) provider(kind enum.Auth) (providers.Provider, error) {
 	p := s.providers[kind]
 	if p == nil {
 		return nil, auth.ErrInvalidRequest
@@ -98,7 +98,7 @@ func (s *Service) provider(kind kind.Auth) (providers.Provider, error) {
 //   - auth.ErrInvalidCredentials when subject/secret are empty (caller error).
 //   - auth.ErrUnauthorized when RBAC denies access (no effective permissions or resolver error).
 //   - Propagates provider and storage errors from dependencies.
-func (s *Service) Login(ctx context.Context, authKind kind.Auth, subject, secret string) (*TokenPair, *identity.Identity, error) {
+func (s *Service) Login(ctx context.Context, authKind enum.Auth, subject, secret string) (*TokenPair, *identity.Identity, error) {
 	if err := s.ensureReady(); err != nil {
 		return nil, nil, err
 	}
@@ -113,7 +113,7 @@ func (s *Service) Login(ctx context.Context, authKind kind.Auth, subject, secret
 
 	var req providers.Request
 	switch authKind {
-	case kind.Password:
+	case enum.Password:
 		req = passwordprovider.Request{Subject: subject, Password: secret}
 	default:
 		return nil, nil, auth.ErrInvalidRequest

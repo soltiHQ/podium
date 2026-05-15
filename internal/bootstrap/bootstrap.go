@@ -6,7 +6,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/credentials"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
@@ -29,7 +29,7 @@ func Run(ctx context.Context, logger zerolog.Logger, roleSVC *role.Service, user
 }
 
 func seedRoles(ctx context.Context, logger zerolog.Logger, roleSVC *role.Service) error {
-	for _, br := range kind.BuiltinRoles {
+	for _, br := range enum.BuiltinRoles {
 		r, err := model.NewRole(br.ID, br.Name)
 		if err != nil {
 			return err
@@ -56,7 +56,7 @@ func seedAdmin(ctx context.Context, logger zerolog.Logger, userSVC *user.Service
 	u.EmailAdd("admin@solit.local")
 	u.NameAdd("admin")
 
-	if err = u.RoleAdd(kind.RoleAdminID); err != nil {
+	if err = u.RoleAdd(enum.RoleAdminID); err != nil {
 		return err
 	}
 	if err = userSVC.Upsert(ctx, u); err != nil {

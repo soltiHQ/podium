@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/credentials"
 	"github.com/soltiHQ/control-plane/internal/auth/providers"
@@ -22,7 +22,7 @@ func New(store storage.Storage) *Provider {
 }
 
 // Kind returns the provider kind.
-func (*Provider) Kind() kind.Auth { return kind.Password }
+func (*Provider) Kind() enum.Auth { return enum.Password }
 
 // Authenticate authenticates the user by subject/password.
 //
@@ -39,7 +39,7 @@ func (p *Provider) Authenticate(ctx context.Context, req providers.Request) (*pr
 	if p == nil || p.store == nil {
 		return nil, auth.ErrInvalidRequest
 	}
-	if req == nil || req.AuthKind() != kind.Password {
+	if req == nil || req.AuthKind() != enum.Password {
 		return nil, auth.ErrInvalidRequest
 	}
 
@@ -62,7 +62,7 @@ func (p *Provider) Authenticate(ctx context.Context, req providers.Request) (*pr
 		return nil, auth.ErrInvalidCredentials
 	}
 
-	cred, err := p.store.GetCredentialByUserAndAuth(ctx, u.ID(), kind.Password)
+	cred, err := p.store.GetCredentialByUserAndAuth(ctx, u.ID(), enum.Password)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil, auth.ErrInvalidCredentials

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 )
 
@@ -54,7 +54,7 @@ func mkRole(t *testing.T, id, name string) *model.Role {
 	return r
 }
 
-func mkCredential(t *testing.T, id, userID string, auth kind.Auth) *model.Credential {
+func mkCredential(t *testing.T, id, userID string, auth enum.Auth) *model.Credential {
 	t.Helper()
 	c, err := model.NewCredential(id, userID, auth)
 	requireNoErr(t, err)
@@ -62,7 +62,7 @@ func mkCredential(t *testing.T, id, userID string, auth kind.Auth) *model.Creden
 	return c
 }
 
-func mkVerifier(t *testing.T, id, credentialID string, auth kind.Auth) *model.Verifier {
+func mkVerifier(t *testing.T, id, credentialID string, auth enum.Auth) *model.Verifier {
 	t.Helper()
 	v, err := model.NewVerifier(id, credentialID, auth)
 	requireNoErr(t, err)
@@ -70,7 +70,7 @@ func mkVerifier(t *testing.T, id, credentialID string, auth kind.Auth) *model.Ve
 	return v
 }
 
-func mkSession(t *testing.T, id, userID, credentialID string, auth kind.Auth) *model.Session {
+func mkSession(t *testing.T, id, userID, credentialID string, auth enum.Auth) *model.Session {
 	t.Helper()
 	refreshHash := []byte("refresh-hash-" + id)
 	expiresAt := fixedNow().Add(24 * time.Hour)
@@ -86,12 +86,12 @@ func userAddRole(t *testing.T, u *model.User, roleID string) {
 	requireNoErr(t, u.RoleAdd(roleID))
 }
 
-func userAddPerm(t *testing.T, u *model.User, p kind.Permission) {
+func userAddPerm(t *testing.T, u *model.User, p enum.Permission) {
 	t.Helper()
 	requireNoErr(t, u.PermissionAdd(p))
 }
 
-func roleAddPerm(t *testing.T, r *model.Role, p kind.Permission) {
+func roleAddPerm(t *testing.T, r *model.Role, p enum.Permission) {
 	t.Helper()
 	requireNoErr(t, r.PermissionAdd(p))
 }

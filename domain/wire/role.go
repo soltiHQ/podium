@@ -9,7 +9,7 @@ import (
 type RoleDTO struct {
 	ID          string
 	Name        string
-	Permissions []string // kind.Permission as string
+	Permissions []string // enum.Permission as string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }

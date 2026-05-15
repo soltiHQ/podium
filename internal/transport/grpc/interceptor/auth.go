@@ -8,7 +8,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
 	"github.com/soltiHQ/control-plane/internal/transport/grpc/status"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
@@ -48,7 +48,7 @@ func UnaryAuth(verifier token.Verifier, skipMethods map[string]struct{}) grpc.Un
 // identity for a specific permission. Returns PermissionDenied if missing.
 //
 // Must be chained after UnaryAuth.
-func UnaryRequirePermission(perm kind.Permission) grpc.UnaryServerInterceptor {
+func UnaryRequirePermission(perm enum.Permission) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		id, ok := transportctx.Identity(ctx)
 		if !ok {

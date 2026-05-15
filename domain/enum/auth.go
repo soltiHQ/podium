@@ -1,4 +1,4 @@
-package kind
+package enum
 
 // Auth defines the authentication mechanism type.
 type Auth string

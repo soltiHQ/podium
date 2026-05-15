@@ -6,7 +6,7 @@ import (
 	"strconv"
 
 	"github.com/rs/zerolog"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
@@ -119,14 +119,14 @@ func (a *API) Routes(mux *http.ServeMux, auth route.BaseMW, _ route.PermMW, comm
 // Permissions handles GET /api/v1/permissions.
 func (a *API) Permissions(w http.ResponseWriter, r *http.Request) {
 	route.Resource(w, r, "",
-		route.Endpoint{Method: http.MethodGet, Perm: kind.UsersEdit, Fn: a.permissionsList},
+		route.Endpoint{Method: http.MethodGet, Perm: enum.UsersEdit, Fn: a.permissionsList},
 	)
 }
 
 // Roles handles GET /api/v1/roles.
 func (a *API) Roles(w http.ResponseWriter, r *http.Request) {
 	route.Resource(w, r, "",
-		route.Endpoint{Method: http.MethodGet, Perm: kind.UsersEdit, Fn: a.rolesList},
+		route.Endpoint{Method: http.MethodGet, Perm: enum.UsersEdit, Fn: a.rolesList},
 	)
 }
 

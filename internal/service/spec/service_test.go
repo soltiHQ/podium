@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/rs/zerolog"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
@@ -104,10 +104,10 @@ func TestDeployFreshTargetsInstall(t *testing.T) {
 		t.Fatalf("expected 2 rollouts, got %d", len(rs))
 	}
 	for _, r := range rs {
-		if r.Intent() != kind.RolloutIntentInstall {
+		if r.Intent() != enum.RolloutIntentInstall {
 			t.Errorf("agent %s: intent=%s, want install", r.AgentID(), r.Intent())
 		}
-		if r.Status() != kind.SyncStatusPending {
+		if r.Status() != enum.SyncStatusPending {
 			t.Errorf("agent %s: status=%s, want pending", r.AgentID(), r.Status())
 		}
 	}
@@ -135,15 +135,15 @@ func TestDeploySkipsAlreadySyncedAtSameGeneration(t *testing.T) {
 		t.Fatalf("Deploy: %v", err)
 	}
 	rA2, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-a"))
-	if rA2.Intent() != kind.RolloutIntentNoop {
+	if rA2.Intent() != enum.RolloutIntentNoop {
 		t.Errorf("synced agent-a intent: got %s, want noop", rA2.Intent())
 	}
-	if rA2.Status() != kind.SyncStatusSynced {
+	if rA2.Status() != enum.SyncStatusSynced {
 		t.Errorf("synced agent-a status: got %s, want synced", rA2.Status())
 	}
 
 	rB, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-b"))
-	if rB.Intent() != kind.RolloutIntentInstall {
+	if rB.Intent() != enum.RolloutIntentInstall {
 		t.Errorf("never-synced agent-b intent: got %s, want install", rB.Intent())
 	}
 }
@@ -171,7 +171,7 @@ func TestDeployQueuesUpdateForStaleRollout(t *testing.T) {
 	_ = svc.Deploy(context.Background(), "sp-1")
 
 	rA2, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-a"))
-	if rA2.Intent() != kind.RolloutIntentUpdate {
+	if rA2.Intent() != enum.RolloutIntentUpdate {
 		t.Errorf("intent: got %s, want update", rA2.Intent())
 	}
 	if rA2.ActualTaskID() != "sub-slot-1" {
@@ -200,11 +200,11 @@ func TestDeployQueuesUninstallForRemovedTarget(t *testing.T) {
 	_ = svc.Deploy(context.Background(), "sp-1")
 
 	rB, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-b"))
-	if rB.Intent() != kind.RolloutIntentUninstall {
+	if rB.Intent() != enum.RolloutIntentUninstall {
 		t.Errorf("dropped agent-b intent: got %s, want uninstall", rB.Intent())
 	}
 	rA, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-a"))
-	if rA.Intent() != kind.RolloutIntentNoop {
+	if rA.Intent() != enum.RolloutIntentNoop {
 		t.Errorf("kept agent-a intent: got %s, want noop", rA.Intent())
 	}
 }
@@ -250,10 +250,10 @@ func TestDeleteSoftPathWithRollouts(t *testing.T) {
 
 	// Rollout must be queued for uninstall.
 	r2, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-a"))
-	if r2.Intent() != kind.RolloutIntentUninstall {
+	if r2.Intent() != enum.RolloutIntentUninstall {
 		t.Errorf("rollout intent: got %s, want uninstall", r2.Intent())
 	}
-	if r2.Status() != kind.SyncStatusPending {
+	if r2.Status() != enum.SyncStatusPending {
 		t.Errorf("rollout status: got %s, want pending", r2.Status())
 	}
 	if r2.ActualTaskID() != "sub-x" {
@@ -378,7 +378,7 @@ func TestDeployAndDeleteAreSerialisedPerSpec(t *testing.T) {
 	// Tombstoned: every remaining rollout must be Uninstall, not Install.
 	rs := listRollouts(t, store, "sp-1")
 	for _, r := range rs {
-		if r.Intent() == kind.RolloutIntentInstall || r.Intent() == kind.RolloutIntentUpdate {
+		if r.Intent() == enum.RolloutIntentInstall || r.Intent() == enum.RolloutIntentUpdate {
 			t.Errorf(
 				"after concurrent Deploy+Delete, tombstoned spec has non-Uninstall rollout: %s intent=%s",
 				r.AgentID(), r.Intent(),

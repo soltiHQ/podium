@@ -13,7 +13,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transport/grpc/status"
 
 	genv1 "github.com/soltiHQ/control-plane/api/gen/v1"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service"
@@ -117,7 +117,7 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(getErr, storage.ErrNotFound):
 		h.eventHub.Record(event.AgentConnected, event.Payload{ID: in.GetId(), Name: in.GetName(), By: "discovery"})
-	case existing != nil && existing.Status() != kind.AgentStatusActive:
+	case existing != nil && existing.Status() != enum.AgentStatusActive:
 		h.eventHub.Record(event.AgentConnected, event.Payload{ID: in.GetId(), Name: in.GetName(), By: "discovery"})
 
 		n := h.eventHub.DeleteIssues(event.AgentInactive, in.GetId())
@@ -190,7 +190,7 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *genv1.SyncRequest) (*genv
 	switch {
 	case errors.Is(getErr, storage.ErrNotFound):
 		g.hub.Record(event.AgentConnected, event.Payload{ID: req.GetId(), Name: req.GetName(), By: "discovery"})
-	case existing != nil && existing.Status() != kind.AgentStatusActive:
+	case existing != nil && existing.Status() != enum.AgentStatusActive:
 		g.hub.Record(event.AgentConnected, event.Payload{ID: req.GetId(), Name: req.GetName(), By: "discovery"})
 
 		n := g.hub.DeleteIssues(event.AgentInactive, req.GetId())

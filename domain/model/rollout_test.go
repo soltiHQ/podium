@@ -3,7 +3,7 @@ package model
 import (
 	"testing"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 // NewRollout starts as Pending with Intent=Install. This matches the
@@ -13,10 +13,10 @@ func TestNewRolloutDefaultsToInstallIntent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRollout: %v", err)
 	}
-	if got, want := r.Status(), kind.SyncStatusPending; got != want {
+	if got, want := r.Status(), enum.SyncStatusPending; got != want {
 		t.Errorf("status: got %q, want %q", got, want)
 	}
-	if got, want := r.Intent(), kind.RolloutIntentInstall; got != want {
+	if got, want := r.Intent(), enum.RolloutIntentInstall; got != want {
 		t.Errorf("intent: got %q, want %q", got, want)
 	}
 	if got, want := r.DesiredGeneration(), 3; got != want {
@@ -34,10 +34,10 @@ func TestMarkSyncedClearsIntent(t *testing.T) {
 	r, _ := NewRollout("spec-1", "agent-1", 5)
 	r.MarkSynced(2)
 
-	if got, want := r.Status(), kind.SyncStatusSynced; got != want {
+	if got, want := r.Status(), enum.SyncStatusSynced; got != want {
 		t.Errorf("status: got %q, want %q", got, want)
 	}
-	if got, want := r.Intent(), kind.RolloutIntentNoop; got != want {
+	if got, want := r.Intent(), enum.RolloutIntentNoop; got != want {
 		t.Errorf("intent should be cleared to Noop after sync, got %q", got)
 	}
 	if got, want := r.ObservedGeneration(), 2; got != want {
@@ -49,13 +49,13 @@ func TestMarkSyncedClearsIntent(t *testing.T) {
 // the same action on the next tick (bounded by MaxRetries).
 func TestMarkFailedPreservesIntent(t *testing.T) {
 	r, _ := NewRollout("spec-1", "agent-1", 1)
-	r.SetIntent(kind.RolloutIntentUpdate)
+	r.SetIntent(enum.RolloutIntentUpdate)
 	r.MarkFailed("boom")
 
-	if got, want := r.Status(), kind.SyncStatusFailed; got != want {
+	if got, want := r.Status(), enum.SyncStatusFailed; got != want {
 		t.Errorf("status: got %q, want %q", got, want)
 	}
-	if got, want := r.Intent(), kind.RolloutIntentUpdate; got != want {
+	if got, want := r.Intent(), enum.RolloutIntentUpdate; got != want {
 		t.Errorf("intent should stay Update after Failed, got %q", got)
 	}
 	if got, want := r.Attempts(), 1; got != want {
@@ -88,22 +88,22 @@ func TestCloneIsIndependent(t *testing.T) {
 	r, _ := NewRollout("spec-1", "agent-1", 1)
 	r.SetActualTaskID("id-v1")
 	r.MarkSynced(1)
-	r.SetIntent(kind.RolloutIntentUpdate)
+	r.SetIntent(enum.RolloutIntentUpdate)
 
 	cp := r.Clone()
 
 	// Mutate the original; the clone must stay put.
 	r.SetActualTaskID("id-v2")
 	r.MarkFailed("downstream broke")
-	r.SetIntent(kind.RolloutIntentUninstall)
+	r.SetIntent(enum.RolloutIntentUninstall)
 
 	if cp.ActualTaskID() != "id-v1" {
 		t.Errorf("clone.ActualTaskID leaked: got %q, want id-v1", cp.ActualTaskID())
 	}
-	if cp.Status() != kind.SyncStatusSynced {
+	if cp.Status() != enum.SyncStatusSynced {
 		t.Errorf("clone.Status leaked: got %q, want Synced", cp.Status())
 	}
-	if cp.Intent() != kind.RolloutIntentUpdate {
+	if cp.Intent() != enum.RolloutIntentUpdate {
 		t.Errorf("clone.Intent leaked: got %q, want Update", cp.Intent())
 	}
 	if cp.Error() != "" {
@@ -117,11 +117,11 @@ func TestCloneIsIndependent(t *testing.T) {
 // RolloutIntent.String returns stable lower-case labels. The UI renders
 // badges by exact match, so regressions here are wire-observable.
 func TestRolloutIntentStringIsStable(t *testing.T) {
-	cases := map[kind.RolloutIntent]string{
-		kind.RolloutIntentNoop:      "noop",
-		kind.RolloutIntentInstall:   "install",
-		kind.RolloutIntentUpdate:    "update",
-		kind.RolloutIntentUninstall: "uninstall",
+	cases := map[enum.RolloutIntent]string{
+		enum.RolloutIntentNoop:      "noop",
+		enum.RolloutIntentInstall:   "install",
+		enum.RolloutIntentUpdate:    "update",
+		enum.RolloutIntentUninstall: "uninstall",
 	}
 	for in, want := range cases {
 		if got := in.String(); got != want {

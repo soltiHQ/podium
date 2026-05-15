@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
@@ -125,7 +125,7 @@ func TestStore_Credentials_CRUD_AndByUserAuth(t *testing.T) {
 	u := mkUser(t, "u1", "sub-1")
 	requireNoErr(t, s.UpsertUser(ctx, u))
 
-	c1 := mkCredential(t, "c1", u.ID(), kind.Password)
+	c1 := mkCredential(t, "c1", u.ID(), enum.Password)
 	requireNoErr(t, s.UpsertCredential(ctx, c1))
 
 	got, err := s.GetCredential(ctx, c1.ID())
@@ -135,19 +135,19 @@ func TestStore_Credentials_CRUD_AndByUserAuth(t *testing.T) {
 		t.Fatalf("unexpected id")
 	}
 
-	_, err = s.GetCredentialByUserAndAuth(ctx, "", kind.Password)
+	_, err = s.GetCredentialByUserAndAuth(ctx, "", enum.Password)
 	if !errors.Is(err, storage.ErrInvalidArgument) {
 		t.Fatalf("expected ErrInvalidArgument, err=%v", err)
 	}
 
-	got2, err := s.GetCredentialByUserAndAuth(ctx, u.ID(), kind.Password)
+	got2, err := s.GetCredentialByUserAndAuth(ctx, u.ID(), enum.Password)
 	requireNoErr(t, err)
 	requireNotNil(t, got2)
 	if got2.ID() != c1.ID() {
 		t.Fatalf("unexpected credential id")
 	}
 
-	_, err = s.GetCredentialByUserAndAuth(ctx, u.ID(), kind.APIKey)
+	_, err = s.GetCredentialByUserAndAuth(ctx, u.ID(), enum.APIKey)
 	if !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, err=%v", err)
 	}
@@ -162,12 +162,12 @@ func TestStore_Credentials_ByUserAuth_NonUnique_ReturnsInternal(t *testing.T) {
 	u := mkUser(t, "u1", "sub-1")
 	requireNoErr(t, s.UpsertUser(ctx, u))
 
-	c1 := mkCredential(t, "c1", u.ID(), kind.Password)
-	c2 := mkCredential(t, "c2", u.ID(), kind.Password)
+	c1 := mkCredential(t, "c1", u.ID(), enum.Password)
+	c2 := mkCredential(t, "c2", u.ID(), enum.Password)
 	requireNoErr(t, s.UpsertCredential(ctx, c1))
 	requireNoErr(t, s.UpsertCredential(ctx, c2))
 
-	_, err := s.GetCredentialByUserAndAuth(ctx, u.ID(), kind.Password)
+	_, err := s.GetCredentialByUserAndAuth(ctx, u.ID(), enum.Password)
 	if !errors.Is(err, storage.ErrInternal) {
 		t.Fatalf("expected ErrInternal, err=%v", err)
 	}
@@ -189,9 +189,9 @@ func TestStore_Credentials_ListByUser(t *testing.T) {
 	requireNoErr(t, s.UpsertUser(ctx, u1))
 	requireNoErr(t, s.UpsertUser(ctx, u2))
 
-	requireNoErr(t, s.UpsertCredential(ctx, mkCredential(t, "c1", u1.ID(), kind.Password)))
-	requireNoErr(t, s.UpsertCredential(ctx, mkCredential(t, "c2", u1.ID(), kind.APIKey)))
-	requireNoErr(t, s.UpsertCredential(ctx, mkCredential(t, "c3", u2.ID(), kind.Password)))
+	requireNoErr(t, s.UpsertCredential(ctx, mkCredential(t, "c1", u1.ID(), enum.Password)))
+	requireNoErr(t, s.UpsertCredential(ctx, mkCredential(t, "c2", u1.ID(), enum.APIKey)))
+	requireNoErr(t, s.UpsertCredential(ctx, mkCredential(t, "c3", u2.ID(), enum.Password)))
 
 	list, err := s.ListCredentialsByUser(ctx, u1.ID())
 	requireNoErr(t, err)
@@ -217,10 +217,10 @@ func TestStore_Verifiers_CRUD_AndByCredential(t *testing.T) {
 
 	u := mkUser(t, "u1", "sub-1")
 	requireNoErr(t, s.UpsertUser(ctx, u))
-	c := mkCredential(t, "c1", u.ID(), kind.Password)
+	c := mkCredential(t, "c1", u.ID(), enum.Password)
 	requireNoErr(t, s.UpsertCredential(ctx, c))
 
-	v := mkVerifier(t, "v1", c.ID(), kind.Password)
+	v := mkVerifier(t, "v1", c.ID(), enum.Password)
 	requireNoErr(t, s.UpsertVerifier(ctx, v))
 
 	got, err := s.GetVerifier(ctx, v.ID())
@@ -248,11 +248,11 @@ func TestStore_Verifiers_ByCredential_NonUnique_ReturnsInternal(t *testing.T) {
 
 	u := mkUser(t, "u1", "sub-1")
 	requireNoErr(t, s.UpsertUser(ctx, u))
-	c := mkCredential(t, "c1", u.ID(), kind.Password)
+	c := mkCredential(t, "c1", u.ID(), enum.Password)
 	requireNoErr(t, s.UpsertCredential(ctx, c))
 
-	v1 := mkVerifier(t, "v1", c.ID(), kind.Password)
-	v2 := mkVerifier(t, "v2", c.ID(), kind.Password)
+	v1 := mkVerifier(t, "v1", c.ID(), enum.Password)
+	v2 := mkVerifier(t, "v2", c.ID(), enum.Password)
 	requireNoErr(t, s.UpsertVerifier(ctx, v1))
 	requireNoErr(t, s.UpsertVerifier(ctx, v2))
 
@@ -274,10 +274,10 @@ func TestStore_Sessions_CRUD_Rotate_Revoke(t *testing.T) {
 
 	u := mkUser(t, "u1", "sub-1")
 	requireNoErr(t, s.UpsertUser(ctx, u))
-	c := mkCredential(t, "c1", u.ID(), kind.Password)
+	c := mkCredential(t, "c1", u.ID(), enum.Password)
 	requireNoErr(t, s.UpsertCredential(ctx, c))
 
-	sess := mkSession(t, "s1", u.ID(), c.ID(), kind.Password)
+	sess := mkSession(t, "s1", u.ID(), c.ID(), enum.Password)
 	requireNoErr(t, s.CreateSession(ctx, sess))
 
 	if err := s.CreateSession(ctx, sess); !errors.Is(err, storage.ErrAlreadyExists) {

@@ -16,14 +16,14 @@ package route
 import (
 	"net/http"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 // BaseMW is a standard HTTP middleware signature.
 type BaseMW func(http.Handler) http.Handler
 
 // PermMW creates a middleware that guards a route with the given permission.
-type PermMW func(kind.Permission) BaseMW
+type PermMW func(enum.Permission) BaseMW
 
 // Chain wraps a handler with middleware applied left-to-right:
 //

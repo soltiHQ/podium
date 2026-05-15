@@ -5,14 +5,14 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 var _ domain.Entity[*Spec] = (*Spec)(nil)
 
 // BackoffConfig holds backoff parameters for task restart delays.
 type BackoffConfig struct {
-	Jitter  kind.JitterStrategy
+	Jitter  enum.JitterStrategy
 	FirstMs int64
 	MaxMs   int64
 	Factor  float64
@@ -63,10 +63,10 @@ type Spec struct {
 	// `admission=Replace` on the wire (see internal/proxy/convert.go),
 	// so storing a per-spec value would be dead state.
 	slot         string
-	kindType     kind.TaskKindType
+	kindType     enum.TaskKindType
 	kindConfig   map[string]any // e.g. {command, args, env, cwd, failOnNonZero} for subprocess
 	timeoutMs    int64
-	restartType  kind.RestartType
+	restartType  enum.RestartType
 	intervalMs   int64 // only for RestartAlways
 	backoff      BackoffConfig
 	runnerLabels map[string]string
@@ -93,13 +93,13 @@ func NewSpec(id, name, slot string) (*Spec, error) {
 
 		targets:      nil,
 		targetLabels: make(map[string]string),
-		kindType:     kind.TaskKindSubprocess,
+		kindType:     enum.TaskKindSubprocess,
 		kindConfig:   make(map[string]any),
 		timeoutMs:    30000,
-		restartType:  kind.RestartNever,
+		restartType:  enum.RestartNever,
 		intervalMs:   0,
 		backoff: BackoffConfig{
-			Jitter:  kind.JitterNone,
+			Jitter:  enum.JitterNone,
 			FirstMs: 1000,
 			MaxMs:   5000,
 			Factor:  2.0,
@@ -126,9 +126,9 @@ func (ts *Spec) SetUpdatedAt(t time.Time) { ts.updatedAt = t }
 func (ts *Spec) SetVersion(v int)         { ts.version = v }
 func (ts *Spec) SetGeneration(g int)      { ts.generation = g }
 func (ts *Spec) SetDeletionRequested(b bool) { ts.deletionRequested = b }
-func (ts *Spec) KindType() kind.TaskKindType       { return ts.kindType }
+func (ts *Spec) KindType() enum.TaskKindType       { return ts.kindType }
 func (ts *Spec) TimeoutMs() int64                  { return ts.timeoutMs }
-func (ts *Spec) RestartType() kind.RestartType     { return ts.restartType }
+func (ts *Spec) RestartType() enum.RestartType     { return ts.restartType }
 func (ts *Spec) IntervalMs() int64                 { return ts.intervalMs }
 func (ts *Spec) Backoff() BackoffConfig            { return ts.backoff }
 
@@ -178,7 +178,7 @@ func (ts *Spec) SetSlot(slot string) {
 	ts.updatedAt = time.Now()
 }
 
-func (ts *Spec) SetKindType(kt kind.TaskKindType) {
+func (ts *Spec) SetKindType(kt enum.TaskKindType) {
 	ts.kindType = kt
 	ts.updatedAt = time.Now()
 }
@@ -197,7 +197,7 @@ func (ts *Spec) SetTimeoutMs(ms int64) {
 	ts.updatedAt = time.Now()
 }
 
-func (ts *Spec) SetRestartType(rt kind.RestartType) {
+func (ts *Spec) SetRestartType(rt enum.RestartType) {
 	ts.restartType = rt
 	ts.updatedAt = time.Now()
 }

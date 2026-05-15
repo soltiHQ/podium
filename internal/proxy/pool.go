@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -61,23 +61,23 @@ func NewPool() *Pool {
 
 // Get returns an AgentProxy for the given endpoint, selecting the implementation
 // based on api version and endpoint type.
-func (p *Pool) Get(endpoint string, epType kind.EndpointType, apiVersion kind.APIVersion) (AgentProxy, error) {
+func (p *Pool) Get(endpoint string, epType enum.EndpointType, apiVersion enum.APIVersion) (AgentProxy, error) {
 	switch apiVersion {
-	case kind.APIVersionV1:
+	case enum.APIVersionV1:
 		return p.getV1(endpoint, epType)
 	default:
 		return nil, ErrUnsupportedAPIVersion
 	}
 }
 
-func (p *Pool) getV1(endpoint string, epType kind.EndpointType) (AgentProxy, error) {
+func (p *Pool) getV1(endpoint string, epType enum.EndpointType) (AgentProxy, error) {
 	switch epType {
-	case kind.EndpointHTTP:
+	case enum.EndpointHTTP:
 		return &httpProxyV1{
 			endpoint: strings.TrimRight(endpoint, "/"),
 			client:   p.httpCli,
 		}, nil
-	case kind.EndpointGRPC:
+	case enum.EndpointGRPC:
 		conn, err := p.grpcConn(endpoint)
 		if err != nil {
 			return nil, err

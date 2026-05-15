@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -37,7 +37,7 @@ func mustUser(t *testing.T, id, subject string) *model.User {
 	return u
 }
 
-func mustAddUserPerm(t *testing.T, u *model.User, p kind.Permission) {
+func mustAddUserPerm(t *testing.T, u *model.User, p enum.Permission) {
 	t.Helper()
 	if err := u.PermissionAdd(p); err != nil {
 		t.Fatalf("user.PermissionAdd(%q): %v", p, err)
@@ -51,7 +51,7 @@ func mustAddUserRole(t *testing.T, u *model.User, roleID string) {
 	}
 }
 
-func mustRole(t *testing.T, id, name string, perms ...kind.Permission) *model.Role {
+func mustRole(t *testing.T, id, name string, perms ...enum.Permission) *model.Role {
 	t.Helper()
 	r, err := model.NewRole(id, name)
 	if err != nil {
@@ -75,7 +75,7 @@ func mustUpsertRole(t *testing.T, ctx context.Context, store storage.Storage, r 
 	}
 }
 
-func assertPerms(t *testing.T, got []kind.Permission, want ...kind.Permission) {
+func assertPerms(t *testing.T, got []enum.Permission, want ...enum.Permission) {
 	t.Helper()
 	if got == nil {
 		t.Fatalf("expected non-nil slice, got nil")

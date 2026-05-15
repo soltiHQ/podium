@@ -13,7 +13,7 @@ type UserDTO struct {
 	Name        string
 	Disabled    bool
 	RoleIDs     []string
-	Permissions []string // kind.Permission as string
+	Permissions []string // enum.Permission as string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }

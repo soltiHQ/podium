@@ -1,4 +1,4 @@
-package kind
+package enum
 
 // AdmissionStrategy defines how the controller admits a new task into a slot.
 type AdmissionStrategy string

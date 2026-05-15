@@ -10,7 +10,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	authcred "github.com/soltiHQ/control-plane/internal/auth/credentials"
@@ -123,7 +123,7 @@ func (s *Service) SetPassword(ctx context.Context, req SetPasswordRequest) error
 
 		credID = req.CredentialID
 		if credID == "" {
-			existing, err := tx.GetCredentialByUserAndAuth(ctx, req.UserID, kind.Password)
+			existing, err := tx.GetCredentialByUserAndAuth(ctx, req.UserID, enum.Password)
 			if err != nil {
 				if !errors.Is(err, storage.ErrNotFound) {
 					return err
@@ -134,7 +134,7 @@ func (s *Service) SetPassword(ctx context.Context, req SetPasswordRequest) error
 			}
 		}
 
-		cred, err := model.NewCredential(credID, req.UserID, kind.Password)
+		cred, err := model.NewCredential(credID, req.UserID, enum.Password)
 		if err != nil {
 			return storage.ErrInvalidArgument
 		}

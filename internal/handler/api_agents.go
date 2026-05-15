@@ -7,7 +7,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -32,7 +32,7 @@ import (
 //   - GET /api/v1/agents
 func (a *API) Agents(w http.ResponseWriter, r *http.Request) {
 	route.Resource(w, r, routepath.ApiAgents,
-		route.Endpoint{Method: http.MethodGet, Perm: kind.AgentsGet, Fn: a.agentList},
+		route.Endpoint{Method: http.MethodGet, Perm: enum.AgentsGet, Fn: a.agentList},
 	)
 }
 
@@ -44,9 +44,9 @@ func (a *API) Agents(w http.ResponseWriter, r *http.Request) {
 //   - GET  /api/v1/agents/{id}/tasks
 func (a *API) AgentsRouter(w http.ResponseWriter, r *http.Request) {
 	route.Router(w, r, routepath.ApiAgent,
-		route.Subroute{Action: "", Method: http.MethodGet, Perm: kind.AgentsGet, Fn: a.agentDetails},
-		route.Subroute{Action: "labels", Method: http.MethodPut, Perm: kind.AgentsEdit, Fn: a.agentPatchLabels},
-		route.Subroute{Action: "tasks", Method: http.MethodGet, Perm: kind.AgentsGet, Fn: a.agentTasksList},
+		route.Subroute{Action: "", Method: http.MethodGet, Perm: enum.AgentsGet, Fn: a.agentDetails},
+		route.Subroute{Action: "labels", Method: http.MethodPut, Perm: enum.AgentsEdit, Fn: a.agentPatchLabels},
+		route.Subroute{Action: "tasks", Method: http.MethodGet, Perm: enum.AgentsGet, Fn: a.agentTasksList},
 	)
 }
 
@@ -200,7 +200,7 @@ func (a *API) agentTasksList(w http.ResponseWriter, r *http.Request, mode httpct
 		result.Total = len(filtered)
 	}
 	slices.SortFunc(result.Tasks, func(a, b proxyv1.Task) int {
-		return cmp.Compare(kind.ParseTaskStatus(a.Status).Priority(), kind.ParseTaskStatus(b.Status).Priority())
+		return cmp.Compare(enum.ParseTaskStatus(a.Status).Priority(), enum.ParseTaskStatus(b.Status).Priority())
 	})
 	response.OK(w, r, mode, &responder.View{
 		Data:      result,

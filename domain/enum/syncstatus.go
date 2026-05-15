@@ -1,4 +1,4 @@
-package kind
+package enum
 
 // SyncStatus describes the synchronization state of a Spec on a specific agent.
 type SyncStatus uint8

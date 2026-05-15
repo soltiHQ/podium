@@ -3,12 +3,12 @@ package wire
 import (
 	"time"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 )
 
 type BackoffDTO struct {
-	Jitter  string // kind.JitterStrategy
+	Jitter  string // enum.JitterStrategy
 	FirstMs int64
 	MaxMs   int64
 	Factor  float64
@@ -22,10 +22,10 @@ type SpecDTO struct {
 	Generation        int
 	DeletionRequested bool
 
-	KindType    string // kind.TaskKindType
+	KindType    string // enum.TaskKindType
 	KindConfig  map[string]any
 	TimeoutMs   int64
-	RestartType string // kind.RestartType
+	RestartType string // enum.RestartType
 	IntervalMs  int64
 	Backoff     BackoffDTO
 
@@ -94,7 +94,7 @@ func SpecFromDTO(d *SpecDTO) (*model.Spec, error) {
 	ts.SetRestartType(kindRestartType(d.RestartType))
 	ts.SetIntervalMs(d.IntervalMs)
 	ts.SetBackoff(model.BackoffConfig{
-		Jitter:  kind.JitterStrategy(d.Backoff.Jitter),
+		Jitter:  enum.JitterStrategy(d.Backoff.Jitter),
 		FirstMs: d.Backoff.FirstMs,
 		MaxMs:   d.Backoff.MaxMs,
 		Factor:  d.Backoff.Factor,

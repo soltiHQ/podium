@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 var _ domain.Entity[*Credential] = (*Credential)(nil)
@@ -19,11 +19,11 @@ type Credential struct {
 	userID string
 
 	secrets map[string]string
-	auth    kind.Auth
+	auth    enum.Auth
 }
 
 // NewCredential creates a new credential domain model.
-func NewCredential(id, userID string, auth kind.Auth) (*Credential, error) {
+func NewCredential(id, userID string, auth enum.Auth) (*Credential, error) {
 	if id == "" {
 		return nil, domain.ErrEmptyID
 	}
@@ -49,7 +49,7 @@ func (c *Credential) ID() string { return c.id }
 func (c *Credential) UserID() string { return c.userID }
 
 // AuthKind returns the authentication kind associated with this credential (e.g., password, api_key, oidc).
-func (c *Credential) AuthKind() kind.Auth { return c.auth }
+func (c *Credential) AuthKind() enum.Auth { return c.auth }
 
 // CreatedAt returns the timestamp when the credential was created.
 func (c *Credential) CreatedAt() time.Time { return c.createdAt }

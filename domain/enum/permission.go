@@ -1,4 +1,4 @@
-package kind
+package enum
 
 // Permission defines a stable identifier of an allowed action.
 type Permission string

@@ -7,7 +7,7 @@ import (
 
 	"github.com/segmentio/ksuid"
 	"github.com/soltiHQ/control-plane/domain"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/event"
@@ -47,8 +47,8 @@ const (
 //   - POST /api/v1/users
 func (a *API) Users(w http.ResponseWriter, r *http.Request) {
 	route.Resource(w, r, routepath.ApiUsers,
-		route.Endpoint{Method: http.MethodGet, Perm: kind.UsersGet, Fn: a.userList},
-		route.Endpoint{Method: http.MethodPost, Perm: kind.UsersAdd, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode) {
+		route.Endpoint{Method: http.MethodGet, Perm: enum.UsersGet, Fn: a.userList},
+		route.Endpoint{Method: http.MethodPost, Perm: enum.UsersAdd, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode) {
 			a.userUpsert(w, r, m, "", modeCreate)
 		}},
 	)
@@ -66,19 +66,19 @@ func (a *API) Users(w http.ResponseWriter, r *http.Request) {
 //   - POST   /api/v1/users/{id}/password
 func (a *API) UsersRouter(w http.ResponseWriter, r *http.Request) {
 	route.Router(w, r, routepath.ApiUser,
-		route.Subroute{Action: "", Method: http.MethodGet, Perm: kind.UsersGet, Fn: a.usersDetails},
-		route.Subroute{Action: "", Method: http.MethodPut, Perm: kind.UsersEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
+		route.Subroute{Action: "", Method: http.MethodGet, Perm: enum.UsersGet, Fn: a.usersDetails},
+		route.Subroute{Action: "", Method: http.MethodPut, Perm: enum.UsersEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
 			a.userUpsert(w, r, m, id, modeUpdate)
 		}},
-		route.Subroute{Action: "", Method: http.MethodDelete, Perm: kind.UsersDelete, Fn: a.userDelete},
-		route.Subroute{Action: "sessions", Method: http.MethodGet, Perm: kind.UsersGet, Fn: a.usersSessions},
-		route.Subroute{Action: "disable", Method: http.MethodPost, Perm: kind.UsersEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
+		route.Subroute{Action: "", Method: http.MethodDelete, Perm: enum.UsersDelete, Fn: a.userDelete},
+		route.Subroute{Action: "sessions", Method: http.MethodGet, Perm: enum.UsersGet, Fn: a.usersSessions},
+		route.Subroute{Action: "disable", Method: http.MethodPost, Perm: enum.UsersEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
 			a.userSetStatus(w, r, m, id, userDisable)
 		}},
-		route.Subroute{Action: "enable", Method: http.MethodPost, Perm: kind.UsersEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
+		route.Subroute{Action: "enable", Method: http.MethodPost, Perm: enum.UsersEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
 			a.userSetStatus(w, r, m, id, userActive)
 		}},
-		route.Subroute{Action: "password", Method: http.MethodPost, Perm: kind.UsersEdit, Fn: a.userSetPassword},
+		route.Subroute{Action: "password", Method: http.MethodPost, Perm: enum.UsersEdit, Fn: a.userSetPassword},
 	)
 }
 
@@ -88,7 +88,7 @@ func (a *API) UsersRouter(w http.ResponseWriter, r *http.Request) {
 //   - POST /api/v1/sessions/{sessionID}/revoke
 func (a *API) SessionsRouter(w http.ResponseWriter, r *http.Request) {
 	route.Router(w, r, routepath.ApiSession,
-		route.Subroute{Action: "revoke", Method: http.MethodPost, Perm: kind.UsersEdit, Fn: a.userRevokeSession},
+		route.Subroute{Action: "revoke", Method: http.MethodPost, Perm: enum.UsersEdit, Fn: a.userRevokeSession},
 	)
 }
 
@@ -154,8 +154,8 @@ func (a *API) usersSessions(w http.ResponseWriter, r *http.Request, mode httpctx
 
 	items := mapSlice(res.Items, wire.SessionToREST)
 	slices.SortFunc(items, func(a, b restv1.Session) int {
-		pa := kind.DeriveSessionStatus(a.Revoked, a.ExpiresAt).Priority()
-		pb := kind.DeriveSessionStatus(b.Revoked, b.ExpiresAt).Priority()
+		pa := enum.DeriveSessionStatus(a.Revoked, a.ExpiresAt).Priority()
+		pb := enum.DeriveSessionStatus(b.Revoked, b.ExpiresAt).Priority()
 		if pa != pb {
 			return cmp.Compare(pa, pb)
 		}

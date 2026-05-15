@@ -3,7 +3,7 @@ package identity
 import (
 	"time"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 // Identity describes an authenticated principal (user/service) and its effective authorization data.
@@ -21,11 +21,11 @@ type Identity struct {
 	SessionID string
 
 	Audience    []string
-	Permissions []kind.Permission
+	Permissions []enum.Permission
 }
 
 // HasPermission reports whether the identity grants the given permission.
-func (id *Identity) HasPermission(p kind.Permission) bool {
+func (id *Identity) HasPermission(p enum.Permission) bool {
 	if id == nil || p == "" {
 		return false
 	}

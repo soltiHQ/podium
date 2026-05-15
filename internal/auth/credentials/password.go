@@ -7,7 +7,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth"
 )
@@ -47,7 +47,7 @@ func GeneratePassword(n int) (string, error) {
 // NewPasswordCredential creates a credential bound to user with password kind.
 // No secret material is stored here.
 func NewPasswordCredential(id, userID string) (*model.Credential, error) {
-	return model.NewCredential(id, userID, kind.Password)
+	return model.NewCredential(id, userID, enum.Password)
 }
 
 // NewPasswordVerifier creates a verifier containing bcrypt hash.
@@ -71,7 +71,7 @@ func NewPasswordVerifier(
 		return nil, err
 	}
 
-	v, err := model.NewVerifier(verifierID, credentialID, kind.Password)
+	v, err := model.NewVerifier(verifierID, credentialID, enum.Password)
 	if err != nil {
 		return nil, err
 	}
@@ -92,8 +92,8 @@ func VerifyPassword(
 		return auth.ErrPasswordMismatch
 	}
 
-	if cred.AuthKind() != kind.Password ||
-		v.AuthKind() != kind.Password {
+	if cred.AuthKind() != enum.Password ||
+		v.AuthKind() != enum.Password {
 		return auth.ErrWrongAuthKind
 	}
 

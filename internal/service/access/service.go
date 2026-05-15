@@ -8,7 +8,7 @@ import (
 	"context"
 
 	"github.com/rs/zerolog"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	iauth "github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
@@ -54,7 +54,7 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identi
 		}
 	}
 
-	pair, id, err := s.auth.Session.Login(ctx, kind.Password, req.Subject, req.Password)
+	pair, id, err := s.auth.Session.Login(ctx, enum.Password, req.Subject, req.Password)
 	if err != nil {
 		if s.auth.Limiter != nil && req.RateKey != "" {
 			s.auth.Limiter.RecordFailure(req.RateKey, now)
@@ -73,8 +73,8 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identi
 }
 
 // GetPermissions returns all available permissions in the system.
-func (s *Service) GetPermissions() []kind.Permission {
-	return kind.All
+func (s *Service) GetPermissions() []enum.Permission {
+	return enum.All
 }
 
 // GetRoles returns all roles from storage.

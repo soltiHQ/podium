@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 var _ domain.Entity[*User] = (*User)(nil)
@@ -32,7 +32,7 @@ type User struct {
 	name    string
 
 	roleIDs     []string
-	permissions []kind.Permission
+	permissions []enum.Permission
 
 	disabled bool
 }
@@ -53,7 +53,7 @@ func NewUser(id, subject string) (*User, error) {
 		id:          id,
 		subject:     subject,
 		roleIDs:     make([]string, 0),
-		permissions: make([]kind.Permission, 0),
+		permissions: make([]enum.Permission, 0),
 	}, nil
 }
 
@@ -143,8 +143,8 @@ func (u *User) RolesIDsNew(roles []string) {
 }
 
 // PermissionsAll returns a copy of permissions granted directly to the user.
-func (u *User) PermissionsAll() []kind.Permission {
-	out := make([]kind.Permission, len(u.permissions))
+func (u *User) PermissionsAll() []enum.Permission {
+	out := make([]enum.Permission, len(u.permissions))
 	copy(out, u.permissions)
 	return out
 }
@@ -159,15 +159,15 @@ func (u *User) PermissionsNew(perms []string) {
 	}
 
 	var (
-		out  = make([]kind.Permission, 0, len(perms))
-		seen = make(map[kind.Permission]struct{}, len(perms))
+		out  = make([]enum.Permission, 0, len(perms))
+		seen = make(map[enum.Permission]struct{}, len(perms))
 	)
 	for _, p := range perms {
 		if p == "" {
 			continue
 		}
 
-		perm := kind.Permission(p)
+		perm := enum.Permission(p)
 		if _, ok := seen[perm]; ok {
 			continue
 		}
@@ -188,7 +188,7 @@ func (u *User) RoleHas(roleID string) bool {
 }
 
 // PermissionHas reports whether the user has the given permission granted directly.
-func (u *User) PermissionHas(p kind.Permission) bool {
+func (u *User) PermissionHas(p enum.Permission) bool {
 	for _, x := range u.permissions {
 		if x == p {
 			return true
@@ -225,7 +225,7 @@ func (u *User) RoleDelete(roleID string) {
 
 // PermissionAdd grants a permission directly to the user.
 // It is idempotent: adding an existing permission does nothing.
-func (u *User) PermissionAdd(p kind.Permission) error {
+func (u *User) PermissionAdd(p enum.Permission) error {
 	if p == "" {
 		return domain.ErrFieldEmpty
 	}
@@ -239,7 +239,7 @@ func (u *User) PermissionAdd(p kind.Permission) error {
 
 // PermissionDelete revokes a permission from the user.
 // If permission does not exist, nothing happens.
-func (u *User) PermissionDelete(p kind.Permission) {
+func (u *User) PermissionDelete(p enum.Permission) {
 	for i, x := range u.permissions {
 		if x == p {
 			u.permissions = append(u.permissions[:i], u.permissions[i+1:]...)
@@ -253,7 +253,7 @@ func (u *User) PermissionDelete(p kind.Permission) {
 func (u *User) Clone() *User {
 	var (
 		roleIDs = make([]string, len(u.roleIDs))
-		perms   = make([]kind.Permission, len(u.permissions))
+		perms   = make([]enum.Permission, len(u.permissions))
 	)
 
 	copy(roleIDs, u.roleIDs)

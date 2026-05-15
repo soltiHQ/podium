@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
@@ -85,7 +85,7 @@ func TestUserFilter_Matches_AllPredicatesANDed(t *testing.T) {
 	u.EmailAdd("sub-1@example.com")
 	u.NameAdd("User 1")
 	userAddRole(t, u, "r-admin")
-	userAddPerm(t, u, kind.UsersGet)
+	userAddPerm(t, u, enum.UsersGet)
 
 	if !NewUserFilter().Matches(u) {
 		t.Fatalf("empty filter must match")
@@ -113,10 +113,10 @@ func TestUserFilter_Matches_AllPredicatesANDed(t *testing.T) {
 		t.Fatalf("expected no match by role id")
 	}
 
-	if !NewUserFilter().ByPermission(kind.UsersGet).Matches(u) {
+	if !NewUserFilter().ByPermission(enum.UsersGet).Matches(u) {
 		t.Fatalf("expected match by permission")
 	}
-	if NewUserFilter().ByPermission(kind.UsersDelete).Matches(u) {
+	if NewUserFilter().ByPermission(enum.UsersDelete).Matches(u) {
 		t.Fatalf("expected no match by permission")
 	}
 
@@ -124,7 +124,7 @@ func TestUserFilter_Matches_AllPredicatesANDed(t *testing.T) {
 		ByDisabled(true).
 		ByEmail("sub-1@example.com").
 		ByRoleID("r-admin").
-		ByPermission(kind.UsersGet)
+		ByPermission(enum.UsersGet)
 	if !f.Matches(u) {
 		t.Fatalf("expected match for ANDed predicates")
 	}
@@ -133,7 +133,7 @@ func TestUserFilter_Matches_AllPredicatesANDed(t *testing.T) {
 		ByDisabled(true).
 		ByEmail("sub-1@example.com").
 		ByRoleID("r-admin").
-		ByPermission(kind.UsersDelete)
+		ByPermission(enum.UsersDelete)
 	if f2.Matches(u) {
 		t.Fatalf("expected no match for ANDed predicates")
 	}
@@ -143,8 +143,8 @@ func TestRoleFilter_Matches_AllPredicatesANDed(t *testing.T) {
 	t.Parallel()
 
 	r := mkRole(t, "r1", "admin")
-	roleAddPerm(t, r, kind.UsersGet)
-	roleAddPerm(t, r, kind.AgentsEdit)
+	roleAddPerm(t, r, enum.UsersGet)
+	roleAddPerm(t, r, enum.AgentsEdit)
 
 	if !NewRoleFilter().Matches(r) {
 		t.Fatalf("empty filter must match")
@@ -157,23 +157,23 @@ func TestRoleFilter_Matches_AllPredicatesANDed(t *testing.T) {
 		t.Fatalf("expected no match by name")
 	}
 
-	if !NewRoleFilter().ByPermission(kind.UsersGet).Matches(r) {
+	if !NewRoleFilter().ByPermission(enum.UsersGet).Matches(r) {
 		t.Fatalf("expected match by permission")
 	}
-	if NewRoleFilter().ByPermission(kind.UsersDelete).Matches(r) {
+	if NewRoleFilter().ByPermission(enum.UsersDelete).Matches(r) {
 		t.Fatalf("expected no match by permission")
 	}
 
 	f := NewRoleFilter().
 		ByName("admin").
-		ByPermission(kind.AgentsEdit)
+		ByPermission(enum.AgentsEdit)
 	if !f.Matches(r) {
 		t.Fatalf("expected match for ANDed predicates")
 	}
 
 	f2 := NewRoleFilter().
 		ByName("admin").
-		ByPermission(kind.UsersDelete)
+		ByPermission(enum.UsersDelete)
 	if f2.Matches(r) {
 		t.Fatalf("expected no match for ANDed predicates")
 	}

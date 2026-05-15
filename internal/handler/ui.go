@@ -7,7 +7,7 @@ import (
 
 	"github.com/a-h/templ"
 	"github.com/rs/zerolog"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service"
@@ -63,15 +63,15 @@ func (u *UI) Routes(mux *http.ServeMux, auth route.BaseMW, perm route.PermMW, co
 	route.HandleFunc(mux, routepath.PageLogout, u.Logout, append(common, auth)...)
 
 	route.HandleFunc(mux, routepath.PageUsers, u.Users, append(common, auth)...)
-	route.HandleFunc(mux, routepath.PageUserInfo, u.UserDetail, append(common, auth, perm(kind.UsersGet))...)
+	route.HandleFunc(mux, routepath.PageUserInfo, u.UserDetail, append(common, auth, perm(enum.UsersGet))...)
 
 	route.HandleFunc(mux, routepath.PageAgents, u.Agents, append(common, auth)...)
-	route.HandleFunc(mux, routepath.PageAgentInfo, u.AgentDetail, append(common, auth, perm(kind.AgentsGet))...)
+	route.HandleFunc(mux, routepath.PageAgentInfo, u.AgentDetail, append(common, auth, perm(enum.AgentsGet))...)
 
-	route.HandleFunc(mux, routepath.PageSpecs, u.Specs, append(common, auth, perm(kind.SpecsGet))...)
-	route.HandleFunc(mux, routepath.PageSpecNew, u.SpecNew, append(common, auth, perm(kind.SpecsAdd))...)
-	route.HandleFunc(mux, routepath.PageSpecEdit, u.SpecEdit, append(common, auth, perm(kind.SpecsEdit))...)
-	route.HandleFunc(mux, routepath.PageSpecInfo, u.SpecDetail, append(common, auth, perm(kind.SpecsGet))...)
+	route.HandleFunc(mux, routepath.PageSpecs, u.Specs, append(common, auth, perm(enum.SpecsGet))...)
+	route.HandleFunc(mux, routepath.PageSpecNew, u.SpecNew, append(common, auth, perm(enum.SpecsAdd))...)
+	route.HandleFunc(mux, routepath.PageSpecEdit, u.SpecEdit, append(common, auth, perm(enum.SpecsEdit))...)
+	route.HandleFunc(mux, routepath.PageSpecInfo, u.SpecDetail, append(common, auth, perm(enum.SpecsGet))...)
 
 	route.HandleFunc(mux, routepath.PageHome, u.Main, append(common, auth)...)
 }

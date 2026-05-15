@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/auth/session"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
@@ -48,7 +48,7 @@ func Auth(verifier token.Verifier, sessionSvc *session.Service) func(http.Handle
 }
 
 // RequirePermission returns middleware that checks identity for a specific permission.
-func RequirePermission(perm kind.Permission) func(http.Handler) http.Handler {
+func RequirePermission(perm enum.Permission) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var (

@@ -3,7 +3,7 @@ package handler
 import (
 	"net/http"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
@@ -41,11 +41,11 @@ func (a *API) Dashboard(w http.ResponseWriter, r *http.Request) {
 	var active, inactive, disconnected int
 	for _, ag := range agents.Items {
 		switch ag.Status() {
-		case kind.AgentStatusActive:
+		case enum.AgentStatusActive:
 			active++
-		case kind.AgentStatusInactive:
+		case enum.AgentStatusInactive:
 			inactive++
-		case kind.AgentStatusDisconnected:
+		case enum.AgentStatusDisconnected:
 			disconnected++
 		}
 	}
@@ -74,13 +74,13 @@ func (a *API) Dashboard(w http.ResponseWriter, r *http.Request) {
 	var synced, pending, failed, drift int
 	for _, r := range rollouts {
 		switch r.Status() {
-		case kind.SyncStatusSynced:
+		case enum.SyncStatusSynced:
 			synced++
-		case kind.SyncStatusPending:
+		case enum.SyncStatusPending:
 			pending++
-		case kind.SyncStatusFailed:
+		case enum.SyncStatusFailed:
 			failed++
-		case kind.SyncStatusDrift:
+		case enum.SyncStatusDrift:
 			drift++
 		}
 	}

@@ -3,7 +3,7 @@ package token
 import (
 	"time"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 // Claims is an algorithm-agnostic representation of access token claims.
@@ -30,5 +30,5 @@ type Claims struct {
 	Name      string
 
 	Audience    []string
-	Permissions []kind.Permission
+	Permissions []enum.Permission
 }

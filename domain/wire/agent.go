@@ -11,14 +11,14 @@ type AgentDTO struct {
 	ID                  string
 	Name                string
 	Endpoint            string
-	EndpointType        string // kind.EndpointType
-	APIVersion          uint8  // kind.APIVersion
+	EndpointType        string // enum.EndpointType
+	APIVersion          uint8  // enum.APIVersion
 	OS                  string
 	Arch                string
 	Platform            string
 	UptimeSeconds       int64
 	HeartbeatIntervalNs int64
-	Status              uint8 // kind.AgentStatus
+	Status              uint8 // enum.AgentStatus
 
 	CreatedAt  time.Time
 	UpdatedAt  time.Time

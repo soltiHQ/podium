@@ -3,7 +3,7 @@ package model
 import (
 	"testing"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 // NewSpec starts at generation=1, matching version=1. Both counters are
@@ -111,12 +111,12 @@ func TestRuntimeEqualsDetectsEveryRuntimeField(t *testing.T) {
 		mutate func(*Spec)
 	}{
 		{"slot", func(s *Spec) { s.SetSlot("slot-2") }},
-		{"kindType", func(s *Spec) { s.SetKindType(kind.TaskKindWasm) }},
+		{"kindType", func(s *Spec) { s.SetKindType(enum.TaskKindWasm) }},
 		{"kindConfig value", func(s *Spec) { s.SetKindConfig(map[string]any{"command": "echo"}) }},
 		{"timeoutMs", func(s *Spec) { s.SetTimeoutMs(60_000) }},
-		{"restartType", func(s *Spec) { s.SetRestartType(kind.RestartAlways) }},
+		{"restartType", func(s *Spec) { s.SetRestartType(enum.RestartAlways) }},
 		{"intervalMs", func(s *Spec) { s.SetIntervalMs(500) }},
-		{"backoff", func(s *Spec) { s.SetBackoff(BackoffConfig{Jitter: kind.JitterFull, FirstMs: 2000, MaxMs: 10_000, Factor: 3.0}) }},
+		{"backoff", func(s *Spec) { s.SetBackoff(BackoffConfig{Jitter: enum.JitterFull, FirstMs: 2000, MaxMs: 10_000, Factor: 3.0}) }},
 		{"runnerLabels", func(s *Spec) { s.SetRunnerLabels(map[string]string{"zone": "us"}) }},
 	}
 

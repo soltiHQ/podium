@@ -1,4 +1,4 @@
-package kind
+package enum
 
 // AgentStatus describes the lifecycle state of an agent.
 type AgentStatus uint8

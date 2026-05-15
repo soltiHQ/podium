@@ -1,4 +1,4 @@
-package kind
+package enum
 
 // TaskStatus describes the execution state of an agent task.
 // https://github.com/soltiHQ/taskvisor/blob/main/src/events/event.rs

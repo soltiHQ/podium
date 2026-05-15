@@ -9,7 +9,7 @@ import (
 	"context"
 
 	"github.com/rs/zerolog"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -190,7 +190,7 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 			if r == nil {
 				continue
 			}
-			r.SetIntent(kind.RolloutIntentUninstall)
+			r.SetIntent(enum.RolloutIntentUninstall)
 			r.MarkPending(ts.Version())
 			if err := tx.UpsertRollout(ctx, r); err != nil {
 				return err
@@ -350,15 +350,15 @@ func (s *Service) Deploy(ctx context.Context, specID string) error {
 
 		for _, agentID := range targets {
 			if r, ok := existing[agentID]; ok {
-				if r.ObservedGeneration() == ts.Generation() && r.Status() == kind.SyncStatusSynced {
+				if r.ObservedGeneration() == ts.Generation() && r.Status() == enum.SyncStatusSynced {
 					noop++
 					continue
 				}
 				if r.ActualTaskID() == "" {
-					r.SetIntent(kind.RolloutIntentInstall)
+					r.SetIntent(enum.RolloutIntentInstall)
 					install++
 				} else {
-					r.SetIntent(kind.RolloutIntentUpdate)
+					r.SetIntent(enum.RolloutIntentUpdate)
 					update++
 				}
 				r.MarkPending(ts.Version())
@@ -371,7 +371,7 @@ func (s *Service) Deploy(ctx context.Context, specID string) error {
 			if err != nil {
 				return err
 			}
-			r.SetIntent(kind.RolloutIntentInstall)
+			r.SetIntent(enum.RolloutIntentInstall)
 			if err := tx.UpsertRollout(ctx, r); err != nil {
 				return err
 			}
@@ -382,7 +382,7 @@ func (s *Service) Deploy(ctx context.Context, specID string) error {
 			if _, kept := wanted[agentID]; kept {
 				continue
 			}
-			r.SetIntent(kind.RolloutIntentUninstall)
+			r.SetIntent(enum.RolloutIntentUninstall)
 			r.MarkPending(ts.Version())
 			if err := tx.UpsertRollout(ctx, r); err != nil {
 				return err

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/credentials"
@@ -43,22 +43,22 @@ func (i *fakeIssuer) Issue(ctx context.Context, id *identity.Identity) (string, 
 }
 
 type fakeRBAC struct {
-	perms []kind.Permission
+	perms []enum.Permission
 	err   error
 }
 
-func (r *fakeRBAC) ResolveUserPermissions(ctx context.Context, u *model.User) ([]kind.Permission, error) {
+func (r *fakeRBAC) ResolveUserPermissions(ctx context.Context, u *model.User) ([]enum.Permission, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
-	out := make([]kind.Permission, len(r.perms))
+	out := make([]enum.Permission, len(r.perms))
 	copy(out, r.perms)
 	return out, nil
 }
 
 type badProvider struct{}
 
-func (badProvider) Kind() kind.Auth { return kind.APIKey }
+func (badProvider) Kind() enum.Auth { return enum.APIKey }
 func (badProvider) Authenticate(ctx context.Context, req providers.Request) (*providers.Result, error) {
 	return nil, auth.ErrInvalidRequest
 }
@@ -112,8 +112,8 @@ func newService(t *testing.T, st storage.Storage, clk token.Clock, iss token.Iss
 		RotateRefresh: rotate,
 	}
 
-	provs := map[kind.Auth]providers.Provider{
-		kind.Password: passwordprovider.New(st),
+	provs := map[enum.Auth]providers.Provider{
+		enum.Password: passwordprovider.New(st),
 	}
 
 	return New(st, iss, clk, cfg, rbac, provs)
@@ -125,11 +125,11 @@ func TestService_EnsureReady_InvalidWiring(t *testing.T) {
 
 	clk := &fakeClock{t: time.Unix(1, 0)}
 	iss := &fakeIssuer{}
-	rbac := &fakeRBAC{perms: []kind.Permission{"perm:a"}}
+	rbac := &fakeRBAC{perms: []enum.Permission{"perm:a"}}
 
 	t.Run("nil service", func(t *testing.T) {
 		var s *Service
-		_, _, err := s.Login(ctx, kind.Password, "s", "p")
+		_, _, err := s.Login(ctx, enum.Password, "s", "p")
 		if !errors.Is(err, auth.ErrInvalidRequest) {
 			t.Fatalf("expected ErrInvalidRequest, got %v", err)
 		}
@@ -137,7 +137,7 @@ func TestService_EnsureReady_InvalidWiring(t *testing.T) {
 
 	t.Run("nil store", func(t *testing.T) {
 		s := New(nil, iss, clk, Config{}, rbac, nil)
-		_, _, err := s.Login(ctx, kind.Password, "s", "p")
+		_, _, err := s.Login(ctx, enum.Password, "s", "p")
 		if !errors.Is(err, auth.ErrInvalidRequest) {
 			t.Fatalf("expected ErrInvalidRequest, got %v", err)
 		}
@@ -145,7 +145,7 @@ func TestService_EnsureReady_InvalidWiring(t *testing.T) {
 
 	t.Run("nil issuer", func(t *testing.T) {
 		s := New(st, nil, clk, Config{}, rbac, nil)
-		_, _, err := s.Login(ctx, kind.Password, "s", "p")
+		_, _, err := s.Login(ctx, enum.Password, "s", "p")
 		if !errors.Is(err, auth.ErrInvalidRequest) {
 			t.Fatalf("expected ErrInvalidRequest, got %v", err)
 		}
@@ -153,7 +153,7 @@ func TestService_EnsureReady_InvalidWiring(t *testing.T) {
 
 	t.Run("nil rbac", func(t *testing.T) {
 		s := New(st, iss, clk, Config{}, nil, nil)
-		_, _, err := s.Login(ctx, kind.Password, "s", "p")
+		_, _, err := s.Login(ctx, enum.Password, "s", "p")
 		if !errors.Is(err, auth.ErrInvalidRequest) {
 			t.Fatalf("expected ErrInvalidRequest, got %v", err)
 		}
@@ -165,26 +165,26 @@ func TestService_Login_InvalidInput(t *testing.T) {
 	st := inmemory.New()
 	clk := &fakeClock{t: time.Unix(1, 0)}
 	iss := &fakeIssuer{}
-	rbac := &fakeRBAC{perms: []kind.Permission{"perm:a"}}
+	rbac := &fakeRBAC{perms: []enum.Permission{"perm:a"}}
 
 	s := newService(t, st, clk, iss, rbac, true)
 
 	t.Run("empty subject", func(t *testing.T) {
-		_, _, err := s.Login(ctx, kind.Password, "", "pw")
+		_, _, err := s.Login(ctx, enum.Password, "", "pw")
 		if !errors.Is(err, auth.ErrInvalidCredentials) {
 			t.Fatalf("expected ErrInvalidCredentials, got %v", err)
 		}
 	})
 
 	t.Run("empty secret", func(t *testing.T) {
-		_, _, err := s.Login(ctx, kind.Password, "subj", "")
+		_, _, err := s.Login(ctx, enum.Password, "subj", "")
 		if !errors.Is(err, auth.ErrInvalidCredentials) {
 			t.Fatalf("expected ErrInvalidCredentials, got %v", err)
 		}
 	})
 
 	t.Run("unsupported auth kind", func(t *testing.T) {
-		_, _, err := s.Login(ctx, kind.APIKey, "subj", "pw")
+		_, _, err := s.Login(ctx, enum.APIKey, "subj", "pw")
 		if !errors.Is(err, auth.ErrInvalidRequest) {
 			t.Fatalf("expected ErrInvalidRequest, got %v", err)
 		}
@@ -196,7 +196,7 @@ func TestService_Login_ProviderMappingValidation(t *testing.T) {
 	st := inmemory.New()
 	clk := &fakeClock{t: time.Unix(1, 0)}
 	iss := &fakeIssuer{}
-	rbac := &fakeRBAC{perms: []kind.Permission{"perm:a"}}
+	rbac := &fakeRBAC{perms: []enum.Permission{"perm:a"}}
 
 	s := New(
 		st,
@@ -204,12 +204,12 @@ func TestService_Login_ProviderMappingValidation(t *testing.T) {
 		clk,
 		Config{AccessTTL: time.Minute, RefreshTTL: time.Hour, Issuer: "i", Audience: "a", RotateRefresh: true},
 		rbac,
-		map[kind.Auth]providers.Provider{
-			kind.Password: badProvider{},
+		map[enum.Auth]providers.Provider{
+			enum.Password: badProvider{},
 		},
 	)
 
-	_, _, err := s.Login(ctx, kind.Password, "subj", "pw")
+	_, _, err := s.Login(ctx, enum.Password, "subj", "pw")
 	if !errors.Is(err, auth.ErrInvalidRequest) {
 		t.Fatalf("expected ErrInvalidRequest, got %v", err)
 	}
@@ -228,7 +228,7 @@ func TestService_Login_UnauthorizedWhenNoPerms(t *testing.T) {
 
 	s := newService(t, st, clk, iss, rbac, true)
 
-	_, _, err := s.Login(ctx, kind.Password, "subj-1", "pw")
+	_, _, err := s.Login(ctx, enum.Password, "subj-1", "pw")
 	if !errors.Is(err, auth.ErrUnauthorized) {
 		t.Fatalf("expected ErrUnauthorized, got %v", err)
 	}
@@ -239,7 +239,7 @@ func TestService_Login_Success_CreatesSession_IssuesToken(t *testing.T) {
 	st := inmemory.New()
 	clk := &fakeClock{t: time.Unix(100, 0)}
 	iss := &fakeIssuer{out: "access-1"}
-	rbac := &fakeRBAC{perms: []kind.Permission{"perm:a", "perm:b"}}
+	rbac := &fakeRBAC{perms: []enum.Permission{"perm:a", "perm:b"}}
 
 	u := mustUser(t, "u1", "subj-1", false)
 	u.NameAdd("User One")
@@ -249,7 +249,7 @@ func TestService_Login_Success_CreatesSession_IssuesToken(t *testing.T) {
 
 	s := newService(t, st, clk, iss, rbac, true)
 
-	pair, id, err := s.Login(ctx, kind.Password, "subj-1", "pw")
+	pair, id, err := s.Login(ctx, enum.Password, "subj-1", "pw")
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
@@ -285,7 +285,7 @@ func TestService_Login_Success_CreatesSession_IssuesToken(t *testing.T) {
 	if sess.CredentialID() != cred.ID() {
 		t.Fatalf("session cred mismatch: %q != %q", sess.CredentialID(), cred.ID())
 	}
-	if sess.AuthKind() != kind.Password {
+	if sess.AuthKind() != enum.Password {
 		t.Fatalf("session auth kind mismatch: %q", sess.AuthKind())
 	}
 	if len(sess.RefreshHash()) == 0 {
@@ -298,7 +298,7 @@ func TestService_Refresh_InvalidInput(t *testing.T) {
 	st := inmemory.New()
 	clk := &fakeClock{t: time.Unix(1, 0)}
 	iss := &fakeIssuer{}
-	rbac := &fakeRBAC{perms: []kind.Permission{"perm:a"}}
+	rbac := &fakeRBAC{perms: []enum.Permission{"perm:a"}}
 
 	s := newService(t, st, clk, iss, rbac, true)
 
@@ -317,7 +317,7 @@ func TestService_Refresh_SessionNotFound(t *testing.T) {
 	st := inmemory.New()
 	clk := &fakeClock{t: time.Unix(1, 0)}
 	iss := &fakeIssuer{}
-	rbac := &fakeRBAC{perms: []kind.Permission{"perm:a"}}
+	rbac := &fakeRBAC{perms: []enum.Permission{"perm:a"}}
 
 	s := newService(t, st, clk, iss, rbac, true)
 
@@ -332,7 +332,7 @@ func TestService_Refresh_Success_NoRotate(t *testing.T) {
 	st := inmemory.New()
 	clk := &fakeClock{t: time.Unix(100, 0)}
 	iss := &fakeIssuer{out: "access-2"}
-	rbac := &fakeRBAC{perms: []kind.Permission{"perm:a"}}
+	rbac := &fakeRBAC{perms: []enum.Permission{"perm:a"}}
 
 	u := mustUser(t, "u1", "subj-1", false)
 	mustUpsertUser(t, ctx, st, u)
@@ -340,7 +340,7 @@ func TestService_Refresh_Success_NoRotate(t *testing.T) {
 
 	s := newService(t, st, clk, iss, rbac, false)
 
-	pair, id, err := s.Login(ctx, kind.Password, "subj-1", "pw")
+	pair, id, err := s.Login(ctx, enum.Password, "subj-1", "pw")
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestService_Refresh_Success_RotateAndOldTokenStopsWorking(t *testing.T) {
 	st := inmemory.New()
 	clk := &fakeClock{t: time.Unix(200, 0)}
 	iss := &fakeIssuer{out: "access-3"}
-	rbac := &fakeRBAC{perms: []kind.Permission{"perm:a"}}
+	rbac := &fakeRBAC{perms: []enum.Permission{"perm:a"}}
 
 	u := mustUser(t, "u1", "subj-1", false)
 	mustUpsertUser(t, ctx, st, u)
@@ -377,7 +377,7 @@ func TestService_Refresh_Success_RotateAndOldTokenStopsWorking(t *testing.T) {
 
 	s := newService(t, st, clk, iss, rbac, true)
 
-	pair, id, err := s.Login(ctx, kind.Password, "subj-1", "pw")
+	pair, id, err := s.Login(ctx, enum.Password, "subj-1", "pw")
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestService_Refresh_ExpiredSession(t *testing.T) {
 	st := inmemory.New()
 	clk := &fakeClock{t: time.Unix(300, 0)}
 	iss := &fakeIssuer{}
-	rbac := &fakeRBAC{perms: []kind.Permission{"perm:a"}}
+	rbac := &fakeRBAC{perms: []enum.Permission{"perm:a"}}
 
 	u := mustUser(t, "u1", "subj-1", false)
 	mustUpsertUser(t, ctx, st, u)
@@ -419,7 +419,7 @@ func TestService_Refresh_ExpiredSession(t *testing.T) {
 	s := newService(t, st, clk, iss, rbac, false)
 	s.cfg.RefreshTTL = 10 * time.Second
 
-	pair, id, err := s.Login(ctx, kind.Password, "subj-1", "pw")
+	pair, id, err := s.Login(ctx, enum.Password, "subj-1", "pw")
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -437,7 +437,7 @@ func TestService_Refresh_DisabledUser(t *testing.T) {
 	st := inmemory.New()
 	clk := &fakeClock{t: time.Unix(400, 0)}
 	iss := &fakeIssuer{}
-	rbac := &fakeRBAC{perms: []kind.Permission{"perm:a"}}
+	rbac := &fakeRBAC{perms: []enum.Permission{"perm:a"}}
 
 	u := mustUser(t, "u1", "subj-1", false)
 	mustUpsertUser(t, ctx, st, u)
@@ -445,7 +445,7 @@ func TestService_Refresh_DisabledUser(t *testing.T) {
 
 	s := newService(t, st, clk, iss, rbac, false)
 
-	pair, id, err := s.Login(ctx, kind.Password, "subj-1", "pw")
+	pair, id, err := s.Login(ctx, enum.Password, "subj-1", "pw")
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
@@ -470,7 +470,7 @@ func TestService_Revoke(t *testing.T) {
 	st := inmemory.New()
 	clk := &fakeClock{t: time.Unix(500, 0)}
 	iss := &fakeIssuer{}
-	rbac := &fakeRBAC{perms: []kind.Permission{"perm:a"}}
+	rbac := &fakeRBAC{perms: []enum.Permission{"perm:a"}}
 
 	u := mustUser(t, "u1", "subj-1", false)
 	mustUpsertUser(t, ctx, st, u)
@@ -493,7 +493,7 @@ func TestService_Revoke(t *testing.T) {
 	})
 
 	t.Run("success and then refresh rejected as revoked", func(t *testing.T) {
-		pair, id, err := s.Login(ctx, kind.Password, "subj-1", "pw")
+		pair, id, err := s.Login(ctx, enum.Password, "subj-1", "pw")
 		if err != nil {
 			t.Fatalf("Login: %v", err)
 		}
