@@ -27,6 +27,19 @@ tasks:
   deps:
     desc: Install dependencies.
     cmds:
+      - |
+        echo "--- DEBUG ---"
+        echo "pwd: $(pwd)"
+        echo "user: $(id)"
+        echo "ls .:"
+        ls -la
+        echo "ls ui/static/js (if exists):"
+        ls -la ui/static/js 2>&1 || true
+        echo "stat ui/static/js/alpine.min.js (if exists):"
+        stat ui/static/js/alpine.min.js 2>&1 || true
+        echo "df -h ."
+        df -h .
+        echo "--- END DEBUG ---"
       - task: helpers:download/file
         vars:
           URL: "https://cdn.jsdelivr.net/npm/alpinejs@{{.alpinejs_version}}/dist/cdn.min.js"
