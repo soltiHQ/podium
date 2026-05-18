@@ -30,9 +30,8 @@ jobs:
             .cache
             vendor
             api/gen
-            ui/static/js
-            ui/static/css/tailwindcss.css
-            ui/templates/**/*_templ.go
+            ui/static
+            ui/templates
           key: podium-${{ hashFiles('go.mod', 'go.sum', 'Taskfile.yaml') }}
 
       - name: Run ${{ matrix.command }}
@@ -48,7 +47,6 @@ jobs:
             .cache
             vendor
             api/gen
-            ui/static/js
-            ui/static/css/tailwindcss.css
-            ui/templates/**/*_templ.go
+            ui/static
+            ui/templates
           key: podium-${{ hashFiles('go.mod', 'go.sum', 'Taskfile.yaml') }}
