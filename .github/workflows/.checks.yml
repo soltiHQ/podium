@@ -10,10 +10,10 @@ jobs:
       fail-fast: false
       matrix:
         command:
-          - go/fumpt
-          - go/vulnerability
-          - go/lint
-          - go/test
+          - ci/fumpt
+          - ci/vulnerability
+          - ci/lint
+          - ci/test
     steps:
       - uses: actions/checkout@v4
 

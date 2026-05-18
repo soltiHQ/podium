@@ -9,11 +9,11 @@ import (
 	"github.com/rs/zerolog"
 
 	genv1 "github.com/soltiHQ/control-plane/api/gen/v1"
+	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
-	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
 
@@ -36,6 +36,7 @@ func (f *fakeProxy) ListTasks(ctx context.Context, _ proxy.TaskFilter) (*proxyv1
 	f.listCalls++
 	return &proxyv1.TaskListResponse{}, nil
 }
+
 func (f *fakeProxy) SubmitTask(ctx context.Context, sub proxy.TaskSubmission) (string, error) {
 	f.submits = append(f.submits, sub.Spec)
 	var id string
@@ -50,6 +51,7 @@ func (f *fakeProxy) SubmitTask(ctx context.Context, sub proxy.TaskSubmission) (s
 	}
 	return id, err
 }
+
 func (f *fakeProxy) DeleteTask(ctx context.Context, id string) error {
 	f.deletes = append(f.deletes, id)
 	if len(f.deleteErr) > 0 {
@@ -59,10 +61,12 @@ func (f *fakeProxy) DeleteTask(ctx context.Context, id string) error {
 	}
 	return nil
 }
+
 func (f *fakeProxy) GetTask(ctx context.Context, id string) (*proxyv1.TaskStatusResponse, error) {
 	f.gets = append(f.gets, id)
 	return &proxyv1.TaskStatusResponse{}, nil
 }
+
 func (f *fakeProxy) ListTaskRuns(ctx context.Context, id string) (*proxyv1.TaskRunListResponse, error) {
 	f.listTaskRuns = append(f.listTaskRuns, id)
 	return &proxyv1.TaskRunListResponse{}, nil

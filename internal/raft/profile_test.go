@@ -21,11 +21,11 @@ func newSingleNode(t *testing.T) *raftpkg.Profile {
 	t.Helper()
 	dir := t.TempDir()
 	p, err := raftpkg.New(raftpkg.Config{
-		NodeID:             "n1",
-		BindAddr:           "127.0.0.1:0", // pick an ephemeral port
-		DataDir:            dir,
-		ElectionTimeout:    50 * time.Millisecond,
-		HeartbeatTimeout:   50 * time.Millisecond,
+		NodeID:           "n1",
+		BindAddr:         "127.0.0.1:0", // pick an ephemeral port
+		DataDir:          dir,
+		ElectionTimeout:  50 * time.Millisecond,
+		HeartbeatTimeout: 50 * time.Millisecond,
 	}, inmemory.New(), event.NewHub(zerolog.Nop()), discovery.NewStatic(nil), zerolog.Nop())
 	if err != nil {
 		t.Fatalf("raft.New: %v", err)

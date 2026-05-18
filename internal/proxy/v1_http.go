@@ -184,4 +184,3 @@ func doProtoJSONGet(ctx context.Context, client httpClient, url string, out prot
 	}
 	return nil
 }
-

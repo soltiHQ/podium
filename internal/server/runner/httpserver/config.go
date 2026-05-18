@@ -25,7 +25,7 @@ type Config struct {
 	Name string `yaml:"name"`
 	Addr string `yaml:"addr"`
 
-	BaseContext func(net.Listener) context.Context                   `yaml:"-"`
+	BaseContext func(net.Listener) context.Context                    `yaml:"-"`
 	ConnContext func(ctx context.Context, c net.Conn) context.Context `yaml:"-"`
 }
 

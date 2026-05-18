@@ -1,195 +1,75 @@
 version: '3'
 
 vars:
-  go_root:
-    sh: go env GOPATH
-  git_root:
-    sh: git rev-parse --show-toplevel
-  go_version:
-    sh: grep '^go ' {{.git_root}}/go.mod | awk '{print $2}'
-
   name: "podium"
-
   alpinejs_version: "3.13.5"
   htmx_version: "1.9.12"
 
-  cache_dir: ".cache"
-  image_ci_patch: "1"
-  image_ci: "ghcr.io/soltihq/golang-ci:{{.go_version}}-{{.image_ci_patch}}"
+includes:
+  golang:
+    taskfile: https://raw.githubusercontent.com/soltiHQ/actions/main/taskfiles/go/Taskfile.yml
+    vars:
+      go_version:
+        sh: grep '^go ' {{.git_root}}/go.mod | awk '{print $2}'
+      git_root:
+        sh: git rev-parse --show-toplevel
+      cache_dir: ".cache"
+      image_patch: "-1"
+
+  helpers:
+    taskfile: https://raw.githubusercontent.com/soltiHQ/actions/main/taskfiles/helpers/Taskfile.yml
 
 tasks:
-  default:
-    desc: Default task.
-    cmds:
-      - echo "Please enter a task or use '-l' or '--list-all' to list all available tasks"
-    silent: true
-
-  # ================================================#
-  # ---------------------INTERNAL-------------------#
-  # ================================================#
-  _docker/run:
-    desc: Internal wrapper to run task in containers.
-    internal: true
-    silent: true
-    requires:
-      vars: [ IMAGE, CMD, MOUNT_DIR ]
-    dir: "{{.git_root}}"
-    cmd: |
-      set -euo pipefail
-      
-      if ! docker image inspect "{{.IMAGE}}" >/dev/null 2>&1; then
-        echo "pulling: {{.IMAGE}}"
-      
-        docker pull -q "{{.IMAGE}}" >/dev/null 2>&1 || {
-          echo "Failed to pull image: {{.IMAGE}}"
-          exit 1
-        }
-      fi
-      docker run --rm --init --pull=never \
-        --security-opt no-new-privileges \
-        --user $(id -u):$(id -g) \
-        --cap-drop=ALL \
-        \
-        --volume "{{.git_root}}/{{.MOUNT_DIR}}:/workspace/lighthouse:rw" \
-        {{if .VOLUMES}}{{range $vol := .VOLUMES}}--volume {{$vol}} {{end}}{{end}} \
-        {{if .ENVS}}{{range $env := .ENVS}}--env "{{$env}}" {{end}}{{end}} \
-        \
-        --workdir /workspace/lighthouse \
-        {{.IMAGE}} \
-        {{.CMD}}
-
-  _go/tool:
-    desc: Internal wrapper for running Go tools.
-    internal: true
-    silent: true
-    requires:
-      vars: [ CMD ]
-    cmds:
-      - cmd: mkdir -p "{{.git_root}}/{{.cache_dir}}"
-      - task: _docker/run
-        vars:
-          IMAGE: "{{.image_ci}}"
-          CMD: "{{.CMD}}"
-          MOUNT_DIR: "."
-          VOLUMES:
-            - "{{.git_root}}/{{.cache_dir}}:/tmp/{{.cache_dir}}"
-          ENVS:
-            - "HOME=/tmp"
-            - "GOPATH=/tmp/{{.cache_dir}}/gopath"
-            - "GOMODCACHE=/tmp/{{.cache_dir}}/mod"
-            - "GOCACHE=/tmp/{{.cache_dir}}/build"
-
-  download/alpinejs:
-    internal: true
-    dir: "{{.git_root}}/ui/static/js"
-    cmds:
-      - |
-        if [ ! -f alpine.min.js ]; then
-          echo "Downloading Alpine.js"
-          curl -fsSL -o alpine.min.js https://cdn.jsdelivr.net/npm/alpinejs@{{.alpinejs_version}}/dist/cdn.min.js
-        fi
-    silent: true
-
-  download/htmx:
-    internal: true
-    dir: "{{.git_root}}/ui/static/js"
-    cmds:
-      - |
-        if [ ! -f htmx.min.js ]; then
-          echo "Downloading htmx"
-          curl -fsSL -o htmx.min.js https://unpkg.com/htmx.org@{{.htmx_version}}/dist/htmx.min.js
-        fi
-    silent: true
-
-  go/mod/tidy:
-    internal: true
-    cmds:
-      - task: _go/tool
-        vars: { CMD: "go mod tidy" }
-
-  proto/gen:
-    internal: true
-    cmds:
-      - task: _go/tool
-        vars: { CMD: "buf generate" }
-    silent: true
-
-  templ/gen:
-    #internal: true
-    cmds:
-      - task: _go/tool
-        vars: { CMD: "templ generate" }
-
-  tailwindcss/gen:
-    #internal: true
-    cmds:
-      - task: _go/tool
-        vars: { CMD: "tailwindcss -c tailwind.config.cjs -i ui/static/css/app.css -o ui/static/css/tailwindcss.css --minify" }
-
-  # ================================================#
-  # ----------------------PUBLIC--------------------#
-  # ================================================#
-  deps/install:
+  deps:
     desc: Install dependencies.
     cmds:
-      - task: download/alpinejs
-      - task: tailwindcss/gen
-      - task: download/htmx
-      - task: proto/gen
-      - task: templ/gen
+      - task: helpers:download/file
+        vars:
+          URL: "https://cdn.jsdelivr.net/npm/alpinejs@{{.alpinejs_version}}/dist/cdn.min.js"
+          TO: "ui/static/js/alpine.min.js"
+      - task: helpers:download/file
+        vars:
+          URL: "https://unpkg.com/htmx.org@{{.htmx_version}}/dist/htmx.min.js"
+          TO: "ui/static/js/htmx.min.js"
 
-  go/mod/vendor:
-    deps:
-      - deps/install
+  gen:
+    desc: Generate code.
     cmds:
-      - task: go/mod/tidy
-      - task: _go/tool
-        vars: { CMD: "go mod vendor" }
+      - task: golang:proto/gen
+      - task: golang:templ/gen
+      - task: golang:tailwindcss/gen
+        vars:
+          INPUT: "ui/static/css/app.css"
+          OUTPUT: "ui/static/css/tailwindcss.css"
 
-  go/build:
-    desc: Build binary. Pass GOOS/GOARCH to cross-compile.
-    deps:
-      - go/mod/vendor
+  ci/fumpt:
+    desc: Run gofumpt.
+    cmds:
+      - task: golang:gofumpt
+
+  ci/lint:
+    desc: Run golangci-lint.
+    cmds:
+      - task: golang:golangci
+
+  ci/test:
+    desc: Run go test.
+    cmds:
+      - task: golang:test
+
+  ci/vulnerability:
+    desc: Run govulncheck.
+    cmds:
+      - task: golang:govulncheck
+
+  ci/build:
+    desc: Build podium binary. Pass GOOS/GOARCH to cross-compile.
     vars:
-      GOOS: '{{.GOOS | default "linux"}}'
+      GOOS:   '{{.GOOS | default "linux"}}'
       GOARCH: '{{.GOARCH | default "amd64"}}'
     cmds:
-      - task: _go/tool
+      - task: golang:build
         vars:
-          CMD: >-
-            sh -c 'mkdir -p bin &&
-            CGO_ENABLED=0 GOOS={{.GOOS}} GOARCH={{.GOARCH}}
-            go build -trimpath -ldflags="-s -w"
-            -o bin/{{.name}}-{{.GOOS}}-{{.GOARCH}} ./cmd'
-
-  go/test:
-    desc: Run Go tests.
-    deps:
-      - go/mod/vendor
-    cmds:
-      - task: _go/tool
-        vars: { CMD: "go test ./..." }
-
-  go/fumpt:
-    desc: Run Go fumpt formatter.
-    deps:
-      - go/mod/vendor
-    cmds:
-      - task: _go/tool
-        vars: { CMD: "gofumpt -l -w $(git ls-files \"*.go\")" }
-
-  go/lint:
-    desc: Run Go linters.
-    deps:
-      - go/mod/vendor
-    cmds:
-      - task: _go/tool
-        vars: { CMD: "golangci-lint run ./..." }
-
-  go/vulnerability:
-    desc: Run vulnerability scanner.
-    deps:
-      - go/mod/vendor
-    cmds:
-      - task: _go/tool
-        vars: { CMD: "govulncheck ./..." }
+          NAME: "{{.name}}"
+          GOOS: "{{.GOOS}}"
+          GOARCH: "{{.GOARCH}}"

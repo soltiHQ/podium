@@ -41,7 +41,7 @@ jobs:
       - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
         uses: soltiHQ/actions/taskfile@main
         with:
-          command: go/build GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }}
+          command: ci/build GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }}
 
       - name: Put Cache
         uses: ./.github/actions/cache-put

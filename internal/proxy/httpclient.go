@@ -127,4 +127,3 @@ func doProtoJSONPostDecoding(ctx context.Context, client httpClient, url string,
 		return formatUnexpectedStatus(resp)
 	}
 }
-

@@ -116,7 +116,9 @@ func TestRuntimeEqualsDetectsEveryRuntimeField(t *testing.T) {
 		{"timeoutMs", func(s *Spec) { s.SetTimeoutMs(60_000) }},
 		{"restartType", func(s *Spec) { s.SetRestartType(enum.RestartAlways) }},
 		{"intervalMs", func(s *Spec) { s.SetIntervalMs(500) }},
-		{"backoff", func(s *Spec) { s.SetBackoff(BackoffConfig{Jitter: enum.JitterFull, FirstMs: 2000, MaxMs: 10_000, Factor: 3.0}) }},
+		{"backoff", func(s *Spec) {
+			s.SetBackoff(BackoffConfig{Jitter: enum.JitterFull, FirstMs: 2000, MaxMs: 10_000, Factor: 3.0})
+		}},
 		{"runnerLabels", func(s *Spec) { s.SetRunnerLabels(map[string]string{"zone": "us"}) }},
 	}
 

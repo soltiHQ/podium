@@ -42,14 +42,16 @@ type Config struct {
 }
 
 // Default returns the default development configuration.
+//
+// Security-sensitive fields (e.g. [auth.Config.JWTSecret]) are intentionally
+// left empty here: they must come from the environment (SOLTI_AUTH_JWT_SECRET)
+// or YAML at load time. [Load] enforces this via [Config.Validate].
 func Default() Config {
 	return Config{
 		HTTP:          httpserver.Config{Name: "http", Addr: ":8080"},
 		HTTPDiscovery: httpserver.Config{Name: "http-discovery", Addr: ":8082"},
 		GRPC:          grpcserver.Config{Name: "grpc-discovery", Addr: ":50051"},
-		Auth: auth.Config{
-			JWTSecret: "solti-fkhk5qo48thkads-85gnsdAdtXZvo9r",
-		},
+		Auth:          auth.Config{}, // JWTSecret must be supplied externally
 		CORS: middleware.CORSConfig{
 			AllowOrigins: []string{"*"},
 		},
@@ -57,7 +59,16 @@ func Default() Config {
 	}
 }
 
+// Validate reports an error if any sub-config has invalid or unsafe values.
+func (c Config) Validate() error {
+	if err := c.Auth.Validate(); err != nil {
+		return fmt.Errorf("config.auth: %w", err)
+	}
+	return nil
+}
+
 // Load reads configuration in priority order: defaults → YAML file → ENV.
+// Refuses to return a Config that fails [Config.Validate].
 func Load() (Config, error) {
 	var (
 		path = configPath()
@@ -70,6 +81,9 @@ func Load() (Config, error) {
 	}
 	if err := envconfig.Process(envPrefix, &cfg); err != nil {
 		return Config{}, fmt.Errorf("config: env: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, fmt.Errorf("config: %w", err)
 	}
 	return cfg, nil
 }

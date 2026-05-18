@@ -22,18 +22,18 @@ type Config struct {
 
 // RaftConfig parametrises the raft backend.
 type RaftConfig struct {
-	NodeID           string `yaml:"node_id"           envconfig:"NODE_ID"`
-	BindAddr         string `yaml:"bind_addr"         envconfig:"BIND_ADDR"`
-	AdvertiseAddr    string `yaml:"advertise_addr"    envconfig:"ADVERTISE_ADDR"`
-	DataDir          string `yaml:"data_dir"          envconfig:"DATA_DIR"`
-	ElectionTimeoutMs int    `yaml:"election_timeout_ms" envconfig:"ELECTION_TIMEOUT_MS"`
-	HeartbeatTimeoutMs int   `yaml:"heartbeat_timeout_ms" envconfig:"HEARTBEAT_TIMEOUT_MS"`
+	NodeID             string `yaml:"node_id"           envconfig:"NODE_ID"`
+	BindAddr           string `yaml:"bind_addr"         envconfig:"BIND_ADDR"`
+	AdvertiseAddr      string `yaml:"advertise_addr"    envconfig:"ADVERTISE_ADDR"`
+	DataDir            string `yaml:"data_dir"          envconfig:"DATA_DIR"`
+	ElectionTimeoutMs  int    `yaml:"election_timeout_ms" envconfig:"ELECTION_TIMEOUT_MS"`
+	HeartbeatTimeoutMs int    `yaml:"heartbeat_timeout_ms" envconfig:"HEARTBEAT_TIMEOUT_MS"`
 }
 
 // DiscoveryConfig picks a Discovery driver and its parameters.
 type DiscoveryConfig struct {
-	Driver   string   `yaml:"driver"   envconfig:"DRIVER"` // "static" or "dns"
-	Peers    []string `yaml:"peers"    envconfig:"PEERS"`   // for "static"
+	Driver   string   `yaml:"driver"   envconfig:"DRIVER"`   // "static" or "dns"
+	Peers    []string `yaml:"peers"    envconfig:"PEERS"`    // for "static"
 	Hostname string   `yaml:"hostname" envconfig:"HOSTNAME"` // for "dns"
 	Port     int      `yaml:"port"     envconfig:"PORT"`     // for "dns"
 }

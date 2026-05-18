@@ -86,7 +86,7 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	if err := s.store.DeleteRole(ctx, id); err != nil {
 		return err
 	}
-	
+
 	s.logger.Debug().Str("role_id", id).Msg("role deleted")
 	return nil
 }

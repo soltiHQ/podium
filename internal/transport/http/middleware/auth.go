@@ -5,10 +5,10 @@ import (
 	"strings"
 
 	"github.com/soltiHQ/control-plane/domain/enum"
+	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/auth/session"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
-	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
 	"github.com/soltiHQ/control-plane/internal/transportctx"

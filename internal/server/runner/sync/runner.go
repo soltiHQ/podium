@@ -2,6 +2,7 @@
 // against the live state on agents:
 //
 //  1. Lists actionable rollouts (status Pending, Drift, or retry-eligible Failed).
+//
 //  2. Dispatches each by its [enum.RolloutIntent]:
 //     - Install    → SubmitTask(spec)                               → save TaskId
 //     - Update     → DeleteTask(oldID); SubmitTask(spec)            → save new TaskId
@@ -423,4 +424,3 @@ func isNotFound(err error) bool {
 		strings.Contains(msg, "NotFound") ||
 		errors.Is(err, proxy.ErrUnexpectedStatus) && strings.Contains(msg, " 404")
 }
-

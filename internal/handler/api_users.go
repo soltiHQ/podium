@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"cmp"
 	"errors"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/segmentio/ksuid"
@@ -23,9 +25,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 	"github.com/soltiHQ/control-plane/internal/uikit/policy"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
-
-	"cmp"
-	"slices"
 
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
 	wire "github.com/soltiHQ/control-plane/domain/wire"
