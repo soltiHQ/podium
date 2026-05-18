@@ -63,7 +63,7 @@ tasks:
       - task: golang:govulncheck
 
   ci/vendor:
-    desc: Prepare project (deps + gen) and run 'go mod vendor'.
+    desc: Prepare project and run 'go mod vendor'.
     cmds:
       - task: deps
       - task: gen
