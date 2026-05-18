@@ -30,8 +30,7 @@ jobs:
             .cache
             vendor
             api/gen
-            ui/static/js/alpine.min.js
-            ui/static/js/htmx.min.js
+            ui/static/js
             ui/static/css/tailwindcss.css
             ui/templates/**/*_templ.go
           key: podium-${{ hashFiles('go.mod', 'go.sum', 'Taskfile.yaml') }}
@@ -49,8 +48,7 @@ jobs:
             .cache
             vendor
             api/gen
-            ui/static/js/alpine.min.js
-            ui/static/js/htmx.min.js
+            ui/static/js
             ui/static/css/tailwindcss.css
             ui/templates/**/*_templ.go
           key: podium-${{ hashFiles('go.mod', 'go.sum', 'Taskfile.yaml') }}
