@@ -62,6 +62,13 @@ tasks:
     cmds:
       - task: golang:govulncheck
 
+  ci/vendor:
+    desc: Prepare project (deps + gen) and run 'go mod vendor'.
+    cmds:
+      - task: deps
+      - task: gen
+      - task: golang:vendor
+
   ci/build:
     desc: Build podium binary. Pass GOOS/GOARCH to cross-compile.
     vars:
