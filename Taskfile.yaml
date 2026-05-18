@@ -4,20 +4,24 @@ vars:
   name: "podium"
   alpinejs_version: "3.13.5"
   htmx_version: "1.9.12"
+  git_root:
+    sh: git rev-parse --show-toplevel
 
 includes:
+
   golang:
     taskfile: https://raw.githubusercontent.com/soltiHQ/actions/main/taskfiles/go/Taskfile.yml
+    dir: '{{.git_root}}'
     vars:
       go_version:
         sh: grep '^go ' {{.git_root}}/go.mod | awk '{print $2}'
-      git_root:
-        sh: git rev-parse --show-toplevel
+      git_root: '{{.git_root}}'
       cache_dir: ".cache"
       image_patch: "-1"
 
   helpers:
     taskfile: https://raw.githubusercontent.com/soltiHQ/actions/main/taskfiles/helpers/Taskfile.yml
+    dir: '{{.git_root}}'
 
 tasks:
   deps:
