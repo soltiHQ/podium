@@ -4,13 +4,8 @@ on:
   workflow_call: {}
 
 jobs:
-  vendor:
-    name: Vendor
-    uses: ./.github/workflows/.vendor.yml
-
   check:
     runs-on: ${{ vars.RUNS_ON }}
-    needs: vendor
     strategy:
       fail-fast: false
       matrix:

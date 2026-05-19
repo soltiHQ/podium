@@ -22,8 +22,13 @@ permissions: {
 }
 
 jobs:
+  vendor:
+    name: Vendor
+    uses: ./.github/workflows/.vendor.yml
+
   checks:
     name: Run
+    needs: vendor
     uses: ./.github/workflows/.checks.yml
 
   commit-check:
