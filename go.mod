@@ -20,7 +20,7 @@ require (
 )
 
 require (
-	github.com/armon/go-metrics v0.5.4 // indirect
+	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/boltdb/bolt v1.3.1 // indirect
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/hashicorp/go-hclog v1.6.3 // indirect
