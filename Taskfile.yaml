@@ -31,9 +31,9 @@ tasks:
   gen:
     desc: Generate code.
     cmds:
-      - task: golang:proto/gen
-      - task: golang:templ/gen
-      - task: golang:tailwindcss/gen
+      - task: golang:proto
+      - task: golang:templ
+      - task: golang:tailwindcss
         vars:
           INPUT: "ui/static/css/app.css"
           OUTPUT: "ui/static/css/tailwindcss.css"
