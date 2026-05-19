@@ -14,13 +14,13 @@ permissions: {
 }
 
 jobs:
-  vendor:
-    name: Vendor
+  prepare:
+    name: Prepare
     uses: ./.github/workflows/.vendor.yml
 
   build:
     name: Build
-    needs: vendor
+    needs: prepare
     uses: ./.github/workflows/.build.yml
 
   pr-check:
