@@ -23,12 +23,6 @@ const (
 // DiscardUnknown keeps forward compatibility when newer agents add fields.
 var httpV1Unmarshal = protojson.UnmarshalOptions{DiscardUnknown: true}
 
-// httpV1Marshal produces canonical proto-JSON request bodies.
-var httpV1Marshal = protojson.MarshalOptions{
-	UseProtoNames:   false,
-	EmitUnpopulated: false,
-}
-
 // httpProxyV1 implements AgentProxy over HTTP for API v1.
 type httpProxyV1 struct {
 	endpoint string

@@ -186,9 +186,7 @@ func applyOp(ctx context.Context, tx storage.Storage, op Op) error {
 }
 
 // Snapshot returns a point-in-time snapshot for log compaction.
-type fsmSnapshot struct {
-	data []byte
-}
+type fsmSnapshot struct{}
 
 func (f *FSM) Snapshot() (hraft.FSMSnapshot, error) {
 	// A full state dump would be written here; Phase 1 uses the empty
