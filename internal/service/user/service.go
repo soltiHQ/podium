@@ -142,15 +142,18 @@ func (s *Service) Upsert(ctx context.Context, u *model.User) error {
 	}
 	u.EmailAdd(email)
 
-	if existing, err := s.store.GetUserBySubject(ctx, subject); err == nil && existing.ID() != u.ID() {
-		return storage.ErrAlreadyExists
-	}
-	if ids := u.RoleIDsAll(); len(ids) > 0 {
-		if _, err := s.store.GetRoles(ctx, ids); err != nil {
-			return err
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		if existing, err := tx.GetUserBySubject(ctx, subject); err == nil && existing.ID() != u.ID() {
+			return storage.ErrAlreadyExists
 		}
-	}
-	if err := s.store.UpsertUser(ctx, u); err != nil {
+		if ids := u.RoleIDsAll(); len(ids) > 0 {
+			if _, err := tx.GetRoles(ctx, ids); err != nil {
+				return err
+			}
+		}
+		return tx.UpsertUser(ctx, u)
+	})
+	if err != nil {
 		return err
 	}
 
