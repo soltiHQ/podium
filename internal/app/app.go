@@ -150,19 +150,33 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 // Shutdown releases resources acquired by [New] in reverse order of creation.
-// Safe to call multiple times; subsequent calls are no-ops.
-func (a *App) Shutdown() {
-	if a.proxyPool != nil {
-		a.proxyPool.Close()
-		a.proxyPool = nil
-	}
-	if a.eventHub != nil {
-		a.eventHub.Close()
-		a.eventHub = nil
-	}
-	if a.raftShutdown != nil {
-		a.raftShutdown()
-		a.raftShutdown = nil
+// Bounded by ctx — if any step (Raft fsync, hub drain, pool close) hangs
+// past the deadline, Shutdown returns and the process exits dirty. The
+// caller logs that case; subsequent calls are no-ops.
+//
+// Returns an error if the deadline elapses before cleanup completes.
+func (a *App) Shutdown(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if a.proxyPool != nil {
+			a.proxyPool.Close()
+			a.proxyPool = nil
+		}
+		if a.eventHub != nil {
+			a.eventHub.Close()
+			a.eventHub = nil
+		}
+		if a.raftShutdown != nil {
+			a.raftShutdown()
+			a.raftShutdown = nil
+		}
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
