@@ -91,9 +91,9 @@ func (s *Service) VerifyOrEnrollToken(ctx context.Context, agentID, presented st
 	})
 }
 
-// AgentToken returns the bearer token the control plane must present when
-// calling this agent, or "" if the agent has no credential yet (not enrolled,
-// or agent auth disabled). A missing credential is not an error.
+// AgentToken returns the bearer token enrolled for this agent, or "" if the
+// agent is not enrolled. A missing credential is not an error. The proxy pool
+// presents the token only when agent auth is required.
 func (s *Service) AgentToken(ctx context.Context, agentID string) (string, error) {
 	if agentID == "" {
 		return "", storage.ErrInvalidArgument

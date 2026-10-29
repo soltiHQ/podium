@@ -103,7 +103,7 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 
 	a, err := agentFromSyncRequest(&in)
 	if err != nil {
-		response.BadRequest(w, r, mode)
+		response.BadRequestMsg(w, r, mode, "invalid agent data: "+err.Error())
 		return
 	}
 
@@ -195,6 +195,7 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 
 // agentFromSyncRequest builds a domain Agent from a discovery heartbeat. Shared
 // by the HTTP and gRPC Sync handlers — both carry the same proto SyncRequest.
+// Both call it before token enrollment, so an invalid payload enrolls nothing.
 func agentFromSyncRequest(req *discoverv1.SyncRequest) (*model.Agent, error) {
 	return model.NewAgentFrom(model.AgentParams{
 		ID:                 req.GetId(),

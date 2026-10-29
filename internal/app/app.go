@@ -119,8 +119,11 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		Bool("client_tls", cfg.TLS.Client.Enabled()).
 		Bool("client_mtls", cfg.TLS.Client.CertFile != "").
 		Msg("tls configuration")
+	if !cfg.AgentAuth.Require {
+		logger.Warn().Msg("agent authentication disabled: any host that reaches the discovery listeners can register agents")
+	}
 
-	proxyPool := proxy.NewPool(clientTLS)
+	proxyPool := proxy.NewPool(clientTLS, cfg.AgentAuth.Require)
 
 	htmx.Configure(cfg.Triggers)
 

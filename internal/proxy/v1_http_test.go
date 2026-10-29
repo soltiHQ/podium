@@ -101,6 +101,23 @@ func TestHttpProxyV1_ApplyTask_Surfaces400Envelope(t *testing.T) {
 	}
 }
 
+// An unparsable endpoint must fail the stream open, never panic in the log hub goroutine.
+func TestStreamLogsInvalidEndpointReturnsError(t *testing.T) {
+	p := &httpProxyV1{endpoint: "http://[", client: http.DefaultClient}
+	if _, err := p.StreamTaskLogsForUID(context.Background(), "task", "uid"); !errors.Is(err, ErrBadEndpointURL) {
+		t.Fatalf("StreamTaskLogsForUID = %v, want ErrBadEndpointURL", err)
+	}
+}
+
+func TestApplyTaskPreconditionsInvalidEndpointReturnsError(t *testing.T) {
+	uid := "uid-1"
+	p := &httpProxyV1{endpoint: "http://[", client: http.DefaultClient}
+	_, err := p.ApplyTask(context.Background(), TaskSubmission{Spec: httpTestManifest(t, "task"), Preconditions: &taskv1.WritePreconditions{Uid: &uid}})
+	if !errors.Is(err, ErrBadEndpointURL) {
+		t.Fatalf("ApplyTask = %v, want ErrBadEndpointURL", err)
+	}
+}
+
 func httpTestManifest(t *testing.T, name string) *taskv1.TaskManifest {
 	t.Helper()
 	s, _ := model.NewSpec("test", "test", "my-slot")

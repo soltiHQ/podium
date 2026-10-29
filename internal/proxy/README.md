@@ -81,3 +81,16 @@ The pool shares HTTP connections and caches gRPC connections per endpoint.
 `Close` releases both. `agentError` translates HTTP/gRPC status into the shared
 `errkind` boundary while preserving operation and transport errors for
 `errors.Is`. Request deadlines come from the caller context.
+
+## Endpoints and credentials
+
+`Pool.Get` validates the endpoint again with `model.ValidateAgentEndpoint`, so
+an agent stored before validation existed gets `ErrBadEndpointURL` instead of a
+client. HTTP endpoints are `http(s)://host[:port]` with an empty or `/` path and
+no userinfo, query or fragment. gRPC endpoints are `host:port`; the
+`http://`/`https://` prefix and trailing `/` tolerated by `normalizeGrpcTarget`
+are also accepted, and TLS still comes from `tls.client`.
+
+The stored bearer token is sent only when `agent_auth.require` is true. The
+HTTP client does not follow redirects: a 3xx answer fails the call as
+`ErrUnexpectedStatus`.

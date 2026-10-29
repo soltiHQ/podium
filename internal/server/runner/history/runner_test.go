@@ -25,7 +25,7 @@ func newRunner(t *testing.T, cfg Config) (*Runner, *inmemory.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pool := proxy.NewPool(nil)
+	pool := proxy.NewPool(nil, true)
 	t.Cleanup(func() { _ = pool.Close() })
 	r, err := New(cfg, zerolog.Nop(), s, pool, svc, standalone.NewLeadership())
 	if err != nil {
@@ -59,11 +59,10 @@ func seedRollout(t *testing.T, s *inmemory.Store, agent, spec string) {
 	}
 }
 
+// slowAgentHandler never answers; each request ends with the caller's deadline.
+func slowAgentHandler(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() }
+
 func agentHandler(w http.ResponseWriter, r *http.Request) {
-	if strings.HasPrefix(r.URL.Path, "/slow/") {
-		<-r.Context().Done()
-		return
-	}
 	w.Header().Set("Content-Type", "application/json")
 	if strings.HasSuffix(r.URL.Path, "/runs") {
 		_, _ = fmt.Fprint(w, `{"metadata":{"taskUid":"uid","resourceVersion":"rv"},"runs":[{"generation":1,"attempt":1,"phase":"succeeded","startedAt":"2026-10-02T00:00:00Z","finishedAt":"2026-10-02T00:00:01Z","workload":{"apiVersion":"solti.io/v1","kind":"SubprocessTask"}}]}`)
@@ -73,14 +72,16 @@ func agentHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestSlowAgentsCannotStarveLaterQueuedAgent(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(agentHandler))
-	defer server.Close()
+	slow := httptest.NewServer(http.HandlerFunc(slowAgentHandler))
+	defer slow.Close()
+	fast := httptest.NewServer(http.HandlerFunc(agentHandler))
+	defer fast.Close()
 	r, s := newRunner(t, Config{CycleTimeout: 50 * time.Millisecond, MaxConcurrency: 1})
 	base := time.Now()
 	for i, id := range []string{"slow-first", "slow-second", "fast-third"} {
-		endpoint := server.URL + "/slow"
+		endpoint := slow.URL
 		if i == 2 {
-			endpoint = server.URL + "/fast"
+			endpoint = fast.URL
 		}
 		seedAgent(t, s, id, endpoint, base.Add(-time.Duration(i)*time.Second))
 		seedRollout(t, s, id, "spec")
@@ -101,8 +102,8 @@ func TestSlowAgentsCannotStarveLaterQueuedAgent(t *testing.T) {
 }
 
 func TestRetentionRunsBeforeSlowSourceConsumesCycle(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(agentHandler))
-	defer server.Close()
+	slow := httptest.NewServer(http.HandlerFunc(slowAgentHandler))
+	defer slow.Close()
 	r, s := newRunner(t, Config{CycleTimeout: 30 * time.Millisecond, MaxConcurrency: 1})
 	record, err := model.NewExecutionRecord(model.ExecutionRecordParams{AgentID: "old", TaskName: "task", TaskUID: "u", Generation: 1, Attempt: 1, Status: "failed", CapturedAt: time.Now().Add(-14 * 24 * time.Hour)})
 	if err != nil {
@@ -111,7 +112,7 @@ func TestRetentionRunsBeforeSlowSourceConsumesCycle(t *testing.T) {
 	if err := s.UpsertExecution(context.Background(), record); err != nil {
 		t.Fatal(err)
 	}
-	seedAgent(t, s, "slow", server.URL+"/slow", time.Now())
+	seedAgent(t, s, "slow", slow.URL, time.Now())
 	seedRollout(t, s, "slow", "spec")
 	r.tick(context.Background())
 	rows, err := storage.AllExecutions(context.Background(), s, nil)
@@ -244,13 +245,15 @@ func TestRunContinuationCacheHasHardBoundAndRemovesOrphans(t *testing.T) {
 }
 
 func TestSlowFirstAgentCannotConsumeSecondAgentsSlotAfterDeadline(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(agentHandler))
-	defer server.Close()
+	slow := httptest.NewServer(http.HandlerFunc(slowAgentHandler))
+	defer slow.Close()
+	fast := httptest.NewServer(http.HandlerFunc(agentHandler))
+	defer fast.Close()
 	r, s := newRunner(t, Config{CycleTimeout: 40 * time.Millisecond, MaxConcurrency: 1})
 	now := time.Now()
-	seedAgent(t, s, "slow", server.URL+"/slow", now)
+	seedAgent(t, s, "slow", slow.URL, now)
 	seedRollout(t, s, "slow", "spec")
-	seedAgent(t, s, "fast", server.URL+"/fast", now.Add(-time.Second))
+	seedAgent(t, s, "fast", fast.URL, now.Add(-time.Second))
 	seedRollout(t, s, "fast", "spec")
 	r.tick(context.Background())
 	if len(r.pendingAgents) != 1 || r.pendingAgents[0].ID() != "fast" {

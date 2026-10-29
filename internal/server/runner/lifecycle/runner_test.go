@@ -27,7 +27,7 @@ func (s *heartbeatBeforeTx) WithTx(ctx context.Context, fn func(storage.Storage)
 
 func TestFreshHeartbeatNotOverwrittenByStaleTick(t *testing.T) {
 	s := inmemory.New()
-	old, _ := model.NewAgentFrom(model.AgentParams{ID: "a", EndpointType: 2, APIVersion: 1})
+	old, _ := model.NewAgentFrom(model.AgentParams{ID: "a", Endpoint: "http://127.0.0.1:8085", EndpointType: 2, APIVersion: 1})
 	old.SetLastSeenAt(time.Now().Add(-time.Hour))
 	_ = s.UpsertAgent(context.Background(), old)
 	fresh := old.Clone()
@@ -45,7 +45,7 @@ func TestLifecycleScansAll503StaleAgents(t *testing.T) {
 	s := inmemory.New()
 	ctx := context.Background()
 	for i := 0; i < 503; i++ {
-		a, _ := model.NewAgentFrom(model.AgentParams{ID: fmt.Sprintf("a-%04d", i), EndpointType: 2, APIVersion: 1})
+		a, _ := model.NewAgentFrom(model.AgentParams{ID: fmt.Sprintf("a-%04d", i), Endpoint: "http://127.0.0.1:8085", EndpointType: 2, APIVersion: 1})
 		a.SetLastSeenAt(time.Now().Add(-time.Hour))
 		a.SetStaleAt(time.Now().Add(-time.Hour))
 		_ = s.UpsertAgent(ctx, a)

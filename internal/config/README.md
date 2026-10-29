@@ -46,6 +46,23 @@ tls:
 
 Env equivalents: `SOLTI_TLS_SERVER_CERT_FILE`, `SOLTI_TLS_CLIENT_CA_FILE`, etc.
 
+## Agent authentication
+
+`agent_auth.require` defaults to `true`. Discovery enrolls each agent's bearer
+token on first contact and answers a later sync without the same token with
+HTTP 401 / gRPC `Unauthenticated`. Outbound calls to agents present the stored
+token. SDK agents send their token only over TLS unless the agent explicitly
+allows insecure token transport.
+
+```yaml
+agent_auth:
+  require: false   # env SOLTI_AGENT_AUTH_REQUIRE=false
+```
+
+`require: false` turns off both directions: no token is checked and none is
+sent. Startup then logs one WARN line: `agent authentication disabled: any host
+that reaches the discovery listeners can register agents`.
+
 ## Observed run history
 
 ```yaml

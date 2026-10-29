@@ -1,15 +1,73 @@
 package loghub_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog"
 
 	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
 	"github.com/soltiHQ/control-plane/internal/loghub"
 )
+
+// TestLoghubRecoversSourcePanic: a panicking source closes its stream and is
+// logged; the process and the hub keep serving.
+func TestLoghubRecoversSourcePanic(t *testing.T) {
+	var (
+		logs  bytes.Buffer
+		opens atomic.Int32
+		src   = make(chan *taskv1.StreamTaskLogsResponse, 1)
+	)
+	hub := loghub.New(func(context.Context, string, string) (<-chan *taskv1.StreamTaskLogsResponse, error) {
+		if opens.Add(1) == 1 {
+			panic("agent stream exploded")
+		}
+		return src, nil
+	}, loghub.Options{Logger: zerolog.New(&logs)})
+	defer hub.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ch, _, err := hub.Subscribe(ctx, "agent-1", "task")
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("panicking source left its subscriber waiting")
+	}
+	if !errors.Is(err, loghub.ErrSourceClosed) || ch != nil {
+		t.Fatalf("panicking source: stream %v, err %v; want ErrSourceClosed", ch, err)
+	}
+	var entry struct {
+		Level   string `json:"level"`
+		AgentID string `json:"agent_id"`
+	}
+	if err := json.Unmarshal(bytes.SplitN(logs.Bytes(), []byte("\n"), 2)[0], &entry); err != nil || entry.Level != "error" || entry.AgentID != "agent-1" {
+		t.Fatalf("panic not logged at ERROR with the agent ID: %q", logs.String())
+	}
+
+	// The torn-down source is gone; a fresh subscription reopens it.
+	ch, unsub, err := hub.Subscribe(ctx, "agent-1", "task")
+	for errors.Is(err, loghub.ErrSourceClosed) {
+		ch, unsub, err = hub.Subscribe(ctx, "agent-1", "task")
+	}
+	if err != nil {
+		t.Fatalf("hub stopped serving after a source panic: %v", err)
+	}
+	defer unsub()
+	src <- chunk("after panic")
+	select {
+	case ev := <-ch:
+		if string(ev.GetChunk().GetLine()) != "after panic" {
+			t.Fatalf("unexpected event after reopen: %v", ev)
+		}
+	case <-ctx.Done():
+		t.Fatal("reopened source delivered nothing")
+	}
+}
 
 func chunk(line string) *taskv1.StreamTaskLogsResponse {
 	return &taskv1.StreamTaskLogsResponse{

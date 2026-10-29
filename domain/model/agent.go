@@ -78,14 +78,19 @@ type AgentParams struct {
 	Capabilities []RunnerCapability
 }
 
-// NewAgentFrom constructs an Agent from AgentParams.
+// NewAgentFrom constructs an Agent from AgentParams. The ID, endpoint, name,
+// heartbeat interval and metadata must pass the agent validation rules
+// (see ValidateAgentID and ValidateAgentEndpoint).
 func NewAgentFrom(p AgentParams) (*Agent, error) {
-	if p.ID == "" {
-		return nil, domain.ErrEmptyID
+	if err := ValidateAgentID(p.ID); err != nil {
+		return nil, err
 	}
 
 	epType, err := enum.EndpointTypeFromInt(p.EndpointType)
 	if err != nil {
+		return nil, err
+	}
+	if err = validateAgentParams(p, epType); err != nil {
 		return nil, err
 	}
 

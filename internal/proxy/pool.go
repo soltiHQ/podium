@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain/enum"
+	"github.com/soltiHQ/control-plane/domain/model"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -38,9 +39,10 @@ type Pool struct {
 	mu     sync.RWMutex
 	closed bool
 
-	httpCli   *http.Client
-	grpcConns map[string]*grpc.ClientConn
-	grpcCreds credentials.TransportCredentials
+	httpCli     *http.Client
+	grpcConns   map[string]*grpc.ClientConn
+	grpcCreds   credentials.TransportCredentials
+	requireAuth bool
 }
 
 // NewPool creates a Pool with a configured HTTP transport.
@@ -49,7 +51,9 @@ type Pool struct {
 // stays plaintext: HTTP uses a minimal TLS-1.2 config (system roots, only
 // engaged for https:// endpoints) and gRPC dials insecurely — preserving the
 // pre-TLS behavior.
-func NewPool(clientTLS *tls.Config) *Pool {
+//
+// requireAuth mirrors agent_auth.require: when false, no stored token is sent.
+func NewPool(clientTLS *tls.Config, requireAuth bool) *Pool {
 	httpTLS := clientTLS
 	if httpTLS == nil {
 		httpTLS = &tls.Config{MinVersion: tls.VersionTLS12}
@@ -62,6 +66,8 @@ func NewPool(clientTLS *tls.Config) *Pool {
 
 	return &Pool{
 		httpCli: &http.Client{
+			// A redirect would carry the request to an address discovery never validated.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 			Transport: &http.Transport{
 				DialContext: (&net.Dialer{
 					Timeout:   5 * time.Second,
@@ -74,22 +80,28 @@ func NewPool(clientTLS *tls.Config) *Pool {
 				MaxIdleConnsPerHost:   10,
 			},
 		},
-		grpcConns: make(map[string]*grpc.ClientConn),
-		grpcCreds: creds,
+		grpcConns:   make(map[string]*grpc.ClientConn),
+		grpcCreds:   creds,
+		requireAuth: requireAuth,
 	}
 }
 
 // Get returns an AgentProxy for the given endpoint, selecting the implementation
 // based on api version and endpoint type.
 // Get returns an AgentProxy bound to the given endpoint and (optional) bearer
-// token. An empty token means "send no credential" (auth disabled, or the agent
-// is not yet enrolled). The proxy presents the token on every call.
+// token. The proxy presents the token on every call, and only when the pool
+// requires agent auth; an empty token means the agent is not yet enrolled.
+// The endpoint is validated again, so an agent stored before validation
+// existed gets an error instead of a client.
 func (p *Pool) Get(endpoint string, epType enum.EndpointType, apiVersion enum.APIVersion, token string) (AgentProxy, error) {
 	p.mu.RLock()
 	closed := p.closed
 	p.mu.RUnlock()
 	if closed {
 		return nil, ErrClosed
+	}
+	if !p.requireAuth {
+		token = ""
 	}
 	switch apiVersion {
 	case enum.APIVersionV1:
@@ -102,6 +114,9 @@ func (p *Pool) Get(endpoint string, epType enum.EndpointType, apiVersion enum.AP
 func (p *Pool) getV1(endpoint string, epType enum.EndpointType, token string) (AgentProxy, error) {
 	switch epType {
 	case enum.EndpointHTTP:
+		if err := validateEndpoint(endpoint, epType); err != nil {
+			return nil, err
+		}
 		// Wrap the shared client so every request carries the bearer header;
 		// keep the bare shared client when there is no token (zero overhead).
 		var client httpClient = p.httpCli
@@ -113,6 +128,9 @@ func (p *Pool) getV1(endpoint string, epType enum.EndpointType, token string) (A
 			client:   client,
 		}, nil
 	case enum.EndpointGRPC:
+		if err := validateEndpoint(endpoint, epType); err != nil {
+			return nil, err
+		}
 		conn, err := p.grpcConn(endpoint)
 		if err != nil {
 			return nil, err
@@ -121,6 +139,14 @@ func (p *Pool) getV1(endpoint string, epType enum.EndpointType, token string) (A
 	default:
 		return nil, ErrUnsupportedEndpointType
 	}
+}
+
+// validateEndpoint applies the discovery endpoint rules to a stored endpoint.
+func validateEndpoint(endpoint string, epType enum.EndpointType) error {
+	if err := model.ValidateAgentEndpoint(endpoint, epType); err != nil {
+		return fmt.Errorf("%w: %w", ErrBadEndpointURL, err)
+	}
+	return nil
 }
 
 // grpcConn returns a cached *grpc.ClientConn or creates one.

@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 
 	discoverv1 "github.com/soltiHQ/control-plane/api/gen/solti/discover/v1"
 	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
@@ -261,7 +262,7 @@ func buildLogHub(logger zerolog.Logger, agentSVC *agent.Service, proxyPool *prox
 		}
 		return p.StreamTaskLogs(ctx, taskID)
 	}
-	return loghub.NewIdentity(open, loghub.Options{SubscriberBuffer: cfg.SubscriberBuffer})
+	return loghub.NewIdentity(open, loghub.Options{SubscriberBuffer: cfg.SubscriberBuffer, Logger: logger})
 }
 
 // addrPort extracts the port number from a listen address like ":8080" or
@@ -287,6 +288,11 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *e
 	isWrite := func(full string) bool { _, ok := writeMethods[full]; return ok }
 
 	opts := []grpc.ServerOption{
+		// Same message cap as the HTTP sync body; bounded streams, pings and idle connections.
+		grpc.MaxRecvMsgSize(256 << 10),
+		grpc.MaxConcurrentStreams(256),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second}),
+		grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionIdle: 5 * time.Minute}),
 		grpc.ChainUnaryInterceptor(
 			interceptor.UnaryRecovery(logger),
 			interceptor.UnaryRequestID(),

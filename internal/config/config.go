@@ -41,10 +41,11 @@ type TLSConfig struct {
 // AgentAuthConfig controls bearer-token authentication between agents and the
 // control plane — one switch for both directions.
 //
-// When Require is true: discovery enrolls each agent's token on first contact
-// (trust-on-first-use) and verifies it on every subsequent sync, rejecting
-// mismatches; outbound proxy calls present the stored token. When false, no
-// token is verified inbound and none is sent outbound. Orthogonal to TLS.
+// When Require is true (the default): discovery enrolls each agent's token on
+// first contact (trust-on-first-use) and verifies it on every subsequent sync,
+// rejecting mismatches; outbound proxy calls present the stored token. When
+// false, no token is verified inbound and none is sent outbound, and startup
+// logs a warning. Orthogonal to TLS.
 type AgentAuthConfig struct {
 	Require bool `yaml:"require" envconfig:"REQUIRE"`
 }
@@ -93,6 +94,7 @@ func Default() Config {
 			MaxPerIP:         10,
 			SubscriberBuffer: 64,
 		},
+		AgentAuth: AgentAuthConfig{Require: true},
 	}
 }
 

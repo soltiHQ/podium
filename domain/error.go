@@ -17,4 +17,6 @@ var (
 	ErrEmptyName = errors.New("name cannot be empty")
 	// ErrEmptyID indicates that entity ID is empty.
 	ErrEmptyID = errors.New("id cannot be empty")
+	// ErrInvalidArgument indicates that a value violates a domain rule.
+	ErrInvalidArgument = errors.New("invalid argument")
 )
