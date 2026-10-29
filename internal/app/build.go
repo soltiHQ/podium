@@ -20,6 +20,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
+	"github.com/soltiHQ/control-plane/internal/bootstrap"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/cluster/discovery"
 	"github.com/soltiHQ/control-plane/internal/cluster/standalone"
@@ -146,6 +147,13 @@ func msToDuration(ms int) time.Duration {
 		return 0
 	}
 	return time.Duration(ms) * time.Millisecond
+}
+
+// bootstrapOptions tells bootstrap where this node keeps its state, which is
+// where a generated administrator password goes, and which password the
+// operator chose.
+func bootstrapOptions(cfg config.Config) bootstrap.Options {
+	return bootstrap.Options{DataDir: cfg.Cluster.DataDir(), AdminPassword: cfg.BootstrapAdminPassword}
 }
 
 // readyForBootstrap distinguishes leader election from applied-state readiness.

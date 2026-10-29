@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/soltiHQ/control-plane/internal/bootstrap"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 )
 
@@ -161,5 +162,32 @@ func TestLoadRejectsMalformedCORSOrigins(t *testing.T) {
 	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
 	if _, err := load(nil); err == nil || !strings.Contains(err.Error(), "config.cors") {
 		t.Fatalf("origin with a path: want a config.cors error, got %v", err)
+	}
+}
+
+// The first administrator's password comes from the environment only: a YAML
+// file cannot carry it.
+func TestLoadBootstrapAdminPasswordIsEnvOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := "bootstrap_admin_password: from-yaml-file\nbootstrap:\n  admin_password: from-yaml-file\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONFIG_PATH", path)
+	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+	cfg, err := load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BootstrapAdminPassword != "" {
+		t.Fatal("the YAML file set the bootstrap admin password")
+	}
+	t.Setenv(bootstrap.AdminPasswordEnv, "from-the-environment")
+	cfg, err = load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BootstrapAdminPassword != "from-the-environment" {
+		t.Fatalf("bootstrap admin password = %q, want the environment value", cfg.BootstrapAdminPassword)
 	}
 }

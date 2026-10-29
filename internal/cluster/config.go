@@ -73,3 +73,18 @@ func (c Config) Validate() error {
 	}
 	return nil
 }
+
+// DataDir returns the data directory of the selected backend: Standalone.DataDir,
+// or Raft.DataDir in raft mode. Ephemeral standalone state has none.
+func (c Config) DataDir() string {
+	switch c.Backend {
+	case "", BackendStandalone:
+		if c.Standalone.Ephemeral {
+			return ""
+		}
+		return c.Standalone.DataDir
+	case BackendRaft:
+		return c.Raft.DataDir
+	}
+	return ""
+}

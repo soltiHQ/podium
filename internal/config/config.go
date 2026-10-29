@@ -79,6 +79,12 @@ type Config struct {
 	// whose X-Forwarded-For and X-Forwarded-Proto headers are believed.
 	// Empty by default: the TCP peer is the client.
 	TrustedProxies []string `yaml:"trusted_proxies" envconfig:"TRUSTED_PROXIES"`
+
+	// BootstrapAdminPassword is the initial password of the administrator the
+	// first start creates (env SOLTI_BOOTSTRAP_ADMIN_PASSWORD). It is never read
+	// from YAML, so config files stay free of it. Empty means bootstrap
+	// generates a password.
+	BootstrapAdminPassword string `yaml:"-" envconfig:"BOOTSTRAP_ADMIN_PASSWORD"`
 }
 
 // Default returns the default development configuration.

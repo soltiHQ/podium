@@ -83,7 +83,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, readyErr
 	}
 	if seed {
-		if err = bootstrap.Run(ctx, logger, svc.role, svc.user, svc.credential); err != nil {
+		if err = bootstrap.Run(ctx, logger, bootstrapOptions(cfg), svc.role, svc.user, svc.credential); err != nil {
 			closeOnError(raftShutdown, eventHub)
 			return nil, err
 		}

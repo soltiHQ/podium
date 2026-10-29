@@ -159,6 +159,28 @@ blocked.
 The main UI and API listener has no limit on failed authentication: its tokens
 and session IDs cannot be guessed, and passwords go through the login limiter.
 
+## First administrator
+
+When the user table is empty, the first start creates the administrator
+`user-admin` (login `admin`) and sets its password:
+
+- `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` sets it. This is its only source: the field
+  has no YAML key, so a config file cannot carry it. It must pass the password
+  policy (12 characters at least, 72 bytes at most); a value that breaks it fails
+  startup with an error that names the variable and not the value. It is never
+  written to a file or a log.
+- Without it podium generates a password and writes it, on one line with mode
+  0600, to `bootstrap-admin-password` in the data directory of the selected
+  backend: `cluster.standalone.data_dir` (default `data/podium`), or
+  `cluster.raft.data_dir` in raft mode, where the file sits on the node that led
+  at first boot. The log names only that path.
+- In ephemeral mode (`cluster.standalone.ephemeral: true`) there is no data
+  directory, so the generated password is logged once, at WARN, with the prefix
+  `ephemeral mode:`. No other mode logs a password.
+
+Once users exist the variable is ignored, with one WARN per start: remove it from
+the environment after the first start. See `internal/bootstrap/README.md`.
+
 ## Observed run history
 
 ```yaml
