@@ -86,11 +86,10 @@ func NewPool(clientTLS *tls.Config, requireAuth bool) *Pool {
 	}
 }
 
-// Get returns an AgentProxy for the given endpoint, selecting the implementation
-// based on api version and endpoint type.
 // Get returns an AgentProxy bound to the given endpoint and (optional) bearer
-// token. The proxy presents the token on every call, and only when the pool
-// requires agent auth; an empty token means the agent is not yet enrolled.
+// token, selecting the implementation by API version and endpoint type. The
+// proxy presents the token on every call, and only when the pool requires
+// agent auth; an empty token means the agent is not yet enrolled.
 // The endpoint is validated again, so an agent stored before validation
 // existed gets an error instead of a client.
 func (p *Pool) Get(endpoint string, epType enum.EndpointType, apiVersion enum.APIVersion, token string) (AgentProxy, error) {

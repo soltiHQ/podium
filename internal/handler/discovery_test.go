@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -68,19 +70,36 @@ func TestHTTPDiscoveryRejectsInvalidAgent(t *testing.T) {
 	hub := event.NewHub(logger)
 	defer hub.Close()
 	h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
-	for _, tc := range []struct{ name, id, body string }{
-		{"unsafe id", `x'"`, `{"id":"x'\"","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`},
-		{"unparsable endpoint", "agent-1", `{"id":"agent-1","endpoint":"http://[","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`},
-		{"endpoint query", "agent-1", `{"id":"agent-1","endpoint":"http://10.0.0.5:8085?x=1","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`},
-		{"heartbeat over one hour", "agent-1", `{"id":"agent-1","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1,"heartbeatIntervalS":3601}`},
+	for _, tc := range []struct{ name, id, body, message string }{
+		{"unsafe id", `x'"`, `{"id":"x'\"","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`, "Invalid agent data: agent id may contain only [A-Za-z0-9._-]."},
+		{"unparsable endpoint", "agent-1", `{"id":"agent-1","endpoint":"http://[","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`, "Invalid agent data: agent endpoint is not a valid URL."},
+		{"endpoint query", "agent-1", `{"id":"agent-1","endpoint":"http://10.0.0.5:8085?x=1","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`, "Invalid agent data: agent endpoint must not contain a query or fragment."},
+		{"heartbeat over one hour", "agent-1", `{"id":"agent-1","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1,"heartbeatIntervalS":3601}`, "Invalid agent data: heartbeat interval must be 0 or 1-3600 seconds."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if res := syncHTTP(h, tc.body, "agent-token"); res.Code != http.StatusBadRequest {
+			res := syncHTTP(h, tc.body, "agent-token")
+			if res.Code != http.StatusBadRequest {
 				t.Fatalf("invalid agent sync: HTTP %d %s, want 400", res.Code, res.Body.String())
+			}
+			// The answer names the broken rule, without the error's sentinel prefix.
+			if got := responseMessage(t, res); got != tc.message {
+				t.Fatalf("invalid agent sync answered %q, want %q", got, tc.message)
 			}
 			assertNotRegistered(t, svc, tc.id)
 		})
 	}
+}
+
+// responseMessage is the message of a JSON error response.
+func responseMessage(t *testing.T, res *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatalf("error response %q is not JSON: %v", res.Body.String(), err)
+	}
+	return body.Message
 }
 
 func TestGRPCDiscoveryRejectsInvalidAgent(t *testing.T) {
@@ -95,16 +114,22 @@ func TestGRPCDiscoveryRejectsInvalidAgent(t *testing.T) {
 		tooMuchMetadata[fmt.Sprintf("key-%d", i)] = "v"
 	}
 	for _, tc := range []struct {
-		name string
-		req  *discoverv1.SyncRequest
+		name    string
+		req     *discoverv1.SyncRequest
+		message string
 	}{
-		{"unsafe id", &discoverv1.SyncRequest{Id: `x'"`, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1}},
-		{"resolver scheme endpoint", &discoverv1.SyncRequest{Id: "agent-1", Endpoint: "unix:///run/agent.sock", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1}},
-		{"too much metadata", &discoverv1.SyncRequest{Id: "agent-1", Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1, Metadata: tooMuchMetadata}},
+		{"unsafe id", &discoverv1.SyncRequest{Id: `x'"`, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1}, "invalid agent data: agent id may contain only [A-Za-z0-9._-]"},
+		{"resolver scheme endpoint", &discoverv1.SyncRequest{Id: "agent-1", Endpoint: "unix:///run/agent.sock", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1}, "invalid agent data: agent endpoint port must be 1-65535"},
+		{"too much metadata", &discoverv1.SyncRequest{Id: "agent-1", Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1, Metadata: tooMuchMetadata}, "invalid agent data: agent metadata exceeds 64 entries"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := g.Sync(ctx, tc.req); grpcstatus.Code(err) != codes.InvalidArgument {
+			_, err := g.Sync(ctx, tc.req)
+			if grpcstatus.Code(err) != codes.InvalidArgument {
 				t.Fatalf("invalid agent sync: %v, want InvalidArgument", err)
+			}
+			// The answer names the broken rule, without the error's sentinel prefix.
+			if msg := grpcstatus.Convert(err).Message(); msg != tc.message {
+				t.Fatalf("invalid agent sync answered %q, want %q", msg, tc.message)
 			}
 			assertNotRegistered(t, svc, tc.req.GetId())
 		})
@@ -168,7 +193,7 @@ func TestDiscoveryAcceptsSDKProtoJSONCapabilitiesAndRejectsOversize(t *testing.T
 		t.Fatalf("capabilities lost: %+v", caps)
 	}
 	// A valid JSON prefix padded past the ceiling must never be accepted.
-	req = httptest.NewRequest(http.MethodPost, "/api/v1/discovery/sync", strings.NewReader(body+strings.Repeat(" ", maxSyncBodyBytes)))
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/discovery/sync", strings.NewReader(body+strings.Repeat(" ", MaxSyncBytes)))
 	res = httptest.NewRecorder()
 	handler.Sync(res, req)
 	if res.Code != http.StatusRequestEntityTooLarge {
@@ -396,5 +421,134 @@ func TestDiscoveryStorageErrorsDoNotCountAsFailures(t *testing.T) {
 	store.armed.Store(false)
 	if res := syncHTTP(h, body, "token-a"); res.Code != http.StatusOK {
 		t.Fatalf("sync after the outage: HTTP %d, want 200", res.Code)
+	}
+}
+
+// An agent token over 1024 bytes is refused before the limiter and the store
+// see it: HTTP 400, gRPC InvalidArgument. An unknown agent is not enrolled,
+// and the refusals count as no failure: more of them than rate_attempts leave
+// an enrolled agent unblocked.
+func TestDiscoveryRejectsOverlongToken(t *testing.T) {
+	overlong, longest := strings.Repeat("t", 1025), strings.Repeat("t", 1024)
+	logger := zerolog.Nop()
+
+	t.Run("http", func(t *testing.T) {
+		svc := agent.New(inmemory.New(), logger)
+		hub := event.NewHub(logger)
+		defer hub.Close()
+		h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
+		body := func(id string) string {
+			return `{"id":"` + id + `","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
+		}
+		refused := func(id string) {
+			t.Helper()
+			res := syncHTTP(h, body(id), overlong)
+			if res.Code != http.StatusBadRequest {
+				t.Fatalf("overlong token for %s: HTTP %d %s, want 400", id, res.Code, res.Body.String())
+			}
+			if got := responseMessage(t, res); got != "Agent token is too long." {
+				t.Fatalf("overlong token for %s answered %q, want %q", id, got, "Agent token is too long.")
+			}
+		}
+		refused("agent-b")
+		assertNotRegistered(t, svc, "agent-b")
+
+		if res := syncHTTP(h, body("agent-a"), longest); res.Code != http.StatusOK {
+			t.Fatalf("enroll a 1024-byte token: HTTP %d %s, want 200", res.Code, res.Body.String())
+		}
+		for range 6 {
+			refused("agent-a")
+		}
+		if res := syncHTTP(h, body("agent-a"), longest); res.Code != http.StatusOK {
+			t.Fatalf("enrolled token after the refusals: HTTP %d %s, want 200", res.Code, res.Body.String())
+		}
+	})
+
+	t.Run("grpc", func(t *testing.T) {
+		svc := agent.New(inmemory.New(), logger)
+		hub := event.NewHub(logger)
+		defer hub.Close()
+		g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), true)
+		sync := func(id, token string) error {
+			ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
+			_, err := g.Sync(ctx, &discoverv1.SyncRequest{Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})
+			return err
+		}
+		refused := func(id string) {
+			t.Helper()
+			err := sync(id, overlong)
+			if grpcstatus.Code(err) != codes.InvalidArgument || grpcstatus.Convert(err).Message() != "agent token is too long" {
+				t.Fatalf("overlong token for %s: %v, want InvalidArgument: agent token is too long", id, err)
+			}
+		}
+		refused("agent-b")
+		assertNotRegistered(t, svc, "agent-b")
+
+		if err := sync("agent-a", longest); err != nil {
+			t.Fatalf("enroll a 1024-byte token: %v", err)
+		}
+		for range 6 {
+			refused("agent-a")
+		}
+		if err := sync("agent-a", longest); err != nil {
+			t.Fatalf("enrolled token after the refusals: %v", err)
+		}
+	})
+}
+
+// A sync without a token while agent auth is required is refused and logged
+// at WARN with the agent ID and the ways out. Only attempts the limiter admits
+// log, so a pair logs at most rate_attempts lines per window.
+func TestTokenlessSyncWarns(t *testing.T) {
+	const warning = "agent sent no token: serve discovery over TLS so the SDK sends it, " +
+		"call allow_insecure_token_transport() in the SDK, or set agent_auth.require=false"
+	for _, tc := range []struct {
+		name string
+		sync func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func() bool // reports a refused sync
+	}{
+		{"http", func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func() bool {
+			h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
+			body := `{"id":"agent-a","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
+			return func() bool {
+				code := syncHTTP(h, body, "").Code
+				return code == http.StatusUnauthorized || code == http.StatusTooManyRequests
+			}
+		}},
+		{"grpc", func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func() bool {
+			g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), true)
+			return func() bool {
+				_, err := g.Sync(context.Background(), &discoverv1.SyncRequest{Id: "agent-a", Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})
+				code := grpcstatus.Code(err)
+				return code == codes.Unauthenticated || code == codes.ResourceExhausted
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			svc := agent.New(inmemory.New(), zerolog.Nop())
+			hub := event.NewHub(zerolog.Nop())
+			defer hub.Close()
+			sync := tc.sync(zerolog.New(&logs), svc, hub)
+			for i := range 8 {
+				if !sync() {
+					t.Fatalf("tokenless sync %d was not refused", i+1)
+				}
+			}
+			assertNotRegistered(t, svc, "agent-a")
+			warnings := 0
+			for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+				var entry struct {
+					Level   string `json:"level"`
+					AgentID string `json:"agent_id"`
+					Message string `json:"message"`
+				}
+				if json.Unmarshal(line, &entry) == nil && entry.Level == "warn" && entry.Message == warning && entry.AgentID == "agent-a" {
+					warnings++
+				}
+			}
+			if warnings != 5 {
+				t.Fatalf("%d WARN lines for eight tokenless syncs, want 5 (rate_attempts):\n%s", warnings, logs.String())
+			}
+		})
 	}
 }

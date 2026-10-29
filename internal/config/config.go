@@ -43,11 +43,15 @@ type TLSConfig struct {
 // AgentAuthConfig controls bearer-token authentication between agents and the
 // control plane — one switch for both directions.
 //
-// When Require is true (the default): discovery enrolls each agent's token on
-// first contact (trust-on-first-use) and verifies it on every subsequent sync,
-// rejecting mismatches; outbound proxy calls present the stored token. When
-// false, no token is verified inbound and none is sent outbound, and startup
-// logs a warning. Orthogonal to TLS.
+// When Require is true (the default), enrolled agents are authenticated: the
+// first sync of an unknown agent ID enrolls its token (trust on first use) and
+// sets the endpoint podium calls, every later sync must present that token,
+// and outbound proxy calls present it. It does not keep other hosts from
+// enrolling new agent IDs: until enrollment tokens exist, the discovery
+// listeners must be reachable only from agent networks or require client
+// certificates, and startup warns when no client CA is set. When false, no
+// token is verified inbound and none is sent outbound, and startup logs a
+// warning. Orthogonal to TLS.
 type AgentAuthConfig struct {
 	Require bool `yaml:"require" envconfig:"REQUIRE"`
 }

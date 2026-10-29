@@ -29,13 +29,37 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
 
-func TestNewWarnsWhenAgentAuthDisabled(t *testing.T) {
-	const warning = "agent authentication disabled: any host that reaches the discovery listeners can register agents"
+const (
+	agentAuthDisabledWarning = "agent authentication disabled: any host that reaches the discovery listeners can register agents"
+	openDiscoveryWarning     = "agent authentication covers enrolled agents only: the first sync of an unknown agent ID enrolls it and sets the endpoint podium calls, so keep the discovery listeners reachable only from agent networks or set tls.server.client_ca_file"
+)
+
+// discoveryWarnings returns the startup warnings about who can register
+// agents, found in a JSON log.
+func discoveryWarnings(t *testing.T, logs []byte) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, line := range bytes.Split(bytes.TrimSpace(logs), []byte("\n")) {
+		var entry map[string]any
+		if json.Unmarshal(line, &entry) != nil || entry["level"] != "warn" {
+			continue
+		}
+		if msg := entry["message"]; msg == agentAuthDisabledWarning || msg == openDiscoveryWarning {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// Startup says who can register agents. With agent auth off, any host that
+// reaches discovery. With it on, enrolled agents must present their token, but
+// any host can still enroll a new agent ID until enrollment tokens exist.
+func TestNewWarnsWhoCanRegisterAgents(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		require bool
-		want    int
-	}{{"required", true, 0}, {"disabled", false, 1}} {
+		want    string
+	}{{"required", true, openDiscoveryWarning}, {"disabled", false, agentAuthDisabledWarning}} {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs bytes.Buffer
 			cfg := config.Default()
@@ -49,20 +73,32 @@ func TestNewWarnsWhenAgentAuthDisabled(t *testing.T) {
 			if err := a.Shutdown(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			warnings := 0
-			for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
-				var entry struct {
-					Level   string `json:"level"`
-					Message string `json:"message"`
-				}
-				if json.Unmarshal(line, &entry) == nil && entry.Message == warning && entry.Level == "warn" {
-					warnings++
-				}
+			warnings := discoveryWarnings(t, logs.Bytes())
+			if len(warnings) != 1 || warnings[0]["message"] != tc.want {
+				t.Fatalf("discovery warnings %v, want one: %q", warnings, tc.want)
 			}
-			if warnings != tc.want {
-				t.Fatalf("agent auth warnings = %d, want %d", warnings, tc.want)
+			if tc.require && (warnings[0]["http_discovery_addr"] != ":8082" || warnings[0]["grpc_addr"] != ":50051") {
+				t.Fatalf("warning %v does not name the discovery listeners :8082 and :50051", warnings[0])
 			}
 		})
+	}
+}
+
+// Client certificates keep hosts without one out of discovery, so with agent
+// auth on there is nothing to warn about.
+func TestOpenDiscoveryWarningSkipsClientCertificates(t *testing.T) {
+	cfg := config.Default()
+	cfg.TLS.Server.ClientCAFile = "agents-ca.pem"
+	var logs bytes.Buffer
+	warnOpenDiscovery(zerolog.New(&logs), cfg)
+	if warnings := discoveryWarnings(t, logs.Bytes()); len(warnings) != 0 {
+		t.Fatalf("discovery warnings with client certificates required: %v", warnings)
+	}
+
+	cfg.AgentAuth.Require = false
+	warnOpenDiscovery(zerolog.New(&logs), cfg)
+	if warnings := discoveryWarnings(t, logs.Bytes()); len(warnings) != 1 || warnings[0]["message"] != agentAuthDisabledWarning {
+		t.Fatalf("discovery warnings with agent auth off: %v, want %q", warnings, agentAuthDisabledWarning)
 	}
 }
 
@@ -141,6 +177,33 @@ func TestGRPCDiscoveryRejectsOversizedMessage(t *testing.T) {
 	}
 	if _, err := svc.Get(ctx, "large-agent"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("oversized sync reached the handler: %v", err)
+	}
+}
+
+// The gRPC discovery listener caps request headers at 16 KiB, like the HTTP
+// listeners: larger metadata never reaches the handler.
+func TestGRPCDiscoveryCapsHeaders(t *testing.T) {
+	ctx := context.Background()
+	logger := zerolog.Nop()
+	svc := agent.New(inmemory.New(), logger)
+	hub := event.NewHub(logger)
+	defer hub.Close()
+	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), nil, false))
+	sync := func(id string, padding int) error {
+		md := metadata.AppendToOutgoingContext(ctx, "x-padding", strings.Repeat("p", padding))
+		_, err := client.Sync(md, &discoverv1.SyncRequest{
+			Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1,
+		})
+		return err
+	}
+	if err := sync("small-agent", 12<<10); err != nil {
+		t.Fatalf("sync with 12 KiB of metadata: %v", err)
+	}
+	if err := sync("large-agent", 20<<10); err == nil {
+		t.Fatal("sync with 20 KiB of metadata accepted, want it refused")
+	}
+	if _, err := svc.Get(ctx, "large-agent"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("oversized headers reached the handler: %v", err)
 	}
 }
 

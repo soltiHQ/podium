@@ -249,6 +249,23 @@ func cookieSecure(mode string, resolver *clientip.Resolver) func(*http.Request) 
 	}
 }
 
+// warnOpenDiscovery logs who can register agents through the discovery
+// listeners. agent_auth.require authenticates enrolled agents only: the first
+// sync of an unknown agent ID enrolls its token and sets the endpoint podium
+// calls. Until enrollment tokens exist, only the network or client
+// certificates (tls.server.client_ca_file) keep other hosts out.
+func warnOpenDiscovery(logger zerolog.Logger, cfg config.Config) {
+	switch {
+	case !cfg.AgentAuth.Require:
+		logger.Warn().Msg("agent authentication disabled: any host that reaches the discovery listeners can register agents")
+	case cfg.TLS.Server.ClientCAFile == "":
+		logger.Warn().
+			Str("http_discovery_addr", cfg.HTTPDiscovery.Addr).
+			Str("grpc_addr", cfg.GRPC.Addr).
+			Msg("agent authentication covers enrolled agents only: the first sync of an unknown agent ID enrolls it and sets the endpoint podium calls, so keep the discovery listeners reachable only from agent networks or set tls.server.client_ca_file")
+	}
+}
+
 // buildDiscoveryListeners wires the HTTP and gRPC discovery listeners around one
 // failure limiter: both count agent token failures per (client IP, agent ID), so
 // an agent has one budget whichever transport it uses.
@@ -334,8 +351,9 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *e
 	isWrite := func(full string) bool { _, ok := writeMethods[full]; return ok }
 
 	opts := []grpc.ServerOption{
-		// Same message cap as the HTTP sync body; bounded streams, pings and idle connections.
-		grpc.MaxRecvMsgSize(256 << 10),
+		// Same message and header caps as the HTTP sync; bounded streams, pings and idle connections.
+		grpc.MaxRecvMsgSize(handler.MaxSyncBytes),
+		grpc.MaxHeaderListSize(16 << 10),
 		grpc.MaxConcurrentStreams(256),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second}),
 		grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionIdle: 5 * time.Minute}),

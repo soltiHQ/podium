@@ -141,10 +141,15 @@ Every event kind maps to a subject (`event.SubjectOf`):
 
 Both parse the agent heartbeat payload, call `model.NewAgentFrom{Sync,Proto}`, then `agentSVC.Upsert`.
 
-With agent auth required, each sync reserves an attempt on the pair (client IP, agent ID) before its token check
-(`verifyAgentToken`), so checks in flight count like failures; a wrong token turns the attempt into a failure, any
-other outcome releases it. Both transports share one limiter, so failures over HTTP count toward gRPC and back.
-`auth.rate_attempts` failures block that pair for `auth.rate_window`: HTTP answers 429, gRPC `ResourceExhausted`.
+With agent auth required, the first sync of an unknown agent ID enrolls the token it presents (trust on first use) and
+sets the endpoint podium calls; every later sync of that ID must present the same token. Until enrollment tokens exist,
+only the network or client certificates keep other hosts from enrolling new IDs (see `internal/config`, "Agent
+authentication"). A token over 1024 bytes (`model.AgentTokenMaxBytes`) is refused first, with HTTP 400
+`Agent token is too long.` / gRPC `InvalidArgument`, and counts as no failure. Then each sync reserves an attempt on
+the pair (client IP, agent ID) before its token check (`verifyAgentToken`), so checks in flight count like failures; a
+missing or wrong token turns the attempt into a failure, any other outcome releases it. A missing token is also logged
+at WARN with the agent ID and the ways out. Both transports share one limiter, so failures over HTTP count toward gRPC
+and back. `auth.rate_attempts` failures block that pair for `auth.rate_window`: HTTP answers 429, gRPC `ResourceExhausted`.
 There is no per-IP limit, so agents behind one egress IP (NAT, Kubernetes) never block each other.
 HTTP takes the client IP from `trusted_proxies`; gRPC uses the peer address.
 

@@ -114,6 +114,10 @@ func parseAgentURL(endpoint string) (*url.URL, error) {
 		return nil, invalidEndpoint("must not contain credentials")
 	}
 	host := u.Host
+	// A port follows the last ':' only when that ':' comes after any ']': the
+	// colons of a bracketed IPv6 literal such as "[::1]" are not a port
+	// separator. A bare IPv6 host like "::1:8085" has a ':' last too, but
+	// SplitHostPort rejects it, so an unbracketed IPv6 literal never passes.
 	if strings.LastIndexByte(host, ':') > strings.LastIndexByte(host, ']') {
 		h, port, err := net.SplitHostPort(host)
 		if err != nil {

@@ -49,7 +49,11 @@ func TestLoghubRecoversSourcePanic(t *testing.T) {
 		t.Fatalf("panic not logged at ERROR with the agent ID: %q", logs.String())
 	}
 
-	// The torn-down source is gone; a fresh subscription reopens it.
+	// The torn-down source is gone; a fresh subscription reopens it. Shutdown
+	// cancels the source before it leaves the hub, so a Subscribe right after
+	// can still find the dead source and get ErrSourceClosed: retry until the
+	// hub opens a fresh one. Once ctx expires, Subscribe returns ctx.Err() and
+	// the loop ends.
 	ch, unsub, err := hub.Subscribe(ctx, "agent-1", "task")
 	for errors.Is(err, loghub.ErrSourceClosed) {
 		ch, unsub, err = hub.Subscribe(ctx, "agent-1", "task")

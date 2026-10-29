@@ -17,6 +17,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transport/grpc/status"
 
 	discoverv1 "github.com/soltiHQ/control-plane/api/gen/solti/discover/v1"
+	"github.com/soltiHQ/control-plane/domain"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/domain/wire"
@@ -44,9 +45,13 @@ var discoverySyncMarshal = protojson.MarshalOptions{
 	EmitUnpopulated: false,
 }
 
-// maxSyncBodyBytes caps SyncRequest bodies to defend against runaway clients.
-// The discovery server owns this independent request limit.
-const maxSyncBodyBytes = 256 * 1024
+// MaxSyncBytes caps a SyncRequest to defend against runaway clients: the HTTP
+// request body and the gRPC message alike.
+const MaxSyncBytes = 256 << 10
+
+// errTokenTooLong refuses a bearer token over model.AgentTokenMaxBytes before
+// the limiter or the store sees it.
+var errTokenTooLong = errors.New("agent token is too long")
 
 // HTTPDiscovery handles agent discovery over HTTP.
 type HTTPDiscovery struct {
@@ -60,10 +65,11 @@ type HTTPDiscovery struct {
 
 // NewHTTPDiscovery creates a new HTTP discovery handler.
 //
-// requireAuth turns on per-agent bearer-token authentication (TOFU enroll +
-// constant-time verify) on every sync. limiter bounds the token checks of each
-// (client IP, agent ID) pair, see verifyAgentToken; resolver gives the client
-// IP (nil trusts no proxy).
+// requireAuth turns on per-agent bearer-token authentication on every sync:
+// the first sync of an unknown agent ID enrolls its token (trust on first
+// use), later ones must present it (constant-time verify). limiter bounds the
+// token checks of each (client IP, agent ID) pair, see verifyAgentToken;
+// resolver gives the client IP (nil trusts no proxy).
 func NewHTTPDiscovery(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, limiter *ratelimit.Limiter, resolver *clientip.Resolver, requireAuth bool) *HTTPDiscovery {
 	if agentSVC == nil {
 		panic(service.ErrNilService)
@@ -98,13 +104,13 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxSyncBodyBytes+1))
+	body, err := io.ReadAll(io.LimitReader(r.Body, MaxSyncBytes+1))
 	if err != nil {
 		response.BadRequest(w, r, mode)
 		return
 	}
 
-	if len(body) > maxSyncBodyBytes {
+	if len(body) > MaxSyncBytes {
 		http.Error(w, "discovery request too large", http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -117,14 +123,16 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 
 	a, err := agentFromSyncRequest(&in)
 	if err != nil {
-		response.BadRequestMsg(w, r, mode, "invalid agent data: "+err.Error())
+		response.BadRequestMsg(w, r, mode, "Invalid agent data: "+brokenRule(err)+".")
 		return
 	}
 
 	if h.requireAuth {
 		token := bearerToken(r.Header.Get("Authorization"))
-		if err := verifyAgentToken(r.Context(), h.agentSVC, h.limiter, h.resolver.IP(r), in.GetId(), token); err != nil {
+		if err := verifyAgentToken(r.Context(), h.logger, h.agentSVC, h.limiter, h.resolver.IP(r), in.GetId(), token); err != nil {
 			switch {
+			case errors.Is(err, errTokenTooLong):
+				response.BadRequestMsg(w, r, mode, "Agent token is too long.")
 			case errors.Is(err, auth.ErrRateLimited):
 				response.AuthRateLimit(w, r, mode)
 			case errors.Is(err, agent.ErrUnauthenticated):
@@ -167,9 +175,9 @@ type GRPCDiscovery struct {
 
 // NewGRPCDiscovery creates a new gRPC discovery handler.
 //
-// requireAuth turns on per-agent bearer-token authentication (TOFU enroll +
-// constant-time verify) on every sync. limiter bounds the token checks of each
-// (peer IP, agent ID) pair, see verifyAgentToken.
+// requireAuth turns on per-agent bearer-token authentication on every sync,
+// as for NewHTTPDiscovery. limiter bounds the token checks of each (peer IP,
+// agent ID) pair, see verifyAgentToken.
 func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event.Hub, limiter *ratelimit.Limiter, requireAuth bool) *GRPCDiscovery {
 	if agentSVC == nil {
 		panic(service.ErrNilService)
@@ -193,12 +201,14 @@ func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event
 func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (*discoverv1.SyncResponse, error) {
 	a, err := agentFromSyncRequest(req)
 	if err != nil {
-		return nil, status.Errorf(ctx, codes.InvalidArgument, "invalid agent data: %v", err)
+		return nil, status.Errorf(ctx, codes.InvalidArgument, "invalid agent data: %s", brokenRule(err))
 	}
 
 	if g.requireAuth {
-		if err := verifyAgentToken(ctx, g.agentSVC, g.limiter, grpcPeerIP(ctx), req.GetId(), grpcBearerToken(ctx)); err != nil {
+		if err := verifyAgentToken(ctx, g.logger, g.agentSVC, g.limiter, grpcPeerIP(ctx), req.GetId(), grpcBearerToken(ctx)); err != nil {
 			switch {
+			case errors.Is(err, errTokenTooLong):
+				return nil, status.Errorf(ctx, codes.InvalidArgument, "agent token is too long")
 			case errors.Is(err, auth.ErrRateLimited):
 				return nil, status.Errorf(ctx, codes.ResourceExhausted, "rate limited")
 			case errors.Is(err, agent.ErrUnauthenticated):
@@ -220,23 +230,40 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 }
 
 // verifyAgentToken checks the bearer token of agentID synced from clientIP, for
-// both Sync transports. It first reserves an attempt on the (client IP, agent ID)
-// pair, so checks in flight count like failures: it returns auth.ErrRateLimited
-// while the failures plus the checks in flight of the pair reach the limit.
-// A wrong token (agent.ErrUnauthenticated) becomes a failure; every other
-// outcome, a panic included, releases the attempt.
-func verifyAgentToken(ctx context.Context, svc *agent.Service, limiter *ratelimit.Limiter, clientIP, agentID, token string) error {
+// both Sync transports. A token over model.AgentTokenMaxBytes returns
+// errTokenTooLong before anything else. Otherwise it reserves an attempt on the
+// (client IP, agent ID) pair, so checks in flight count like failures: it
+// returns auth.ErrRateLimited while the failures plus the checks in flight of
+// the pair reach the limit. A missing or wrong token (agent.ErrUnauthenticated)
+// becomes a failure, and a missing one logs a WARN, at most rate_attempts per
+// window for the pair; every other outcome, a panic included, releases the
+// attempt.
+func verifyAgentToken(ctx context.Context, logger zerolog.Logger, svc *agent.Service, limiter *ratelimit.Limiter, clientIP, agentID, token string) error {
+	if len(token) > model.AgentTokenMaxBytes {
+		return errTokenTooLong
+	}
 	attempt, err := limiter.Reserve(time.Now(), ratelimit.AgentKey(clientIP, agentID))
 	if err != nil {
 		return err
 	}
 	defer attempt.Release() // a no-op once the attempt has failed
 
+	if token == "" {
+		// The SDK sends no token over plaintext unless told to.
+		logger.Warn().Str("agent_id", agentID).
+			Msg("agent sent no token: serve discovery over TLS so the SDK sends it, call allow_insecure_token_transport() in the SDK, or set agent_auth.require=false")
+	}
 	err = svc.VerifyOrEnrollToken(ctx, agentID, token)
 	if errors.Is(err, agent.ErrUnauthenticated) {
 		attempt.Fail(time.Now())
 	}
 	return err
+}
+
+// brokenRule is the domain rule err reports, without its sentinel prefix, for
+// the answer to an agent whose sync data breaks it.
+func brokenRule(err error) string {
+	return strings.TrimPrefix(err.Error(), domain.ErrInvalidArgument.Error()+": ")
 }
 
 // agentFromSyncRequest builds a domain Agent from a discovery heartbeat. Shared

@@ -48,11 +48,32 @@ Env equivalents: `SOLTI_TLS_SERVER_CERT_FILE`, `SOLTI_TLS_CLIENT_CA_FILE`, etc.
 
 ## Agent authentication
 
-`agent_auth.require` defaults to `true`. Discovery enrolls each agent's bearer
-token on first contact and answers a later sync without the same token with
-HTTP 401 / gRPC `Unauthenticated`. Outbound calls to agents present the stored
-token. SDK agents send their token only over TLS unless the agent explicitly
-allows insecure token transport.
+`agent_auth.require` defaults to `true`. It authenticates enrolled agents: a
+sync for an agent ID that has a token, but without that token, gets HTTP 401 /
+gRPC `Unauthenticated`, and outbound calls to the agent present the stored
+token. It does not keep other hosts out: the first sync of an unknown agent ID
+enrolls the token it presents (trust on first use) and sets the endpoint
+podium will call. Until enrollment tokens exist (a later phase), the discovery
+listeners (`http_discovery.addr`, default `:8082`, and `grpc.addr`, default
+`:50051`) must be reachable only from agent networks, or must require client
+certificates (`tls.server.client_ca_file`). Without a client CA, startup logs
+one WARN line, with the two listen addresses: `agent authentication covers
+enrolled agents only: the first sync of an unknown agent ID enrolls it and sets
+the endpoint podium calls, so keep the discovery listeners reachable only from
+agent networks or set tls.server.client_ca_file`.
+
+With `require: true`, a token longer than 1024 bytes is refused before any
+check, with HTTP 400 `Agent token is too long.` / gRPC `InvalidArgument`, and
+nothing is enrolled. gRPC discovery caps request headers at 16 KiB, like the
+HTTP listeners.
+
+SDK agents send their token only over TLS unless the agent explicitly allows
+insecure token transport (`allow_insecure_token_transport()`). With `require:
+true`, a sync without a token is refused like a wrong one and logged at WARN
+with the agent ID and the three ways out: TLS, so the SDK sends its token; the
+SDK's insecure-token option; or `agent_auth.require: false`. The discovery
+limiter bounds these lines to `auth.rate_attempts` per `auth.rate_window` for
+each client IP and agent ID.
 
 ```yaml
 agent_auth:
