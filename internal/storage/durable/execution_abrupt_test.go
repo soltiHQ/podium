@@ -31,7 +31,7 @@ func TestDurableExecutionArchiveSurvivesAbruptExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer restored.Close()
+	defer func() { _ = restored.Close() }()
 	want := durableArchiveRow(t)
 	got, err := restored.GetExecution(context.Background(), want.ID())
 	if err != nil || !reflect.DeepEqual(got.Params(), want.Params()) {

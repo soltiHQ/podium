@@ -26,6 +26,7 @@ func (v fixtureVerifier) Verify(context.Context, string) (*identity.Identity, er
 type fixtureIssuer struct{}
 
 func (fixtureIssuer) Issue(context.Context, *identity.Identity) (string, error) { return "issued", nil }
+
 func TestAuthChecksRevocationAndCurrentPermissionsBeforeHandler(t *testing.T) {
 	ctx := context.Background()
 	st := inmemory.New()

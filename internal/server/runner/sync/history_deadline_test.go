@@ -32,7 +32,7 @@ func (f *deadlineArchiveProxy) DeleteTask(ctx context.Context, id string) error 
 
 func TestArchiveDeadlinePreservesDeleteBudget(t *testing.T) {
 	f := &deadlineArchiveProxy{}
-	r, s, _ := newFakeRunner(t, &f.archiveProxy.fakeProxy)
+	r, s, _ := newFakeRunner(t, &f.fakeProxy)
 	r.pool = archivePool{f}
 	svc, err := historysvc.New(s, historysvc.Config{})
 	if err != nil {

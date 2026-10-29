@@ -39,7 +39,7 @@ func conditionsGRPCProxy(t *testing.T, resource *taskv1.Task) *grpcProxyV1 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.Close(); server.Stop(); l.Close() })
+	t.Cleanup(func() { _ = conn.Close(); server.Stop(); _ = l.Close() })
 	return &grpcProxyV1{conn: conn}
 }
 

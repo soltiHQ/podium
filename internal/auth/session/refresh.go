@@ -2,10 +2,10 @@ package session
 
 import (
 	"crypto/rand"
+	"crypto/sha3"
 	"encoding/base64"
 
 	"github.com/soltiHQ/control-plane/internal/auth"
-	"golang.org/x/crypto/sha3"
 )
 
 const (

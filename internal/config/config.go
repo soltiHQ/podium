@@ -162,7 +162,7 @@ func loadYAML(path string, dst *Config) error {
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if err = yaml.NewDecoder(f).Decode(dst); err != nil {
 		return fmt.Errorf("decode %s: %w", path, err)

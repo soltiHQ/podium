@@ -84,11 +84,11 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx storage.Storage) error) e
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	snap := s.state.takeSnapshot()
+	snap := s.takeSnapshot()
 	committed := false
 	defer func() {
 		if !committed {
-			s.state.restoreSnapshot(snap)
+			s.restoreSnapshot(snap)
 		}
 	}()
 	if err := fn(s.state); err != nil {

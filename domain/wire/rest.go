@@ -165,7 +165,7 @@ func RolloutSpecToREST(ts *model.Spec, states []*model.Rollout) restv1.RolloutSp
 		gen := ts.Generation()
 		for _, ss := range states {
 			if ss.IsStaleFor(gen) {
-				out.Spec.DirtyForRollout = true
+				out.DirtyForRollout = true
 				break
 			}
 		}

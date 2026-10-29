@@ -41,7 +41,7 @@ func pageGRPCProxy(t *testing.T, s *runPageServer) *grpcProxyV1 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.Close(); server.Stop(); l.Close() })
+	t.Cleanup(func() { _ = conn.Close(); server.Stop(); _ = l.Close() })
 	return &grpcProxyV1{conn: conn}
 }
 

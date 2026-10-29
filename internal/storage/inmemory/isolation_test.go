@@ -29,12 +29,14 @@ func TestTransactionRollbackDoesNotLoseConcurrentWrite(t *testing.T) {
 	writeDone := make(chan error, 1)
 	go func() { writeDone <- s.UpsertAgent(ctx, mkAgent(t, "concurrent")) }()
 	select {
-	case <-writeDone:
-		t.Fatal("direct write bypassed transaction gate")
+	case err := <-writeDone:
+		t.Fatalf("direct write bypassed transaction gate: %v", err)
 	case <-time.After(20 * time.Millisecond):
 	}
 	close(release)
-	<-txDone
+	if err := <-txDone; err == nil {
+		t.Fatal("aborted transaction reported success")
+	}
 	if err := <-writeDone; err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +71,9 @@ func TestTransactionReadsCannotObserveIntermediateWrites(t *testing.T) {
 	case <-time.After(20 * time.Millisecond):
 	}
 	close(release)
-	<-done
+	if err := <-done; err == nil {
+		t.Fatal("aborted transaction reported success")
+	}
 	if err := <-read; !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("want absent after rollback: %v", err)
 	}

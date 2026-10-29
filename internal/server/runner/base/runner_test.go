@@ -69,7 +69,8 @@ func TestStopHonorsDeadlineWhenTickStuck(t *testing.T) {
 
 	close(release)
 	select {
-	case <-errCh:
+	case err := <-errCh:
+		_ = err // Start only has to return; its result is not under test.
 	case <-time.After(time.Second):
 		t.Fatal("Start did not return after release")
 	}

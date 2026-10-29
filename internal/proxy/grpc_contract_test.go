@@ -60,7 +60,7 @@ func grpcContractProxy(t *testing.T, s *taskContractServer) *grpcProxyV1 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { conn.Close(); server.Stop(); l.Close() })
+	t.Cleanup(func() { _ = conn.Close(); server.Stop(); _ = l.Close() })
 	return &grpcProxyV1{conn: conn}
 }
 
@@ -128,12 +128,12 @@ func (l *memoryListener) DialContext(ctx context.Context) (net.Conn, error) {
 	case l.conns <- server:
 		return client, nil
 	case <-l.done:
-		server.Close()
-		client.Close()
+		_ = server.Close()
+		_ = client.Close()
 		return nil, io.EOF
 	case <-ctx.Done():
-		server.Close()
-		client.Close()
+		_ = server.Close()
+		_ = client.Close()
 		return nil, ctx.Err()
 	}
 }

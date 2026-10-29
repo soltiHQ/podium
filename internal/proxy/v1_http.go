@@ -230,7 +230,7 @@ func (p *httpProxyV1) request(ctx context.Context, method, target string, body [
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrRequest, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return formatUnexpectedStatus(resp)
 	}
@@ -278,13 +278,13 @@ func (p *httpProxyV1) StreamTaskLogsForUID(ctx context.Context, name, uid string
 	}
 	if resp.StatusCode != http.StatusOK {
 		err := formatUnexpectedStatus(resp)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, agentError(ErrStreamTaskLogs, err)
 	}
 	ch := make(chan *taskv1.StreamTaskLogsResponse, 64)
 	go func() {
 		defer close(ch)
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 4096), 1024*1024)
 		var data []string

@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"crypto/sha3"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -21,7 +22,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth/token/jwt"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
-	"golang.org/x/crypto/sha3"
 )
 
 type cookieRefreshReadBarrier struct {
@@ -125,7 +125,7 @@ func TestRefreshLosingConcurrentResponseCannotClearWinningCookies(t *testing.T) 
 			t.Fatal(r.err)
 		}
 		_, _ = io.Copy(io.Discard, r.response.Body)
-		r.response.Body.Close()
+		_ = r.response.Body.Close()
 		switch r.response.StatusCode {
 		case 204:
 			winner = r.response
@@ -155,7 +155,7 @@ func TestRefreshLosingConcurrentResponseCannotClearWinningCookies(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer continued.Body.Close()
+	defer func() { _ = continued.Body.Close() }()
 	if continued.StatusCode != 204 {
 		t.Fatalf("late losing response destroyed winning authentication:HTTP%d", continued.StatusCode)
 	}
@@ -165,7 +165,7 @@ func TestRefreshLosingConcurrentResponseCannotClearWinningCookies(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer replay.Body.Close()
+	defer func() { _ = replay.Body.Close() }()
 	if replay.StatusCode != 401 {
 		t.Fatalf("consumed old refresh replay statusHTTP%d", replay.StatusCode)
 	}
@@ -229,7 +229,7 @@ func TestRefreshCurrentRequestRechecksChangedPermissions(t *testing.T) {
 	release()
 	select {
 	case response := <-replies:
-		defer response.Body.Close()
+		defer func() { _ = response.Body.Close() }()
 		if response.StatusCode != 403 {
 			t.Fatalf("permission removed during refresh still authorized current request:HTTP%d", response.StatusCode)
 		}

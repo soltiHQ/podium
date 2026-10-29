@@ -31,7 +31,7 @@ func preflightLogFile(path string) error {
 	if err != nil {
 		return fmt.Errorf("raft: preflight open log: %w", err)
 	}
-	defer logs.Close()
+	defer func() { _ = logs.Close() }()
 	return preflightLogs(logs)
 }
 

@@ -26,7 +26,7 @@ func newRunner(t *testing.T, cfg Config) (*Runner, *inmemory.Store) {
 		t.Fatal(err)
 	}
 	pool := proxy.NewPool(nil)
-	t.Cleanup(func() { pool.Close() })
+	t.Cleanup(func() { _ = pool.Close() })
 	r, err := New(cfg, zerolog.Nop(), s, pool, svc, standalone.NewLeadership())
 	if err != nil {
 		t.Fatal(err)
@@ -66,9 +66,9 @@ func agentHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if strings.HasSuffix(r.URL.Path, "/runs") {
-		fmt.Fprint(w, `{"metadata":{"taskUid":"uid","resourceVersion":"rv"},"runs":[{"generation":1,"attempt":1,"phase":"succeeded","startedAt":"2026-10-02T00:00:00Z","finishedAt":"2026-10-02T00:00:01Z","workload":{"apiVersion":"solti.io/v1","kind":"SubprocessTask"}}]}`)
+		_, _ = fmt.Fprint(w, `{"metadata":{"taskUid":"uid","resourceVersion":"rv"},"runs":[{"generation":1,"attempt":1,"phase":"succeeded","startedAt":"2026-10-02T00:00:00Z","finishedAt":"2026-10-02T00:00:01Z","workload":{"apiVersion":"solti.io/v1","kind":"SubprocessTask"}}]}`)
 	} else {
-		fmt.Fprint(w, `{"metadata":{"name":"task","uid":"uid","creationTimestamp":"2026-10-02T00:00:00Z"}}`)
+		_, _ = fmt.Fprint(w, `{"metadata":{"name":"task","uid":"uid","creationTimestamp":"2026-10-02T00:00:00Z"}}`)
 	}
 }
 
@@ -206,9 +206,9 @@ func TestCollectorResumesStaticHistoryWithOneRowOnePageBudget(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if req.URL.Query().Get("continue") == "next" {
-			fmt.Fprint(w, `{"metadata":{"taskUid":"uid","resourceVersion":"rv"},"runs":[{"generation":1,"attempt":2,"phase":"failed","startedAt":"2026-10-02T00:00:00Z","finishedAt":"2026-10-02T00:00:01Z"}]}`)
+			_, _ = fmt.Fprint(w, `{"metadata":{"taskUid":"uid","resourceVersion":"rv"},"runs":[{"generation":1,"attempt":2,"phase":"failed","startedAt":"2026-10-02T00:00:00Z","finishedAt":"2026-10-02T00:00:01Z"}]}`)
 		} else {
-			fmt.Fprint(w, `{"metadata":{"taskUid":"uid","resourceVersion":"rv","continue":"next"},"runs":[{"generation":1,"attempt":1,"phase":"succeeded","startedAt":"2026-10-02T00:00:00Z","finishedAt":"2026-10-02T00:00:01Z"}]}`)
+			_, _ = fmt.Fprint(w, `{"metadata":{"taskUid":"uid","resourceVersion":"rv","continue":"next"},"runs":[{"generation":1,"attempt":1,"phase":"succeeded","startedAt":"2026-10-02T00:00:00Z","finishedAt":"2026-10-02T00:00:01Z"}]}`)
 		}
 	}))
 	defer server.Close()

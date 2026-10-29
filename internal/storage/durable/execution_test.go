@@ -62,7 +62,7 @@ func TestDurableExecutionRestartRollbackAndNoCascade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer again.Close()
+	defer func() { _ = again.Close() }()
 	got, err := again.GetExecution(ctx, e.ID())
 	if err != nil || !reflect.DeepEqual(got.Params(), e.Params()) {
 		t.Fatal("archive not losslessly restored", err)
@@ -77,7 +77,7 @@ func TestDurableExecutionRestartRollbackAndNoCascade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer last.Close()
+	defer func() { _ = last.Close() }()
 	if _, err := last.GetExecution(ctx, e.ID()); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatal("deleted history resurrected", err)
 	}
@@ -136,7 +136,7 @@ func TestDurableSnapshotV2UpgradePreservesNineGroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	if err := db.View(func(tx *bolt.Tx) error {
 		var saved raftv1.Snapshot
 		if err := proto.Unmarshal(tx.Bucket(stateBucket).Get(snapshotKey), &saved); err != nil {

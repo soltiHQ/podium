@@ -253,7 +253,7 @@ func (f *FSM) Snapshot() (hraft.FSMSnapshot, error) {
 // The proto blob is fully decoded into memory before the live store is
 // swapped, so a truncated or corrupted stream leaves the store untouched.
 func (f *FSM) Restore(r io.ReadCloser) error {
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	store, ok := f.store.(*inmemory.Store)
 	if !ok {

@@ -42,20 +42,20 @@ func TestRaftVersion2CommandLogCanBeReadAndExtended(t *testing.T) {
 	for i := first; i <= last; i++ {
 		var entry hraft.Log
 		if err := logs.GetLog(i, &entry); err != nil {
-			logs.Close()
+			_ = logs.Close()
 			t.Fatal(err)
 		}
 		if entry.Type != hraft.LogCommand {
 			continue
 		}
 		if _, err := decodeCommand(entry.Data); err != nil {
-			logs.Close()
+			_ = logs.Close()
 			t.Fatal(err)
 		}
 		entry.Data = append([]byte(nil), entry.Data...)
 		entry.Data[len(commandMagic)] = 2
 		if err := logs.StoreLog(&entry); err != nil {
-			logs.Close()
+			_ = logs.Close()
 			t.Fatal(err)
 		}
 		converted++

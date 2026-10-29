@@ -148,8 +148,7 @@ func TestCloseWaitsForActiveCommitAndIsIdempotent(t *testing.T) {
 	select {
 	case err := <-closed:
 		close(release)
-		<-writer
-		t.Fatalf("close abandoned active transaction:%v", err)
+		t.Fatalf("close abandoned active transaction:%v, writer:%v", err, <-writer)
 	case <-time.After(20 * time.Millisecond):
 	}
 	close(release)

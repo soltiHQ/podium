@@ -33,7 +33,7 @@ func TestDurableExecutionCommitErrorDoesNotPublish(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer restored.Close()
+	defer func() { _ = restored.Close() }()
 	if _, err := restored.GetExecution(ctx, e.ID()); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatal("unacknowledged archive restored", err)
 	}

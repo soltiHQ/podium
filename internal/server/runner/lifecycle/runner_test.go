@@ -21,7 +21,7 @@ type heartbeatBeforeTx struct {
 }
 
 func (s *heartbeatBeforeTx) WithTx(ctx context.Context, fn func(storage.Storage) error) error {
-	_ = s.Storage.UpsertAgent(ctx, s.fresh)
+	_ = s.UpsertAgent(ctx, s.fresh)
 	return s.Storage.WithTx(ctx, fn)
 }
 

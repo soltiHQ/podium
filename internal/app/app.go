@@ -134,21 +134,21 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 
 	lifecycleRunner, err := lifecycle.New(cfg.Lifecycle, logger, store, eventHub, leadership)
 	if err != nil {
-		proxyPool.Close()
+		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
 
 	syncRunner, err := syncrunner.New(cfg.Sync, logger, store, proxyPool, eventHub, svc.history, leadership)
 	if err != nil {
-		proxyPool.Close()
+		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
 
 	historyRunner, err := historyrunner.New(cfg.History.Collector, logger, store, proxyPool, svc.history, leadership)
 	if err != nil {
-		proxyPool.Close()
+		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
@@ -159,7 +159,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 	httpRunner, err := httpserver.New(httpCfg, logger, mainHandler)
 	if err != nil {
 		logHub.Close()
-		proxyPool.Close()
+		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
@@ -170,7 +170,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 	httpDiscoveryRunner, err := httpserver.New(discoveryCfg, logger, discoveryHandler)
 	if err != nil {
 		logHub.Close()
-		proxyPool.Close()
+		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
@@ -179,7 +179,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 	grpcRunner, err := grpcserver.New(cfg.GRPC, logger, grpcSrv)
 	if err != nil {
 		logHub.Close()
-		proxyPool.Close()
+		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
@@ -187,7 +187,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 	srv, err := server.New(cfg.Server, logger, httpRunner, httpDiscoveryRunner, grpcRunner, lifecycleRunner, syncRunner, historyRunner)
 	if err != nil {
 		logHub.Close()
-		proxyPool.Close()
+		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
@@ -227,7 +227,7 @@ func (a *App) Shutdown(ctx context.Context) error {
 				a.logHub.Close()
 			}
 			if a.proxyPool != nil {
-				a.proxyPool.Close()
+				_ = a.proxyPool.Close()
 			}
 			if a.eventHub != nil {
 				a.eventHub.Close()

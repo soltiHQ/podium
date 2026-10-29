@@ -128,7 +128,7 @@ func assertReopen(t *testing.T, s *Store, dir string, expected []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer restored.Close()
+	defer func() { _ = restored.Close() }()
 	if !bytes.Equal(expected, snapshotBytes(t, restored)) {
 		t.Fatal("committed state differs after reopening")
 	}
@@ -534,7 +534,7 @@ func TestAcknowledgedWritesSurviveProcessExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer restored.Close()
+	defer func() { _ = restored.Close() }()
 	content := restored.inner.SnapshotForRaft()
 	if len(content.Agents)+len(content.AgentCreds)+len(content.Users)+len(content.Roles)+len(content.Credentials)+len(content.Verifiers)+len(content.Sessions)+len(content.Specs)+len(content.Rollouts) != 9 {
 		t.Fatal("acknowledged state lost after process exit")

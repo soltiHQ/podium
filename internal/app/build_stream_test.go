@@ -91,7 +91,7 @@ func TestAuthenticatedEventAndTaskLogStreamsShareLimitAndRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	pool := proxy.NewPool(nil)
-	defer pool.Close()
+	defer func() { _ = pool.Close() }()
 	events := event.NewHub(logger)
 	defer events.Close()
 	handler, logs := buildMainHandler(cfg, logger, svc, authModel, pool, events, standalone.NewLeadership())
@@ -110,7 +110,7 @@ func TestAuthenticatedEventAndTaskLogStreamsShareLimitAndRelease(t *testing.T) {
 	defer func() {
 		for _, stream := range heldStreams {
 			stream.cancel()
-			stream.response.Body.Close()
+			_ = stream.response.Body.Close()
 		}
 	}()
 	open := func(path, token string) *held {
@@ -137,7 +137,7 @@ func TestAuthenticatedEventAndTaskLogStreamsShareLimitAndRelease(t *testing.T) {
 			heldStreams = append(heldStreams, stream)
 		} else {
 			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1024))
-			response.Body.Close()
+			_ = response.Body.Close()
 			requestCancel()
 		}
 		return stream
@@ -171,12 +171,12 @@ func TestAuthenticatedEventAndTaskLogStreamsShareLimitAndRelease(t *testing.T) {
 	expect(eventPath, "", 401)         // Authentication precedes slot admission.
 	expect(logPath, noPermission, 403) // Log permission precedes slot admission.
 	first.cancel()
-	first.response.Body.Close()
+	_ = first.response.Body.Close()
 	logStream := reopen(logPath) // One event + one task log now occupy both slots.
 	expect(eventPath, allowed, 429)
 	expect(logPath, allowed, 429)
 	logStream.cancel()
-	logStream.response.Body.Close()
+	_ = logStream.response.Body.Close()
 	select {
 	case <-sourceCanceled:
 	case <-ctx.Done():
@@ -185,15 +185,15 @@ func TestAuthenticatedEventAndTaskLogStreamsShareLimitAndRelease(t *testing.T) {
 	third := reopen(eventPath)
 	expect(logPath, allowed, 429)
 	second.cancel()
-	second.response.Body.Close()
+	_ = second.response.Body.Close()
 	third.cancel()
-	third.response.Body.Close()
+	_ = third.response.Body.Close()
 	fourth := reopen(eventPath)
 	fifth := reopen(eventPath)
 	expect(eventPath, allowed, 429)
 	fourth.cancel()
-	fourth.response.Body.Close()
+	_ = fourth.response.Body.Close()
 	fifth.cancel()
-	fifth.response.Body.Close()
+	_ = fifth.response.Body.Close()
 	t.Log("shared cap2, authenticated/permission ordering, mixed events+logs, backing cancellation, and release/reopen verified")
 }

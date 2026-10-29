@@ -31,7 +31,7 @@ type SnapshotContent struct {
 func (s *Store) SnapshotForRaft() SnapshotContent {
 	s.gate.RLock()
 	defer s.gate.RUnlock()
-	snap := s.state.takeSnapshot()
+	snap := s.takeSnapshot()
 	return SnapshotContent{
 		Agents:      valuesOf(snap.agents),
 		AgentCreds:  valuesOf(snap.agentCreds),
@@ -54,7 +54,7 @@ func (s *Store) SnapshotForRaft() SnapshotContent {
 func (s *Store) RestoreFromSnapshot(c SnapshotContent) {
 	s.gate.Lock()
 	defer s.gate.Unlock()
-	s.state.restoreSnapshot(snapshot{
+	s.restoreSnapshot(snapshot{
 		agents:      indexByID(c.Agents),
 		agentCreds:  indexByID(c.AgentCreds),
 		users:       indexByID(c.Users),
