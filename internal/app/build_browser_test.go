@@ -517,7 +517,8 @@ func expiredAccessToken(t *testing.T, cookies []*http.Cookie) string {
 // While the store cannot tell whether a session is valid, logout must not
 // pretend it worked: 503, no cookie written, and the session lives on. That
 // holds for a valid access token, whose session check fails, and for an
-// expired one, whose refresh fails. Other requests get 503 too, not 401.
+// expired one, whose refresh fails. Other requests get 503 too, not 401, and
+// every such 503 is logged at ERROR with its method and path.
 func TestLogoutDuringStoreOutageKeepsSession(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -547,6 +548,20 @@ func TestLogoutDuringStoreOutageKeepsSession(t *testing.T) {
 				if written := w.Result().Cookies(); len(written) != 0 {
 					t.Fatalf("%s %s during the outage wrote cookies %v", r.Method, r.URL.Path, written)
 				}
+				logged := false
+				for _, line := range strings.Split(strings.TrimSpace(f.logs.String()), "\n") {
+					var entry struct {
+						Level  string `json:"level"`
+						Method string `json:"method"`
+						Path   string `json:"path"`
+					}
+					if json.Unmarshal([]byte(line), &entry) == nil && entry.Level == "error" && entry.Method == r.Method && entry.Path == r.URL.Path {
+						logged = true
+					}
+				}
+				if !logged {
+					t.Fatalf("%s %s during the outage: no ERROR log line with its method and path:\n%s", r.Method, r.URL.Path, f.logs.String())
+				}
 			}
 			outage.down.Store(false)
 
@@ -557,5 +572,19 @@ func TestLogoutDuringStoreOutageKeepsSession(t *testing.T) {
 				t.Fatalf("after the outage: HTTP %d, want 200 (still signed in)", w.Code)
 			}
 		})
+	}
+}
+
+// A refresh for a user that was deleted answers 401, as for any refresh token
+// that is no good, not 503 as for a store that cannot tell.
+func TestRefreshForDeletedUserIsUnauthorized(t *testing.T) {
+	f := newBrowserFixture(t, config.Default(), nil)
+	alice := f.login(t, "alice")
+	if err := f.store.DeleteUser(context.Background(), "user-alice"); err != nil {
+		t.Fatal(err)
+	}
+	cookies := append(without(alice, httpcookie.NameAccessToken), &http.Cookie{Name: httpcookie.NameAccessToken, Value: expiredAccessToken(t, alice)})
+	if w := f.serve(browserRequest(http.MethodGet, "/api/v1/users", "", "", cookies)); w.Code != http.StatusUnauthorized {
+		t.Fatalf("refresh for a deleted user: HTTP %d, want 401", w.Code)
 	}
 }

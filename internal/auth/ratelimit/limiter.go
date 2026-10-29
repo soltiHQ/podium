@@ -39,8 +39,8 @@ type entry struct {
 // Limiter provides an in-memory, concurrency-safe rate limiter
 // for authentication attempts identified by an arbitrary string key.
 //
-// Failures are recorded directly with RecordFailure, or through an Attempt
-// taken with Reserve, which also counts the attempt while it is in flight.
+// Failures are recorded through an Attempt taken with Reserve, which also
+// counts the attempt while it is in flight.
 //
 // A block ends BlockWindow after it started; failures of a key that never got
 // blocked are forgotten Window after the last one. At most 100 000 keys are
@@ -85,12 +85,13 @@ func New(cfg Config) *Limiter {
 	}
 }
 
-// Blocked reports whether the key is currently blocked at time now.
+// blocked reports whether the key is currently blocked at time now.
 //
 // Expired state is dropped first.
 //
-// Safe for concurrent use.
-func (l *Limiter) Blocked(key string, now time.Time) bool {
+// Safe for concurrent use. Only tests use it: a check followed by a later
+// recordFailure races other attempts, which Reserve does not.
+func (l *Limiter) blocked(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -98,14 +99,14 @@ func (l *Limiter) Blocked(key string, now time.Time) bool {
 	return e != nil && now.Before(e.blockedUntil)
 }
 
-// RecordFailure records a failed attempt for the key and reports whether
+// recordFailure records a failed attempt for the key and reports whether
 // this failure blocked it.
 //
 // The failure that reaches MaxAttempts blocks the key until now + BlockWindow.
 // A failure recorded while the key is blocked changes nothing.
 //
-// Safe for concurrent use.
-func (l *Limiter) RecordFailure(key string, now time.Time) bool {
+// Safe for concurrent use. Only tests use it, like blocked.
+func (l *Limiter) recordFailure(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -154,7 +155,7 @@ func (l *Limiter) Reset(key string) {
 }
 
 // Fail ends the attempt as failed: it records a failure on each key, as
-// RecordFailure does, and reports whether that blocked any of them.
+// recordFailure does, and reports whether that blocked any of them.
 // Ending an attempt that has ended does nothing.
 func (a *Attempt) Fail(now time.Time) bool {
 	l := a.l

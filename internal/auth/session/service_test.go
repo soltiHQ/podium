@@ -234,6 +234,22 @@ func TestService_Login_UnauthorizedWhenNoPerms(t *testing.T) {
 	}
 }
 
+// A permission lookup that fails is an outage, not a user without
+// permissions: Login returns the error as it is, not ErrUnauthorized.
+func TestService_Login_ReturnsPermissionLookupErrors(t *testing.T) {
+	ctx := context.Background()
+	st := inmemory.New()
+	u := mustUser(t, "u1", "subj-1", false)
+	mustUpsertUser(t, ctx, st, u)
+	_ = mustUpsertPasswordCred(t, ctx, st, "cred-1", u.ID(), "pw")
+	s := newService(t, st, &fakeClock{t: time.Unix(1, 0)}, &fakeIssuer{}, &fakeRBAC{err: storage.ErrUnavailable}, false)
+
+	_, _, err := s.Login(ctx, enum.Password, "subj-1", "pw")
+	if !errors.Is(err, storage.ErrUnavailable) || errors.Is(err, auth.ErrUnauthorized) {
+		t.Fatalf("Login: %v, want storage.ErrUnavailable", err)
+	}
+}
+
 func TestService_Login_Success_CreatesSession_IssuesToken(t *testing.T) {
 	ctx := context.Background()
 	st := inmemory.New()
@@ -466,17 +482,18 @@ func TestService_Refresh_DisabledUser(t *testing.T) {
 }
 
 // failingReads fails the nth GetSession and the nth GetUser call, counted
-// from 1, with storage.ErrUnavailable; 0 never fails.
+// from 1, with err; 0 never fails.
 type failingReads struct {
 	storage.Storage
 	failSession, failUser int
 	sessions, users       int
+	err                   error
 }
 
 func (s *failingReads) GetSession(ctx context.Context, id string) (*model.Session, error) {
 	s.sessions++
 	if s.sessions == s.failSession {
-		return nil, storage.ErrUnavailable
+		return nil, s.err
 	}
 	return s.Storage.GetSession(ctx, id)
 }
@@ -484,7 +501,7 @@ func (s *failingReads) GetSession(ctx context.Context, id string) (*model.Sessio
 func (s *failingReads) GetUser(ctx context.Context, id string) (*model.User, error) {
 	s.users++
 	if s.users == s.failUser {
-		return nil, storage.ErrUnavailable
+		return nil, s.err
 	}
 	return s.Storage.GetUser(ctx, id)
 }
@@ -507,12 +524,49 @@ func TestService_Refresh_ReturnsStorageErrors(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st, original, raw, clock := refreshFixture(t)
-			reads := &failingReads{Storage: st, failSession: tc.failSession, failUser: tc.failUser}
+			reads := &failingReads{Storage: st, failSession: tc.failSession, failUser: tc.failUser, err: storage.ErrUnavailable}
 			svc := newService(t, reads, clock, &fakeIssuer{}, &fakeRBAC{perms: []enum.Permission{enum.SpecsGet}, err: tc.rbacErr}, false)
 			if _, _, err := svc.Refresh(context.Background(), original.ID(), raw); !errors.Is(err, tc.want) {
 				t.Fatalf("Refresh: %v, want %v", err, tc.want)
 			}
 		})
+	}
+}
+
+// A session or user that is gone when Refresh reads it, at any of its reads,
+// makes the refresh token no good: ErrInvalidRefresh, which the auth
+// middleware answers with 401, not a failure to check it (503). So does a
+// read the store refuses as an invalid ID.
+func TestService_Refresh_MissingRecordsAreInvalidRefresh(t *testing.T) {
+	t.Run("deleted user", func(t *testing.T) {
+		st, original, raw, clock := refreshFixture(t)
+		if err := st.DeleteUser(context.Background(), original.UserID()); err != nil {
+			t.Fatal(err)
+		}
+		svc := newService(t, st, clock, &fakeIssuer{}, &fakeRBAC{perms: []enum.Permission{enum.SpecsGet}}, false)
+		if _, _, err := svc.Refresh(context.Background(), original.ID(), raw); !errors.Is(err, auth.ErrInvalidRefresh) {
+			t.Fatalf("Refresh: %v, want ErrInvalidRefresh", err)
+		}
+	})
+	for _, read := range []struct {
+		name                  string
+		failSession, failUser int
+	}{
+		{"session lookup", 1, 0},
+		{"user lookup", 0, 1},
+		{"session recheck", 2, 0},
+		{"user recheck", 0, 2},
+	} {
+		for _, missing := range []error{storage.ErrNotFound, storage.ErrInvalidArgument} {
+			t.Run(read.name+"/"+missing.Error(), func(t *testing.T) {
+				st, original, raw, clock := refreshFixture(t)
+				reads := &failingReads{Storage: st, failSession: read.failSession, failUser: read.failUser, err: missing}
+				svc := newService(t, reads, clock, &fakeIssuer{}, &fakeRBAC{perms: []enum.Permission{enum.SpecsGet}}, false)
+				if _, _, err := svc.Refresh(context.Background(), original.ID(), raw); !errors.Is(err, auth.ErrInvalidRefresh) {
+					t.Fatalf("Refresh: %v, want ErrInvalidRefresh", err)
+				}
+			})
+		}
 	}
 }
 

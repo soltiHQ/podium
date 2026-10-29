@@ -63,8 +63,8 @@ account + client IP); see "Login rate limiting"
     └─ issue new access token
 ```
 A session or user that is gone, expired, revoked or disabled is an auth error (`ErrInvalidRefresh`, `ErrRevoked`); a
-failed lookup (storage or RBAC) is returned as it is, so `middleware.Auth` answers 503, not 401, and logout does not
-clear the cookies of a session it could not check.
+failed lookup (storage or RBAC) is returned as it is, so `middleware.Auth` answers 503, not 401, logs the error at ERROR
+with the method and path (never a credential), and logout does not clear the cookies of a session it could not check.
 
 ## Dependency graph
 ```text

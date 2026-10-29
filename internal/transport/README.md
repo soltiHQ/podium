@@ -46,7 +46,7 @@ Main listener (`app.buildMainHandler`), outermost first:
         │  per route:
   RequestID      ── installs request id + error slot (API routes and the event stream only)
    Logger        ── reads the slot back after the handler returns (same routes)
-    Auth / OptionalAuth / RequirePermission
+    Auth / OptionalAuth / RequirePermission  ── 503 when credentials cannot be checked, logged at ERROR
      handler/api.go | ui.go
         ├─ success → response.OK(w, r, mode, &View{Data: dto, Component: tmpl})
         │              └─ Responder from ctx → JSON (json.Marshal + sec headers)

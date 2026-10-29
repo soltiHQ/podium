@@ -97,8 +97,8 @@ func (s *Service) provider(kind enum.Auth) (providers.Provider, error) {
 // Errors:
 //   - auth.ErrInvalidRequest for invalid wiring, unsupported auth kind, or invalid provider mapping.
 //   - auth.ErrInvalidCredentials when subject/secret are empty (caller error).
-//   - auth.ErrUnauthorized when RBAC denies access (no effective permissions or resolver error).
-//   - Propagates provider and storage errors from dependencies.
+//   - auth.ErrUnauthorized when the user has no effective permissions.
+//   - Propagates provider, storage and RBAC resolver errors from dependencies.
 func (s *Service) Login(ctx context.Context, authKind enum.Auth, subject, secret string) (*TokenPair, *identity.Identity, error) {
 	if err := s.ensureReady(); err != nil {
 		return nil, nil, err
@@ -134,7 +134,10 @@ func (s *Service) Login(ctx context.Context, authKind enum.Auth, subject, secret
 	cred := res.Credential
 
 	perms, err := s.rbac.ResolveUserPermissions(ctx, u)
-	if err != nil || len(perms) == 0 {
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(perms) == 0 {
 		return nil, nil, auth.ErrUnauthorized
 	}
 

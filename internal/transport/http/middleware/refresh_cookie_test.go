@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
@@ -78,7 +80,7 @@ func cookieRefreshHandler(st storage.Storage, resolver session.RBACResolver, nex
 	clk := token.RealClock()
 	secret := []byte("test-only-local-refresh-cookie-signing-key")
 	svc := session.New(st, jwt.NewHSIssuer(secret, clk), clk, session.Config{AccessTTL: time.Hour, RefreshTTL: 24 * time.Hour, Issuer: "cookie-test", Audience: "cookie-client", RotateRefresh: true}, resolver, nil)
-	return Auth(jwt.NewHSVerifier("cookie-test", "cookie-client", secret, clk), svc, notSecure)(RequirePermission(enum.SpecsGet)(next))
+	return Auth(jwt.NewHSVerifier("cookie-test", "cookie-client", secret, clk), svc, notSecure, zerolog.Nop())(RequirePermission(enum.SpecsGet)(next))
 }
 
 func cookieRefreshRequest(ctx context.Context, target string, cookies []*http.Cookie) *http.Request {

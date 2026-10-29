@@ -273,6 +273,9 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 			response.BadRequestMsg(w, r, mode, "invalid email address")
 		case errors.Is(err, storage.ErrAlreadyExists):
 			response.Conflict(w, r, mode, "user with this subject already exists")
+		case errors.Is(err, storage.ErrNotFound):
+			// The user was deleted after the read above, or a role it names does not exist.
+			response.NotFound(w, r, mode)
 		default:
 			a.logger.Error().Err(err).Str("user_id", u.ID()).Msg("user upsert failed")
 			response.Unavailable(w, r, mode)

@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/rs/zerolog"
+
 	"github.com/soltiHQ/control-plane/internal/auth"
 
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -19,15 +21,17 @@ import (
 
 // Auth returns middleware that verifies the access token and stores the identity in context.
 // A browser whose access token is missing or expired is refreshed from its cookies. Missing
-// or rejected credentials answer 401, credentials that could not be checked 503. secure
+// or rejected credentials answer 401, credentials that could not be checked 503, after an
+// ERROR log line with the method, the path and the error, never a credential. secure
 // decides whether the auth cookies Auth sets or clears carry the Secure attribute.
-func Auth(verifier token.Verifier, sessionSvc *session.Service, secure func(*http.Request) bool) func(http.Handler) http.Handler {
+func Auth(verifier token.Verifier, sessionSvc *session.Service, secure func(*http.Request) bool, logger zerolog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			mode := httpctx.ModeFromRequest(r)
 			id, err := authenticate(w, r, verifier, sessionSvc, secure)
 			switch {
 			case err != nil:
+				logCheckFailure(logger, r, err)
 				response.Unavailable(w, r, mode)
 			case id == nil:
 				response.Unauthorized(w, r, mode)
@@ -40,13 +44,14 @@ func Auth(verifier token.Verifier, sessionSvc *session.Service, secure func(*htt
 
 // OptionalAuth is Auth for a route that also serves callers without valid
 // credentials: they reach next without an identity. Credentials that could
-// not be checked still answer 503.
-func OptionalAuth(verifier token.Verifier, sessionSvc *session.Service, secure func(*http.Request) bool) func(http.Handler) http.Handler {
+// not be checked still answer 503, logged like Auth.
+func OptionalAuth(verifier token.Verifier, sessionSvc *session.Service, secure func(*http.Request) bool, logger zerolog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			id, err := authenticate(w, r, verifier, sessionSvc, secure)
 			switch {
 			case err != nil:
+				logCheckFailure(logger, r, err)
 				response.Unavailable(w, r, httpctx.ModeFromRequest(r))
 			case id == nil:
 				next.ServeHTTP(w, r)
@@ -57,14 +62,24 @@ func OptionalAuth(verifier token.Verifier, sessionSvc *session.Service, secure f
 	}
 }
 
+// logCheckFailure logs why credentials could not be checked: the method, the
+// path and the error. It never logs a cookie or a token.
+func logCheckFailure(logger zerolog.Logger, r *http.Request, err error) {
+	logger.Error().Err(err).Str("method", r.Method).Str("path", r.URL.Path).Msg("auth check failed")
+}
+
 // authenticate returns the identity of r, from its bearer token or access
 // cookie, or else, for a browser, from a refresh with its refresh and session
 // cookies. There are three outcomes:
 //
 //   - valid credentials: the identity;
 //   - no usable credentials (missing, malformed, expired, revoked or unknown,
-//     or a user without permissions): neither identity nor error. A rejected
-//     access cookie clears the auth cookies; a rejected refresh writes none;
+//     or a user without permissions): neither identity nor error. An access
+//     cookie that does not verify (expired, malformed or badly signed) falls
+//     through to the refresh. Only an access cookie that verifies but that
+//     the session check rejects (a session that is revoked, expired or
+//     unknown, a user that is disabled or deleted, or no permissions) clears
+//     the auth cookies; a rejected refresh writes none;
 //   - credentials that could not be checked, such as during a storage outage
 //     in the access check or the refresh: the error. No cookie is written.
 func authenticate(w http.ResponseWriter, r *http.Request, verifier token.Verifier, sessionSvc *session.Service, secure func(*http.Request) bool) (*identity.Identity, error) {

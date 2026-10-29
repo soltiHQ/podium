@@ -173,7 +173,7 @@ HTTP takes the client IP from `trusted_proxies`; gRPC uses the peer address.
 valid credentials. It revokes the caller's own session, never the one the `session_id` cookie names, clears the auth
 cookies and redirects to `/login` (303); without valid credentials it only clears the cookies. When the credentials
 cannot be checked (a storage failure in the access check or the refresh) or the revoke fails, it answers 503 and leaves
-the cookies untouched, so nobody is told they logged out while their session lives on; a failed revoke is logged at
+the cookies untouched, so nobody is told they logged out while their session lives on; either failure is logged at
 ERROR.
 
 ## Response pattern

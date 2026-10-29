@@ -304,17 +304,45 @@ func TestUnknownPermissionInputIsBadRequest(t *testing.T) {
 	ctx := context.Background()
 	admin := f.user(t, "admin", enum.RoleAdminID)
 	f.user(t, "reader", enum.RoleUserReaderID)
-	if w := f.do(http.MethodPost, "/api/v1/users", `{"subject":"newcomer","permissions":["users:get","legacy:perm"]}`, admin); w.Code != http.StatusBadRequest {
-		t.Fatalf("create with an unknown permission: %d %s, want 400", w.Code, w.Body.String())
+	w := f.do(http.MethodPost, "/api/v1/users", `{"subject":"newcomer","permissions":["users:get","legacy:perm"]}`, admin)
+	if w.Code != http.StatusBadRequest || responseMessage(t, w) != "Unknown permission." {
+		t.Fatalf("create with an unknown permission: %d %s, want 400 Unknown permission.", w.Code, w.Body.String())
 	}
 	if _, err := f.store.GetUserBySubject(ctx, "newcomer"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("refused create stored the user: %v", err)
 	}
-	if w := f.do(http.MethodPut, "/api/v1/users/reader", `{"permissions":["legacy:perm"]}`, admin); w.Code != http.StatusBadRequest {
-		t.Fatalf("update with an unknown permission: %d %s, want 400", w.Code, w.Body.String())
+	w = f.do(http.MethodPut, "/api/v1/users/reader", `{"permissions":["legacy:perm"]}`, admin)
+	if w.Code != http.StatusBadRequest || responseMessage(t, w) != "Unknown permission." {
+		t.Fatalf("update with an unknown permission: %d %s, want 400 Unknown permission.", w.Code, w.Body.String())
 	}
 	if u, err := f.store.GetUser(ctx, "reader"); err != nil || len(u.PermissionsAll()) != 0 {
 		t.Fatalf("refused update changed the user: %v", err)
+	}
+}
+
+// deleteOnRead is a store whose user reads outside a transaction delete the
+// user they return, as a delete that commits right after the read would.
+type deleteOnRead struct{ storage.Storage }
+
+func (s deleteOnRead) GetUser(ctx context.Context, id string) (*model.User, error) {
+	u, err := s.Storage.GetUser(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return u, s.DeleteUser(ctx, id)
+}
+
+// An update that read the user before a delete committed finds it gone in its
+// transaction: 404, as for any update of a missing user, not 503.
+func TestUserUpdateRacingDeleteIsNotFound(t *testing.T) {
+	f := newAPIFixtureOver(t, func(s storage.Storage) storage.Storage { return deleteOnRead{s} })
+	admin := f.user(t, "admin", enum.RoleAdminID)
+	f.user(t, "reader", enum.RoleUserReaderID)
+	if w := f.do(http.MethodPut, "/api/v1/users/reader", `{"name":"Reader"}`, admin); w.Code != http.StatusNotFound {
+		t.Fatalf("update of a user deleted meanwhile: %d %s, want 404", w.Code, w.Body.String())
+	}
+	if _, err := f.store.GetUser(context.Background(), "reader"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("the update brought the deleted user back: %v", err)
 	}
 }
 

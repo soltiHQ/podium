@@ -171,7 +171,13 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 			response.AuthRateLimit(w, r, mode)
 			return
 		case errors.Is(err, auth.ErrInvalidCredentials),
-			errors.Is(err, auth.ErrInvalidRequest):
+			errors.Is(err, auth.ErrInvalidRequest),
+			errors.Is(err, auth.ErrUnauthorized):
+			// A user without permissions (ErrUnauthorized) gets the answer to a
+			// wrong password, which tells nothing about the password.
+			if errors.Is(err, auth.ErrUnauthorized) {
+				u.logger.Warn().Str("subject", account).Msg("login refused: the user has no permissions")
+			}
 			transportctx.SetError(r.Context(), "invalid credentials")
 			http.Redirect(w, r, routepath.PageLogin+"?error=Invalid+username+or+password&redirect="+url.QueryEscape(redirect), http.StatusSeeOther)
 			return

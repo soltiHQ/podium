@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -436,5 +437,49 @@ func TestLoginSetsDeviceCookie(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A user without permissions cannot sign in, and the answer to the right
+// password is the answer to a wrong one, so it tells nothing about the
+// password. Such an attempt counts as no failure; the log says why.
+func TestLoginWithoutPermissionsLooksLikeWrongPassword(t *testing.T) {
+	f := newLoginFixture(t)
+	ctx := context.Background()
+	u, err := f.store.GetUser(ctx, "user-alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.SetPermissions(nil)
+	if err := f.store.UpsertUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+
+	wrong := f.login(loginSubject, "wrong-password", loginIP)
+	if wrong.Code != http.StatusSeeOther {
+		t.Fatalf("wrong password: HTTP %d, want 303", wrong.Code)
+	}
+	// One failure so far; five more counted failures would block the account.
+	for i := range 6 {
+		right := f.login(loginSubject, loginPassword, loginIP)
+		if right.Code != wrong.Code || right.Header().Get("Location") != wrong.Header().Get("Location") || right.Body.String() != wrong.Body.String() {
+			t.Fatalf("right password %d: HTTP %d to %q, want the wrong-password answer: HTTP %d to %q",
+				i+1, right.Code, right.Header().Get("Location"), wrong.Code, wrong.Header().Get("Location"))
+		}
+	}
+	warned := false
+	for _, line := range strings.Split(strings.TrimSpace(f.logs.String()), "\n") {
+		var entry struct {
+			Level   string `json:"level"`
+			Subject string `json:"subject"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal([]byte(line), &entry) == nil && entry.Level == "warn" && entry.Subject == loginSubject &&
+			entry.Message == "login refused: the user has no permissions" {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatalf("no WARN line naming alice:\n%s", f.logs.String())
 	}
 }

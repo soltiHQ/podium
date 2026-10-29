@@ -56,6 +56,13 @@ type apiFixture struct {
 
 func newAPIFixture(t *testing.T) *apiFixture {
 	t.Helper()
+	return newAPIFixtureOver(t, nil)
+}
+
+// newAPIFixtureOver is newAPIFixture with the services over wrap(store) when
+// wrap is set; the fixture seeds and reads the inner store.
+func newAPIFixtureOver(t *testing.T, wrap func(storage.Storage) storage.Storage) *apiFixture {
+	t.Helper()
 	ctx := context.Background()
 	logger := zerolog.Nop()
 	store := inmemory.New()
@@ -73,7 +80,11 @@ func newAPIFixture(t *testing.T) *apiFixture {
 			t.Fatal(err)
 		}
 	}
-	archive, err := history.New(store, history.Config{})
+	var st storage.Storage = store
+	if wrap != nil {
+		st = wrap(store)
+	}
+	archive, err := history.New(st, history.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,12 +98,12 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	t.Cleanup(logs.Close)
 	streams := middleware.NewStreamLimiter(0, nil)
 	api := NewAPI(logger,
-		user.New(store, logger),
-		access.New(kit.New(store, auth.Config{JWTSecret: strings.Repeat("k", auth.MinJWTSecretLen)}), store, logger),
-		session.New(store, logger),
-		credential.New(store, logger),
-		agent.New(store, logger),
-		spec.New(store, logger),
+		user.New(st, logger),
+		access.New(kit.New(st, auth.Config{JWTSecret: strings.Repeat("k", auth.MinJWTSecretLen)}), st, logger),
+		session.New(st, logger),
+		credential.New(st, logger),
+		agent.New(st, logger),
+		spec.New(st, logger),
 		archive, pool, hub, logs, streams,
 	)
 	mux := http.NewServeMux()
