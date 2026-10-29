@@ -45,13 +45,16 @@ type UI struct {
 	specSVC   *spec.Service
 	hub       *event.Hub
 	resolver  *clientip.Resolver
+	secure    func(*http.Request) bool
 	logger    zerolog.Logger
 }
 
 // NewUI creates a new UI handler.
 //
-// resolver gives the client IP of login attempts; nil trusts no proxy.
-func NewUI(logger zerolog.Logger, accessSVC *access.Service, specSVC *spec.Service, hub *event.Hub, resolver *clientip.Resolver) *UI {
+// resolver gives the client IP of login attempts; nil trusts no proxy. secure
+// decides whether the auth cookies that login and logout write carry the
+// Secure attribute.
+func NewUI(logger zerolog.Logger, accessSVC *access.Service, specSVC *spec.Service, hub *event.Hub, resolver *clientip.Resolver, secure func(*http.Request) bool) *UI {
 	if accessSVC == nil {
 		panic(service.ErrNilService)
 	}
@@ -61,19 +64,24 @@ func NewUI(logger zerolog.Logger, accessSVC *access.Service, specSVC *spec.Servi
 	if hub == nil {
 		panic(event.ErrNilHub)
 	}
+	if secure == nil {
+		panic("handler.NewUI: nil cookie policy")
+	}
 	return &UI{
 		logger:    logger.With().Str("handler", "ui").Logger(),
 		accessSVC: accessSVC,
 		specSVC:   specSVC,
 		hub:       hub,
 		resolver:  resolver,
+		secure:    secure,
 	}
 }
 
-// Routes registers UI routes.
-func (u *UI) Routes(mux *http.ServeMux, auth route.BaseMW, perm route.PermMW, common ...route.BaseMW) {
+// Routes registers UI routes. optionalAuth guards logout, which also clears
+// the cookies of a caller whose session has already ended.
+func (u *UI) Routes(mux *http.ServeMux, auth, optionalAuth route.BaseMW, perm route.PermMW, common ...route.BaseMW) {
 	route.HandleFunc(mux, routepath.PageLogin, u.Login, common...)
-	route.HandleFunc(mux, routepath.PageLogout, u.Logout, append(common, auth)...)
+	route.HandleFunc(mux, routepath.PageLogout, u.Logout, append(common, optionalAuth)...)
 
 	route.HandleFunc(mux, routepath.PageUsers, u.Users, append(common, auth)...)
 	route.HandleFunc(mux, routepath.PageUserInfo, u.UserDetail, append(common, auth, perm(enum.UsersGet))...)
@@ -166,11 +174,17 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 	u.hub.Record(event.SessionCreated, event.Payload{
 		ID: id.UserID, Name: id.Name, By: "auth",
 	})
-	httpcookie.SetAuth(w, r, res.AccessToken, res.RefreshToken, res.SessionID)
+	httpcookie.SetAuth(w, u.secure(r), res.AccessToken, res.RefreshToken, res.SessionID)
 	http.Redirect(w, r, redirect, http.StatusFound)
 }
 
-// Logout handles GET/POST /logout.
+// Logout handles POST /logout.
+//
+// It revokes the session of the authenticated caller, never the one the
+// session_id cookie names, then clears the auth cookies and redirects to the
+// login page; a caller without valid credentials only gets the cookies
+// cleared. When the revoke fails the session lives on, so the answer is 503
+// and the cookies stay.
 func (u *UI) Logout(w http.ResponseWriter, r *http.Request) {
 	mode := httpctx.ModeFromRequest(r)
 
@@ -178,17 +192,21 @@ func (u *UI) Logout(w http.ResponseWriter, r *http.Request) {
 		response.NotFound(w, r, mode)
 		return
 	}
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+	if r.Method != http.MethodPost {
 		response.NotAllowed(w, r, mode)
 		return
 	}
-	if c, err := httpcookie.GetSessionID(r); err == nil && c != nil && c.Value != "" {
-		_ = u.accessSVC.Logout(r.Context(), access.LogoutRequest{SessionID: c.Value})
+	if id, ok := transportctx.Identity(r.Context()); ok {
+		if err := u.accessSVC.Logout(r.Context(), access.LogoutRequest{SessionID: id.SessionID}); err != nil {
+			u.logger.Error().Err(err).Str("user_id", id.UserID).Msg("logout failed")
+			response.Unavailable(w, r, mode)
+			return
+		}
+		u.logger.Info().Str("user_id", id.UserID).Msg("logout")
 	}
 
-	u.logger.Info().Msg("logout")
-	httpcookie.DeleteAuth(w, r)
-	http.Redirect(w, r, routepath.PageLogin, http.StatusFound)
+	httpcookie.DeleteAuth(w, u.secure(r))
+	http.Redirect(w, r, routepath.PageLogin, http.StatusSeeOther)
 }
 
 // Main handle GET /.

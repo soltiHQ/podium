@@ -2,13 +2,14 @@ package ratelimit
 
 import (
 	"net/netip"
-	"strings"
+
+	"github.com/soltiHQ/control-plane/domain/model"
 )
 
 // AccountKey is the login key of an account: "login:acct:<subject>".
 // The subject is normalized the way user storage normalizes it.
 func AccountKey(subject string) string {
-	return "login:acct:" + strings.ToLower(strings.TrimSpace(subject))
+	return "login:acct:" + model.NormalizeSubject(subject)
 }
 
 // LoginIPKey is the login key of a client IP: "login:ip:<network>".

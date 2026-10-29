@@ -58,11 +58,12 @@ func identityFromMapClaims(mc jwtlib.MapClaims, issuer, audience string) (*ident
 
 	iat := time.Unix(int64FromClaim(mc["iat"]), 0)
 	nbf := time.Unix(int64FromClaim(mc["nbf"]), 0)
-	exp := time.Unix(int64FromClaim(mc["exp"]), 0)
+	expUnix := int64FromClaim(mc["exp"])
 
-	if sub == "" || uid == "" || jti == "" || sid == "" || exp.IsZero() {
+	if sub == "" || uid == "" || jti == "" || sid == "" || expUnix == 0 {
 		return nil, auth.ErrInvalidToken
 	}
+	exp := time.Unix(expUnix, 0)
 
 	name, _ := mc[claimName].(string)
 

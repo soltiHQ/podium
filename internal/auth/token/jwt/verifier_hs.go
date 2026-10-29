@@ -3,6 +3,7 @@ package jwt
 import (
 	"context"
 	"errors"
+	"time"
 
 	jwtlib "github.com/golang-jwt/jwt/v5"
 	"github.com/soltiHQ/control-plane/internal/auth"
@@ -10,6 +11,9 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
 )
+
+// clockSkew is how far exp and nbf may be off between issuer and verifier clocks.
+const clockSkew = 30 * time.Second
 
 // HSVerifier verifies HMAC-signed JWT access tokens (HS256).
 type HSVerifier struct {
@@ -32,7 +36,8 @@ func NewHSVerifier(issuer, audience string, secret []byte, clock token.Clock) *H
 	}
 }
 
-// Verify parses and validates a raw JWT token string.
+// Verify parses and validates a raw JWT token string. The token must carry
+// exp; exp and nbf allow clockSkew.
 func (v *HSVerifier) Verify(_ context.Context, rawToken string) (*identity.Identity, error) {
 	if rawToken == "" {
 		return nil, auth.ErrInvalidToken
@@ -50,6 +55,8 @@ func (v *HSVerifier) Verify(_ context.Context, rawToken string) (*identity.Ident
 		jwtlib.WithValidMethods([]string{jwtlib.SigningMethodHS256.Alg()}),
 		jwtlib.WithIssuer(v.issuer),
 		jwtlib.WithAudience(v.audience),
+		jwtlib.WithExpirationRequired(),
+		jwtlib.WithLeeway(clockSkew),
 		jwtlib.WithTimeFunc(v.clock.Now),
 	)
 	if err != nil {

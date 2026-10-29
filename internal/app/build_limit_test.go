@@ -15,6 +15,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
+	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 )
@@ -22,9 +23,13 @@ import (
 // mainHandler builds the main listener from cfg over an in-memory store.
 func mainHandler(t *testing.T, cfg config.Config) http.Handler {
 	t.Helper()
-	logger := zerolog.Nop()
+	return mainHandlerOver(t, cfg, inmemory.New(), zerolog.Nop())
+}
+
+// mainHandlerOver builds the main listener from cfg over store, logging to logger.
+func mainHandlerOver(t *testing.T, cfg config.Config, store storage.Storage, logger zerolog.Logger) http.Handler {
+	t.Helper()
 	cfg.Auth.JWTSecret = strings.Repeat("limit-test-only-secret", 2)
-	store := inmemory.New()
 	authModel := kit.New(store, cfg.Auth)
 	svc, err := initServices(store, authModel, cfg.History.Archive, logger)
 	if err != nil {

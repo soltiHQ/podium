@@ -189,7 +189,7 @@ func (a *API) usersSessions(w http.ResponseWriter, r *http.Request, mode httpctx
 func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string, action upsertMode) {
 	in, err := decodeJSON[restv1.User](r)
 	if err != nil {
-		response.BadRequest(w, r, mode)
+		badBody(w, r, mode, err)
 		return
 	}
 
@@ -362,7 +362,7 @@ func (a *API) userSetStatus(w http.ResponseWriter, r *http.Request, mode httpctx
 func (a *API) userSetPassword(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, userID string) {
 	in, err := decodeJSON[restv1.SetPasswordRequest](r)
 	if err != nil {
-		response.BadRequest(w, r, mode)
+		badBody(w, r, mode, err)
 		return
 	}
 	if in.Password == "" {
@@ -381,6 +381,8 @@ func (a *API) userSetPassword(w http.ResponseWriter, r *http.Request, mode httpc
 		switch {
 		case errors.Is(err, storage.ErrNotFound):
 			response.NotFound(w, r, mode)
+		case errors.Is(err, auth.ErrWeakPassword):
+			response.BadRequestMsg(w, r, mode, "Password must be 12-72 characters.")
 		case errors.Is(err, auth.ErrUserDisabled):
 			response.BadRequestMsg(w, r, mode, "user is disabled")
 		default:

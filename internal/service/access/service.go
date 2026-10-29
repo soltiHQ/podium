@@ -3,7 +3,6 @@ package access
 import (
 	"context"
 	"errors"
-	"strings"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -43,21 +42,25 @@ func New(authSvc *kit.Auth, store storage.Storage, logger zerolog.Logger) *Servi
 
 // Login authenticates a user and returns issued tokens and identity.
 //
-// Before the password check, the attempt reserves a slot on its account key
-// and on its client IP key, so attempts in flight count like failures: an
-// attempt is refused with ErrRateLimited while, for either key, failures plus
-// attempts in flight reach the limit. A failed check records a failure on
-// both keys; the failure that blocks one of them comes back joined with
-// ErrRateLimitReached. A successful login resets the account only, never the
+// The subject is normalized once, the way user storage normalizes it, for the
+// limiter and the password check alike. Before the password check, the
+// attempt reserves a slot on its account key and on its client IP key, so
+// attempts in flight count like failures: an attempt is refused with
+// ErrRateLimited while, for either key, failures plus attempts in flight reach
+// the limit. Only a wrong subject or password (ErrInvalidCredentials) records
+// a failure on both keys; the failure that blocks one of them comes back
+// joined with ErrRateLimitReached. Any other error, such as a storage outage,
+// releases the slots. A successful login resets the account only, never the
 // client IP.
 func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identity, LoginResult, error) {
-	if strings.TrimSpace(req.Subject) == "" || req.Password == "" {
+	subject := model.NormalizeSubject(req.Subject)
+	if subject == "" || req.Password == "" {
 		return nil, LoginResult{}, iauth.ErrInvalidRequest
 	}
 
-	s.logger.Debug().Str("subject", req.Subject).Msg("login attempt")
+	s.logger.Debug().Str("subject", subject).Msg("login attempt")
 
-	account := ratelimit.AccountKey(req.Subject)
+	account := ratelimit.AccountKey(subject)
 	attempt, err := s.auth.Limiter.Reserve(s.auth.Clock.Now(), account, ratelimit.LoginIPKey(req.ClientIP))
 	if err != nil {
 		return nil, LoginResult{}, err
@@ -65,8 +68,12 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identi
 	// Frees the slots if Session.Login panics; a no-op once the attempt has ended.
 	defer attempt.Release()
 
-	pair, id, err := s.auth.Session.Login(ctx, enum.Password, req.Subject, req.Password)
+	pair, id, err := s.auth.Session.Login(ctx, enum.Password, subject, req.Password)
 	if err != nil {
+		if !errors.Is(err, iauth.ErrInvalidCredentials) {
+			attempt.Release()
+			return nil, LoginResult{}, err
+		}
 		if attempt.Fail(s.auth.Clock.Now()) {
 			err = errors.Join(err, iauth.ErrRateLimitReached)
 		}
@@ -74,7 +81,7 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identi
 	}
 	attempt.Release()
 	s.auth.Limiter.Reset(account)
-	s.logger.Info().Str("subject", req.Subject).Str("user_id", id.UserID).Msg("login success")
+	s.logger.Info().Str("subject", subject).Str("user_id", id.UserID).Msg("login success")
 	return id, LoginResult{
 		AccessToken:  pair.AccessToken,
 		RefreshToken: pair.RefreshToken,

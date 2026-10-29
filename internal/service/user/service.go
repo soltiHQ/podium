@@ -210,7 +210,7 @@ func (s *Service) save(ctx context.Context, u *model.User, check func(tx storage
 		return storage.ErrInvalidArgument
 	}
 
-	subject := strings.TrimSpace(strings.ToLower(u.Subject()))
+	subject := model.NormalizeSubject(u.Subject())
 	if subject == "" {
 		return domain.ErrInvalidSubject
 	}

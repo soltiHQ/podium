@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/soltiHQ/control-plane/domain/enum"
+	"github.com/soltiHQ/control-plane/domain/model"
 	iauth "github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
 	"github.com/soltiHQ/control-plane/internal/auth/providers"
@@ -18,6 +19,8 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth/session"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
 	"github.com/soltiHQ/control-plane/internal/auth/token/jwt"
+	"github.com/soltiHQ/control-plane/internal/service/credential"
+	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
 
@@ -98,6 +101,66 @@ func TestLoginLimiterBoundsConcurrentAttempts(t *testing.T) {
 	}
 	if gate.calls.Load() != calls {
 		t.Fatal("an attempt on the blocked account reached the password check")
+	}
+}
+
+// outage is a store whose user lookups fail while down is set.
+type outage struct {
+	storage.Storage
+	down atomic.Bool
+}
+
+func (s *outage) GetUserBySubject(ctx context.Context, subject string) (*model.User, error) {
+	if s.down.Load() {
+		return nil, storage.ErrUnavailable
+	}
+	return s.Storage.GetUserBySubject(ctx, subject)
+}
+
+// Only a wrong subject or password counts toward the limit. Any other failure,
+// such as a storage outage or a user without permissions, releases the
+// attempt: it never blocks the account or the client IP.
+func TestLoginCountsOnlyInvalidCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		password string
+		down     bool
+		want     error
+	}{
+		{"storage outage", "wrong-password", true, storage.ErrUnavailable},
+		{"user without permissions", "nobody-password", false, iauth.ErrUnauthorized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := &outage{Storage: inmemory.New()}
+			u, err := model.NewUser("user-nobody", "nobody")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.UpsertUser(ctx, u); err != nil {
+				t.Fatal(err)
+			}
+			if err := credential.New(store, zerolog.Nop()).SetPassword(ctx, credential.SetPasswordRequest{UserID: u.ID(), Password: "nobody-password", Cost: 4}); err != nil {
+				t.Fatal(err)
+			}
+			cfg := iauth.Config{JWTSecret: strings.Repeat("k", iauth.MinJWTSecretLen)}.WithDefaults()
+			svc := New(kit.New(store, cfg), store, zerolog.Nop())
+			login := func(password string) error {
+				_, _, err := svc.Login(ctx, LoginRequest{Subject: "nobody", Password: password, ClientIP: "203.0.113.9"})
+				return err
+			}
+
+			store.down.Store(tc.down)
+			for i := range 2 * cfg.RateAttempts {
+				if err := login(tc.password); !errors.Is(err, tc.want) || errors.Is(err, iauth.ErrRateLimited) {
+					t.Fatalf("attempt %d: %v, want %v", i+1, err, tc.want)
+				}
+			}
+			store.down.Store(false)
+			if err := login("wrong-password"); !errors.Is(err, iauth.ErrInvalidCredentials) {
+				t.Fatalf("wrong password afterwards: %v, want ErrInvalidCredentials, not a blocked key", err)
+			}
+		})
 	}
 }
 

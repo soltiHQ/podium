@@ -18,7 +18,7 @@ handler/
 | `API`             | HTTP      | `NewAPI`              | user, access, session, credential, agent, spec services + proxy.Pool |
 | `HTTPDiscovery`   | HTTP      | `NewHTTPDiscovery`    | agent service, discovery limiter, client IP resolver                 |
 | `GRPCDiscovery`   | gRPC      | `NewGRPCDiscovery`    | agent service, discovery limiter                                     |
-| `UI`              | HTTP      | `NewUI`               | access + spec services, client IP resolver                           |
+| `UI`              | HTTP      | `NewUI`               | access + spec services, client IP resolver, cookie Secure policy     |
 | `Static`          | HTTP      | `NewStatic`           | embedded `ui.Static` filesystem                                      |
 
 All constructors panic on nil dependencies — fail-fast at startup. The client IP resolver is the exception:
@@ -31,8 +31,8 @@ mux (http.ServeMux)
 ├── API.Routes(mux, auth, _, common...)
 │     auth enforced at mux level, permissions per-method inside handler
 │
-├── UI.Routes(mux, auth, perm, common...)
-│     perm(kind.Permission) added per-route at mux level
+├── UI.Routes(mux, auth, optionalAuth, perm, common...)
+│     perm(kind.Permission) added per-route at mux level; optionalAuth guards /logout
 │
 ├── HTTPDiscovery.Sync  ← registered externally (no Routes method)
 │
@@ -54,6 +54,11 @@ UI checks permissions **at registration** (per-route granularity).
 `TestRoutePermissionMatrix` (`route_permissions_test.go`) holds this table as code and checks it against the
 registered routes: every new `/api/v1` route needs a row there.
 
+Endpoints that read a JSON body (user create, update and password, agent labels, spec create and update) require
+`Content-Type: application/json`, parameters allowed; any other type gets 415 `Content-Type must be
+application/json.`. A cross-site HTML form cannot send that type. In front of every route, `app` refuses
+cross-origin browser mutations with 403 (see `internal/config`, "Browser sessions").
+
 ### Users `/api/v1/users`
 | Method | Path                          | Permission                                               |
 |--------|-------------------------------|----------------------------------------------------------|
@@ -65,7 +70,7 @@ registered routes: every new `/api/v1` route needs a row there.
 | GET    | `/api/v1/users/{id}/sessions` | `UsersGet`                                               |
 | POST   | `/api/v1/users/{id}/disable`  | `UsersEdit`                                              |
 | POST   | `/api/v1/users/{id}/enable`   | `UsersEdit`                                              |
-| POST   | `/api/v1/users/{id}/password` | `UsersEdit`                                              |
+| POST   | `/api/v1/users/{id}/password` | `UsersEdit`; 12 to 72 characters, else 400               |
 
 ### Sessions `/api/v1/session`
 | Method | Path                          | Permission  |
@@ -147,7 +152,7 @@ HTTP takes the client IP from `trusted_proxies`; gRPC uses the peer address.
 | Path                | Handler          | Auth | Permission  |
 |---------------------|------------------|------|-------------|
 | `/login`            | `UI.Login`       | —    | —           |
-| `/logout`           | `UI.Logout`      | yes  | —           |
+| `/logout` (POST)    | `UI.Logout`      | opt. | —           |
 | `/`                 | `UI.Main`        | yes  | —           |
 | `/users`            | `UI.Users`       | yes  | —           |
 | `/users/info/{id}`  | `UI.UserDetail`  | yes  | `UsersGet`  |
@@ -158,6 +163,11 @@ HTTP takes the client IP from `trusted_proxies`; gRPC uses the peer address.
 | `/specs/new`        | `UI.SpecNew`     | yes  | `SpecsAdd`  |
 | `/specs/edit/{id}`  | `UI.SpecEdit`    | yes  | `SpecsEdit` |
 | `/specs/info/{id}`  | `UI.SpecDetail`  | yes  | `SpecsGet`  |
+
+`/logout` answers only POST (GET is 405). It authenticates like the other pages but also admits a caller without
+valid credentials. It revokes the caller's own session, never the one the `session_id` cookie names, clears the auth
+cookies and redirects to `/login` (303); without valid credentials it only clears the cookies. A failed revoke is
+logged at ERROR and answers 503 with the cookies untouched.
 
 ## Response pattern
 All handlers detect render mode via `httpctx.ModeFromRequest(r)`:

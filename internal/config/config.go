@@ -91,12 +91,9 @@ func Default() Config {
 		HTTP:          httpserver.Config{Name: "http", Addr: ":8080"},
 		HTTPDiscovery: httpserver.Config{Name: "http-discovery", Addr: ":8082"},
 		GRPC:          grpcserver.Config{Name: "grpc-discovery", Addr: ":50051"},
-		Auth:          auth.Config{}, // JWTSecret must be supplied externally
-		CORS: middleware.CORSConfig{
-			AllowOrigins: []string{"*"},
-		},
-		Cluster: cluster.DefaultConfig(),
-		History: HistoryConfig{Archive: history.DefaultConfig(), Collector: historyrunner.DefaultConfig()},
+		Auth:          auth.Config{CookieSecure: auth.CookieSecureAuto}, // JWTSecret must be supplied externally
+		Cluster:       cluster.DefaultConfig(),
+		History:       HistoryConfig{Archive: history.DefaultConfig(), Collector: historyrunner.DefaultConfig()},
 		Streams: middleware.StreamsConfig{
 			MaxPerIP:         10,
 			SubscriberBuffer: 64,

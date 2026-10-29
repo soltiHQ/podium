@@ -16,6 +16,9 @@ func TestCORSConfigValidate(t *testing.T) {
 		{"wildcard with credentials is rejected", CORSConfig{AllowOrigins: []string{"*"}, AllowCredentials: true}, true},
 		{"specific origin with credentials is ok", CORSConfig{AllowOrigins: []string{"https://app.example.com"}, AllowCredentials: true}, false},
 		{"no origins is ok", CORSConfig{}, false},
+		{"origin with a port is ok", CORSConfig{AllowOrigins: []string{"https://app.example.com:8443"}}, false},
+		{"origin with a path is rejected", CORSConfig{AllowOrigins: []string{"https://app.example.com/"}}, true},
+		{"origin without a scheme is rejected", CORSConfig{AllowOrigins: []string{"app.example.com"}}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -43,7 +43,7 @@ templ VBar(active string, nav policy.Nav) {
 			</div>
 			<div class="flex flex-col items-center gap-2 max-sm:flex-row max-sm:gap-1">
 				@ThemeToggle()
-				@VBarItem("logout", routepath.PageLogout, "Logout", active)
+				@VBarLogout()
 			</div>
 		</div>
 	</nav>
@@ -117,6 +117,34 @@ templ VBarItem(id string, href string, label string, active string) {
 			@asset.Icon(id)
 		</a>
 	}
+}
+
+// VBarLogout renders logout as a POST form: logout answers no GET, and the
+// cross-origin check keeps POST same-origin, so another site cannot sign the
+// user out.
+templ VBarLogout() {
+	<form method="POST" action={ routepath.PageLogout } class="flex">
+		<button
+			type="submit"
+			class="
+				flex items-center justify-center
+				h-12 w-12 max-sm:h-10 max-sm:w-10 rounded-[var(--r-lg)]
+
+				text-icon
+				border border-transparent
+
+				transition-all duration-200
+				hover:text-fg
+				hover:bg-nav-bg
+				hover:border-border
+				hover:shadow-1
+			"
+			title="Logout"
+			aria-label="Logout"
+		>
+			@asset.Icon("logout")
+		</button>
+	</form>
 }
 
 templ ThemeToggle() {

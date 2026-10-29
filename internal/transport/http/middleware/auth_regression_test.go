@@ -11,6 +11,9 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 )
 
+// notSecure is the cookie policy of a plain HTTP deployment.
+func notSecure(*http.Request) bool { return false }
+
 type failedVerifier struct{}
 
 func (failedVerifier) Verify(context.Context, string) (*identity.Identity, error) {
@@ -23,7 +26,7 @@ func TestAuthEmptyRefreshCookiesNeverAuthorize(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		r.Header.Set("Cookie", cookies)
 		w := httptest.NewRecorder()
-		Auth(failedVerifier{}, nil)(next).ServeHTTP(w, r)
+		Auth(failedVerifier{}, nil, notSecure)(next).ServeHTTP(w, r)
 		if w.Code != 401 {
 			t.Fatalf("cookies %q status %d", cookies, w.Code)
 		}
@@ -38,7 +41,7 @@ func TestMalformedAuthorizationDoesNotFallbackToCookie(t *testing.T) {
 	if raw != "" || !fromHeader {
 		t.Fatalf("malformed header fell back: %q %v", raw, fromHeader)
 	}
-	if _, err := tryRefresh(httptest.NewRecorder(), r, nil); !errors.Is(err, auth.ErrInvalidRefresh) {
+	if _, err := tryRefresh(httptest.NewRecorder(), r, nil, notSecure); !errors.Is(err, auth.ErrInvalidRefresh) {
 		t.Fatal(err)
 	}
 }

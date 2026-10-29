@@ -2,7 +2,9 @@ package middleware
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -10,8 +12,10 @@ import (
 
 // CORSConfig controls CORS behavior.
 type CORSConfig struct {
-	// AllowOrigins is the list of allowed origins.
-	// Use ["*"] to allow all (not recommended with credentials).
+	// AllowOrigins is the list of allowed origins, each an exact
+	// "scheme://host[:port]". Empty by default: no origin gets CORS access.
+	// Use ["*"] to allow all (not recommended with credentials). CrossOrigin
+	// also lets the exact origins, never "*", send mutations.
 	AllowOrigins []string `yaml:"allow_origins"`
 	// AllowMethods is the list of allowed HTTP methods.
 	// Defaults to GET, POST, PUT, DELETE, PATCH, OPTIONS.
@@ -29,19 +33,34 @@ type CORSConfig struct {
 	MaxAge time.Duration `yaml:"max_age"`
 }
 
-// Validate rejects unsafe CORS combinations.
+// Validate rejects unsafe CORS combinations and malformed origins.
 //
-// Wildcard origin ("*") with AllowCredentials is forbidden.
+// Wildcard origin ("*") with AllowCredentials is forbidden. Every other origin
+// must be an exact "scheme://host[:port]" that http.CrossOriginProtection
+// accepts as a trusted origin.
 func (c CORSConfig) Validate() error {
-	if !c.AllowCredentials {
-		return nil
+	if c.AllowCredentials && slices.Contains(c.AllowOrigins, "*") {
+		return errors.New(`allow_credentials cannot be combined with wildcard origin "*"`)
 	}
-	for _, o := range c.AllowOrigins {
-		if o == "*" {
-			return errors.New(`allow_credentials cannot be combined with wildcard origin "*"`)
-		}
+	if _, err := c.crossOriginProtection(); err != nil {
+		return fmt.Errorf("allow_origins: %w", err)
 	}
 	return nil
+}
+
+// crossOriginProtection returns a protection that trusts the exact origins of
+// AllowOrigins; "*" trusts none.
+func (c CORSConfig) crossOriginProtection() (*http.CrossOriginProtection, error) {
+	p := http.NewCrossOriginProtection()
+	for _, o := range c.AllowOrigins {
+		if o == "*" {
+			continue
+		}
+		if err := p.AddTrustedOrigin(o); err != nil {
+			return nil, err
+		}
+	}
+	return p, nil
 }
 
 func (c CORSConfig) withDefaults() CORSConfig {

@@ -81,8 +81,9 @@ func (s *Service) Delete(ctx context.Context, req DeleteRequest) error {
 }
 
 // SetPassword creates or replaces password auth material for a user without
-// actor checks. It is for trusted internal callers such as bootstrap; request
-// handlers use SetPasswordAs.
+// actor checks; the password policy still applies (auth.ErrWeakPassword). It
+// is for trusted internal callers such as bootstrap; request handlers use
+// SetPasswordAs.
 func (s *Service) SetPassword(ctx context.Context, req SetPasswordRequest) error {
 	return s.setPassword(ctx, req, nil)
 }
@@ -96,11 +97,15 @@ func (s *Service) SetPasswordAs(ctx context.Context, actor *identity.Identity, r
 	})
 }
 
-// setPassword stores the password. check, when set, runs inside the
-// transaction with the target user before anything is written.
+// setPassword stores the password, which must pass the password policy
+// (auth.ErrWeakPassword). check, when set, runs inside the transaction with
+// the target user before anything is written.
 func (s *Service) setPassword(ctx context.Context, req SetPasswordRequest, check func(tx storage.Storage, u *model.User) error) error {
 	if req.UserID == "" || req.Password == "" {
 		return auth.ErrInvalidRequest
+	}
+	if err := authcred.CheckPasswordPolicy(req.Password); err != nil {
+		return err
 	}
 
 	var credID string

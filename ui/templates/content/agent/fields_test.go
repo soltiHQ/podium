@@ -106,3 +106,11 @@ func TestKVEditorDataEncodesLabelsAsLiterals(t *testing.T) {
 		t.Fatalf("got  %s\nwant %s", got, want)
 	}
 }
+
+// The labels endpoint answers 415 to a body that is not declared as JSON.
+func TestUIMutationsSendJSONContentType(t *testing.T) {
+	expr := kvSubmitExpr("/api/v1/agents/a/labels", "agent_update")
+	if !strings.Contains(expr, "'Content-Type': 'application/json'") || !strings.Contains(expr, "body: JSON.stringify(body)") {
+		t.Fatalf("label editor does not send a JSON body as application/json:\n%s", expr)
+	}
+}

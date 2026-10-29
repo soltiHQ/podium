@@ -2,6 +2,7 @@ package credentials
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -169,5 +170,34 @@ func TestVerifyPassword_CorruptedHash(t *testing.T) {
 
 	if err = VerifyPassword(cred, v, "pw"); !errors.Is(err, auth.ErrMissingPasswordHash) {
 		t.Fatalf("expected ErrMissingPasswordHash for corrupted hash, err=%v", err)
+	}
+}
+
+// The minimum counts characters, the maximum counts bytes: bcrypt reads only
+// the first 72.
+func TestCheckPasswordPolicy(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		password string
+		ok       bool
+	}{
+		{"11 bytes", strings.Repeat("a", 11), false},
+		{"12 bytes", strings.Repeat("a", 12), true},
+		{"72 bytes", strings.Repeat("a", 72), true},
+		{"73 bytes", strings.Repeat("a", 73), false},
+		{"11 two-byte characters", strings.Repeat("é", 11), false},
+		{"12 two-byte characters", strings.Repeat("é", 12), true},
+		{"24 three-byte characters, 72 bytes", strings.Repeat("€", 24), true},
+		{"25 three-byte characters, 75 bytes", strings.Repeat("€", 25), false},
+	} {
+		err := CheckPasswordPolicy(tc.password)
+		if tc.ok && err != nil {
+			t.Errorf("%s: %v, want accepted", tc.name, err)
+		}
+		if !tc.ok && !errors.Is(err, auth.ErrWeakPassword) {
+			t.Errorf("%s: %v, want ErrWeakPassword", tc.name, err)
+		}
 	}
 }

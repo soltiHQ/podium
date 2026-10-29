@@ -56,7 +56,7 @@ func newLoginFixture(t *testing.T) *loginFixture {
 	hub := event.NewHub(logger)
 	t.Cleanup(hub.Close)
 	authModel := kit.New(store, auth.Config{JWTSecret: strings.Repeat("k", auth.MinJWTSecretLen)})
-	ui := NewUI(logger, access.New(authModel, store, logger), spec.New(store, logger), hub, nil)
+	ui := NewUI(logger, access.New(authModel, store, logger), spec.New(store, logger), hub, nil, func(*http.Request) bool { return false })
 	return &loginFixture{ui: ui, hub: hub}
 }
 
@@ -169,6 +169,23 @@ func TestSuccessfulLoginResetsOnlyTheAccount(t *testing.T) {
 	}
 	if w := f.login("carol", "wrong-password", loginIP); w.Code != http.StatusTooManyRequests {
 		t.Fatalf("attempt from the blocked IP: HTTP %d, want 429", w.Code)
+	}
+}
+
+// The subject is normalized the way user storage normalizes it.
+func TestLoginNormalizesSubject(t *testing.T) {
+	f := newLoginFixture(t)
+	if w := f.login(" Alice ", loginPassword, loginIP); w.Code != http.StatusFound {
+		t.Fatalf(`login as " Alice ": HTTP %d, want 302`, w.Code)
+	}
+	var sessions []event.Record
+	for _, rec := range f.hub.RecentEvents(100) {
+		if rec.Kind == event.SessionCreated {
+			sessions = append(sessions, rec)
+		}
+	}
+	if len(sessions) != 1 || sessions[0].Payload.ID != "user-alice" {
+		t.Fatalf("session_created events %+v, want one for user-alice", sessions)
 	}
 }
 

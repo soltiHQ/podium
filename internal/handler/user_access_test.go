@@ -31,6 +31,7 @@ func TestUserCreationSeparatelyAuthorizesAccessAssignments(t *testing.T) {
 	a := &API{userSVC: user.New(st, zerolog.Nop()), hub: event.NewHub(zerolog.Nop())}
 	request := func(body string, permissions ...enum.Permission) int {
 		r := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
 		r = r.WithContext(transportctx.WithIdentity(r.Context(), &identity.Identity{UserID: "actor", Permissions: permissions}))
 		w := httptest.NewRecorder()
 		a.Users(w, r)
@@ -370,5 +371,50 @@ func TestUserEditModalOffersOnlyGrantableAccess(t *testing.T) {
 		if !slices.Equal(perms.Items, tc.permissions) {
 			t.Errorf("%s: permission options %v, want %v", tc.viewer.UserID, perms.Items, tc.permissions)
 		}
+	}
+}
+
+// A new password needs 12 to 72 characters: 12 counted as characters, 72 as
+// bytes (bcrypt's limit). Shorter or longer is a 400 that stores nothing.
+func TestPasswordPolicy(t *testing.T) {
+	ctx := context.Background()
+	actor := &identity.Identity{UserID: "actor", Permissions: []enum.Permission{enum.UsersEdit}}
+	for _, tc := range []struct {
+		name     string
+		password string
+		want     int
+	}{
+		{"11 bytes", strings.Repeat("a", 11), http.StatusBadRequest},
+		{"73 bytes", strings.Repeat("a", 73), http.StatusBadRequest},
+		{"12 bytes", strings.Repeat("a", 12), http.StatusNoContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAPIFixture(t)
+			f.user(t, "target")
+			body, err := json.Marshal(restv1.SetPasswordRequest{Password: tc.password})
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := f.do(http.MethodPost, "/api/v1/users/target/password", string(body), actor)
+			if w.Code != tc.want {
+				t.Fatalf("HTTP %d %s, want %d", w.Code, w.Body.String(), tc.want)
+			}
+			_, stored := f.store.GetCredentialByUserAndAuth(ctx, "target", enum.Password)
+			if tc.want != http.StatusBadRequest {
+				if stored != nil {
+					t.Fatalf("accepted password not stored: %v", stored)
+				}
+				return
+			}
+			var got struct {
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got.Message != "Password must be 12-72 characters." {
+				t.Fatalf("message %q (%v), want %q", got.Message, err, "Password must be 12-72 characters.")
+			}
+			if !errors.Is(stored, storage.ErrNotFound) {
+				t.Fatalf("rejected password was stored: %v", stored)
+			}
+		})
 	}
 }

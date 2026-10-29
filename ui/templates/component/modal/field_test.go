@@ -66,3 +66,16 @@ func TestEditFormDataEncodesValuesAsLiterals(t *testing.T) {
 		t.Errorf("hostile text appears %d times, want 2 (once per literal):\n%s", n, got)
 	}
 }
+
+// The JSON endpoints answer 415 to a body that is not declared as JSON, so
+// every modal that submits JSON must say so.
+func TestUIMutationsSendJSONContentType(t *testing.T) {
+	for name, expr := range map[string]string{
+		"password": passwordSubmitExpr("/api/v1/users/u/password"),
+		"form":     formSubmitExpr("PUT", "/api/v1/users/u", []Field{{ID: "subject"}}, []AsyncSelect{{ID: "permissions"}}),
+	} {
+		if !strings.Contains(expr, "'Content-Type': 'application/json'") || !strings.Contains(expr, "body: JSON.stringify(") {
+			t.Errorf("%s modal does not send a JSON body as application/json:\n%s", name, expr)
+		}
+	}
+}

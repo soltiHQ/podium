@@ -65,6 +65,9 @@ stored selectors.
 
 Fetch forms ask for `Accept: application/json` even when using HTMX redirect
 headers. API negotiation honors that header so error messages remain readable.
+A fetch that sends a JSON body declares `Content-Type: application/json`: the
+API answers any other body type with 415. The server refuses mutations from
+another origin with 403, and logout is a POST form in the navigation bar.
 HTMX confirmation dialogs close after success and retain errors after failure.
 
 The task list passes exact slot filters to the agent before pagination and uses

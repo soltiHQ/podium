@@ -2,11 +2,15 @@ package config
 
 import (
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 )
 
 func TestLoadTrustedProxies(t *testing.T) {
@@ -87,5 +91,75 @@ func TestMistypedConfigFlagIsReported(t *testing.T) {
 	}
 	if path != "from-env.yaml" {
 		t.Fatalf("config path = %q, want CONFIG_PATH", path)
+	}
+}
+
+// With the default config no origin gets CORS access: a cross-origin page can
+// neither read API responses nor pass a preflight.
+func TestDefaultCORSAllowsNoOrigins(t *testing.T) {
+	cfg := Default()
+	if len(cfg.CORS.AllowOrigins) != 0 {
+		t.Fatalf("default cors.allow_origins = %q, want none", cfg.CORS.AllowOrigins)
+	}
+	h := middleware.CORS(cfg.CORS)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	for _, method := range []string{http.MethodGet, http.MethodOptions} {
+		r := httptest.NewRequest(method, "/api/v1/users", nil)
+		r.Header.Set("Origin", "https://other.example.com")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("%s: Access-Control-Allow-Origin = %q, want none", method, got)
+		}
+	}
+}
+
+func TestLoadCookieSecure(t *testing.T) {
+	for _, tc := range []struct {
+		name, env string
+		set       bool
+		want      string
+		wantErr   bool
+	}{
+		{name: "default", want: "auto"},
+		{name: "auto", env: "auto", set: true, want: "auto"},
+		{name: "always", env: "always", set: true, want: "always"},
+		{name: "unknown value", env: "never", set: true, wantErr: true},
+		{name: "case matters", env: "Always", set: true, wantErr: true},
+		{name: "empty", env: "", set: true, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CONFIG_PATH", "")
+			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+			if tc.set {
+				t.Setenv("SOLTI_AUTH_COOKIE_SECURE", tc.env)
+			}
+			cfg, err := load(nil)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "config.auth") {
+					t.Fatalf("want a config.auth error, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Auth.CookieSecure != tc.want {
+				t.Fatalf("auth.cookie_secure = %q, want %q", cfg.Auth.CookieSecure, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsMalformedCORSOrigins(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("cors:\n  allow_origins:\n    - https://app.example.com/\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONFIG_PATH", path)
+	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+	if _, err := load(nil); err == nil || !strings.Contains(err.Error(), "config.cors") {
+		t.Fatalf("origin with a path: want a config.cors error, got %v", err)
 	}
 }

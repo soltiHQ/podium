@@ -56,7 +56,7 @@ func TestAuthChecksRevocationAndCurrentPermissionsBeforeHandler(t *testing.T) {
 		}
 		w.WriteHeader(204)
 	})
-	handler := Auth(fixtureVerifier{&identity.Identity{UserID: "u", SessionID: "s", Permissions: []enum.Permission{enum.UsersDelete}}}, svc)(next)
+	handler := Auth(fixtureVerifier{&identity.Identity{UserID: "u", SessionID: "s", Permissions: []enum.Permission{enum.UsersDelete}}}, svc, notSecure)(next)
 	request := func() int {
 		r := httptest.NewRequest(http.MethodGet, "/api/test", nil)
 		r.Header.Set("Authorization", "Bearer valid")

@@ -157,9 +157,22 @@ func (f *apiFixture) spec(t *testing.T, id string) {
 	}
 }
 
-// do sends a JSON-mode request as actor; a nil actor is unauthenticated.
+// do sends a JSON-mode request as actor; a nil actor is unauthenticated. A
+// body is sent as application/json.
 func (f *apiFixture) do(method, target, body string, actor *identity.Identity) *httptest.ResponseRecorder {
+	contentType := ""
+	if body != "" {
+		contentType = "application/json"
+	}
+	return f.send(method, target, contentType, body, actor)
+}
+
+// send is do with the given Content-Type; an empty one sends none.
+func (f *apiFixture) send(method, target, contentType, body string, actor *identity.Identity) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, target, strings.NewReader(body))
+	if contentType != "" {
+		r.Header.Set("Content-Type", contentType)
+	}
 	if actor != nil {
 		r = r.WithContext(transportctx.WithIdentity(r.Context(), actor))
 	}
@@ -298,6 +311,9 @@ func TestRoutePermissionMatrix(t *testing.T) {
 				f.hub.Record(event.SyncFailed, event.Payload{ID: "spec-1"})
 				f.hub.Record(event.RateLimited, event.Payload{ID: "alice"})
 				r := httptest.NewRequest(rp.method, rp.target(), strings.NewReader(rp.body))
+				if rp.body != "" {
+					r.Header.Set("Content-Type", "application/json")
+				}
 				ctx := r.Context()
 				if rp.stream {
 					var cancel context.CancelFunc

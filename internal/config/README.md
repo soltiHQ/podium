@@ -4,7 +4,7 @@ Package config aggregates per-package configuration structs and provides a
 single `Default()` constructor for development use:
 
 - **Config** — top-level struct embedding sub-configs from `httpserver`,
-  `grpcserver`, `lifecycle`, `sync`, `server`, `wire` (auth), and `trigger`.
+  `grpcserver`, `lifecycle`, `sync`, `server`, `auth`, and `trigger`.
 - **Default()** — returns safe development defaults. Zero-valued sub-configs
   inherit package-level defaults via each package's `withDefaults()`.
 
@@ -95,6 +95,42 @@ mode, list the replicas too: a follower forwards writes to the leader, which
 otherwise sees the follower as the client.
 
 gRPC discovery ignores this setting and always uses the peer address.
+
+## Browser sessions
+
+`auth.cookie_secure` (env `SOLTI_AUTH_COOKIE_SECURE`) decides when the three
+auth cookies carry the `Secure` attribute, on every response that sets or
+clears them (login, logout, refresh, a revoked session):
+
+- `auto` (default): when the client used HTTPS, either a TLS connection or
+  `X-Forwarded-Proto: https` from a proxy in `trusted_proxies`.
+- `always`: on every response. Use it when the proxy that terminates TLS cannot
+  be listed in `trusted_proxies`.
+
+Any other value, an empty one included, fails configuration loading.
+
+The main listener refuses state-changing requests that a browser sends from
+another origin (Go's `http.CrossOriginProtection`) with 403
+`Cross-origin request blocked.`: a request whose `Sec-Fetch-Site` is not
+`same-origin` or `none`, or, from a browser that does not send that header, one
+whose `Origin` does not match `Host`. GET, HEAD and OPTIONS always pass, as do
+clients that send neither header (scripts, agents). Behind a proxy that
+rewrites `Host`, such old browsers are refused. The discovery listener has no
+such check.
+
+`cors.allow_origins` is empty by default: no other origin gets CORS access.
+
+```yaml
+cors:
+  allow_origins:
+    - https://ops.example.com
+  allow_credentials: true
+```
+
+Each entry is an exact `scheme://host[:port]`, without a path; anything else
+fails configuration loading. A listed origin may also send mutations past the
+cross-origin check. `"*"` lets any origin read through CORS, but trusts none
+with a mutation, and cannot be combined with `allow_credentials`.
 
 ## Rate limiting
 

@@ -39,7 +39,9 @@ func TestSpecEditMissingDoesNotBecomeCreateForm(t *testing.T) {
 
 func TestDecodeJSONRejectsTrailingValues(t *testing.T) {
 	for _, input := range []string{`{"name":"a"} {"name":"b"}`, `{"name":"a"} garbage`} {
-		if _, err := decodeJSON[map[string]string](httptest.NewRequest(http.MethodPost, "/", strings.NewReader(input))); err == nil {
+		r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(input))
+		r.Header.Set("Content-Type", "application/json")
+		if _, err := decodeJSON[map[string]string](r); err == nil {
 			t.Fatalf("accepted %s", input)
 		}
 	}

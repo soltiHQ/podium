@@ -123,7 +123,7 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		err = json.Unmarshal(raw, &fields)
 	}
 	if err != nil {
-		response.BadRequest(w, r, mode)
+		badBody(w, r, mode, err)
 		return
 	}
 

@@ -17,6 +17,7 @@ import (
 	discoverv1 "github.com/soltiHQ/control-plane/api/gen/solti/discover/v1"
 	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
 	"github.com/soltiHQ/control-plane/domain/enum"
+	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/cluster"
@@ -185,16 +186,19 @@ func waitForLeader(ctx context.Context, l cluster.Leadership) bool {
 }
 
 // buildMainHandler wires the UI and API listener. resolver gives client IPs to
-// the login limiter and the stream limiter. The listener has no limit on failed
-// authentication: its tokens and session IDs cannot be guessed, and passwords
-// go through the login limiter.
+// the login limiter and the stream limiter, and tells the auth cookies whether
+// the client used HTTPS. The listener has no limit on failed authentication:
+// its tokens and session IDs cannot be guessed, and passwords go through the
+// login limiter. Cross-origin browser mutations are refused before any route.
 func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership, resolver *clientip.Resolver) (http.Handler, *loghub.Hub) {
 	var (
+		secure        = cookieSecure(cfg.Auth.CookieSecure, resolver)
 		logHub        = buildLogHub(logger, svc.agent, proxyPool, cfg.Streams)
 		streamLimit   = middleware.NewStreamLimiter(cfg.Streams.MaxPerIP, resolver)
 		apiHandler    = handler.NewAPI(logger, svc.user, svc.access, svc.session, svc.credential, svc.agent, svc.spec, svc.history, proxyPool, eventHub, logHub, streamLimit)
-		authMW        = middleware.Auth(authModel.Verifier, authModel.Session)
-		uiHandler     = handler.NewUI(logger, svc.access, svc.spec, eventHub, resolver)
+		authMW        = middleware.Auth(authModel.Verifier, authModel.Session, secure)
+		optAuthMW     = middleware.OptionalAuth(authModel.Verifier, authModel.Session, secure)
+		uiHandler     = handler.NewUI(logger, svc.access, svc.spec, eventHub, resolver, secure)
 		staticHandler = handler.NewStatic(logger)
 		logMW         = middleware.Logger(logger)
 		ridMW         = middleware.RequestID()
@@ -205,12 +209,13 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 		})
 	)
 	apiHandler.Routes(mux, authMW, permMW, ridMW, logMW)
-	uiHandler.Routes(mux, authMW, permMW)
+	uiHandler.Routes(mux, authMW, optAuthMW, permMW)
 	staticHandler.Routes(mux)
 
 	route.HandleFunc(mux, routepath.ApiEventStream, eventHub.SSEHandler(), ridMW, logMW, authMW, middleware.StreamLimit(streamLimit))
 
 	var h http.Handler = mux
+	h = middleware.CrossOrigin(cfg.CORS)(h)
 	h = middleware.Negotiate(responder.NewJSON(), responder.NewHTML())(h)
 	h = middleware.Leader(leadership, middleware.LeaderOptions{
 		ForwardPort: addrPort(cfg.HTTP.Addr),
@@ -219,6 +224,16 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 	h = middleware.CORS(cfg.CORS)(h)
 	h = middleware.Recovery(logger)(h)
 	return h, logHub
+}
+
+// cookieSecure decides whether the auth cookies of a response carry the Secure
+// attribute: always with auth.cookie_secure "always", otherwise when the client
+// used HTTPS, directly or through a trusted proxy.
+func cookieSecure(mode string, resolver *clientip.Resolver) func(*http.Request) bool {
+	always := mode == auth.CookieSecureAlways
+	return func(r *http.Request) bool {
+		return always || resolver.HTTPS(r)
+	}
 }
 
 // buildDiscoveryListeners wires the HTTP and gRPC discovery listeners around one

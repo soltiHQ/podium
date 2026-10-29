@@ -1,5 +1,6 @@
 // Package httpcookie carries auth tokens over HTTP cookies.
-// Owns the three auth-cookie names and their SameSite/Secure policy.
+// Owns the three auth-cookie names and their SameSite policy; the caller
+// decides Secure (auth.cookie_secure).
 package httpcookie
 
 import "net/http"
@@ -11,10 +12,9 @@ const (
 	NameSessionID    = "session_id"
 )
 
-// SetAuth writes the three auth cookies to the response.
-func SetAuth(w http.ResponseWriter, r *http.Request, accessToken, refreshToken, sessionID string) {
-	secure := r.TLS != nil
-
+// SetAuth writes the three auth cookies to the response, with the Secure
+// attribute when secure is set.
+func SetAuth(w http.ResponseWriter, secure bool, accessToken, refreshToken, sessionID string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     NameAccessToken,
 		Value:    accessToken,
@@ -41,10 +41,9 @@ func SetAuth(w http.ResponseWriter, r *http.Request, accessToken, refreshToken, 
 	})
 }
 
-// DeleteAuth expires all three auth cookies.
-func DeleteAuth(w http.ResponseWriter, r *http.Request) {
-	secure := r.TLS != nil
-
+// DeleteAuth expires all three auth cookies, with the Secure attribute when
+// secure is set.
+func DeleteAuth(w http.ResponseWriter, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     NameAccessToken,
 		Value:    "",

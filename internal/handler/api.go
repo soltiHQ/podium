@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 
@@ -210,9 +211,17 @@ func (a *API) actor(r *http.Request) string {
 	return "unknown"
 }
 
-// decodeJSON reads and decodes a JSON request body into v.
+// errNotJSON reports a request body that is not declared as application/json.
+var errNotJSON = errors.New("request body is not declared as application/json")
+
+// decodeJSON reads and decodes a JSON request body into v. The body must be
+// declared as application/json (errNotJSON): an HTML form on another site
+// cannot send that type, and a script there only after a CORS preflight.
 func decodeJSON[T any](r *http.Request) (T, error) {
 	var v T
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+		return v, errNotJSON
+	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, (2<<20)+1))
 	if err != nil {
 		return v, err
@@ -229,6 +238,16 @@ func decodeJSON[T any](r *http.Request) (T, error) {
 		return v, errors.New("request body must contain one JSON value")
 	}
 	return v, nil
+}
+
+// badBody answers a decodeJSON error: 415 for a body not declared as JSON,
+// 400 for anything else.
+func badBody(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, err error) {
+	if errors.Is(err, errNotJSON) {
+		response.UnsupportedMediaType(w, r, mode, "Content-Type must be application/json.")
+		return
+	}
+	response.BadRequest(w, r, mode)
 }
 
 // queryInt reads a query parameter as int, returning fallback if absent or invalid.

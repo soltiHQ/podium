@@ -105,7 +105,7 @@ func (a *API) agentDetails(w http.ResponseWriter, r *http.Request, mode httpctx.
 func (a *API) agentPatchLabels(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	labels, err := decodeJSON[map[string]string](r)
 	if err != nil {
-		response.BadRequest(w, r, mode)
+		badBody(w, r, mode, err)
 		return
 	}
 

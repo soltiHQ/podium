@@ -36,8 +36,9 @@ transport/
   RequestID   ── installs request id + error slot (outermost, owns the slot)
    Logger     ── reads the slot back after the handler returns
     Negotiate ── picks the Responder (JSON vs HTML), stores it in ctx
+     CrossOrigin ── refuses cross-origin browser mutations: 403 through that Responder
      
-  Auth / RequirePermission (per route)
+  Auth / OptionalAuth / RequirePermission (per route)
     handler/api.go | ui.go
         ├─ success → response.OK(w, r, mode, &View{Data: dto, Component: tmpl})
         │              └─ Responder from ctx → JSON (json.Marshal + sec headers)
@@ -70,7 +71,8 @@ only the negotiated `Responder` is stored in context.
 
 `clientip.Resolver` decides who the client of an HTTP request is (`trusted_proxies`, see `internal/config`):
 - `IP(r)` - the TCP peer; when the peer is a trusted proxy, the right-most `X-Forwarded-For` entry that is not itself trusted.
-- `HTTPS(r)` - direct TLS, or `X-Forwarded-Proto: https` from a trusted proxy.
+- `HTTPS(r)` - direct TLS, or `X-Forwarded-Proto: https` from a trusted proxy. With `auth.cookie_secure: auto` it decides
+  whether the auth cookies are `Secure`; `app` builds that decision once and hands it to every cookie writer.
 
 RFC 7239 `Forwarded` is not supported. The login limiter, `middleware.StreamLimit` and HTTP discovery take the client IP from the resolver.
 gRPC requests carry no forwarding headers: gRPC discovery uses the peer address.

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -15,6 +16,12 @@ import (
 const (
 	PasswordHashKey   = "hash"
 	DefaultBcryptCost = 12
+
+	// MinPasswordLength is the fewest characters (runes) a new password may have.
+	MinPasswordLength = 12
+	// MaxPasswordBytes is the most bytes a password may have: bcrypt reads
+	// only the first 72, so a longer one would match on its prefix.
+	MaxPasswordBytes = 72
 )
 
 func normalizeCost(cost int) (int, error) {
@@ -28,6 +35,17 @@ func normalizeCost(cost int) (int, error) {
 		return 0, auth.ErrInvalidRequest
 	}
 	return cost, nil
+}
+
+// CheckPasswordPolicy returns auth.ErrWeakPassword unless password has at
+// least MinPasswordLength characters and at most MaxPasswordBytes bytes.
+// It applies when a password is set, not at login, so a shorter password set
+// before the policy still works.
+func CheckPasswordPolicy(password string) error {
+	if utf8.RuneCountInString(password) < MinPasswordLength || len(password) > MaxPasswordBytes {
+		return auth.ErrWeakPassword
+	}
+	return nil
 }
 
 // GeneratePassword returns a cryptographically random URL-safe password

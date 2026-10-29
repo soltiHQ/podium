@@ -212,3 +212,20 @@ func TestDiscoveryTransportsShareTheFailureBudget(t *testing.T) {
 		t.Fatalf("HTTP after the shared budget ran out: HTTP %d, want 429", code)
 	}
 }
+
+// Agents are not browsers: the discovery listener has no cross-origin check,
+// so browser headers on a sync change nothing.
+func TestDiscoveryListenerSkipsCrossOriginCheck(t *testing.T) {
+	c := newDiscoveryClients(t)
+	body := `{"id":"agent-a","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/sync", strings.NewReader(body))
+	r.RemoteAddr = "127.0.0.1:40000"
+	r.Header.Set("Authorization", "Bearer token-agent-a")
+	r.Header.Set("Origin", "https://other.example.com")
+	r.Header.Set("Sec-Fetch-Site", "cross-site")
+	w := httptest.NewRecorder()
+	c.http.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("cross-site sync: HTTP %d %s, want 200", w.Code, w.Body.String())
+	}
+}
