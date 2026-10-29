@@ -2,7 +2,6 @@ package interceptor
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"runtime/debug"
 	"time"
@@ -13,8 +12,6 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	"github.com/soltiHQ/control-plane/internal/auth"
-	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
 )
@@ -80,29 +77,6 @@ func StreamLogger(logger zerolog.Logger) grpc.StreamServerInterceptor {
 			evt.Str("code", st.Code().String()).Err(err).Msg("grpc stream")
 		} else {
 			evt.Str("code", "OK").Msg("grpc stream")
-		}
-		return err
-	}
-}
-
-// StreamRateLimit applies per-peer failure-based throttling to streaming RPCs.
-// Counts a stream as a failure only if the handler exits with an error.
-func StreamRateLimit(limiter *ratelimit.Limiter) grpc.StreamServerInterceptor {
-	if limiter == nil {
-		return func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-			return handler(srv, ss)
-		}
-	}
-	return func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		key := ratelimit.IPKey(peerAddr(ss.Context()))
-		if err := limiter.Check(key, time.Now()); errors.Is(err, auth.ErrRateLimited) {
-			return status.Error(codes.ResourceExhausted, "rate limited")
-		}
-		err := handler(srv, ss)
-		if err != nil {
-			limiter.RecordFailure(key, time.Now())
-		} else {
-			limiter.Reset(key)
 		}
 		return err
 	}

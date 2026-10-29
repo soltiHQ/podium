@@ -63,6 +63,57 @@ agent_auth:
 sent. Startup then logs one WARN line: `agent authentication disabled: any host
 that reaches the discovery listeners can register agents`.
 
+## Client IPs and trusted proxies
+
+`trusted_proxies` lists the reverse proxies whose forwarding headers podium
+believes. It defaults to empty: the TCP peer is the client.
+
+```yaml
+trusted_proxies:   # env SOLTI_TRUSTED_PROXIES=10.0.0.1,10.1.0.0/16
+  - 10.0.0.1
+  - 10.1.0.0/16
+```
+
+Entries are IP addresses or CIDR prefixes; anything else fails configuration
+loading. The headers count only when the TCP peer is in the list:
+
+- `X-Forwarded-For`: all header lines are joined in order and walked from the
+  right. Trusted entries are skipped; the first untrusted entry is the client.
+  When every entry is trusted, the left-most one is. A missing or empty header,
+  or an entry the walk cannot parse, leaves the peer as the client. Entries may
+  be `ip`, `ip:port` or `[ip]:port`.
+- `X-Forwarded-Proto`: the first value of the first header line, compared with
+  `https` case-insensitively, says whether the client used HTTPS.
+
+RFC 7239 `Forwarded` is not supported: behind a proxy that sends only
+`Forwarded`, the proxy is the client. List only proxies that append the peer
+to `X-Forwarded-For` (or replace the header); a listed host that passes a
+client's header through unchanged lets that client pick its own IP. In raft
+mode, list the replicas too: a follower forwards writes to the leader, which
+otherwise sees the follower as the client.
+
+gRPC discovery ignores this setting and always uses the peer address.
+
+## Rate limiting
+
+`auth.rate_attempts` (default 5) and `auth.rate_window` (default 1m; env
+`SOLTI_AUTH_RATE_ATTEMPTS`, `SOLTI_AUTH_RATE_WINDOW`) configure every failure
+limiter: `rate_attempts` failures, each within `rate_window` of the previous
+one, block a key for `rate_window`. Each surface has its own in-memory limiter
+of at most 100 000 keys; past that, the least recently updated key is evicted.
+
+| Surface               | Counted per            | Counts                                           | Blocked answer        |
+|-----------------------|------------------------|--------------------------------------------------|-----------------------|
+| Login (`POST /login`) | account, and client IP | failed logins; a success resets the account only | 429                   |
+| Main HTTP listener    | client IP              | 401 responses only                               | 429 for every request |
+| HTTP discovery        | client IP + agent ID   | agent token failures                             | 429                   |
+| gRPC discovery        | peer IP + agent ID     | agent token failures                             | `ResourceExhausted`   |
+
+A client IP is counted by its /64 prefix for IPv6; IPv4-mapped IPv6 addresses
+count as IPv4. Nothing resets a client IP key, and the User-Agent plays no
+part. Agents behind one egress IP never block each other. The `rate_limited`
+dashboard event is recorded once, when a login key becomes blocked.
+
 ## Observed run history
 
 ```yaml

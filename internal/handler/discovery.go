@@ -6,10 +6,12 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/soltiHQ/control-plane/internal/transport/grpc/status"
@@ -18,10 +20,12 @@ import (
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/domain/wire"
+	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
@@ -48,24 +52,33 @@ type HTTPDiscovery struct {
 	logger      zerolog.Logger
 	agentSVC    *agent.Service
 	eventHub    *event.Hub
+	limiter     *ratelimit.Limiter
+	resolver    *clientip.Resolver
 	requireAuth bool
 }
 
 // NewHTTPDiscovery creates a new HTTP discovery handler.
 //
 // requireAuth turns on per-agent bearer-token authentication (TOFU enroll +
-// constant-time verify) on every sync.
-func NewHTTPDiscovery(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, requireAuth bool) *HTTPDiscovery {
+// constant-time verify) on every sync. limiter counts the authentication
+// failures of each (client IP, agent ID) pair; resolver gives the client IP
+// (nil trusts no proxy).
+func NewHTTPDiscovery(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, limiter *ratelimit.Limiter, resolver *clientip.Resolver, requireAuth bool) *HTTPDiscovery {
 	if agentSVC == nil {
 		panic(service.ErrNilService)
 	}
 	if eventHub == nil {
 		panic(event.ErrNilHub)
 	}
+	if limiter == nil {
+		panic("handler.NewHTTPDiscovery: nil rate limiter")
+	}
 	return &HTTPDiscovery{
 		logger:      logger.With().Str("handler", "discovery-http").Logger(),
 		agentSVC:    agentSVC,
 		eventHub:    eventHub,
+		limiter:     limiter,
+		resolver:    resolver,
 		requireAuth: requireAuth,
 	}
 }
@@ -108,9 +121,15 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.requireAuth {
+		key := ratelimit.AgentKey(h.resolver.IP(r), in.GetId())
+		if h.limiter.Blocked(key, time.Now()) {
+			response.AuthRateLimit(w, r, mode)
+			return
+		}
 		token := bearerToken(r.Header.Get("Authorization"))
 		if err := h.agentSVC.VerifyOrEnrollToken(r.Context(), in.GetId(), token); err != nil {
 			if errors.Is(err, agent.ErrUnauthenticated) {
+				h.limiter.RecordFailure(key, time.Now())
 				response.Unauthorized(w, r, mode)
 				return
 			}
@@ -144,24 +163,30 @@ type GRPCDiscovery struct {
 	logger      zerolog.Logger
 	agentSVC    *agent.Service
 	hub         *event.Hub
+	limiter     *ratelimit.Limiter
 	requireAuth bool
 }
 
 // NewGRPCDiscovery creates a new gRPC discovery handler.
 //
 // requireAuth turns on per-agent bearer-token authentication (TOFU enroll +
-// constant-time verify) on every sync.
-func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event.Hub, requireAuth bool) *GRPCDiscovery {
+// constant-time verify) on every sync. limiter counts the authentication
+// failures of each (peer IP, agent ID) pair.
+func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event.Hub, limiter *ratelimit.Limiter, requireAuth bool) *GRPCDiscovery {
 	if agentSVC == nil {
 		panic(service.ErrNilService)
 	}
 	if hub == nil {
 		panic(event.ErrNilHub)
 	}
+	if limiter == nil {
+		panic("handler.NewGRPCDiscovery: nil rate limiter")
+	}
 	return &GRPCDiscovery{
 		logger:      logger.With().Str("handler", "discovery-grpc").Logger(),
 		agentSVC:    agentSVC,
 		hub:         hub,
+		limiter:     limiter,
 		requireAuth: requireAuth,
 	}
 }
@@ -174,9 +199,14 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 	}
 
 	if g.requireAuth {
+		key := ratelimit.AgentKey(grpcPeerIP(ctx), req.GetId())
+		if g.limiter.Blocked(key, time.Now()) {
+			return nil, status.Errorf(ctx, codes.ResourceExhausted, "rate limited")
+		}
 		token := grpcBearerToken(ctx)
 		if err := g.agentSVC.VerifyOrEnrollToken(ctx, req.GetId(), token); err != nil {
 			if errors.Is(err, agent.ErrUnauthenticated) {
+				g.limiter.RecordFailure(key, time.Now())
 				return nil, status.Errorf(ctx, codes.Unauthenticated, "agent authentication failed")
 			}
 			g.logger.Error().Err(err).Str("agent_id", req.GetId()).Msg("token verify failed")
@@ -242,6 +272,16 @@ func bearerToken(header string) string {
 		return header[len(prefix):]
 	}
 	return ""
+}
+
+// grpcPeerIP returns the canonical IP of the gRPC peer. gRPC requests carry no
+// forwarding headers, so the peer address is the client.
+func grpcPeerIP(ctx context.Context) string {
+	var addr string
+	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+		addr = p.Addr.String()
+	}
+	return clientip.FromAddr(addr)
 }
 
 // grpcBearerToken extracts the bearer token from incoming gRPC "authorization"

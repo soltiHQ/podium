@@ -107,5 +107,18 @@ auth/
 | Refresh token        | 32-byte `crypto/rand`, base64 raw URL encoded            |
 | Refresh validation   | SHA3-256 hash, `subtle.ConstantTimeCompare`              |
 | Session ID           | 16-byte `crypto/rand`, hex encoded                       |
-| Rate limiting        | in-memory, per-key, configurable attempts + block window |
+| Rate limiting        | per account + per client IP, bounded, in memory (below)  |
 | Error masking        | generic errors hide which field failed                   |
+
+## Login rate limiting
+`access.Service.Login` checks two keys of `kit.Auth.Limiter` before authenticating:
+`login:acct:<subject>` (trimmed and lower-cased like user storage) and `login:ip:<client IP>`
+(IPv6 counted by its /64, IPv4-mapped addresses unmapped).
+
+- An attempt is refused with `ErrRateLimited` (HTTP 429) while either key is blocked; refused attempts count nothing.
+- A failed login records a failure on both keys. `auth.rate_attempts` failures, each within `auth.rate_window`
+  of the previous one, block a key for `auth.rate_window`.
+- The failure that blocks a key returns its usual error joined with `ErrRateLimitReached`;
+  the UI answers it like any failed login and records one `rate_limited` event.
+- A successful login resets the account key only. Nothing resets a client IP key.
+- The User-Agent plays no part. The limiter keeps at most 100 000 keys and evicts the least recently updated one.

@@ -4,7 +4,8 @@ package access
 type LoginRequest struct {
 	Subject  string
 	Password string
-	RateKey  string
+	// ClientIP is where the attempt came from: failures count per account and per client IP.
+	ClientIP string
 }
 
 // LoginResult carries issued tokens and session ID after a successful login.

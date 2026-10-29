@@ -12,12 +12,12 @@ import (
 	wire "github.com/soltiHQ/control-plane/domain/wire"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
-	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/http/route"
@@ -32,16 +32,26 @@ import (
 	pageUser "github.com/soltiHQ/control-plane/ui/templates/page/user"
 )
 
+const (
+	// maxLoginBodyBytes caps the login form body.
+	maxLoginBodyBytes = 16 << 10
+	// maxLoginSubjectBytes caps the login subject.
+	maxLoginSubjectBytes = 256
+)
+
 // UI handlers
 type UI struct {
 	accessSVC *access.Service
 	specSVC   *spec.Service
 	hub       *event.Hub
+	resolver  *clientip.Resolver
 	logger    zerolog.Logger
 }
 
 // NewUI creates a new UI handler.
-func NewUI(logger zerolog.Logger, accessSVC *access.Service, specSVC *spec.Service, hub *event.Hub) *UI {
+//
+// resolver gives the client IP of login attempts; nil trusts no proxy.
+func NewUI(logger zerolog.Logger, accessSVC *access.Service, specSVC *spec.Service, hub *event.Hub, resolver *clientip.Resolver) *UI {
 	if accessSVC == nil {
 		panic(service.ErrNilService)
 	}
@@ -56,6 +66,7 @@ func NewUI(logger zerolog.Logger, accessSVC *access.Service, specSVC *spec.Servi
 		accessSVC: accessSVC,
 		specSVC:   specSVC,
 		hub:       hub,
+		resolver:  resolver,
 	}
 }
 
@@ -105,6 +116,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 		response.NotAllowed(w, r, mode)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxLoginBodyBytes)
 	if err := r.ParseForm(); err != nil {
 		response.BadRequest(w, r, mode)
 		return
@@ -114,22 +126,28 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 		subject  = r.FormValue("subject")
 		password = r.FormValue("password")
 		redirect = safeLoginRedirect(r.FormValue("redirect"))
-		rateKey  = ratelimit.LoginKey(r, subject)
 	)
+	if len(subject) > maxLoginSubjectBytes {
+		response.BadRequestMsg(w, r, mode, "Username is too long.")
+		return
+	}
 	if redirect == "" {
 		redirect = routepath.PageHome
 	}
 	id, res, err := u.accessSVC.Login(r.Context(), access.LoginRequest{
 		Subject:  subject,
 		Password: password,
-		RateKey:  rateKey,
+		ClientIP: u.resolver.IP(r),
 	})
+	if errors.Is(err, auth.ErrRateLimitReached) {
+		// Recorded once per block; the refused attempts that follow record nothing.
+		u.hub.Record(event.RateLimited, event.Payload{
+			ID: subject, Name: subject, By: "auth",
+		})
+	}
 	if err != nil {
 		switch {
 		case errors.Is(err, auth.ErrRateLimited):
-			u.hub.Record(event.RateLimited, event.Payload{
-				ID: subject, Name: subject, By: "auth",
-			})
 			response.AuthRateLimit(w, r, mode)
 			return
 		case errors.Is(err, auth.ErrInvalidCredentials),

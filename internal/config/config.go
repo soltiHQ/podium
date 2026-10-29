@@ -21,6 +21,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
 	syncrunner "github.com/soltiHQ/control-plane/internal/server/runner/sync"
 	"github.com/soltiHQ/control-plane/internal/service/history"
+	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/transport/tlsconf"
 	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
@@ -72,6 +73,11 @@ type Config struct {
 	Streams       middleware.StreamsConfig `yaml:"streams"        envconfig:"STREAMS"`
 	TLS           TLSConfig                `yaml:"tls"            envconfig:"TLS"`
 	AgentAuth     AgentAuthConfig          `yaml:"agent_auth"     envconfig:"AGENT_AUTH"`
+
+	// TrustedProxies lists the reverse proxies (IP addresses or CIDR prefixes)
+	// whose X-Forwarded-For and X-Forwarded-Proto headers are believed.
+	// Empty by default: the TCP peer is the client.
+	TrustedProxies []string `yaml:"trusted_proxies" envconfig:"TRUSTED_PROXIES"`
 }
 
 // Default returns the default development configuration.
@@ -120,6 +126,9 @@ func (c Config) Validate() error {
 	}
 	if err := c.TLS.Client.Validate(); err != nil {
 		return fmt.Errorf("config.tls.client: %w", err)
+	}
+	if _, err := clientip.New(c.TrustedProxies); err != nil {
+		return fmt.Errorf("config.trusted_proxies: %w", err)
 	}
 	return nil
 }

@@ -20,6 +20,7 @@ transport/
 │   └── route/         middleware chaining + REST dispatch (Resource, Router)
 │
 ├── httpctx/           HTTP-only request context (Responder, RenderMode)
+├── clientip/          client IP + HTTPS detection behind trusted proxies
 ├── tlsconf/           PEM config → *tls.Config (server + client, mTLS)
 └── errkind/           domain/agent error → Kind (shared by both transports)
 ```
@@ -53,7 +54,7 @@ only the negotiated `Responder` is stored in context.
 ```text
   gRPC client
         ▼
-  UnaryRecovery → UnaryRequestID → UnaryLogger → UnaryRateLimit → UnaryLeader
+  UnaryRecovery → UnaryRequestID → UnaryLogger → UnaryLeader
         │   (UnaryAuth / UnaryRequirePermission exist but are not chained yet)
         ▼
   handler/discovery.go (GRPCDiscovery)
@@ -64,6 +65,22 @@ only the negotiated `Responder` is stored in context.
                        ├─ attaches requestID as errdetails.RequestInfo
                        └─ sets the error slot → UnaryLogger appends it
 ```
+
+## Client IP
+
+`clientip.Resolver` decides who the client of an HTTP request is (`trusted_proxies`, see `internal/config`):
+- `IP(r)` - the TCP peer; when the peer is a trusted proxy, the right-most `X-Forwarded-For` entry that is not itself trusted.
+- `HTTPS(r)` - direct TLS, or `X-Forwarded-Proto: https` from a trusted proxy.
+
+RFC 7239 `Forwarded` is not supported. The login limiter, `middleware.RateLimit`, `middleware.StreamLimit` and HTTP discovery take the client IP from the resolver.
+gRPC requests carry no forwarding headers: gRPC discovery uses the peer address.
+
+## Rate limits
+
+- `middleware.RateLimit` (main listener only) counts 401 responses per client IP; other statuses neither count nor reset. A blocked IP gets 429 for every request.
+- Discovery has no per-IP limit. Both Sync handlers count agent token failures per (client IP, agent ID), so one agent with a stale token never blocks the other agents behind its egress IP:
+  HTTP answers 429, gRPC `ResourceExhausted`.
+- `middleware.StreamLimit` caps concurrent streams per client IP.
 
 ## Error model (shared)
 

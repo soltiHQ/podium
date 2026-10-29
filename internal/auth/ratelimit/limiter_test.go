@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -13,6 +14,9 @@ func TestNew_DefaultConfig(t *testing.T) {
 
 	if l.cfg.MaxAttempts != 5 {
 		t.Fatalf("expected default MaxAttempts=5, got %d", l.cfg.MaxAttempts)
+	}
+	if l.cfg.Window != 10*time.Minute {
+		t.Fatalf("expected default Window=10m, got %v", l.cfg.Window)
 	}
 	if l.cfg.BlockWindow != 10*time.Minute {
 		t.Fatalf("expected default BlockWindow=10m, got %v", l.cfg.BlockWindow)
@@ -140,5 +144,80 @@ func TestLimiter_ExpiryResetsFailureState(t *testing.T) {
 	l.RecordFailure("k", after)
 	if !l.Blocked("k", after) {
 		t.Fatal("should block again after new failure")
+	}
+}
+
+func TestLoginLimiterBounded(t *testing.T) {
+	const limit = 100_000
+	now := time.Now()
+	l := New(Config{MaxAttempts: 5, BlockWindow: time.Hour})
+
+	l.RecordFailure("first", now)
+	l.RecordFailure("second", now)
+	for i := range limit - 2 {
+		l.RecordFailure("filler-"+strconv.Itoa(i), now)
+	}
+	l.RecordFailure("first", now) // "second" is now the least recently updated key
+	l.RecordFailure("overflow", now)
+
+	if n := len(l.entries); n > limit {
+		t.Fatalf("limiter holds %d keys, want at most %d", n, limit)
+	}
+	if _, ok := l.entries["second"]; ok {
+		t.Fatal("the least recently updated key was not evicted")
+	}
+	for _, key := range []string{"first", "overflow"} {
+		if _, ok := l.entries[key]; !ok {
+			t.Fatalf("recently updated key %q was evicted", key)
+		}
+	}
+}
+
+func TestRecordFailureReportsTheBlockOnce(t *testing.T) {
+	start := time.Now()
+	l := New(Config{MaxAttempts: 3, Window: time.Minute, BlockWindow: time.Minute})
+
+	for _, at := range []time.Time{start, start.Add(2 * time.Minute)} {
+		for i, want := range []bool{false, false, true, false} {
+			if got := l.RecordFailure("k", at); got != want {
+				t.Fatalf("failure %d at %v: RecordFailure = %v, want %v", i+1, at.Sub(start), got, want)
+			}
+		}
+		if !l.Blocked("k", at) {
+			t.Fatalf("not blocked at %v", at.Sub(start))
+		}
+	}
+}
+
+func TestFailuresCountWithinWindowOfTheLastOne(t *testing.T) {
+	start := time.Now()
+	l := New(Config{MaxAttempts: 3, Window: time.Minute, BlockWindow: time.Hour})
+
+	// Each failure lands within a minute of the previous one.
+	l.RecordFailure("k", start)
+	l.RecordFailure("k", start.Add(50*time.Second))
+	l.RecordFailure("k", start.Add(100*time.Second))
+	if !l.Blocked("k", start.Add(100*time.Second)) {
+		t.Fatal("failures within the window of each other did not block")
+	}
+	if !l.Blocked("k", start.Add(100*time.Second+59*time.Minute)) {
+		t.Fatal("block ended before BlockWindow")
+	}
+	if l.Blocked("k", start.Add(100*time.Second+time.Hour)) {
+		t.Fatal("block outlived BlockWindow")
+	}
+
+	// Failures further apart than the window never add up.
+	for i := range 5 {
+		l.RecordFailure("spaced", start.Add(time.Duration(i)*61*time.Second))
+	}
+	if l.Blocked("spaced", start.Add(5*61*time.Second)) {
+		t.Fatal("failures more than a window apart added up")
+	}
+	if l.Blocked("spaced", start.Add(10*time.Minute)) {
+		t.Fatal("unblocked key reported blocked after its window")
+	}
+	if _, ok := l.entries["spaced"]; ok {
+		t.Fatal("expected the entry to be removed a window after its last failure")
 	}
 }

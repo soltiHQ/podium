@@ -16,12 +16,13 @@ handler/
 | Handler           | Transport | Constructor           | Dependencies                                                         |
 |-------------------|-----------|-----------------------|----------------------------------------------------------------------|
 | `API`             | HTTP      | `NewAPI`              | user, access, session, credential, agent, spec services + proxy.Pool |
-| `HTTPDiscovery`   | HTTP      | `NewHTTPDiscovery`    | agent service                                                        |
-| `GRPCDiscovery`   | gRPC      | `NewGRPCDiscovery`    | agent service                                                        |
-| `UI`              | HTTP      | `NewUI`               | access service                                                       |
+| `HTTPDiscovery`   | HTTP      | `NewHTTPDiscovery`    | agent service, discovery limiter, client IP resolver                 |
+| `GRPCDiscovery`   | gRPC      | `NewGRPCDiscovery`    | agent service, discovery limiter                                     |
+| `UI`              | HTTP      | `NewUI`               | access + spec services, client IP resolver                           |
 | `Static`          | HTTP      | `NewStatic`           | embedded `ui.Static` filesystem                                      |
 
-All constructors panic on nil dependencies — fail-fast at startup.
+All constructors panic on nil dependencies — fail-fast at startup. The client IP resolver is the exception:
+nil means no trusted proxies.
 
 ## Route registration
 ```text
@@ -134,6 +135,11 @@ Every event kind maps to a subject (`event.SubjectOf`):
 | gRPC      | `DiscoverService/Sync` | proto-defined                |
 
 Both parse the agent heartbeat payload, call `model.NewAgentFrom{Sync,Proto}`, then `agentSVC.Upsert`.
+
+With agent auth required, every token failure counts against the pair (client IP, agent ID); the limiter is checked
+before the token. `auth.rate_attempts` failures block that pair for `auth.rate_window`: HTTP answers 429, gRPC
+`ResourceExhausted`. There is no per-IP limit, so agents behind one egress IP (NAT, Kubernetes) never block each other.
+HTTP takes the client IP from `trusted_proxies`; gRPC uses the peer address.
 
 ## UI pages
 | Path                | Handler          | Auth | Permission  |

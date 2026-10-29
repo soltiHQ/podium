@@ -85,7 +85,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		return nil, storage.ErrNotFound
 	}, loghub.Options{})
 	t.Cleanup(logs.Close)
-	streams := middleware.NewStreamLimiter(0)
+	streams := middleware.NewStreamLimiter(0, nil)
 	api := NewAPI(logger,
 		user.New(store, logger),
 		access.New(kit.New(store, auth.Config{JWTSecret: strings.Repeat("k", auth.MinJWTSecretLen)}), store, logger),

@@ -94,7 +94,7 @@ func TestAuthenticatedEventAndTaskLogStreamsShareLimitAndRelease(t *testing.T) {
 	defer func() { _ = pool.Close() }()
 	events := event.NewHub(logger)
 	defer events.Close()
-	handler, logs := buildMainHandler(cfg, logger, svc, authModel, pool, events, standalone.NewLeadership())
+	handler, logs := buildMainHandler(cfg, logger, svc, authModel, pool, events, standalone.NewLeadership(), nil)
 	defer logs.Close()
 	server := httptest.NewServer(handler)
 	defer server.Close()

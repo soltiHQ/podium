@@ -27,7 +27,8 @@ type Auth struct {
 	// Clock used by token issuance and verification.
 	Clock token.Clock
 
-	// Limiter tracks failed login attempts and enforces temporary blocking.
+	// Limiter counts failed logins per account and per client IP.
+	// The other surfaces get their own instances from [NewLimiter].
 	Limiter *ratelimit.Limiter
 
 	// Session provides login, refresh, and revoke operations.
@@ -35,6 +36,18 @@ type Auth struct {
 
 	// Verifier validates incoming access tokens.
 	Verifier *jwt.HSVerifier
+}
+
+// NewLimiter returns a failure limiter configured from cfg: rate_attempts
+// failures, each within rate_window of the previous one, block a key for
+// rate_window.
+func NewLimiter(cfg auth.Config) *ratelimit.Limiter {
+	cfg = cfg.WithDefaults()
+	return ratelimit.New(ratelimit.Config{
+		MaxAttempts: cfg.RateAttempts,
+		Window:      cfg.RateWindow,
+		BlockWindow: cfg.RateWindow,
+	})
 }
 
 // New constructs a fully wired authentication stack.
@@ -70,9 +83,6 @@ func New(store storage.Storage, cfg auth.Config) *Auth {
 				enum.Password: passwordprovider.New(store),
 			},
 		),
-		Limiter: ratelimit.New(ratelimit.Config{
-			MaxAttempts: cfg.RateAttempts,
-			BlockWindow: cfg.RateWindow,
-		}),
+		Limiter: NewLimiter(cfg),
 	}
 }

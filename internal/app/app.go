@@ -26,6 +26,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
 	syncrunner "github.com/soltiHQ/control-plane/internal/server/runner/sync"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
@@ -123,6 +124,12 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		logger.Warn().Msg("agent authentication disabled: any host that reaches the discovery listeners can register agents")
 	}
 
+	resolver, err := clientip.New(cfg.TrustedProxies)
+	if err != nil {
+		closeOnError(raftShutdown, eventHub)
+		return nil, err
+	}
+
 	proxyPool := proxy.NewPool(clientTLS, cfg.AgentAuth.Require)
 
 	htmx.Configure(cfg.Triggers)
@@ -156,7 +163,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	mainHandler, logHub := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership)
+	mainHandler, logHub := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership, resolver)
 	httpCfg := cfg.HTTP
 	httpCfg.TLSConfig = uiServerTLS
 	httpRunner, err := httpserver.New(httpCfg, logger, mainHandler)
@@ -167,7 +174,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	discoveryHandler := buildDiscoveryHandler(logger, svc.agent, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), authModel.Limiter, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled())
+	discoveryHandler := buildDiscoveryHandler(logger, svc.agent, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), kit.NewLimiter(cfg.Auth), resolver, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled())
 	discoveryCfg := cfg.HTTPDiscovery
 	discoveryCfg.TLSConfig = serverTLS
 	httpDiscoveryRunner, err := httpserver.New(discoveryCfg, logger, discoveryHandler)
@@ -178,7 +185,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	grpcSrv := buildGRPCServer(logger, svc.agent, eventHub, leadership, authModel.Limiter, serverTLS, cfg.AgentAuth.Require)
+	grpcSrv := buildGRPCServer(logger, svc.agent, eventHub, leadership, kit.NewLimiter(cfg.Auth), serverTLS, cfg.AgentAuth.Require)
 	grpcRunner, err := grpcserver.New(cfg.GRPC, logger, grpcSrv)
 	if err != nil {
 		logHub.Close()

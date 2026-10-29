@@ -2,6 +2,7 @@ package access
 
 import (
 	"context"
+	"errors"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -9,6 +10,7 @@ import (
 	iauth "github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
+	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
@@ -36,6 +38,11 @@ func New(authSvc *kit.Auth, store storage.Storage, logger zerolog.Logger) *Servi
 }
 
 // Login authenticates a user and returns issued tokens and identity.
+//
+// Failed attempts count against the account and against the client IP; an attempt
+// is refused with ErrRateLimited while either is blocked. The failure that blocks
+// one of them comes back joined with ErrRateLimitReached. A successful login resets
+// the account only, never the client IP.
 func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identity, LoginResult, error) {
 	if req.Subject == "" || req.Password == "" {
 		return nil, LoginResult{}, iauth.ErrInvalidRequest
@@ -43,22 +50,34 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identi
 
 	s.logger.Debug().Str("subject", req.Subject).Msg("login attempt")
 
-	now := s.auth.Clock.Now()
-	if s.auth.Limiter != nil && req.RateKey != "" {
-		if err := s.auth.Limiter.Check(req.RateKey, now); err != nil {
+	var (
+		now     = s.auth.Clock.Now()
+		limiter = s.auth.Limiter
+		account = ratelimit.AccountKey(req.Subject)
+		client  = ratelimit.LoginIPKey(req.ClientIP)
+	)
+	if limiter != nil {
+		if err := limiter.Check(account, now); err != nil {
+			return nil, LoginResult{}, err
+		}
+		if err := limiter.Check(client, now); err != nil {
 			return nil, LoginResult{}, err
 		}
 	}
 
 	pair, id, err := s.auth.Session.Login(ctx, enum.Password, req.Subject, req.Password)
 	if err != nil {
-		if s.auth.Limiter != nil && req.RateKey != "" {
-			s.auth.Limiter.RecordFailure(req.RateKey, now)
+		if limiter != nil {
+			accountBlocked := limiter.RecordFailure(account, now)
+			clientBlocked := limiter.RecordFailure(client, now)
+			if accountBlocked || clientBlocked {
+				err = errors.Join(err, iauth.ErrRateLimitReached)
+			}
 		}
 		return nil, LoginResult{}, err
 	}
-	if s.auth.Limiter != nil && req.RateKey != "" {
-		s.auth.Limiter.Reset(req.RateKey)
+	if limiter != nil {
+		limiter.Reset(account)
 	}
 	s.logger.Info().Str("subject", req.Subject).Str("user_id", id.UserID).Msg("login success")
 	return id, LoginResult{

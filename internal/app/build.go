@@ -39,6 +39,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/durable"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 	"github.com/soltiHQ/control-plane/internal/transport/grpc/interceptor"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
@@ -183,13 +184,15 @@ func waitForLeader(ctx context.Context, l cluster.Leadership) bool {
 	}
 }
 
-func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership) (http.Handler, *loghub.Hub) {
+// buildMainHandler wires the UI and API listener. resolver gives client IPs to
+// its own failure limiter, the login limiter and the stream limiter.
+func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership, resolver *clientip.Resolver) (http.Handler, *loghub.Hub) {
 	var (
 		logHub        = buildLogHub(logger, svc.agent, proxyPool, cfg.Streams)
-		streamLimit   = middleware.NewStreamLimiter(cfg.Streams.MaxPerIP)
+		streamLimit   = middleware.NewStreamLimiter(cfg.Streams.MaxPerIP, resolver)
 		apiHandler    = handler.NewAPI(logger, svc.user, svc.access, svc.session, svc.credential, svc.agent, svc.spec, svc.history, proxyPool, eventHub, logHub, streamLimit)
 		authMW        = middleware.Auth(authModel.Verifier, authModel.Session)
-		uiHandler     = handler.NewUI(logger, svc.access, svc.spec, eventHub)
+		uiHandler     = handler.NewUI(logger, svc.access, svc.spec, eventHub, resolver)
 		staticHandler = handler.NewStatic(logger)
 		logMW         = middleware.Logger(logger)
 		ridMW         = middleware.RequestID()
@@ -211,22 +214,24 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 		ForwardPort: addrPort(cfg.HTTP.Addr),
 		TargetTLS:   cfg.TLS.Server.Enabled(),
 	})(h)
-	h = middleware.RateLimit(authModel.Limiter)(h)
+	h = middleware.RateLimit(kit.NewLimiter(cfg.Auth), resolver)(h)
 	h = middleware.CORS(cfg.CORS)(h)
 	h = middleware.Recovery(logger)(h)
 	return h, logHub
 }
 
-func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, requireAuth bool, targetTLS bool) http.Handler {
+// buildDiscoveryHandler wires the HTTP discovery listener. It has no per-IP
+// limit: the handler counts authentication failures per (client IP, agent ID)
+// in limiter, so agents behind one egress IP never block each other.
+func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, resolver *clientip.Resolver, requireAuth bool, targetTLS bool) http.Handler {
 	var (
-		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC, eventHub, requireAuth)
+		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC, eventHub, limiter, resolver, requireAuth)
 		mux           = http.NewServeMux()
 	)
 	mux.HandleFunc("/api/v1/discovery/sync", httpDiscovery.Sync)
 
 	var h http.Handler = mux
 	h = middleware.Leader(leadership, middleware.LeaderOptions{ForwardPort: httpPort, TargetTLS: targetTLS})(h)
-	h = middleware.RateLimit(limiter)(h)
 	h = middleware.Recovery(logger)(h)
 	h = middleware.Logger(logger)(h)
 	h = middleware.RequestID()(h)
@@ -279,6 +284,9 @@ func addrPort(addr string) int {
 	return n
 }
 
+// buildGRPCServer wires the gRPC discovery listener. Like HTTP discovery, it
+// has no per-IP limit: the Sync handler counts authentication failures per
+// (peer IP, agent ID) in limiter.
 func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, limiter *ratelimit.Limiter, serverTLS *tls.Config, requireAuth bool) *grpc.Server {
 	// Write methods (must run on leader). Sync is the only agent-facing
 	// mutation; everything else is pure read.
@@ -297,14 +305,12 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *e
 			interceptor.UnaryRecovery(logger),
 			interceptor.UnaryRequestID(),
 			interceptor.UnaryLogger(logger),
-			interceptor.UnaryRateLimit(limiter),
 			interceptor.UnaryLeader(leadership, interceptor.LeaderOptions{IsWrite: isWrite}),
 		),
 		grpc.ChainStreamInterceptor(
 			interceptor.StreamRecovery(logger),
 			interceptor.StreamRequestID(),
 			interceptor.StreamLogger(logger),
-			interceptor.StreamRateLimit(limiter),
 			interceptor.StreamLeader(leadership, interceptor.LeaderOptions{IsWrite: isWrite}),
 		),
 	}
@@ -314,7 +320,7 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *e
 
 	var (
 		srv           = grpc.NewServer(opts...)
-		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC, eventHub, requireAuth)
+		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC, eventHub, limiter, requireAuth)
 	)
 	discoverv1.RegisterDiscoverServiceServer(srv, grpcDiscovery)
 	return srv
