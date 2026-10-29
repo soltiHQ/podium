@@ -149,9 +149,11 @@ Then:
 - An attempt is refused with `ErrRateLimited` (HTTP 429) while, for any of its keys, failures plus attempts in flight
   reach `auth.rate_attempts`; a refused attempt reserves nothing. A burst of parallel attempts therefore gets at
   most `auth.rate_attempts` password checks per key.
-- A wrong subject or password (`ErrInvalidCredentials`) turns the slot into a failure on each key (`Attempt.Fail`).
-  `auth.rate_attempts` failures, each within `auth.rate_window` of the previous one, block a key for `auth.rate_window`.
-  Any other error (storage outage, token issue, user without permissions) releases the slots and counts nothing.
+- A wrong subject or password (`ErrInvalidCredentials`) turns the slot into a failure on each key (`Attempt.Fail`), and
+  so does the right password of a user without permissions (`ErrUnauthorized`): the UI answers both alike, so neither
+  the answer nor the limiter tells a right password apart. `auth.rate_attempts` failures, each within
+  `auth.rate_window` of the previous one, block a key for `auth.rate_window`. Any other error (storage outage, token
+  issue) releases the slots and counts nothing.
 - The failure that blocks a key, a device key included, returns its usual error joined with `ErrRateLimitReached`;
   the UI answers it like any failed login and records one `rate_limited` event.
 - A successful login releases the slots (`Attempt.Release`) and resets the device key of a known device, or else the

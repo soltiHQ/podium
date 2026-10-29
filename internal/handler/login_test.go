@@ -440,33 +440,44 @@ func TestLoginSetsDeviceCookie(t *testing.T) {
 	}
 }
 
-// A user without permissions cannot sign in, and the answer to the right
-// password is the answer to a wrong one, so it tells nothing about the
-// password. Such an attempt counts as no failure; the log says why.
+// A user without permissions cannot sign in, and nothing in the answers tells
+// the right password from a wrong one: the same attempts get the same answers,
+// the limiter's 429 and its rate_limited event included. The log says why.
 func TestLoginWithoutPermissionsLooksLikeWrongPassword(t *testing.T) {
-	f := newLoginFixture(t)
-	ctx := context.Background()
-	u, err := f.store.GetUser(ctx, "user-alice")
-	if err != nil {
-		t.Fatal(err)
+	// attempts sends seven logins with password as alice, who has no permissions.
+	attempts := func(t *testing.T, password string) (*loginFixture, []*httptest.ResponseRecorder) {
+		t.Helper()
+		f := newLoginFixture(t)
+		ctx := context.Background()
+		u, err := f.store.GetUser(ctx, "user-alice")
+		if err != nil {
+			t.Fatal(err)
+		}
+		u.SetPermissions(nil)
+		if err := f.store.UpsertUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+		var answers []*httptest.ResponseRecorder
+		for range 7 {
+			answers = append(answers, f.login(loginSubject, password, loginIP))
+		}
+		return f, answers
 	}
-	u.SetPermissions(nil)
-	if err := f.store.UpsertUser(ctx, u); err != nil {
-		t.Fatal(err)
+	wrongFixture, wrong := attempts(t, "wrong-password")
+	f, right := attempts(t, loginPassword)
+	if wrong[4].Code != http.StatusSeeOther || wrong[5].Code != http.StatusTooManyRequests {
+		t.Fatalf("wrong passwords: attempt 5 HTTP %d, attempt 6 HTTP %d; want 303, then 429", wrong[4].Code, wrong[5].Code)
 	}
-
-	wrong := f.login(loginSubject, "wrong-password", loginIP)
-	if wrong.Code != http.StatusSeeOther {
-		t.Fatalf("wrong password: HTTP %d, want 303", wrong.Code)
-	}
-	// One failure so far; five more counted failures would block the account.
-	for i := range 6 {
-		right := f.login(loginSubject, loginPassword, loginIP)
-		if right.Code != wrong.Code || right.Header().Get("Location") != wrong.Header().Get("Location") || right.Body.String() != wrong.Body.String() {
-			t.Fatalf("right password %d: HTTP %d to %q, want the wrong-password answer: HTTP %d to %q",
-				i+1, right.Code, right.Header().Get("Location"), wrong.Code, wrong.Header().Get("Location"))
+	for i := range wrong {
+		if right[i].Code != wrong[i].Code || right[i].Header().Get("Location") != wrong[i].Header().Get("Location") || right[i].Body.String() != wrong[i].Body.String() {
+			t.Fatalf("attempt %d with the right password: HTTP %d to %q, want the wrong-password answer: HTTP %d to %q",
+				i+1, right[i].Code, right[i].Header().Get("Location"), wrong[i].Code, wrong[i].Header().Get("Location"))
 		}
 	}
+	if got, want := f.rateLimitedEvents(), wrongFixture.rateLimitedEvents(); len(got) != 1 || len(want) != 1 || got[0].Payload != want[0].Payload {
+		t.Fatalf("rate_limited events %+v, want those of the wrong passwords %+v", got, want)
+	}
+
 	warned := false
 	for _, line := range strings.Split(strings.TrimSpace(f.logs.String()), "\n") {
 		var entry struct {

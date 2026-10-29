@@ -119,18 +119,20 @@ func (s *outage) GetUserBySubject(ctx context.Context, subject string) (*model.U
 	return s.Storage.GetUserBySubject(ctx, subject)
 }
 
-// Only a wrong subject or password counts toward the limit. Any other failure,
-// such as a storage outage or a user without permissions, releases the
-// attempt: it never blocks the account or the client IP.
-func TestLoginCountsOnlyInvalidCredentials(t *testing.T) {
+// A wrong subject or password counts toward the limit, and so does the right
+// password of a user without permissions, whose answer must not tell it apart.
+// Any other failure, such as a storage outage, releases the attempt: it never
+// blocks the account or the client IP.
+func TestLoginCountsOnlyCredentialFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		password string
 		down     bool
 		want     error
+		counts   bool
 	}{
-		{"storage outage", "wrong-password", true, storage.ErrUnavailable},
-		{"user without permissions", "nobody-password", false, iauth.ErrUnauthorized},
+		{"storage outage", "wrong-password", true, storage.ErrUnavailable, false},
+		{"user without permissions", "nobody-password", false, iauth.ErrUnauthorized, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -154,13 +156,27 @@ func TestLoginCountsOnlyInvalidCredentials(t *testing.T) {
 
 			store.down.Store(tc.down)
 			for i := range 2 * cfg.RateAttempts {
-				if err := login(tc.password); !errors.Is(err, tc.want) || errors.Is(err, iauth.ErrRateLimited) {
-					t.Fatalf("attempt %d: %v, want %v", i+1, err, tc.want)
+				err := login(tc.password)
+				switch {
+				case !tc.counts || i < cfg.RateAttempts:
+					if !errors.Is(err, tc.want) || errors.Is(err, iauth.ErrRateLimited) {
+						t.Fatalf("attempt %d: %v, want %v", i+1, err, tc.want)
+					}
+					blocking := tc.counts && i == cfg.RateAttempts-1
+					if got := errors.Is(err, iauth.ErrRateLimitReached); got != blocking {
+						t.Fatalf("attempt %d: %v; joined with ErrRateLimitReached: %v, want %v", i+1, err, got, blocking)
+					}
+				default:
+					if !errors.Is(err, iauth.ErrRateLimited) {
+						t.Fatalf("attempt %d after %d counted failures: %v, want ErrRateLimited", i+1, cfg.RateAttempts, err)
+					}
 				}
 			}
-			store.down.Store(false)
-			if err := login("wrong-password"); !errors.Is(err, iauth.ErrInvalidCredentials) {
-				t.Fatalf("wrong password afterwards: %v, want ErrInvalidCredentials, not a blocked key", err)
+			if !tc.counts {
+				store.down.Store(false)
+				if err := login("wrong-password"); !errors.Is(err, iauth.ErrInvalidCredentials) {
+					t.Fatalf("wrong password afterwards: %v, want ErrInvalidCredentials, not a blocked key", err)
+				}
 			}
 		})
 	}

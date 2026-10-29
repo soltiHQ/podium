@@ -49,10 +49,6 @@ var discoverySyncMarshal = protojson.MarshalOptions{
 // request body and the gRPC message alike.
 const MaxSyncBytes = 256 << 10
 
-// errTokenTooLong refuses a bearer token over model.AgentTokenMaxBytes before
-// the limiter or the store sees it.
-var errTokenTooLong = errors.New("agent token is too long")
-
 // HTTPDiscovery handles agent discovery over HTTP.
 type HTTPDiscovery struct {
 	logger      zerolog.Logger
@@ -131,7 +127,7 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 		token := bearerToken(r.Header.Get("Authorization"))
 		if err := verifyAgentToken(r.Context(), h.logger, h.agentSVC, h.limiter, h.resolver.IP(r), in.GetId(), token); err != nil {
 			switch {
-			case errors.Is(err, errTokenTooLong):
+			case errors.Is(err, agent.ErrTokenTooLong):
 				response.BadRequestMsg(w, r, mode, "Agent token is too long.")
 			case errors.Is(err, auth.ErrRateLimited):
 				response.AuthRateLimit(w, r, mode)
@@ -207,7 +203,7 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 	if g.requireAuth {
 		if err := verifyAgentToken(ctx, g.logger, g.agentSVC, g.limiter, grpcPeerIP(ctx), req.GetId(), grpcBearerToken(ctx)); err != nil {
 			switch {
-			case errors.Is(err, errTokenTooLong):
+			case errors.Is(err, agent.ErrTokenTooLong):
 				return nil, status.Errorf(ctx, codes.InvalidArgument, "agent token is too long")
 			case errors.Is(err, auth.ErrRateLimited):
 				return nil, status.Errorf(ctx, codes.ResourceExhausted, "rate limited")
@@ -231,16 +227,16 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 
 // verifyAgentToken checks the bearer token of agentID synced from clientIP, for
 // both Sync transports. A token over model.AgentTokenMaxBytes returns
-// errTokenTooLong before anything else. Otherwise it reserves an attempt on the
-// (client IP, agent ID) pair, so checks in flight count like failures: it
-// returns auth.ErrRateLimited while the failures plus the checks in flight of
-// the pair reach the limit. A missing or wrong token (agent.ErrUnauthenticated)
-// becomes a failure, and a missing one logs a WARN, at most rate_attempts per
-// window for the pair; every other outcome, a panic included, releases the
-// attempt.
+// agent.ErrTokenTooLong before anything else. Otherwise it reserves an attempt
+// on the (client IP, agent ID) pair, so checks in flight count like failures:
+// it returns auth.ErrRateLimited while the failures plus the checks in flight
+// of the pair reach the limit. A missing or wrong token
+// (agent.ErrUnauthenticated) becomes a failure, and a missing one logs a WARN,
+// at most rate_attempts per window for the pair; every other outcome, a panic
+// included, releases the attempt.
 func verifyAgentToken(ctx context.Context, logger zerolog.Logger, svc *agent.Service, limiter *ratelimit.Limiter, clientIP, agentID, token string) error {
 	if len(token) > model.AgentTokenMaxBytes {
-		return errTokenTooLong
+		return agent.ErrTokenTooLong
 	}
 	attempt, err := limiter.Reserve(time.Now(), ratelimit.AgentKey(clientIP, agentID))
 	if err != nil {

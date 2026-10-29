@@ -13,14 +13,28 @@ import (
 	"testing"
 )
 
-// quotedVerb is a format verb right after a JavaScript quote, as in
-// fetch('%s'): the value lands inside a hand-written string literal.
-var quotedVerb = regexp.MustCompile(`['"]%[a-zA-Z]`)
+// verb is a format verb, with optional flags, width and argument index, as
+// in %s, %-5v or %[1]s.
+const verb = `%[-+# 0-9.]*(?:\[\d+\])?[a-zA-Z]`
 
-// templQuoteJoin is the same mistake in a .templ file: a Go string that ends
-// or starts with a JavaScript quote, joined to a value with +, as in
-// "fetch('" + url + "')", or a quoted format verb.
-var templQuoteJoin = regexp.MustCompile(`'"\s*\+|\\""\s*\+|\+\s*"'|\+\s*"\\"|'%[a-zA-Z]|\\"%[a-zA-Z]`)
+// bq is a backquote, the delimiter of a Go raw string.
+const bq = "`"
+
+// quotedVerb is a format verb right after a JavaScript quote, as in
+// fetch('%s') or remove("%[1]v"): the value lands inside a hand-written string
+// literal. It applies to the text of a Go string literal.
+var quotedVerb = regexp.MustCompile(`['"]` + verb)
+
+// templShapes finds the same mistakes in a line of a .templ file, where a
+// JavaScript double quote is \" inside a Go string and " inside a raw string:
+// a quoted format verb, or a + that joins a value to a Go string or raw string
+// ending or starting with a JavaScript quote, as in "fetch('" + url + "')" or
+// `remove("` + id + `")`. Raw strings are also checked with quotedVerb.
+var templShapes = regexp.MustCompile(strings.Join([]string{
+	`(?:'|\\")` + verb,                         // '%s, \"%[1]s
+	`(?:'["` + bq + `]|\\""|"` + bq + `)\s*\+`, // '" +, '` +, \"" +, "` +
+	`\+\s*(?:["` + bq + `]'|"\\"|` + bq + `")`, // + "', + `', + "\", + `"
+}, "|"))
 
 // Every dynamic value in an Alpine or HTMX expression goes through String. The
 // templates and their Go builders must not paste a value between JavaScript
@@ -87,7 +101,12 @@ func checkTempl(t *testing.T, path string) {
 		if strings.HasPrefix(strings.TrimSpace(line), "//") {
 			continue
 		}
-		if templQuoteJoin.MatchString(line) {
+		raw := strings.Split(line, bq)
+		inRaw := false
+		for j := 1; j < len(raw); j += 2 {
+			inRaw = inRaw || quotedVerb.MatchString(raw[j])
+		}
+		if inRaw || templShapes.MatchString(line) {
 			t.Errorf("%s:%d: a value pasted between quotes: encode it with jsexpr.String:\n%s", path, i+1, line)
 		}
 	}

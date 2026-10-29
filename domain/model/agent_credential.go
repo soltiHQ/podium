@@ -1,7 +1,6 @@
 package model
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain"
@@ -9,9 +8,11 @@ import (
 
 var _ domain.Entity[*AgentCredential] = (*AgentCredential)(nil)
 
-// AgentTokenMaxBytes caps an agent bearer token. The store copies and syncs
-// its whole state on every write, so a few huge tokens would slow down or
-// exhaust the control plane.
+// AgentTokenMaxBytes caps the bearer token discovery accepts and enrolls. The
+// store copies and syncs its whole state on every write, so a few huge tokens
+// would slow down or exhaust the control plane. The cap applies to tokens
+// agents send, never to stored credentials: one an older version stored with
+// a longer token still loads.
 const AgentTokenMaxBytes = 1024
 
 // AgentCredential is the per-agent bearer secret the control plane learns at
@@ -29,16 +30,15 @@ type AgentCredential struct {
 	token   string
 }
 
-// NewAgentCredential binds a raw token of at most AgentTokenMaxBytes to an agent.
+// NewAgentCredential binds a raw token to an agent. It also rebuilds stored
+// credentials, so it accepts a token of any length; enrollment applies
+// AgentTokenMaxBytes before it.
 func NewAgentCredential(agentID, token string) (*AgentCredential, error) {
 	if agentID == "" {
 		return nil, domain.ErrEmptyID
 	}
 	if token == "" {
 		return nil, domain.ErrFieldEmpty
-	}
-	if len(token) > AgentTokenMaxBytes {
-		return nil, fmt.Errorf("%w: agent token exceeds %d bytes", domain.ErrInvalidArgument, AgentTokenMaxBytes)
 	}
 
 	now := time.Now()

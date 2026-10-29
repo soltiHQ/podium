@@ -64,7 +64,10 @@ agent networks or set tls.server.client_ca_file`.
 
 With `require: true`, a token longer than 1024 bytes is refused before any
 check, with HTTP 400 `Agent token is too long.` / gRPC `InvalidArgument`, and
-nothing is enrolled. gRPC discovery caps request headers at 16 KiB, like the
+nothing is enrolled. The cap applies to what agents send, never to stored
+state: a credential an older version stored with a longer token still loads, so
+podium starts, but that agent's syncs are refused with 400, and no API resets a
+stored credential yet. gRPC discovery caps request headers at 16 KiB, like the
 HTTP listeners.
 
 SDK agents send their token only over TLS unless the agent explicitly allows

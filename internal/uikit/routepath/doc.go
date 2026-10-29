@@ -8,5 +8,6 @@
 // and typo-free across handlers, templates, and Alpine.js fetch calls. Every ID is path-escaped as a single
 // segment (url.PathEscape): it cannot add a query or a fragment, nor break out of the HTML attribute or
 // JavaScript string the URL is placed in. The server routes on the decoded r.URL.Path, where an escaped "/" is a
-// separator again: an ID with a "/" gets 404, and any other ID reaches its handler unchanged.
+// separator again, so an ID that contains "/" is not supported; agent IDs and ksuids cannot contain one. Any other
+// ID reaches its handler unchanged.
 package routepath

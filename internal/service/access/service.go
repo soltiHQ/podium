@@ -52,12 +52,14 @@ func New(authSvc *kit.Auth, store storage.Storage, logger zerolog.Logger) *Servi
 // client IP key. Before the password check, the attempt reserves a slot on its
 // keys, so attempts in flight count like failures: an attempt is refused with
 // ErrRateLimited while, for any of its keys, failures plus attempts in flight
-// reach the limit. Only a wrong subject or password (ErrInvalidCredentials)
-// records a failure on the keys; the failure that blocks one of them comes
-// back joined with ErrRateLimitReached. Any other error, such as a storage
-// outage, releases the slots. A successful login resets the device key of a
-// known device, or else the account key, never the client IP, and returns a
-// new device cookie.
+// reach the limit. A failure is recorded on the keys only for a wrong subject
+// or password (ErrInvalidCredentials) and for the right password of a user
+// without permissions (ErrUnauthorized), whose answer must not tell it apart
+// from a wrong one; the failure that blocks one of the keys comes back joined
+// with ErrRateLimitReached. Any other error, such as a storage outage,
+// releases the slots. A successful login resets the device key of a known
+// device, or else the account key, never the client IP, and returns a new
+// device cookie.
 func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identity, LoginResult, error) {
 	subject := model.NormalizeSubject(req.Subject)
 	if subject == "" || req.Password == "" {
@@ -83,7 +85,7 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identi
 
 	pair, id, err := s.auth.Session.Login(ctx, enum.Password, subject, req.Password)
 	if err != nil {
-		if !errors.Is(err, iauth.ErrInvalidCredentials) {
+		if !errors.Is(err, iauth.ErrInvalidCredentials) && !errors.Is(err, iauth.ErrUnauthorized) {
 			attempt.Release()
 			return nil, LoginResult{}, err
 		}

@@ -145,7 +145,8 @@ With agent auth required, the first sync of an unknown agent ID enrolls the toke
 sets the endpoint podium calls; every later sync of that ID must present the same token. Until enrollment tokens exist,
 only the network or client certificates keep other hosts from enrolling new IDs (see `internal/config`, "Agent
 authentication"). A token over 1024 bytes (`model.AgentTokenMaxBytes`) is refused first, with HTTP 400
-`Agent token is too long.` / gRPC `InvalidArgument`, and counts as no failure. Then each sync reserves an attempt on
+`Agent token is too long.` / gRPC `InvalidArgument`, and counts as no failure; `VerifyOrEnrollToken` never enrolls one
+either, while stored credentials load whatever their length. Then each sync reserves an attempt on
 the pair (client IP, agent ID) before its token check (`verifyAgentToken`), so checks in flight count like failures; a
 missing or wrong token turns the attempt into a failure, any other outcome releases it. A missing token is also logged
 at WARN with the agent ID and the ways out. Both transports share one limiter, so failures over HTTP count toward gRPC

@@ -2,6 +2,7 @@ package wire_test
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,6 +179,23 @@ func TestRollout_ProtoRoundtrip(t *testing.T) {
 	}
 	if back.ObservedGeneration() != 5 {
 		t.Fatalf("observed: %d", back.ObservedGeneration())
+	}
+}
+
+// A stored credential decodes whatever the length of its token: the 1024-byte
+// cap applies when discovery enrolls a token, never when a replica replays or
+// restores one an older version stored.
+func TestAgentCredentialFromProtoKeepsLongTokens(t *testing.T) {
+	token := strings.Repeat("t", 4096)
+	created := nowTruncated()
+	c, err := wire.AgentCredentialFromProto(&raftv1.AgentCredentialMsg{
+		AgentId: "a1", Token: token, CreatedAtNs: created.UnixNano(), UpdatedAtNs: created.UnixNano(),
+	})
+	if err != nil {
+		t.Fatalf("decode a 4096-byte token: %v", err)
+	}
+	if c.AgentID() != "a1" || c.Token() != token || !c.CreatedAt().Equal(created) {
+		t.Fatalf("credential %q, %d-byte token, created %v; want a1, the 4096-byte token, %v", c.AgentID(), len(c.Token()), c.CreatedAt(), created)
 	}
 }
 
