@@ -42,3 +42,22 @@ type Leadership interface {
 	// called again. Returns when the outer ctx is cancelled.
 	WhenLeader(ctx context.Context, fn func(context.Context) error) error
 }
+
+// LeaderReadiness is implemented by drivers whose election can precede state
+// replay. A successful WaitReady means leader reads include prior committed
+// operations. Leadership alone must not be used as a replay readiness check.
+type LeaderReadiness interface {
+	WaitReady(ctx context.Context) error
+}
+
+// AwaitLeaderReady establishes the read-ready boundary before leader work.
+// Drivers without asynchronous recovery retain the Leadership-only contract.
+func AwaitLeaderReady(ctx context.Context, leader Leadership) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if ready, ok := leader.(LeaderReadiness); ok {
+		return ready.WaitReady(ctx)
+	}
+	return nil
+}

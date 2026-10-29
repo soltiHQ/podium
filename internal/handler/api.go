@@ -1,7 +1,10 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -15,6 +18,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
+	"github.com/soltiHQ/control-plane/internal/service/history"
 	"github.com/soltiHQ/control-plane/internal/service/session"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
 	"github.com/soltiHQ/control-plane/internal/service/user"
@@ -45,6 +49,7 @@ type API struct {
 	accessSVC     *access.Service
 	agentSVC      *agent.Service
 	specSVC       *spec.Service
+	historySVC    *history.Service
 	userSVC       *user.Service
 	proxyPool     *proxy.Pool
 	hub           *event.Hub
@@ -63,6 +68,7 @@ func NewAPI(
 	credentialSVC *credential.Service,
 	agentSVC *agent.Service,
 	specSVC *spec.Service,
+	historySVC *history.Service,
 	proxyPool *proxy.Pool,
 	hub *event.Hub,
 	logHub *loghub.Hub,
@@ -86,6 +92,9 @@ func NewAPI(
 	if specSVC == nil {
 		panic(service.ErrNilService)
 	}
+	if historySVC == nil {
+		panic(service.ErrNilService)
+	}
 	if proxyPool == nil {
 		panic(proxy.ErrNilPool)
 	}
@@ -106,6 +115,7 @@ func NewAPI(
 		accessSVC:     accessSVC,
 		agentSVC:      agentSVC,
 		specSVC:       specSVC,
+		historySVC:    historySVC,
 		userSVC:       userSVC,
 		proxyPool:     proxyPool,
 		hub:           hub,
@@ -121,8 +131,11 @@ func (a *API) Routes(mux *http.ServeMux, auth route.BaseMW, _ route.PermMW, comm
 	route.HandleFunc(mux, routepath.ApiUser, a.UsersRouter, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiSession, a.SessionsRouter, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiAgents, a.Agents, append(common, auth)...)
-	route.HandleFunc(mux, "GET /api/v1/agents/{id}/tasks/{taskID}/logs/stream", a.AgentTaskLogsStream, append(common, auth, middleware.StreamLimit(a.streamLimit))...)
+	route.HandleFunc(mux, "GET /api/v1/agents/{id}/tasks/{taskID}/logs/stream", a.AgentTaskLogsStream, append(common, auth, middleware.RequirePermission(enum.AgentsGet), middleware.StreamLimit(a.streamLimit))...)
+	route.HandleFunc(mux, "POST /api/v1/agents/{id}/tasks/{taskID}/cancel", a.AgentTaskCancel, append(common, auth, middleware.RequirePermission(enum.AgentsEdit))...)
+	route.HandleFunc(mux, "GET /api/v1/agents/{id}/tasks/{taskID}", a.AgentTaskDetail, append(common, auth, middleware.RequirePermission(enum.AgentsGet))...)
 	route.HandleFunc(mux, routepath.ApiAgent, a.AgentsRouter, append(common, auth)...)
+	route.HandleFunc(mux, routepath.ApiHistory, a.History, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiSpecs, a.Specs, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiSpec, a.SpecsRouter, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiDashboard, a.Dashboard, append(common, auth)...)
@@ -188,8 +201,22 @@ func (a *API) actor(r *http.Request) string {
 // decodeJSON reads and decodes a JSON request body into v.
 func decodeJSON[T any](r *http.Request) (T, error) {
 	var v T
-	err := json.NewDecoder(r.Body).Decode(&v)
-	return v, err
+	raw, err := io.ReadAll(io.LimitReader(r.Body, (2<<20)+1))
+	if err != nil {
+		return v, err
+	}
+	if len(raw) > 2<<20 {
+		return v, errors.New("JSON request exceeds 2 MiB")
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	if err := d.Decode(&v); err != nil {
+		return v, err
+	}
+	var extra any
+	if err := d.Decode(&extra); err != io.EOF {
+		return v, errors.New("request body must contain one JSON value")
+	}
+	return v, nil
 }
 
 // queryInt reads a query parameter as int, returning fallback if absent or invalid.

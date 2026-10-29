@@ -18,29 +18,11 @@ templ App(title string, active string, n policy.Nav) {
 			"
 		>
 			<main class="mx-auto w-full max-w-7xl px-4 sm:px-6 lg:px-8 py-8">
-				{ children... }
+				<div class="flex items-center justify-end mb-4"><span id="connection-status" role="status" class="text-xs text-muted">Connecting live updates…</span></div>
+ <div id="request-status" hidden role="alert" class="mb-4 p-3 rounded border border-border bg-card text-sm text-danger"></div>
+ { children... }
 			</main>
 		</div>
 
-		<script>
-			(function() {
-				// SSE bridge: push server events into HTMX trigger system.
-				if (typeof EventSource !== 'undefined') {
-					var es = new EventSource('/api/v1/events/stream');
-					es.onmessage = function(e) {
-						if (window.htmx) htmx.trigger(document.body, e.data);
-					};
-				}
-
-				// Redirect to list when a detail page's object is deleted (404).
-				document.body.addEventListener('htmx:afterRequest', function(e) {
-					if (e.detail.successful || !e.detail.xhr || e.detail.xhr.status !== 404) return;
-					var p = window.location.pathname;
-					if (p.startsWith('/users/')) window.location.href = '/users';
-					else if (p.startsWith('/agents/')) window.location.href = '/agents';
-					else if (p.startsWith('/specs/')) window.location.href = '/specs';
-				});
-			})();
-		</script>
 	}
 }

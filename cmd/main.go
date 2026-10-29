@@ -38,13 +38,26 @@ func main() {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	if err := a.Shutdown(shutdownCtx); err != nil {
-		logger.Error().Err(err).Dur("timeout", shutdownTimeout).Msg("shutdown deadline exceeded; exiting dirty")
+	shutdownErr := a.Shutdown(shutdownCtx)
+	if shutdownErr != nil {
+		logger.Error().Err(shutdownErr).Dur("timeout", shutdownTimeout).Msg("shutdown failed")
 	}
 
-	if runErr != nil {
-		logger.Error().Err(runErr).Msg("server exited")
-		os.Exit(1)
+	if code := exitCode(runErr, shutdownErr); code != 0 {
+		logger.Error().Err(runErr).Msg("server exited with error")
+		os.Exit(code)
 	}
 	logger.Info().Msg("server stopped")
+}
+
+// Signal cancellation is a clean shutdown; failed cleanup or runner errors are
+// visible to a supervisor through a nonzero exit status.
+func exitCode(runErr, shutdownErr error) int {
+	if shutdownErr != nil {
+		return 1
+	}
+	if runErr != nil && runErr != context.Canceled {
+		return 1
+	}
+	return 0
 }

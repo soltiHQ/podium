@@ -35,7 +35,11 @@ templ BuilderPage(initial *restv1.Spec) {
 				<!-- Identity -->
 				@builderSection("Identity") {
 					@builderField("name", "Name", "Spec name", true)
-					@builderField("slot", "Slot", "e.g. worker-a", true)
+					if initial == nil {
+ @builderField("slot", "Slot", "e.g. worker-a", true)
+ } else {
+ <div><label for="slot" class={ form.LabelClass }>Slot</label><input id="slot" x-model="slot" readonly class={ form.BaseInputClass + "h-11 px-4" }/><p class="mt-1 text-xs text-muted">The execution lane is immutable. Create another spec for a different slot.</p></div>
+ }
 				}
 
 				<!-- Kind -->
@@ -65,46 +69,14 @@ templ BuilderPage(initial *restv1.Spec) {
 							<template x-if="subprocess_mode === 'command'">
 								<div class="space-y-3">
 									@builderField("cmd", "Command", "e.g. sleep", true)
-									@builderField("args", "Args (space-separated)", "e.g. 30", false)
+									@builderField("args", "Arguments (JSON array)", `["30", "hello world"]`, false)
 								</div>
 							</template>
 
 							<!-- Script mode -->
 							<template x-if="subprocess_mode === 'script'">
 								<div class="space-y-3">
-									<div>
-										<label class={ form.LabelClass }>Runtime</label>
-										<div class="flex flex-wrap gap-2">
-											@scriptRuntimeChip("wellKnown", "SCRIPT_RUNTIME_BASH", "Bash")
-											@scriptRuntimeChip("wellKnown", "SCRIPT_RUNTIME_PYTHON", "Python")
-											@scriptRuntimeChip("wellKnown", "SCRIPT_RUNTIME_NODE", "Node")
-											<button type="button"
-												class="px-3 py-1.5 text-xs rounded-full border transition-colors"
-												x-bind:class="script_runtime_kind === 'custom' ? 'bg-primary/10 border-primary text-primary' : 'border-border text-muted hover:text-fg'"
-												x-on:click="script_runtime_kind = 'custom'">Custom</button>
-										</div>
-									</div>
-
-									<template x-if="script_runtime_kind === 'custom'">
-										<div class="grid grid-cols-2 gap-3">
-											<div>
-												<label for="script_rt_cmd" class={ form.LabelClass }>Interpreter</label>
-												@form.Input(
-													"script_rt_cmd", "text", "", "e.g. ruby",
-													true, false, "",
-													templ.Attributes{"x-model": "script_runtime_custom_command"},
-												)
-											</div>
-											<div>
-												<label for="script_rt_flag" class={ form.LabelClass }>Flag</label>
-												@form.Input(
-													"script_rt_flag", "text", "", "e.g. -e",
-													true, false, "",
-													templ.Attributes{"x-model": "script_runtime_custom_flag"},
-												)
-											</div>
-										</div>
-									</template>
+ @builderField("script_interpreter", "Interpreter", "bash, python3, node, or an absolute executable path", true)
 
 									<!-- Drag-drop + file picker -->
 									<div>
@@ -129,7 +101,7 @@ templ BuilderPage(initial *restv1.Spec) {
 											placeholder="#!/usr/bin/env bash&#10;echo hello"></textarea>
 									</div>
 
-									@builderField("args", "Args (space-separated)", "passed after body", false)
+									@builderField("args", "Arguments (JSON array)", `["hello world", ""]`, false)
 								</div>
 							</template>
 
@@ -165,7 +137,7 @@ templ BuilderPage(initial *restv1.Spec) {
 							<label class={ form.LabelClass }>Container Config (JSON)</label>
 							<textarea x-model="container_json" rows="5"
 								class={ textareaClass }
-								placeholder='{"image": "alpine:latest", "command": "sh"}'></textarea>
+								placeholder='{"image": "alpine:latest", "command": {"items": ["sh"]}, "args": ["-c", "echo hello"]}'></textarea>
 						</div>
 					</template>
 				}
@@ -243,7 +215,10 @@ templ BuilderPage(initial *restv1.Spec) {
 								x-on:click="target_mode = 'labels'">Labels</button>
 						</div>
 
-						<template x-if="target_mode === 'agents'">
+						<p class="text-xs text-muted">Explicit agents and label matches are combined. All labels must match.</p>
+ <p x-show="agent_error" x-text="agent_error" class="text-xs text-danger" role="alert"></p>
+ <button type="button" x-show="agent_error" x-on:click="loadAgents()" class="text-xs text-primary">Retry agent lookup</button>
+ <template x-if="target_mode === 'agents'">
 							<div>
 								@agentMultiSelect()
 							</div>
@@ -280,7 +255,15 @@ templ BuilderPage(initial *restv1.Spec) {
 			</div>
 		</div>
 
-		<!-- Footer -->
+		<div class="px-6 py-4 border-t border-border" x-show="error" x-cloak>
+ <p x-text="error" role="alert" class="text-sm text-danger"></p>
+ <pre x-show="legacy_script_blocked" x-text="legacy_script_json" class="mt-3 p-3 rounded border border-border text-xs font-mono whitespace-pre-wrap break-words"></pre>
+ <button type="button" x-show="legacy_script_blocked" x-on:click="legacy_script_blocked=false;error=''" class="mt-2 text-sm text-primary">Use the reviewed interpreter and file-execution contract</button>
+ if initial != nil {
+ <a x-show="conflict" href={ templ.SafeURL(formCancelHref(initial)) } target="_blank" rel="noopener" class="text-sm text-primary">Open latest saved spec</a>
+ }
+ </div>
+ <!-- Footer -->
 		<div class="flex items-center justify-between gap-3 px-6 py-4 border-t border-border bg-surface-dim">
 			<a href={ templ.SafeURL(formCancelHref(initial)) }
 				class="text-sm text-muted hover:text-fg transition-colors">Cancel</a>
@@ -360,18 +343,6 @@ templ subprocessModeChip(mode string, label string) {
 		class="px-3 py-1.5 text-xs rounded-full border transition-colors"
 		x-bind:class={ "subprocess_mode === '" + mode + "' ? 'bg-primary/10 border-primary text-primary' : 'border-border text-muted hover:text-fg'" }
 		x-on:click={ "subprocess_mode = '" + mode + "'" }>{ label }</button>
-}
-
-// scriptRuntimeChip renders a single well-known runtime option. The
-// `kind` argument is always "wellKnown" here (Custom is handled in the
-// template directly because it toggles extra fields). `value` is the
-// full proto enum name (e.g. SCRIPT_RUNTIME_BASH) — pbjson on the
-// agent parses that form.
-templ scriptRuntimeChip(kind string, value string, label string) {
-	<button type="button"
-		class="px-3 py-1.5 text-xs rounded-full border transition-colors"
-		x-bind:class={ "(script_runtime_kind === '" + kind + "' && script_runtime_well_known === '" + value + "') ? 'bg-primary/10 border-primary text-primary' : 'border-border text-muted hover:text-fg'" }
-		x-on:click={ "script_runtime_kind = '" + kind + "'; script_runtime_well_known = '" + value + "'" }>{ label }</button>
 }
 
 // agentMultiSelect renders the agent multi-select dropdown.

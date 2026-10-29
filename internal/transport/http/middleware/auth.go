@@ -1,8 +1,11 @@
 package middleware
 
 import (
+	"errors"
 	"net/http"
 	"strings"
+
+	"github.com/soltiHQ/control-plane/internal/auth"
 
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
@@ -22,13 +25,35 @@ func Auth(verifier token.Verifier, sessionSvc *session.Service) func(http.Handle
 				mode            = httpctx.ModeFromRequest(r)
 				raw, fromHeader = extractBearer(r)
 			)
-			if raw == "" {
+			if raw == "" && fromHeader {
 				response.Unauthorized(w, r, mode)
+				return
+			}
+			if raw == "" {
+				id, err := tryRefresh(w, r, sessionSvc)
+				if err != nil || id == nil {
+					response.Unauthorized(w, r, mode)
+					return
+				}
+				next.ServeHTTP(w, r.WithContext(transportctx.WithIdentity(r.Context(), id)))
 				return
 			}
 
 			id, err := verifier.Verify(r.Context(), raw)
 			if err == nil {
+				id, err = sessionSvc.AuthorizeAccess(r.Context(), id)
+				if err != nil {
+					switch {
+					case errors.Is(err, auth.ErrRevoked), errors.Is(err, auth.ErrInvalidToken), errors.Is(err, auth.ErrUnauthorized):
+						if !fromHeader {
+							httpcookie.DeleteAuth(w, r)
+						}
+						response.Unauthorized(w, r, mode)
+					default:
+						response.Unavailable(w, r, mode)
+					}
+					return
+				}
 				next.ServeHTTP(w, r.WithContext(transportctx.WithIdentity(r.Context(), id)))
 				return
 			}
@@ -74,6 +99,7 @@ func extractBearer(r *http.Request) (token string, fromHeader bool) {
 		if len(h) >= len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
 			return strings.TrimSpace(h[len(prefix):]), true
 		}
+		return "", true
 	}
 	if c, err := httpcookie.GetAccessToken(r); err == nil && c.Value != "" {
 		return c.Value, false
@@ -84,16 +110,24 @@ func extractBearer(r *http.Request) (token string, fromHeader bool) {
 func tryRefresh(w http.ResponseWriter, r *http.Request, svc *session.Service) (*identity.Identity, error) {
 	refreshCookie, err := httpcookie.GetRefreshToken(r)
 	if err != nil || refreshCookie.Value == "" {
-		return nil, err
+		return nil, auth.ErrInvalidRefresh
 	}
 	sessionCookie, err := httpcookie.GetSessionID(r)
 	if err != nil || sessionCookie.Value == "" {
-		return nil, err
+		return nil, auth.ErrInvalidRefresh
+	}
+	if svc == nil {
+		return nil, auth.ErrInvalidRequest
 	}
 
 	pair, id, err := svc.Refresh(r.Context(), sessionCookie.Value, refreshCookie.Value)
 	if err != nil {
-		httpcookie.DeleteAuth(w, r)
+		// A parallel rotation may already have installed newer browser cookies.
+		// Reject this request without overwriting that successful response.
+		return nil, err
+	}
+	id, err = svc.AuthorizeAccess(r.Context(), id)
+	if err != nil {
 		return nil, err
 	}
 	httpcookie.SetAuth(w, r, pair.AccessToken, pair.RefreshToken, id.SessionID)

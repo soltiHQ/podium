@@ -6,7 +6,10 @@ package app
 
 import (
 	"context"
+	"sync"
 	"time"
+
+	"github.com/soltiHQ/control-plane/internal/loghub"
 
 	"github.com/rs/zerolog"
 
@@ -18,6 +21,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/server"
 	"github.com/soltiHQ/control-plane/internal/server/runner/grpcserver"
+	historyrunner "github.com/soltiHQ/control-plane/internal/server/runner/history"
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
 	syncrunner "github.com/soltiHQ/control-plane/internal/server/runner/sync"
@@ -45,7 +49,10 @@ type App struct {
 	proxyPool    *proxy.Pool
 	authModel    *kit.Auth
 
-	server *server.Server
+	server       *server.Server
+	logHub       *loghub.Hub
+	shutdownOnce sync.Once
+	shutdownDone chan struct{}
 }
 
 // New assembles all dependencies and seeds initial data when this replica is
@@ -58,14 +65,23 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 	}
 
 	authModel := kit.New(store, cfg.Auth)
-	svc := initServices(store, authModel, logger)
+	svc, err := initServices(store, authModel, cfg.History.Archive, logger)
+	if err != nil {
+		closeOnError(raftShutdown, eventHub)
+		return nil, err
+	}
 
 	// Default users/roles/credentials seeding must run through the store.
 	// In raft mode that means only the leader actually persists — followers
 	// would get "not the leader" on Upsert. Solution: wait for any leader,
 	// then only the leader seeds. If this replica is a follower, skip —
 	// leader's writes will replicate here automatically.
-	if waitForLeader(ctx, leadership, leaderWaitTimeout) && leadership.AmLeader() {
+	seed, readyErr := readyForBootstrap(ctx, leadership, leaderWaitTimeout)
+	if readyErr != nil {
+		closeOnError(raftShutdown, eventHub)
+		return nil, readyErr
+	}
+	if seed {
 		if err = bootstrap.Run(ctx, logger, svc.role, svc.user, svc.credential); err != nil {
 			closeOnError(raftShutdown, eventHub)
 			return nil, err
@@ -123,18 +139,26 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	syncRunner, err := syncrunner.New(cfg.Sync, logger, store, proxyPool, eventHub, leadership)
+	syncRunner, err := syncrunner.New(cfg.Sync, logger, store, proxyPool, eventHub, svc.history, leadership)
 	if err != nil {
 		proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
 
-	mainHandler := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership)
+	historyRunner, err := historyrunner.New(cfg.History.Collector, logger, store, proxyPool, svc.history, leadership)
+	if err != nil {
+		proxyPool.Close()
+		closeOnError(raftShutdown, eventHub)
+		return nil, err
+	}
+
+	mainHandler, logHub := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership)
 	httpCfg := cfg.HTTP
 	httpCfg.TLSConfig = uiServerTLS
 	httpRunner, err := httpserver.New(httpCfg, logger, mainHandler)
 	if err != nil {
+		logHub.Close()
 		proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
@@ -145,6 +169,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 	discoveryCfg.TLSConfig = serverTLS
 	httpDiscoveryRunner, err := httpserver.New(discoveryCfg, logger, discoveryHandler)
 	if err != nil {
+		logHub.Close()
 		proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
@@ -153,13 +178,15 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 	grpcSrv := buildGRPCServer(logger, svc.agent, eventHub, leadership, authModel.Limiter, serverTLS, cfg.AgentAuth.Require)
 	grpcRunner, err := grpcserver.New(cfg.GRPC, logger, grpcSrv)
 	if err != nil {
+		logHub.Close()
 		proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
 
-	srv, err := server.New(cfg.Server, logger, httpRunner, httpDiscoveryRunner, grpcRunner, lifecycleRunner, syncRunner)
+	srv, err := server.New(cfg.Server, logger, httpRunner, httpDiscoveryRunner, grpcRunner, lifecycleRunner, syncRunner, historyRunner)
 	if err != nil {
+		logHub.Close()
 		proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
@@ -173,7 +200,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		raftShutdown: raftShutdown,
 		proxyPool:    proxyPool,
 		authModel:    authModel,
-		server:       srv,
+		server:       srv, logHub: logHub, shutdownDone: make(chan struct{}),
 	}, nil
 }
 
@@ -190,24 +217,28 @@ func (a *App) Run(ctx context.Context) error {
 //
 // Returns an error if the deadline elapses before cleanup completes.
 func (a *App) Shutdown(ctx context.Context) error {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if a.proxyPool != nil {
-			a.proxyPool.Close()
-			a.proxyPool = nil
+	a.shutdownOnce.Do(func() {
+		if a.shutdownDone == nil {
+			a.shutdownDone = make(chan struct{})
 		}
-		if a.eventHub != nil {
-			a.eventHub.Close()
-			a.eventHub = nil
-		}
-		if a.raftShutdown != nil {
-			a.raftShutdown()
-			a.raftShutdown = nil
-		}
-	}()
+		go func() {
+			defer close(a.shutdownDone)
+			if a.logHub != nil {
+				a.logHub.Close()
+			}
+			if a.proxyPool != nil {
+				a.proxyPool.Close()
+			}
+			if a.eventHub != nil {
+				a.eventHub.Close()
+			}
+			if a.raftShutdown != nil {
+				a.raftShutdown()
+			}
+		}()
+	})
 	select {
-	case <-done:
+	case <-a.shutdownDone:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

@@ -1,44 +1,19 @@
-# internal/bootstrap
-Seed data is required for the control-plane to function on the first startup.
+# First-start bootstrap
 
-## Package map
-```text
-bootstrap/
-└── bootstrap.go    Run() entry point, seedRoles, seedAdmin
-```
+Bootstrap creates missing built-in roles and the missing `user-admin` identity
+(subject `admin`, administrator role). It generates and logs a password only
+when that user's password credential is absent. This also repairs a partially
+completed first startup.
 
-## What gets seeded
+Existing roles, profile fields, disabled state, role assignments and password
+credentials are preserved on every restart. A persisted administrator is never
+silently re-enabled or assigned a new password by bootstrap. Retrieve the
+generated password from the first-start log and manage subsequent credentials
+through the authenticated account workflow.
 
-### Roles
-All roles defined in `domain/kind.BuiltinRoles` are upserted via `role.Service`.
+The startup context is checked before seeding. Storage errors abort bootstrap;
+they do not trigger deletion, reset or replacement of existing state. Durable
+storage restores state before services and bootstrap run.
 
-### Admin user
-A single admin user with a randomly generated password:
-- ID: `user-admin`, subject: `admin`
-- Role: `kind.RoleAdminID` (`001`)
-- Password: crypto/rand, base64 URL-safe, 32 characters
-
-The generated password is logged at **Warn** level on every startup
-so the operator can retrieve it from the output.
-
-## Startup flow
-```text
-cmd/main.go
-    │
-    ▼
-bootstrap.Run(ctx, logger, roleSVC, userSVC, credSVC)
-    │
-    ├─ seedRoles     kind.BuiltinRoles → roleSVC.Upsert
-    │
-    └─ seedAdmin     model.NewUser → userSVC.Upsert
-                     credentials.GeneratePassword → credSVC.SetPassword
-                     logger.Warn (login + password)
-```
-
-## Dependencies
-```text
-bootstrap.Run
-    ├── role.Service         upsert built-in roles
-    ├── user.Service         upsert admin user
-    └── credential.Service   set admin password
-```
+`bootstrap_test.go` covers an existing operator-managed administrator, partial
+first-start repair and canceled startup.

@@ -1,11 +1,16 @@
 package cluster
 
+import (
+	"fmt"
+	"strings"
+)
+
 // Backend picks the storage + replication strategy at startup.
 type Backend string
 
 const (
-	// BackendStandalone runs as a single-node deployment using an
-	// in-memory store. Always leader. Default.
+	// BackendStandalone runs as a single-node deployment using a
+	// durable disk-backed store. Explicit Standalone.Ephemeral opts into memory. Always leader. Default.
 	BackendStandalone Backend = "standalone"
 
 	// BackendRaft runs as a multi-replica HA cluster. Replicas keep their
@@ -15,9 +20,20 @@ const (
 
 // Config is the top-level cluster configuration.
 type Config struct {
-	Backend   Backend         `yaml:"backend"   envconfig:"BACKEND"`
-	Raft      RaftConfig      `yaml:"raft"      envconfig:"RAFT"`
-	Discovery DiscoveryConfig `yaml:"discovery" envconfig:"DISCOVERY"`
+	Standalone StandaloneConfig `yaml:"standalone" envconfig:"STANDALONE"`
+	Backend    Backend          `yaml:"backend"   envconfig:"BACKEND"`
+	Raft       RaftConfig       `yaml:"raft"      envconfig:"RAFT"`
+	Discovery  DiscoveryConfig  `yaml:"discovery" envconfig:"DISCOVERY"`
+}
+
+// DefaultStandaloneDataDir is relative to the process working directory.
+const DefaultStandaloneDataDir = "data/podium"
+
+// StandaloneConfig configures persistent single-node storage.
+// Ephemeral explicitly opts into volatile development state and ignores DataDir.
+type StandaloneConfig struct {
+	Ephemeral bool   `yaml:"ephemeral" envconfig:"EPHEMERAL"`
+	DataDir   string `yaml:"data_dir" envconfig:"DATA_DIR"`
 }
 
 // RaftConfig parametrises the raft backend.
@@ -40,5 +56,20 @@ type DiscoveryConfig struct {
 
 // DefaultConfig returns a standalone config.
 func DefaultConfig() Config {
-	return Config{Backend: BackendStandalone}
+	return Config{Backend: BackendStandalone, Standalone: StandaloneConfig{DataDir: DefaultStandaloneDataDir}}
+}
+
+// Validate requires a persistent standalone location unless ephemeral mode is
+// explicitly selected. Ephemeral takes precedence over a default/yaml/env path.
+func (c Config) Validate() error {
+	switch c.Backend {
+	case "", BackendStandalone:
+		if !c.Standalone.Ephemeral && strings.TrimSpace(c.Standalone.DataDir) == "" {
+			return fmt.Errorf("standalone.data_dir is required unless standalone.ephemeral is explicitly true")
+		}
+	case BackendRaft:
+	default:
+		return fmt.Errorf("unknown backend %q", c.Backend)
+	}
+	return nil
 }

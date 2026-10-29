@@ -1,6 +1,11 @@
 package proxy
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"github.com/soltiHQ/control-plane/domain/enum"
+)
 
 func TestNormalizeGrpcTarget(t *testing.T) {
 	cases := []struct {
@@ -24,5 +29,16 @@ func TestNormalizeGrpcTarget(t *testing.T) {
 				t.Errorf("normalizeGrpcTarget(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPoolGetAfterCloseReturnsError(t *testing.T) {
+	p := NewPool(nil)
+	_ = p.Close()
+	if _, err := p.Get("localhost:9999", enum.EndpointGRPC, enum.APIVersionV1, ""); !errors.Is(err, ErrClosed) {
+		t.Fatalf("closed pool reopened: %v", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"github.com/rs/zerolog"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -114,11 +115,13 @@ func (s *Service) Upsert(ctx context.Context, m *model.Agent) error {
 	}
 
 	var existed bool
+	var reconnected bool
 	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
 		existing, err := tx.GetAgent(ctx, m.ID())
 		switch {
 		case err == nil:
 			existed = true
+			reconnected = existing.Status() != enum.AgentStatusActive || m.UptimeSeconds() < existing.UptimeSeconds()
 			m.SetCreatedAt(existing.CreatedAt())
 			for k, v := range existing.LabelsAll() {
 				m.LabelAdd(k, v)
@@ -127,13 +130,39 @@ func (s *Service) Upsert(ctx context.Context, m *model.Agent) error {
 				m.SetHeartbeatInterval(existing.HeartbeatInterval())
 			}
 		case errors.Is(err, storage.ErrNotFound):
+			reconnected = true
 		default:
 			return err
 		}
 		if hb := m.HeartbeatInterval(); hb > 0 {
 			m.SetStaleAt(m.LastSeenAt().Add(hb))
 		}
-		return tx.UpsertAgent(ctx, m)
+		if err := tx.UpsertAgent(ctx, m); err != nil {
+			return err
+		}
+		if reconnected {
+			rollouts, err := storage.AllRollouts(ctx, tx, tx.BuildRolloutFilter(storage.RolloutQueryCriteria{AgentID: m.ID()}))
+			if err != nil {
+				return err
+			}
+			for _, ro := range rollouts {
+				if ro.Status() != enum.SyncStatusFailed && ro.Status() != enum.SyncStatusUnknown {
+					continue
+				}
+				if ro.Intent() == enum.RolloutIntentNoop {
+					if ro.ActualTaskID() == "" {
+						ro.SetIntent(enum.RolloutIntentInstall)
+					} else {
+						ro.SetIntent(enum.RolloutIntentUpdate)
+					}
+				}
+				ro.MarkPending(ro.DesiredGeneration())
+				if err = tx.UpsertRollout(ctx, ro); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return err

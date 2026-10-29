@@ -7,11 +7,12 @@ import "github.com/soltiHQ/control-plane/internal/auth/identity"
 // It encapsulates which top-level menu items the authenticated user may see
 // (Show* flags) and which create-actions are available (Can* flags).
 type Nav struct {
-	ShowUsers  bool
-	ShowTasks  bool
-	ShowAgents bool
-	CanAddUser bool
-	CanAddSpec bool
+	ShowUsers   bool
+	ShowTasks   bool
+	ShowAgents  bool
+	ShowHistory bool
+	CanAddUser  bool
+	CanAddSpec  bool
 }
 
 // BuildNav derives UI navigation flags from the authenticated identity.
@@ -22,10 +23,11 @@ func BuildNav(id *identity.Identity) Nav {
 
 	perms := permSet(id)
 	return Nav{
-		CanAddUser: hasAny(perms, usersAdd),
-		ShowTasks:  hasAny(perms, specsGet),
-		CanAddSpec: hasAny(perms, specsAdd),
-		ShowAgents: hasAny(perms, agentsGet, agentsEdit),
-		ShowUsers:  hasAny(perms, usersGet, usersAdd, usersEdit, usersDelete),
+		CanAddUser:  hasAny(perms, usersAdd),
+		ShowTasks:   hasAny(perms, specsGet),
+		CanAddSpec:  hasAny(perms, specsAdd),
+		ShowAgents:  hasAny(perms, agentsGet, agentsEdit),
+		ShowHistory: hasAny(perms, agentsGet),
+		ShowUsers:   hasAny(perms, usersGet, usersAdd, usersEdit, usersDelete),
 	}
 }

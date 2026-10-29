@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -10,17 +11,17 @@ import (
 	"testing"
 
 	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
-	"google.golang.org/protobuf/encoding/protojson"
+	"github.com/soltiHQ/control-plane/domain/model"
 )
 
 // httpProxyV1.ApplyTask must return the TaskId from ApplyTaskResponse.
 // Without it CP cannot later DeleteTask or GetTaskStatus for this exact
 // run, which breaks the uninstall (delete-on-target-removal) flow.
 func TestHttpProxyV1_ApplyTask_ReturnsTaskID(t *testing.T) {
-	want := "sub-my-slot-42"
+	want := "my-task"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut || !strings.HasSuffix(r.URL.Path, "/api/v1/tasks") {
+		if r.Method != http.MethodPut || !strings.HasSuffix(r.URL.Path, "/apis/solti.io/v1/tasks/my-task") {
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
 			return
@@ -28,7 +29,7 @@ func TestHttpProxyV1_ApplyTask_ReturnsTaskID(t *testing.T) {
 		// Drain so we don't trip test server's internal assertions.
 		_, _ = io.Copy(io.Discard, r.Body)
 
-		body, err := protojson.Marshal(&taskv1.ApplyTaskResponse{TaskId: want})
+		body, err := json.Marshal(map[string]any{"metadata": map[string]any{"name": want, "uid": "uid-1"}})
 		if err != nil {
 			t.Fatalf("marshal response: %v", err)
 		}
@@ -41,7 +42,7 @@ func TestHttpProxyV1_ApplyTask_ReturnsTaskID(t *testing.T) {
 	p := &httpProxyV1{endpoint: srv.URL, client: srv.Client()}
 
 	got, err := p.ApplyTask(context.Background(), TaskSubmission{
-		Spec: &taskv1.CreateSpec{Slot: "my-slot"},
+		Spec: httpTestManifest(t, "my-task"),
 	})
 	if err != nil {
 		t.Fatalf("ApplyTask: %v", err)
@@ -56,7 +57,7 @@ func TestHttpProxyV1_ApplyTask_ReturnsTaskID(t *testing.T) {
 // than pretend-it-is-synced.
 func TestHttpProxyV1_ApplyTask_RejectsEmptyTaskID(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := protojson.Marshal(&taskv1.ApplyTaskResponse{TaskId: ""})
+		body, _ := json.Marshal(map[string]any{"metadata": map[string]any{"name": ""}})
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)
@@ -65,7 +66,7 @@ func TestHttpProxyV1_ApplyTask_RejectsEmptyTaskID(t *testing.T) {
 
 	p := &httpProxyV1{endpoint: srv.URL, client: srv.Client()}
 
-	_, err := p.ApplyTask(context.Background(), TaskSubmission{Spec: &taskv1.CreateSpec{Slot: "s"}})
+	_, err := p.ApplyTask(context.Background(), TaskSubmission{Spec: httpTestManifest(t, "task")})
 	if err == nil {
 		t.Fatal("expected error for empty task_id")
 	}
@@ -91,11 +92,23 @@ func TestHttpProxyV1_ApplyTask_Surfaces400Envelope(t *testing.T) {
 
 	p := &httpProxyV1{endpoint: srv.URL, client: srv.Client()}
 
-	_, err := p.ApplyTask(context.Background(), TaskSubmission{Spec: &taskv1.CreateSpec{Slot: ""}})
+	_, err := p.ApplyTask(context.Background(), TaskSubmission{Spec: httpTestManifest(t, "task")})
 	if err == nil {
 		t.Fatal("expected error for 400")
 	}
 	if !strings.Contains(err.Error(), "InvalidRequest") || !strings.Contains(err.Error(), "slot cannot be empty") {
 		t.Errorf("error should carry SDK envelope, got %q", err.Error())
 	}
+}
+
+func httpTestManifest(t *testing.T, name string) *taskv1.TaskManifest {
+	t.Helper()
+	s, _ := model.NewSpec("test", "test", "my-slot")
+	s.SetKindConfig(map[string]any{"command": map[string]any{"command": "echo"}})
+	m, err := SpecToProto(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Metadata.Name = name
+	return m
 }

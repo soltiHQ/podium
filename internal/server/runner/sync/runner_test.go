@@ -31,7 +31,7 @@ func (agentNotFound) ErrorKind() errkind.Kind { return errkind.NotFound }
 // fakeProxy records every call. Tests configure return values up front
 // and assert on the recorded call sequence afterwards.
 type fakeProxy struct {
-	applies      []*taskv1.CreateSpec
+	applies      []*taskv1.TaskManifest
 	applyResp    []string // pop from front, one per Apply call
 	applyErr     []error
 	deletes      []string
@@ -39,6 +39,9 @@ type fakeProxy struct {
 	gets         []string
 	listTaskRuns []string
 	listCalls    int
+	onApply      func()
+	onDelete     func()
+	getErr       error
 }
 
 func (f *fakeProxy) ListTasks(ctx context.Context, _ proxy.TaskFilter) (*proxyv1.ListTasksResponse, error) {
@@ -48,6 +51,9 @@ func (f *fakeProxy) ListTasks(ctx context.Context, _ proxy.TaskFilter) (*proxyv1
 
 func (f *fakeProxy) ApplyTask(ctx context.Context, sub proxy.TaskSubmission) (string, error) {
 	f.applies = append(f.applies, sub.Spec)
+	if f.onApply != nil {
+		f.onApply()
+	}
 	var id string
 	var err error
 	if len(f.applyResp) > 0 {
@@ -63,6 +69,9 @@ func (f *fakeProxy) ApplyTask(ctx context.Context, sub proxy.TaskSubmission) (st
 
 func (f *fakeProxy) DeleteTask(ctx context.Context, id string) error {
 	f.deletes = append(f.deletes, id)
+	if f.onDelete != nil {
+		f.onDelete()
+	}
 	if len(f.deleteErr) > 0 {
 		err := f.deleteErr[0]
 		f.deleteErr = f.deleteErr[1:]
@@ -73,7 +82,7 @@ func (f *fakeProxy) DeleteTask(ctx context.Context, id string) error {
 
 func (f *fakeProxy) GetTask(ctx context.Context, id string) (*proxyv1.GetTaskResponse, error) {
 	f.gets = append(f.gets, id)
-	return &proxyv1.GetTaskResponse{}, nil
+	return &proxyv1.GetTaskResponse{}, f.getErr
 }
 
 func (f *fakeProxy) ListTaskRuns(ctx context.Context, id string) (*proxyv1.ListTaskRunsResponse, error) {
@@ -173,7 +182,9 @@ func TestReconcileInstallSavesTaskIDAndSyncs(t *testing.T) {
 func TestReconcileUpdateAppliesAndSwapsTaskID(t *testing.T) {
 	fp := &fakeProxy{applyResp: []string{"sub-slot-2"}}
 	r, store, _ := newFakeRunner(t, fp)
-	_ = seedSpecAndAgent(t, store, "sp-1", "agent-a")
+	ts := seedSpecAndAgent(t, store, "sp-1", "agent-a")
+	ts.BumpGeneration()
+	_ = store.UpsertSpec(context.Background(), ts)
 
 	ro, _ := model.NewRollout("sp-1", "agent-a", 1)
 	ro.SetActualTaskID("sub-slot-old")
@@ -210,7 +221,9 @@ func TestReconcileUpdateApplyFailureKeepsOldTaskID(t *testing.T) {
 		applyErr:  []error{applyErr},
 	}
 	r, store, _ := newFakeRunner(t, fp)
-	_ = seedSpecAndAgent(t, store, "sp-1", "agent-a")
+	ts := seedSpecAndAgent(t, store, "sp-1", "agent-a")
+	ts.BumpGeneration()
+	_ = store.UpsertSpec(context.Background(), ts)
 
 	ro, _ := model.NewRollout("sp-1", "agent-a", 1)
 	ro.SetActualTaskID("sub-slot-old")

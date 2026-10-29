@@ -16,9 +16,11 @@ import (
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/server"
 	"github.com/soltiHQ/control-plane/internal/server/runner/grpcserver"
+	historyrunner "github.com/soltiHQ/control-plane/internal/server/runner/history"
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
 	syncrunner "github.com/soltiHQ/control-plane/internal/server/runner/sync"
+	"github.com/soltiHQ/control-plane/internal/service/history"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/transport/tlsconf"
 	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
@@ -47,8 +49,15 @@ type AgentAuthConfig struct {
 	Require bool `yaml:"require" envconfig:"REQUIRE"`
 }
 
+// HistoryConfig separates durable retention from bounded collection.
+type HistoryConfig struct {
+	Archive   history.Config       `yaml:"archive" envconfig:"ARCHIVE"`
+	Collector historyrunner.Config `yaml:"collector" envconfig:"COLLECTOR"`
+}
+
 // Config holds the full application configuration.
 type Config struct {
+	History       HistoryConfig            `yaml:"history" envconfig:"HISTORY"`
 	HTTP          httpserver.Config        `yaml:"http"           envconfig:"HTTP"`
 	HTTPDiscovery httpserver.Config        `yaml:"http_discovery" envconfig:"HTTP_DISCOVERY"`
 	GRPC          grpcserver.Config        `yaml:"grpc"           envconfig:"GRPC"`
@@ -79,6 +88,7 @@ func Default() Config {
 			AllowOrigins: []string{"*"},
 		},
 		Cluster: cluster.DefaultConfig(),
+		History: HistoryConfig{Archive: history.DefaultConfig(), Collector: historyrunner.DefaultConfig()},
 		Streams: middleware.StreamsConfig{
 			MaxPerIP:         10,
 			SubscriberBuffer: 64,
@@ -88,6 +98,15 @@ func Default() Config {
 
 // Validate reports an error if any sub-config has invalid or unsafe values.
 func (c Config) Validate() error {
+	if err := c.History.Archive.Validate(); err != nil {
+		return fmt.Errorf("config.history.archive: %w", err)
+	}
+	if err := c.History.Collector.Validate(); err != nil {
+		return fmt.Errorf("config.history.collector: %w", err)
+	}
+	if err := c.Cluster.Validate(); err != nil {
+		return fmt.Errorf("config.cluster: %w", err)
+	}
 	if err := c.Auth.Validate(); err != nil {
 		return fmt.Errorf("config.auth: %w", err)
 	}

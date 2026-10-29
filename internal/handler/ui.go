@@ -3,6 +3,7 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/a-h/templ"
@@ -16,6 +17,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
+	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/http/route"
@@ -65,6 +67,7 @@ func (u *UI) Routes(mux *http.ServeMux, auth route.BaseMW, perm route.PermMW, co
 	route.HandleFunc(mux, routepath.PageUsers, u.Users, append(common, auth)...)
 	route.HandleFunc(mux, routepath.PageUserInfo, u.UserDetail, append(common, auth, perm(enum.UsersGet))...)
 
+	route.HandleFunc(mux, routepath.PageHistory, u.History, append(common, auth, perm(enum.AgentsGet))...)
 	route.HandleFunc(mux, routepath.PageAgents, u.Agents, append(common, auth)...)
 	route.HandleFunc(mux, routepath.PageAgentInfo, u.AgentDetail, append(common, auth, perm(enum.AgentsGet))...)
 
@@ -86,10 +89,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 			response.NotFound(w, r, mode)
 			return
 		}
-		redirect := r.URL.Query().Get("redirect")
-		if redirect == "" {
-			redirect = routepath.PageHome
-		}
+		redirect := safeLoginRedirect(r.URL.Query().Get("redirect"))
 		errMsg := r.URL.Query().Get("error")
 
 		response.OK(w, r, mode, &responder.View{
@@ -113,7 +113,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 	var (
 		subject  = r.FormValue("subject")
 		password = r.FormValue("password")
-		redirect = r.FormValue("redirect")
+		redirect = safeLoginRedirect(r.FormValue("redirect"))
 		rateKey  = ratelimit.LoginKey(r, subject)
 	)
 	if redirect == "" {
@@ -135,7 +135,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, auth.ErrInvalidCredentials),
 			errors.Is(err, auth.ErrInvalidRequest):
 			transportctx.SetError(r.Context(), "invalid credentials")
-			http.Redirect(w, r, routepath.PageLogin+"?error=Invalid+username+or+password", http.StatusFound)
+			http.Redirect(w, r, routepath.PageLogin+"?error=Invalid+username+or+password&redirect="+url.QueryEscape(redirect), http.StatusSeeOther)
 			return
 		default:
 			u.logger.Error().Err(err).Str("subject", subject).Msg("login error")
@@ -210,7 +210,10 @@ func (u *UI) SpecNew(w http.ResponseWriter, r *http.Request) {
 
 // SpecDetail handle GET /specs/info/{}.
 func (u *UI) SpecDetail(w http.ResponseWriter, r *http.Request) {
-	u.pageParam(w, r, http.MethodGet, routepath.PageSpecInfo, func(nav policy.Nav, specID string) templ.Component { return pageSpec.Detail(nav, specID) })
+	id, _ := transportctx.Identity(r.Context())
+	u.pageParam(w, r, http.MethodGet, routepath.PageSpecInfo, func(nav policy.Nav, specID string) templ.Component {
+		return pageSpec.Detail(nav, specID, policy.BuildSpecDetail(id))
+	})
 }
 
 // SpecEdit handle GET /specs/edit/{}.
@@ -220,17 +223,35 @@ func (u *UI) SpecDetail(w http.ResponseWriter, r *http.Request) {
 // pre-populate inputs). We pre-fetch via specSVC, convert to the REST
 // DTO, and hand it to the templ component.
 func (u *UI) SpecEdit(w http.ResponseWriter, r *http.Request) {
-	u.pageParam(w, r, http.MethodGet, routepath.PageSpecEdit, func(nav policy.Nav, specID string) templ.Component {
-		ts, err := u.specSVC.Get(r.Context(), specID)
-		if err != nil {
-			// Fall back to the create-mode builder so the user doesn't
-			// get a blank page; the handler-level NotFound check below
-			// would be preferable but pageParam doesn't surface errors.
-			return pageSpec.New(nav)
+	mode := httpctx.ModeFromRequest(r)
+	if r.Method != http.MethodGet {
+		response.NotAllowed(w, r, mode)
+		return
+	}
+	specID := strings.TrimPrefix(r.URL.Path, routepath.PageSpecEdit)
+	if !strings.HasPrefix(r.URL.Path, routepath.PageSpecEdit) || specID == "" || strings.Contains(specID, "/") {
+		response.NotFound(w, r, mode)
+		return
+	}
+	id, ok := transportctx.Identity(r.Context())
+	if !ok {
+		response.Unauthorized(w, r, mode)
+		return
+	}
+	ts, err := u.specSVC.Get(r.Context(), specID)
+	if err != nil {
+		if !errors.Is(err, storage.ErrNotFound) {
+			u.logger.Error().Err(err).Str("spec", specID).Msg("edit lookup failed")
 		}
-		initial := wire.SpecToREST(ts)
-		return pageSpec.Edit(nav, &initial)
-	})
+		response.FromError(w, r, mode, err)
+		return
+	}
+	if ts.DeletionRequested() {
+		response.Conflict(w, r, mode, "This spec is being deleted and cannot be edited.")
+		return
+	}
+	initial := wire.SpecToREST(ts)
+	response.OK(w, r, mode, &responder.View{Component: pageSpec.Edit(policy.BuildNav(id), &initial)})
 }
 
 func (u *UI) page(w http.ResponseWriter, r *http.Request, m, p string, render func(nav policy.Nav) templ.Component) {
@@ -279,4 +300,17 @@ func (u *UI) pageParam(w http.ResponseWriter, r *http.Request, m, p string, rend
 	response.OK(w, r, mode, &responder.View{
 		Component: render(policy.BuildNav(id), param),
 	})
+}
+
+// safeLoginRedirect accepts only a local absolute path. URL parsing alone
+// accepts network-path references; browsers also normalize backslashes.
+func safeLoginRedirect(raw string) string {
+	if raw == "" || !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") || strings.ContainsAny(raw, "\\\r\n") {
+		return routepath.PageHome
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.IsAbs() || u.Host != "" || u.User != nil || strings.HasPrefix(u.Path, "//") || strings.Contains(u.Path, "\\") {
+		return routepath.PageHome
+	}
+	return u.RequestURI()
 }

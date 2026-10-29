@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -46,6 +47,7 @@ func (a *API) Specs(w http.ResponseWriter, r *http.Request) {
 //   - DELETE /api/v1/specs/{id}/force
 //   - POST   /api/v1/specs/{id}/deploy
 //   - GET    /api/v1/specs/{id}/sync
+//   - GET    /api/v1/specs/{id}/placement
 func (a *API) SpecsRouter(w http.ResponseWriter, r *http.Request) {
 	route.Router(w, r, routepath.ApiSpec,
 		route.Subroute{Action: "", Method: http.MethodGet, Perm: enum.SpecsGet, Fn: a.specDetails},
@@ -56,6 +58,7 @@ func (a *API) SpecsRouter(w http.ResponseWriter, r *http.Request) {
 		route.Subroute{Action: "force", Method: http.MethodDelete, Perm: enum.SpecsEdit, Fn: a.specForceDelete},
 		route.Subroute{Action: "deploy", Method: http.MethodPost, Perm: enum.SpecsDeploy, Fn: a.specDeploy},
 		route.Subroute{Action: "sync", Method: http.MethodGet, Perm: enum.SpecsGet, Fn: a.specRollouts},
+		route.Subroute{Action: "placement", Method: http.MethodGet, Perm: enum.SpecsGet, Fn: a.specPlacement},
 	)
 }
 
@@ -110,12 +113,24 @@ func (a *API) specDetails(w http.ResponseWriter, r *http.Request, mode httpctx.R
 }
 
 func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string, action upsertMode) {
-	in, err := decodeJSON[restv1.SpecCreateRequest](r)
+	raw, err := decodeJSON[json.RawMessage](r)
+	var in restv1.SpecCreateRequest
+	var fields map[string]json.RawMessage
+	if err == nil {
+		err = json.Unmarshal(raw, &in)
+	}
+	if err == nil {
+		err = json.Unmarshal(raw, &fields)
+	}
 	if err != nil {
 		response.BadRequest(w, r, mode)
 		return
 	}
 
+	if action == modeUpdate && in.Version <= 0 {
+		response.BadRequestMsg(w, r, mode, "The current spec version is required when updating.")
+		return
+	}
 	var ts *model.Spec
 
 	switch action {
@@ -141,7 +156,7 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 			response.Unavailable(w, r, mode)
 			return
 		}
-		if in.Name != "" {
+		if _, present := fields["name"]; present {
 			x.SetName(in.Name)
 		}
 		// Slot is immutable after create — it is the task's identity/lane on
@@ -167,38 +182,29 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	}
 
 	// Lifecycle
-	if in.TimeoutMs > 0 {
+	if _, present := fields["timeout_ms"]; present {
 		ts.SetTimeoutMs(in.TimeoutMs)
 	}
 	if in.RestartType != "" {
 		ts.SetRestartType(enum.RestartType(in.RestartType))
 	}
-	if in.IntervalMs > 0 {
+	if _, present := fields["interval_ms"]; present {
 		ts.SetIntervalMs(in.IntervalMs)
 	}
-	if action == modeCreate {
-		ts.SetBackoff(model.BackoffConfig{
-			Jitter:  enum.JitterStrategy(in.Jitter),
-			FirstMs: in.BackoffFirstMs,
-			MaxMs:   in.BackoffMaxMs,
-			Factor:  in.BackoffFactor,
-		})
-	} else if in.Jitter != "" || in.BackoffFirstMs > 0 || in.BackoffMaxMs > 0 || in.BackoffFactor > 0 {
-		b := ts.Backoff()
-		if in.Jitter != "" {
-			b.Jitter = enum.JitterStrategy(in.Jitter)
-		}
-		if in.BackoffFirstMs > 0 {
-			b.FirstMs = in.BackoffFirstMs
-		}
-		if in.BackoffMaxMs > 0 {
-			b.MaxMs = in.BackoffMaxMs
-		}
-		if in.BackoffFactor > 0 {
-			b.Factor = in.BackoffFactor
-		}
-		ts.SetBackoff(b)
+	b := ts.Backoff()
+	if _, present := fields["jitter"]; present {
+		b.Jitter = enum.JitterStrategy(in.Jitter)
 	}
+	if _, present := fields["backoff_first_ms"]; present {
+		b.FirstMs = in.BackoffFirstMs
+	}
+	if _, present := fields["backoff_max_ms"]; present {
+		b.MaxMs = in.BackoffMaxMs
+	}
+	if _, present := fields["backoff_factor"]; present {
+		b.Factor = in.BackoffFactor
+	}
+	ts.SetBackoff(b)
 
 	// Targets
 	if action == modeCreate {
@@ -226,7 +232,7 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	if action == modeCreate {
 		if err := a.specSVC.Create(r.Context(), ts); err != nil {
 			a.logger.Error().Err(err).Msg("spec create failed")
-			response.Unavailable(w, r, mode)
+			response.FromError(w, r, mode, err)
 			return
 		}
 		a.logger.Info().Str("spec", ts.ID()).Str("name", ts.Name()).Msg("spec created")
@@ -299,10 +305,16 @@ func (a *API) specForceDelete(w http.ResponseWriter, r *http.Request, mode httpc
 
 func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	if err := a.specSVC.Deploy(r.Context(), id); err != nil {
+		var unsupported *spec.UnsupportedTargetsError
+		if errors.As(err, &unsupported) {
+			a.logger.Warn().Str("spec", id).Strs("unsupported_agents", unsupported.Agents).Msg("spec deploy rejected")
+			response.BadRequestMsg(w, r, mode, "Deployment blocked: a target has no compatible runner. Review the placement preview.")
+			return
+		}
 		var unknown *spec.UnknownTargetsError
 		if errors.As(err, &unknown) {
 			a.logger.Warn().Str("spec", id).Strs("missing_agents", unknown.Agents).Msg("spec deploy rejected")
-			response.BadRequest(w, r, mode)
+			response.BadRequestMsg(w, r, mode, "Deployment blocked: a target agent is missing from discovery. Review the placement preview.")
 			return
 		}
 		if !errors.Is(err, storage.ErrNotFound) {

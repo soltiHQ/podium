@@ -2,6 +2,7 @@ package base
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -27,9 +28,10 @@ type Runner struct {
 	tick       TickFunc
 	logger     zerolog.Logger
 
-	stop    chan struct{} // closed by Stop to request exit
-	done    chan struct{} // closed when Start's loop has fully returned
-	started atomic.Bool
+	stop     chan struct{} // closed by Stop to request exit
+	done     chan struct{} // closed when Start's loop has fully returned
+	started  atomic.Bool
+	stopOnce sync.Once
 }
 
 // New builds a periodic runner.
@@ -95,11 +97,7 @@ func (r *Runner) Stop(ctx context.Context) error {
 	if !r.started.Load() {
 		return nil
 	}
-	select {
-	case <-r.stop:
-	default:
-		close(r.stop)
-	}
+	r.stopOnce.Do(func() { close(r.stop) })
 	select {
 	case <-r.done:
 		return nil

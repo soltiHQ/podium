@@ -1,6 +1,8 @@
 package wire
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -76,7 +78,7 @@ func AgentToProto(a *model.Agent) *raftv1.AgentMsg {
 		StaleAtNs:           timeToUnixNano(a.StaleAt()),
 		Metadata:            md,
 		Labels:              lbl,
-		Capabilities:        a.Capabilities(),
+		Capabilities:        CapabilitiesToProto(a.Capabilities()),
 	}
 }
 
@@ -103,7 +105,7 @@ func AgentFromProto(p *raftv1.AgentMsg) (*model.Agent, error) {
 	a.SetStaleAt(timeFromUnixNano(p.GetStaleAtNs()))
 	a.SetMetadata(p.GetMetadata())
 	a.SetLabels(p.GetLabels())
-	a.SetCapabilities(p.GetCapabilities())
+	a.SetCapabilities(CapabilitiesFromProto(p.GetCapabilities()))
 	return a, nil
 }
 
@@ -315,15 +317,19 @@ func SessionToProto(s *model.Session) *raftv1.SessionMsg {
 	cp := make([]byte, len(hash))
 	copy(cp, hash)
 	return &raftv1.SessionMsg{
-		Id:           s.ID(),
-		UserId:       s.UserID(),
-		CredentialId: s.CredentialID(),
-		Auth:         string(s.AuthKind()),
-		RefreshHash:  cp,
-		ExpiresAtNs:  timeToUnixNano(s.ExpiresAt()),
-		RevokedAtNs:  timeToUnixNano(s.RevokedAt()),
-		CreatedAtNs:  timeToUnixNano(s.CreatedAt()),
-		UpdatedAtNs:  timeToUnixNano(s.UpdatedAt()),
+		Id:               s.ID(),
+		UserId:           s.UserID(),
+		CredentialId:     s.CredentialID(),
+		Auth:             string(s.AuthKind()),
+		RefreshHash:      cp,
+		ExpiresAtNs:      timeToUnixNano(s.ExpiresAt()),
+		RevokedAtNs:      timeToUnixNano(s.RevokedAt()),
+		CreatedAtNs:      timeToUnixNano(s.CreatedAt()),
+		UpdatedAtNs:      timeToUnixNano(s.UpdatedAt()),
+		UpdatedAtPresent: !s.UpdatedAt().IsZero(),
+		RevokedAtPresent: !s.RevokedAt().IsZero(),
+		ExpiresAtPresent: !s.ExpiresAt().IsZero(),
+		CreatedAtPresent: !s.CreatedAt().IsZero(),
 	}
 }
 
@@ -336,15 +342,24 @@ func SessionFromProto(p *raftv1.SessionMsg) (*model.Session, error) {
 	copy(hash, p.GetRefreshHash())
 	s, err := model.NewSession(
 		p.GetId(), p.GetUserId(), p.GetCredentialId(),
-		enum.Auth(p.GetAuth()), hash, timeFromUnixNano(p.GetExpiresAtNs()),
+		enum.Auth(p.GetAuth()), hash, sessionTimeFromUnixNano(p.GetExpiresAtNs(), p.GetExpiresAtPresent()),
 	)
 	if err != nil {
 		return nil, err
 	}
-	s.SetCreatedAt(timeFromUnixNano(p.GetCreatedAtNs()))
-	s.SetUpdatedAt(timeFromUnixNano(p.GetUpdatedAtNs()))
-	s.SetRevokedAt(timeFromUnixNano(p.GetRevokedAtNs()))
+	s.SetCreatedAt(sessionTimeFromUnixNano(p.GetCreatedAtNs(), p.GetCreatedAtPresent()))
+	s.SetUpdatedAt(sessionTimeFromUnixNano(p.GetUpdatedAtNs(), p.GetUpdatedAtPresent()))
+	s.SetRevokedAt(sessionTimeFromUnixNano(p.GetRevokedAtNs(), p.GetRevokedAtPresent()))
 	return s, nil
+}
+
+// sessionTimeFromUnixNano preserves valid epoch instants and the existing
+// unset/nonzero legacy encoding without changing other entity contracts.
+func sessionTimeFromUnixNano(ns int64, present bool) time.Time {
+	if ns == 0 && present {
+		return time.Unix(0, 0)
+	}
+	return timeFromUnixNano(ns)
 }
 
 // === Specs ===
@@ -352,9 +367,9 @@ func SessionFromProto(p *raftv1.SessionMsg) (*model.Session, error) {
 // SpecToProto serialises a model.Spec for Raft replication. KindConfig is
 // converted to google.protobuf.Struct; non-JSON-friendly values inside the
 // map (channels, functions) will fail here loudly.
-func SpecToProto(ts *model.Spec) *raftv1.SpecMsg {
+func SpecToProto(ts *model.Spec) (*raftv1.SpecMsg, error) {
 	if ts == nil {
-		return nil
+		return nil, nil
 	}
 	tl := make(map[string]string, len(ts.TargetLabels()))
 	for k, v := range ts.TargetLabels() {
@@ -365,7 +380,25 @@ func SpecToProto(ts *model.Spec) *raftv1.SpecMsg {
 		rl[k] = v
 	}
 	b := ts.Backoff()
-	kc, _ := structpb.NewStruct(ts.KindConfig())
+	// JSON normalization supports typed slices/maps from domain callers while
+	// retaining explicit errors for functions, channels and non-finite numbers.
+	raw, err := json.Marshal(ts.KindConfig())
+	if err != nil {
+		return nil, fmt.Errorf("wire: encode spec config: %w", err)
+	}
+	var normalized map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&normalized); err != nil {
+		return nil, fmt.Errorf("wire: normalize spec config: %w", err)
+	}
+	if err := normalizeConfigNumbers(normalized); err != nil {
+		return nil, fmt.Errorf("wire: represent spec config: %w", err)
+	}
+	kc, err := structpb.NewStruct(normalized)
+	if err != nil {
+		return nil, fmt.Errorf("wire: represent spec config: %w", err)
+	}
 	return &raftv1.SpecMsg{
 		Id:                ts.ID(),
 		Name:              ts.Name(),
@@ -389,7 +422,7 @@ func SpecToProto(ts *model.Spec) *raftv1.SpecMsg {
 		RunnerLabels: rl,
 		CreatedAtNs:  timeToUnixNano(ts.CreatedAt()),
 		UpdatedAtNs:  timeToUnixNano(ts.UpdatedAt()),
-	}
+	}, nil
 }
 
 // SpecFromProto reconstructs a model.Spec from its Raft representation.
@@ -450,11 +483,7 @@ func RolloutToProto(r *model.Rollout) *raftv1.RolloutMsg {
 	}
 }
 
-// RolloutFromProto reconstructs a model.Rollout from its Raft form.
-// NewRollout builds the skeleton; transition methods set the status+counters
-// to match the serialised state. Errors from transitions are ignored — they
-// indicate invariant violations the serialised state already represents,
-// which can't be fixed by reporting here.
+// RolloutFromProto restores persisted state without triggering business transitions.
 func RolloutFromProto(p *raftv1.RolloutMsg) (*model.Rollout, error) {
 	if p == nil {
 		return nil, nil
@@ -463,21 +492,10 @@ func RolloutFromProto(p *raftv1.RolloutMsg) (*model.Rollout, error) {
 	if err != nil {
 		return nil, err
 	}
-	r.SetIntent(enum.RolloutIntent(p.GetIntent()))
 	r.SetActualTaskID(p.GetActualTaskId())
-	switch enum.SyncStatus(p.GetStatus()) {
-	case enum.SyncStatusPending:
-		r.MarkPending(int(p.GetDesiredGeneration()))
-	case enum.SyncStatusSynced:
-		r.MarkSynced(int(p.GetObservedGeneration()))
-	case enum.SyncStatusFailed:
-		r.MarkFailed(p.GetErrMsg())
-	case enum.SyncStatusDrift:
-		r.MarkDrift()
-	case enum.SyncStatusUnknown:
-		r.MarkUnknown()
-	}
-	r.SetLastPushedAt(timeFromUnixNano(p.GetLastPushedAtNs()))
+	r.RestoreState(enum.SyncStatus(p.GetStatus()), enum.RolloutIntent(p.GetIntent()),
+		int(p.GetObservedGeneration()), int(p.GetAttempts()), p.GetErrMsg(),
+		timeFromUnixNano(p.GetLastPushedAtNs()), timeFromUnixNano(p.GetLastSyncedAtNs()))
 	r.SetCreatedAt(timeFromUnixNano(p.GetCreatedAtNs()))
 	r.SetUpdatedAt(timeFromUnixNano(p.GetUpdatedAtNs()))
 	return r, nil

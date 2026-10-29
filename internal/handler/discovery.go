@@ -17,6 +17,7 @@ import (
 	discoverv1 "github.com/soltiHQ/control-plane/api/gen/solti/discover/v1"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/domain/wire"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
@@ -39,7 +40,7 @@ var discoverySyncMarshal = protojson.MarshalOptions{
 }
 
 // maxSyncBodyBytes caps SyncRequest bodies to defend against runaway clients.
-// Matches the 256 KiB limit used by the SDK's HttpApi RequestBodyLimitLayer.
+// The discovery server owns this independent request limit.
 const maxSyncBodyBytes = 256 * 1024
 
 // HTTPDiscovery handles agent discovery over HTTP.
@@ -83,9 +84,14 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxSyncBodyBytes))
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxSyncBodyBytes+1))
 	if err != nil {
 		response.BadRequest(w, r, mode)
+		return
+	}
+
+	if len(body) > maxSyncBodyBytes {
+		http.Error(w, "discovery request too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 
@@ -202,7 +208,7 @@ func agentFromSyncRequest(req *discoverv1.SyncRequest) (*model.Agent, error) {
 		UptimeSeconds:      req.GetUptimeSeconds(),
 		HeartbeatIntervalS: int(req.GetHeartbeatIntervalS()),
 		Metadata:           req.GetMetadata(),
-		Capabilities:       req.GetCapabilities(),
+		Capabilities:       wire.CapabilitiesFromProto(req.GetCapabilities()),
 	})
 }
 

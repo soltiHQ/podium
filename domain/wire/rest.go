@@ -15,9 +15,18 @@ func AgentToREST(a *model.Agent) restv1.Agent {
 	if a == nil {
 		return restv1.Agent{}
 	}
+	caps := make([]restv1.RunnerCapability, 0, len(a.Capabilities()))
+	for _, c := range a.Capabilities() {
+		workloads := make([]restv1.WorkloadGVK, 0, len(c.Workloads))
+		for _, gvk := range c.Workloads {
+			workloads = append(workloads, restv1.WorkloadGVK{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind})
+		}
+		caps = append(caps, restv1.RunnerCapability{Name: c.Name, Labels: c.Labels, Workloads: workloads})
+	}
 	return restv1.Agent{
-		ID:   a.ID(),
-		Name: a.Name(),
+		Capabilities: caps,
+		ID:           a.ID(),
+		Name:         a.Name(),
 
 		OS:            a.OS(),
 		Arch:          a.Arch(),

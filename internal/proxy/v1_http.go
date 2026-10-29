@@ -2,278 +2,371 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
-	jsonStd "encoding/json"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
-
-	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
+	"time"
 
 	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
 	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
 )
 
 const (
-	v1PathTasks = "/api/v1/tasks"
+	v1PathTasks           = "/apis/solti.io/v1/tasks"
+	maxAgentResponseBytes = 4 * 1024 * 1024
 )
 
-// httpV1Unmarshal decodes canonical proto-JSON responses from the SDK.
-// DiscardUnknown keeps forward compatibility when newer agents add fields.
-var httpV1Unmarshal = protojson.UnmarshalOptions{DiscardUnknown: true}
-
-// httpProxyV1 implements AgentProxy over HTTP for API v1.
 type httpProxyV1 struct {
 	endpoint string
 	client   httpClient
 }
+type resourceMeta struct {
+	Name            string    `json:"name"`
+	UID             string    `json:"uid"`
+	ResourceVersion string    `json:"resourceVersion"`
+	Generation      uint64    `json:"generation"`
+	CreatedAt       time.Time `json:"creationTimestamp"`
+}
+type taskConditionResource struct {
+	Type               string     `json:"type"`
+	Status             string     `json:"status"`
+	ObservedGeneration uint64     `json:"observedGeneration"`
+	LastTransitionTime *time.Time `json:"lastTransitionTime"`
+	Reason             string     `json:"reason"`
+	Message            string     `json:"message"`
+}
+
+type taskResource struct {
+	Metadata resourceMeta `json:"metadata"`
+	Spec     struct {
+		Slot string `json:"slot"`
+	} `json:"spec"`
+	Status struct {
+		Phase              string                  `json:"phase"`
+		Attempt            int                     `json:"attempt"`
+		Error              string                  `json:"error"`
+		ExitCode           *int32                  `json:"exitCode"`
+		ObservedGeneration uint64                  `json:"observedGeneration"`
+		Conditions         []taskConditionResource `json:"conditions"`
+	} `json:"status"`
+}
+
+func (t taskResource) flat() proxyv1.Task {
+	conditions := make([]proxyv1.TaskCondition, 0, len(t.Status.Conditions))
+	for _, condition := range t.Status.Conditions {
+		item := proxyv1.TaskCondition{Type: condition.Type, Status: condition.Status, ObservedGeneration: condition.ObservedGeneration, Reason: condition.Reason, Message: condition.Message}
+		if condition.LastTransitionTime != nil {
+			ms := condition.LastTransitionTime.UnixMilli()
+			item.LastTransitionTime = &ms
+		}
+		conditions = append(conditions, item)
+	}
+	createdAt := int64(0)
+	if !t.Metadata.CreatedAt.IsZero() {
+		createdAt = t.Metadata.CreatedAt.UnixMilli()
+	}
+	return proxyv1.Task{Conditions: conditions, ID: t.Metadata.Name, UID: t.Metadata.UID, ResourceVersion: t.Metadata.ResourceVersion, Generation: t.Metadata.Generation, ObservedGeneration: t.Status.ObservedGeneration, CreatedAt: createdAt, UpdatedAt: 0, Slot: t.Spec.Slot, Status: t.Status.Phase, Attempt: t.Status.Attempt, Error: t.Status.Error, ExitCode: t.Status.ExitCode}
+}
+
+type listMeta struct {
+	Next            string  `json:"continue"`
+	ResourceVersion string  `json:"resourceVersion"`
+	Remaining       *uint64 `json:"remainingItemCount"`
+	TaskUID         string  `json:"taskUid"`
+}
+
+func (p *httpProxyV1) taskURL(name, suffix string) string {
+	return p.endpoint + v1PathTasks + "/" + url.PathEscape(name) + suffix
+}
 
 func (p *httpProxyV1) ListTasks(ctx context.Context, f TaskFilter) (*proxyv1.ListTasksResponse, error) {
+	if err := validateTaskFilter(f); err != nil {
+		return nil, err
+	}
+	if f.Offset > 0 {
+		return nil, fmt.Errorf("%w: offset pagination unsupported; use cursor", ErrListTasks)
+	}
 	u, err := url.Parse(p.endpoint + v1PathTasks)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrBadEndpointURL, err)
 	}
-
 	q := u.Query()
 	if f.Slot != "" {
 		q.Set("slot", f.Slot)
 	}
 	if f.Status != "" {
-		q.Set("status", f.Status)
+		q.Add("phase", f.Status)
 	}
 	if f.Limit > 0 {
 		q.Set("limit", strconv.Itoa(f.Limit))
 	}
-	if f.Offset > 0 {
-		q.Set("offset", strconv.Itoa(f.Offset))
+	if f.Cursor != "" {
+		q.Set("continue", f.Cursor)
+	}
+	if f.LabelSelector != "" {
+		q.Set("labelSelector", f.LabelSelector)
 	}
 	u.RawQuery = q.Encode()
-
-	var out taskv1.ListTasksResponse
-	if err := doProtoJSONGet(ctx, p.client, u.String(), &out); err != nil {
+	var out struct {
+		Metadata listMeta       `json:"metadata"`
+		Items    []taskResource `json:"items"`
+	}
+	if err := p.request(ctx, http.MethodGet, u.String(), nil, &out); err != nil {
 		return nil, agentError(ErrListTasks, err)
 	}
-
-	tasks := make([]proxyv1.Task, len(out.GetTasks()))
-	for i, t := range out.GetTasks() {
-		tasks[i] = taskDataToProxy(t)
+	tasks := make([]proxyv1.Task, len(out.Items))
+	for i, t := range out.Items {
+		tasks[i] = t.flat()
 	}
-
-	return &proxyv1.ListTasksResponse{
-		Tasks: tasks,
-		Total: int(out.GetTotal()),
-	}, nil
+	return &proxyv1.ListTasksResponse{Tasks: tasks, Total: len(tasks), NextCursor: out.Metadata.Next, ResourceVersion: out.Metadata.ResourceVersion, RemainingCount: out.Metadata.Remaining}, nil
 }
 
 func (p *httpProxyV1) ApplyTask(ctx context.Context, sub TaskSubmission) (string, error) {
-	if sub.Spec == nil {
-		return "", fmt.Errorf("%w: nil spec", ErrApplyTask)
+	if sub.Spec == nil || sub.Spec.GetMetadata().GetName() == "" {
+		return "", fmt.Errorf("%w: missing manifest name", ErrApplyTask)
 	}
-	u, err := url.Parse(p.endpoint + v1PathTasks)
+	body, err := TaskManifestJSON(sub.Spec)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrBadEndpointURL, err)
+		return "", fmt.Errorf("%w: %v", ErrApplyTask, err)
 	}
-
-	// ApplyTaskResponse carries the TaskId now running in the slot.
-	var out taskv1.ApplyTaskResponse
-	if err := doProtoJSONPutDecoding(ctx, p.client, u.String(), &taskv1.ApplyTaskRequest{Spec: sub.Spec}, &out); err != nil {
+	u := p.taskURL(sub.Spec.GetMetadata().GetName(), "")
+	if pre := sub.Preconditions; pre != nil {
+		parsed, _ := url.Parse(u)
+		q := parsed.Query()
+		if pre.Uid != nil {
+			q.Set("uid", *pre.Uid)
+		}
+		if pre.ResourceVersion != nil {
+			q.Set("resourceVersion", *pre.ResourceVersion)
+		}
+		parsed.RawQuery = q.Encode()
+		u = parsed.String()
+	}
+	var out taskResource
+	if err := p.request(ctx, http.MethodPut, u, body, &out); err != nil {
 		return "", agentError(ErrApplyTask, err)
 	}
-	taskID := out.GetTaskId()
-	if taskID == "" {
+	if out.Metadata.Name == "" {
 		return "", fmt.Errorf("%w: agent returned empty task id", ErrApplyTask)
 	}
-	return taskID, nil
+	if out.Metadata.Name != sub.Spec.GetMetadata().GetName() {
+		return "", fmt.Errorf("%w: agent returned different task name", ErrApplyTask)
+	}
+	if out.Metadata.UID == "" {
+		return "", fmt.Errorf("%w: agent returned empty task UID", ErrApplyTask)
+	}
+	return out.Metadata.Name, nil
 }
 
-func (p *httpProxyV1) GetTask(ctx context.Context, taskID string) (*proxyv1.GetTaskResponse, error) {
-	u, err := url.Parse(fmt.Sprintf("%s%s/%s", p.endpoint, v1PathTasks, taskID))
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrBadEndpointURL, err)
-	}
-
-	var out taskv1.GetTaskStatusResponse
-	if err := doProtoJSONGet(ctx, p.client, u.String(), &out); err != nil {
+func (p *httpProxyV1) GetTask(ctx context.Context, name string) (*proxyv1.GetTaskResponse, error) {
+	var out taskResource
+	if err := p.request(ctx, http.MethodGet, p.taskURL(name, ""), nil, &out); err != nil {
 		return nil, agentError(ErrGetTask, err)
 	}
-
-	var task *proxyv1.Task
-	if data := out.GetTask(); data != nil {
-		t := taskDataToProxy(data)
-		task = &t
+	if out.Metadata.Name != name || out.Metadata.UID == "" {
+		return nil, fmt.Errorf("%w: invalid task identity", ErrGetTask)
 	}
-	return &proxyv1.GetTaskResponse{Task: task}, nil
+	t := out.flat()
+	return &proxyv1.GetTaskResponse{Task: &t}, nil
 }
 
-func (p *httpProxyV1) ListTaskRuns(ctx context.Context, taskID string) (*proxyv1.ListTaskRunsResponse, error) {
-	u, err := url.Parse(fmt.Sprintf("%s%s/%s/runs", p.endpoint, v1PathTasks, taskID))
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrBadEndpointURL, err)
-	}
-
-	var out taskv1.ListTaskRunsResponse
-	if err := doProtoJSONGet(ctx, p.client, u.String(), &out); err != nil {
-		return nil, agentError(ErrListTaskRuns, err)
-	}
-
-	runs := make([]proxyv1.TaskRun, len(out.GetRuns()))
-	for i, r := range out.GetRuns() {
-		run := proxyv1.TaskRun{
-			Attempt:   int(r.GetAttempt()),
-			Status:    v1TaskStatusString(r.GetStatus()),
-			StartedAt: r.GetStartedAt(),
-		}
-		if r.FinishedAt != nil {
-			run.FinishedAt = *r.FinishedAt
-		}
-		if r.Error != nil {
-			run.Error = *r.Error
-		}
-		if r.ExitCode != nil {
-			run.ExitCode = r.ExitCode
-		}
-		runs[i] = run
-	}
-	return &proxyv1.ListTaskRunsResponse{Runs: runs}, nil
+func (p *httpProxyV1) ListTaskRuns(ctx context.Context, name string) (*proxyv1.ListTaskRunsResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	return aggregateTaskRuns(ctx, p, name)
 }
 
-func (p *httpProxyV1) DeleteTask(ctx context.Context, taskID string) error {
-	u, err := url.Parse(fmt.Sprintf("%s%s/%s", p.endpoint, v1PathTasks, taskID))
+func (p *httpProxyV1) writeTask(ctx context.Context, name string, cancel bool) error {
+	task, err := p.GetTask(ctx, name)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrBadEndpointURL, err)
+		return err
 	}
-
-	if err := doDelete(ctx, p.client, u.String()); err != nil {
+	if task.Task == nil || task.Task.UID == "" {
+		return fmt.Errorf("%w: missing task UID", ErrDeleteTask)
+	}
+	suffix := ""
+	method := http.MethodDelete
+	if cancel {
+		suffix = "/cancel"
+		method = http.MethodPost
+	}
+	parsed, _ := url.Parse(p.taskURL(name, suffix))
+	q := parsed.Query()
+	q.Set("uid", task.Task.UID)
+	parsed.RawQuery = q.Encode()
+	if err := p.request(ctx, method, parsed.String(), nil, nil); err != nil {
 		return agentError(ErrDeleteTask, err)
 	}
 	return nil
 }
 
-// StreamTaskLogs consumes the agent's SSE stream at
-// /api/v1/tasks/{id}/logs/stream and translates each event to the proto
-// shape used cluster-wide.
-//
-// Agent wire format is a custom flat JSON with a `type` discriminator
-// (see agentLogEvent), not canonical proto-JSON. We translate locally so
-// downstream consumers can rely on a single StreamTaskLogsResponse shape
-// regardless of the source transport.
-func (p *httpProxyV1) StreamTaskLogs(ctx context.Context, taskID string) (<-chan *taskv1.StreamTaskLogsResponse, error) {
-	u, err := url.Parse(fmt.Sprintf("%s%s/%s/logs", p.endpoint, v1PathTasks, taskID))
+func (p *httpProxyV1) DeleteTask(ctx context.Context, name string) error {
+	return p.writeTask(ctx, name, false)
+}
+
+func (p *httpProxyV1) CancelTask(ctx context.Context, name string) error {
+	return p.writeTask(ctx, name, true)
+}
+
+func (p *httpProxyV1) request(ctx context.Context, method, target string, body []byte, out any) error {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, target, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrBadEndpointURL, err)
+		return fmt.Errorf("%w: %v", ErrCreateRequest, err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrRequest, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return formatUnexpectedStatus(resp)
+	}
+	if out == nil {
+		_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, maxAgentResponseBytes))
+		return err
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAgentResponseBytes+1))
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrDecode, err)
+	}
+	if len(data) > maxAgentResponseBytes {
+		return fmt.Errorf("%w: agent response exceeds 4 MiB", ErrDecode)
+	}
+	if err = json.Unmarshal(data, out); err != nil {
+		return fmt.Errorf("%w: %v", ErrDecode, err)
+	}
+	return nil
+}
+
+func (p *httpProxyV1) StreamTaskLogs(ctx context.Context, name string) (<-chan *taskv1.StreamTaskLogsResponse, error) {
+	task, err := p.GetTask(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return p.StreamTaskLogsForUID(ctx, name, task.Task.UID)
+}
+
+func (p *httpProxyV1) StreamTaskLogsForUID(ctx context.Context, name, uid string) (<-chan *taskv1.StreamTaskLogsResponse, error) {
+	if uid == "" {
+		return nil, fmt.Errorf("%w: missing task UID", ErrStreamTaskLogs)
+	}
+	parsed, _ := url.Parse(p.taskURL(name, "/logs"))
+	q := parsed.Query()
+	q.Set("taskUid", uid)
+	parsed.RawQuery = q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrCreateRequest, err)
 	}
 	req.Header.Set("Accept", "text/event-stream")
-
 	resp, err := p.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrStreamTaskLogs, err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		err := formatUnexpectedStatus(resp)
-		_ = resp.Body.Close()
+		resp.Body.Close()
 		return nil, agentError(ErrStreamTaskLogs, err)
 	}
-
 	ch := make(chan *taskv1.StreamTaskLogsResponse, 64)
 	go func() {
 		defer close(ch)
 		defer resp.Body.Close()
-
-		reader := bufio.NewReader(resp.Body)
-		var dataLines []string
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				return
-			}
-			line = strings.TrimRight(line, "\r\n")
-
-			// Blank line = frame terminator. Concatenate accumulated
-			// `data:` lines (per SSE spec multiple data lines join with
-			// newline) and dispatch.
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 4096), 1024*1024)
+		var data []string
+		eventName := ""
+		frameBytes := 0
+		for scanner.Scan() {
+			line := strings.TrimSuffix(scanner.Text(), "\r")
 			if line == "" {
-				if len(dataLines) > 0 {
-					ev := parseAgentLogEvent(strings.Join(dataLines, "\n"))
-					dataLines = dataLines[:0]
-					if ev == nil {
-						continue
-					}
-					select {
-					case ch <- ev:
-					case <-ctx.Done():
-						return
+				if len(data) > 0 {
+					ev := parseAgentLogFrame(eventName, strings.Join(data, "\n"), uid)
+					if ev != nil {
+						select {
+						case ch <- ev:
+						case <-ctx.Done():
+							return
+						}
 					}
 				}
+				data = nil
+				eventName = ""
+				frameBytes = 0
 				continue
 			}
-			if strings.HasPrefix(line, "data:") {
-				dataLines = append(dataLines, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+			if strings.HasPrefix(line, "event:") {
+				eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 			}
-			// `event:` and other SSE fields are ignored — the type
-			// discriminator inside the data payload is authoritative.
+			if strings.HasPrefix(line, "data:") {
+				frameBytes += len(line)
+				if frameBytes > 1024*1024 {
+					return
+				}
+				data = append(data, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+			}
 		}
 	}()
 	return ch, nil
 }
 
-// agentLogEvent matches the flat JSON the agent emits per SSE frame.
 type agentLogEvent struct {
-	Type     string `json:"type"`
-	Attempt  uint32 `json:"attempt,omitempty"`
-	Stream   string `json:"stream,omitempty"`
-	Seq      uint64 `json:"seq,omitempty"`
-	Ts       int64  `json:"ts,omitempty"`
-	Line     string `json:"line,omitempty"`
-	Started  int64  `json:"startedAt,omitempty"`
-	Finished int64  `json:"finishedAt,omitempty"`
-	ExitCode *int32 `json:"exitCode,omitempty"`
-	Skipped  uint64 `json:"skipped,omitempty"`
+	Type         string `json:"type"`
+	TaskUID      string `json:"taskUid"`
+	Generation   uint64 `json:"generation"`
+	Attempt      uint32 `json:"attempt"`
+	Stream       string `json:"stream"`
+	Seq          uint64 `json:"seq"`
+	Ts           int64  `json:"ts"`
+	Line         string `json:"line"`
+	Truncated    bool   `json:"truncated"`
+	Started      int64  `json:"startedAt"`
+	Finished     int64  `json:"finishedAt"`
+	ExitCode     *int32 `json:"exitCode"`
+	Skipped      uint64 `json:"skipped"`
+	SkippedBytes uint64 `json:"skippedBytes"`
 }
 
-// parseAgentLogEvent decodes one agent SSE payload and converts it to the
-// proto shape. Returns nil on unknown or malformed events; callers should
-// skip silently — the stream continues.
-func parseAgentLogEvent(payload string) *taskv1.StreamTaskLogsResponse {
-	payload = strings.TrimSpace(payload)
-	if payload == "" {
+func parseAgentLogFrame(eventName, payload, uid string) *taskv1.StreamTaskLogsResponse {
+	var e agentLogEvent
+	if json.Unmarshal([]byte(payload), &e) != nil {
 		return nil
 	}
-	var e agentLogEvent
-	if err := jsonStd.Unmarshal([]byte(payload), &e); err != nil {
+	if uid != "" && e.TaskUID != uid {
 		return nil
+	}
+	if eventName != "" {
+		want := map[string]string{"chunk": "chunk", "run-started": "runStarted", "run-finished": "runFinished", "lagged": "lagged"}[eventName]
+		if want == "" || want != e.Type {
+			return nil
+		}
 	}
 	switch e.Type {
 	case "chunk":
-		return &taskv1.StreamTaskLogsResponse{Kind: &taskv1.StreamTaskLogsResponse_Chunk{Chunk: &taskv1.OutputChunk{
-			Attempt: e.Attempt,
-			Stream:  agentStreamToProto(e.Stream),
-			Seq:     e.Seq,
-			Ts:      e.Ts,
-			Line:    []byte(e.Line),
-		}}}
+		line, err := base64.StdEncoding.DecodeString(e.Line)
+		if err != nil {
+			return nil
+		}
+		return &taskv1.StreamTaskLogsResponse{Kind: &taskv1.StreamTaskLogsResponse_Chunk{Chunk: &taskv1.OutputChunk{Generation: e.Generation, Attempt: e.Attempt, Stream: agentStreamToProto(e.Stream), Seq: e.Seq, Ts: e.Ts, Line: line, Truncated: e.Truncated}}}
 	case "runStarted":
-		return &taskv1.StreamTaskLogsResponse{Kind: &taskv1.StreamTaskLogsResponse_RunStarted{RunStarted: &taskv1.RunStarted{
-			Attempt:   e.Attempt,
-			StartedAt: e.Started,
-		}}}
+		return &taskv1.StreamTaskLogsResponse{Kind: &taskv1.StreamTaskLogsResponse_RunStarted{RunStarted: &taskv1.RunStarted{Generation: e.Generation, Attempt: e.Attempt, StartedAt: e.Started}}}
 	case "runFinished":
-		return &taskv1.StreamTaskLogsResponse{Kind: &taskv1.StreamTaskLogsResponse_RunFinished{RunFinished: &taskv1.RunFinished{
-			Attempt:    e.Attempt,
-			ExitCode:   e.ExitCode,
-			FinishedAt: e.Finished,
-		}}}
+		return &taskv1.StreamTaskLogsResponse{Kind: &taskv1.StreamTaskLogsResponse_RunFinished{RunFinished: &taskv1.RunFinished{Generation: e.Generation, Attempt: e.Attempt, FinishedAt: e.Finished, ExitCode: e.ExitCode}}}
 	case "lagged":
-		return &taskv1.StreamTaskLogsResponse{Kind: &taskv1.StreamTaskLogsResponse_Lagged{Lagged: &taskv1.Lagged{
-			Skipped: e.Skipped,
-		}}}
+		return &taskv1.StreamTaskLogsResponse{Kind: &taskv1.StreamTaskLogsResponse_Lagged{Lagged: &taskv1.Lagged{Skipped: e.Skipped, SkippedBytes: e.SkippedBytes}}}
 	}
 	return nil
 }
@@ -286,34 +379,4 @@ func agentStreamToProto(s string) taskv1.OutputStreamKind {
 		return taskv1.OutputStreamKind_OUTPUT_STREAM_KIND_STDERR
 	}
 	return taskv1.OutputStreamKind_OUTPUT_STREAM_KIND_UNSPECIFIED
-}
-
-// doProtoJSONGet performs a GET and decodes the response as proto-JSON.
-// On non-200 responses the SDK error envelope (`{"error","message"}`) is
-// surfaced via formatUnexpectedStatus instead of being silently discarded.
-func doProtoJSONGet(ctx context.Context, client httpClient, url string, out proto.Message) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrCreateRequest, err)
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrRequest, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return formatUnexpectedStatus(resp)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrDecode, err)
-	}
-	if err := httpV1Unmarshal.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("%w: %v", ErrDecode, err)
-	}
-	return nil
 }

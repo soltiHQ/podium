@@ -13,7 +13,7 @@ single `Default()` constructor for development use:
 1. Add a `Config` struct with `withDefaults()` in the owning package.
 2. Add the field to `config.Config`.
 3. Optionally set non-zero defaults in `Default()`.
-4. Pass `cfg.<Field>` from `cmd/main.go`.
+4. Pass `cfg.<Field>` in the `internal/app` composition root.
 
 ## Loading from external sources
 
@@ -45,3 +45,29 @@ tls:
 ```
 
 Env equivalents: `SOLTI_TLS_SERVER_CERT_FILE`, `SOLTI_TLS_CLIENT_CA_FILE`, etc.
+
+## Observed run history
+
+```yaml
+history:
+  archive:
+    retention: 168h
+    max_records: 10000
+    max_bytes: 33554432
+  collector:
+    tick_interval: 5s
+    cycle_timeout: 8s
+    max_concurrency: 2
+    max_agents_per_cycle: 100
+    page_size: 256
+    max_pages: 4
+    max_run_continuations: 1024
+```
+
+Environment equivalents include `SOLTI_HISTORY_ARCHIVE_RETENTION`,
+`SOLTI_HISTORY_ARCHIVE_MAX_RECORDS`, `SOLTI_HISTORY_ARCHIVE_MAX_BYTES` and
+`SOLTI_HISTORY_COLLECTOR_MAX_CONCURRENCY`. YAML and ENV use duration strings.
+Zero values inherit owning-package defaults; negative values and collector counts
+above their supported bounds fail configuration loading. `max_bytes` measures
+conservative retained-record payload, not database/RSS size. Captures are best
+effort and bound each task buffer to 8 MiB in addition to page/time limits.

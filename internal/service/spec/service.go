@@ -2,6 +2,12 @@ package spec
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/soltiHQ/control-plane/internal/proxy"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -53,14 +59,23 @@ func (s *Service) Get(ctx context.Context, id string) (*model.Spec, error) {
 
 // Create persists a new spec.
 func (s *Service) Create(ctx context.Context, ts *model.Spec) error {
-	if ts == nil {
-		return storage.ErrInvalidArgument
+	if err := validateSpec(ts); err != nil {
+		return err
 	}
 	if ts.DeletionRequested() {
 		return storage.ErrInvalidArgument
 	}
 
-	if err := s.store.UpsertSpec(ctx, ts); err != nil {
+	if err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		_, err := tx.GetSpec(ctx, ts.ID())
+		if err == nil {
+			return storage.ErrAlreadyExists
+		}
+		if !errors.Is(err, storage.ErrNotFound) {
+			return err
+		}
+		return tx.UpsertSpec(ctx, ts)
+	}); err != nil {
 		return err
 	}
 
@@ -76,8 +91,8 @@ func (s *Service) Create(ctx context.Context, ts *model.Spec) error {
 // the client sends the version it last read, and Upsert rejects with a [ConflictError] if the stored version has advanced in the meantime.
 // Pass `0` to opt out of the check (background jobs with no rival writer); interactive UI flows should always pass the observed version.
 func (s *Service) Upsert(ctx context.Context, ts *model.Spec, expectedVersion int) error {
-	if ts == nil {
-		return storage.ErrInvalidArgument
+	if err := validateSpec(ts); err != nil {
+		return err
 	}
 
 	var runtimeChanged bool
@@ -96,6 +111,9 @@ func (s *Service) Upsert(ctx context.Context, ts *model.Spec, expectedVersion in
 		}
 		runtimeChanged = !old.RuntimeEquals(ts)
 
+		ts.SetVersion(old.Version())
+		ts.SetGeneration(old.Generation())
+		ts.SetCreatedAt(old.CreatedAt())
 		ts.IncrementVersion()
 		if runtimeChanged {
 			ts.BumpGeneration()
@@ -136,15 +154,12 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		rolloutsRes, err := tx.ListRollouts(ctx,
-			tx.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: id}),
-			storage.ListOptions{Limit: storage.MaxListLimit},
-		)
+		rolloutsRes, err := storage.AllRollouts(ctx, tx, tx.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: id}))
 		if err != nil {
 			return err
 		}
 
-		if len(rolloutsRes.Items) == 0 {
+		if len(rolloutsRes) == 0 {
 			fastPath = true
 			return tx.DeleteSpec(ctx, id)
 		}
@@ -153,17 +168,17 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 		if err = tx.UpsertSpec(ctx, ts); err != nil {
 			return err
 		}
-		for _, r := range rolloutsRes.Items {
+		for _, r := range rolloutsRes {
 			if r == nil {
 				continue
 			}
 			r.SetIntent(enum.RolloutIntentUninstall)
-			r.MarkPending(ts.Version())
+			r.MarkPending(ts.Generation())
 			if err = tx.UpsertRollout(ctx, r); err != nil {
 				return err
 			}
 		}
-		pending = len(rolloutsRes.Items)
+		pending = len(rolloutsRes)
 		return nil
 	})
 	if err != nil {
@@ -203,14 +218,11 @@ func (s *Service) ForceDelete(ctx context.Context, id string) error {
 // Rollouts return all rollouts matching the given criteria.
 // The service owns the translation from domain-level criteria to the backend-specific filter - callers never import the storage backend.
 func (s *Service) Rollouts(ctx context.Context, c storage.RolloutQueryCriteria) ([]*model.Rollout, error) {
-	res, err := s.store.ListRollouts(ctx,
-		s.store.BuildRolloutFilter(c),
-		storage.ListOptions{Limit: storage.MaxListLimit},
-	)
+	res, err := storage.AllRollouts(ctx, s.store, s.store.BuildRolloutFilter(c))
 	if err != nil {
 		return nil, err
 	}
-	return res.Items, nil
+	return res, nil
 }
 
 // RolloutsBySpec is a thin wrapper over `Rollouts` that always filters by the given spec.
@@ -219,14 +231,11 @@ func (s *Service) RolloutsBySpec(ctx context.Context, specID string) ([]*model.R
 		return nil, storage.ErrInvalidArgument
 	}
 
-	res, err := s.store.ListRollouts(ctx,
-		s.store.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: specID}),
-		storage.ListOptions{Limit: storage.MaxListLimit},
-	)
+	res, err := storage.AllRollouts(ctx, s.store, s.store.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: specID}))
 	if err != nil {
 		return nil, err
 	}
-	return res.Items, nil
+	return res, nil
 }
 
 // Deploy is the reconciler that maps the current desired state (spec targets + spec generation) onto the set of Rollout records.
@@ -248,7 +257,6 @@ func (s *Service) Deploy(ctx context.Context, specID string) error {
 	var (
 		generation                       int
 		install, update, uninstall, noop int
-		missing                          []string
 	)
 	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
 		ts, err := tx.GetSpec(ctx, specID)
@@ -259,15 +267,20 @@ func (s *Service) Deploy(ctx context.Context, specID string) error {
 			return storage.ErrInvalidArgument
 		}
 		generation = ts.Generation()
-		targets := ts.Targets()
-
-		for _, agentID := range targets {
-			if _, err = tx.GetAgent(ctx, agentID); err != nil {
-				missing = append(missing, agentID)
-			}
+		plan, err := loadPlacement(ctx, tx, ts, time.Now())
+		if err != nil {
+			return err
 		}
+		missing, unsupported := blockedTargets(plan)
 		if len(missing) > 0 {
 			return &UnknownTargetsError{Agents: missing}
+		}
+		if len(unsupported) > 0 {
+			return &UnsupportedTargetsError{Agents: unsupported}
+		}
+		targets := make([]string, 0, len(plan.Targets))
+		for _, target := range plan.Targets {
+			targets = append(targets, target.AgentID)
 		}
 
 		wanted := make(map[string]struct{}, len(targets))
@@ -275,16 +288,13 @@ func (s *Service) Deploy(ctx context.Context, specID string) error {
 			wanted[id] = struct{}{}
 		}
 
-		rolloutsRes, err := tx.ListRollouts(ctx,
-			tx.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: specID}),
-			storage.ListOptions{Limit: storage.MaxListLimit},
-		)
+		rolloutsRes, err := storage.AllRollouts(ctx, tx, tx.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: specID}))
 		if err != nil {
 			return err
 		}
 
-		existing := make(map[string]*model.Rollout, len(rolloutsRes.Items))
-		for _, r := range rolloutsRes.Items {
+		existing := make(map[string]*model.Rollout, len(rolloutsRes))
+		for _, r := range rolloutsRes {
 			if r != nil {
 				existing[r.AgentID()] = r
 			}
@@ -303,13 +313,13 @@ func (s *Service) Deploy(ctx context.Context, specID string) error {
 					r.SetIntent(enum.RolloutIntentUpdate)
 					update++
 				}
-				r.MarkPending(ts.Version())
+				r.MarkPending(ts.Generation())
 				if err = tx.UpsertRollout(ctx, r); err != nil {
 					return err
 				}
 				continue
 			}
-			r, err := model.NewRollout(specID, agentID, ts.Version())
+			r, err := model.NewRollout(specID, agentID, ts.Generation())
 			if err != nil {
 				return err
 			}
@@ -325,7 +335,7 @@ func (s *Service) Deploy(ctx context.Context, specID string) error {
 				continue
 			}
 			r.SetIntent(enum.RolloutIntentUninstall)
-			r.MarkPending(ts.Version())
+			r.MarkPending(ts.Generation())
 			if err = tx.UpsertRollout(ctx, r); err != nil {
 				return err
 			}
@@ -351,5 +361,20 @@ func (s *Service) Deploy(ctx context.Context, specID string) error {
 		Int("uninstall", uninstall).
 		Int("noop", noop).
 		Msg("deploy reconciled rollouts")
+	return nil
+}
+
+func validateSpec(ts *model.Spec) error {
+	if ts == nil || strings.TrimSpace(ts.Name()) == "" {
+		return fmt.Errorf("%w: spec name is required", storage.ErrInvalidArgument)
+	}
+	if _, err := proxy.SpecToProto(ts); err != nil {
+		return fmt.Errorf("%w: %v", storage.ErrInvalidArgument, err)
+	}
+	for k, v := range ts.TargetLabels() {
+		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+			return fmt.Errorf("%w: target selector key/value required", storage.ErrInvalidArgument)
+		}
+	}
 	return nil
 }

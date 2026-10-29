@@ -7,13 +7,13 @@ import (
 	"time"
 
 	hraft "github.com/hashicorp/raft"
-	"google.golang.org/protobuf/proto"
 
 	raftv1 "github.com/soltiHQ/control-plane/api/gen/solti/raft/v1"
 	"github.com/soltiHQ/control-plane/domain/wire"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"github.com/soltiHQ/control-plane/internal/storage/snapshot"
 )
 
 // Compile-time check.
@@ -180,7 +180,20 @@ func applyStoreOp(ctx context.Context, tx storage.Storage, op *raftv1.Op) error 
 		return tx.DeleteSessionsByUser(ctx, v.SessionDeleteByUser)
 	case *raftv1.Op_SessionRotateRefresh:
 		m := v.SessionRotateRefresh
-		return tx.RotateRefresh(ctx, m.GetId(), m.GetRefreshHash(), time.Unix(0, m.GetExpiresAtNs()))
+		if m == nil {
+			return storage.ErrInvalidArgument
+		}
+		clocked, ok := tx.(storage.ClockedSessionRotation)
+		if !ok {
+			return fmt.Errorf("%w: explicit session rotation timestamps are unsupported", storage.ErrInternal)
+		}
+		var updatedAt time.Time
+		if m.UpdatedAtNs != nil {
+			updatedAt = time.Unix(0, m.GetUpdatedAtNs())
+		}
+		// Historical commands omitted this field. The clocked storage hook
+		// preserves the existing modification time rather than inventing one.
+		return clocked.RotateRefreshAt(ctx, m.GetId(), m.GetRefreshHash(), time.Unix(0, m.GetExpiresAtNs()), updatedAt)
 	case *raftv1.Op_SessionRevoke:
 		m := v.SessionRevoke
 		return tx.RevokeSession(ctx, m.GetId(), time.Unix(0, m.GetRevokedAtNs()))
@@ -205,6 +218,14 @@ func applyStoreOp(ctx context.Context, tx storage.Storage, op *raftv1.Op) error 
 	case *raftv1.Op_RolloutDeleteBySpec:
 		return tx.DeleteRolloutsBySpec(ctx, v.RolloutDeleteBySpec)
 
+	case *raftv1.Op_ExecutionUpsert:
+		e, err := wire.ExecutionFromProto(v.ExecutionUpsert)
+		if err != nil {
+			return err
+		}
+		return tx.UpsertExecution(ctx, e)
+	case *raftv1.Op_ExecutionDelete:
+		return tx.DeleteExecution(ctx, v.ExecutionDelete)
 	default:
 		return fmt.Errorf("%w: %T", wire.ErrUnknownOp, op.GetOp())
 	}
@@ -243,82 +264,9 @@ func (f *FSM) Restore(r io.ReadCloser) error {
 	if err != nil {
 		return fmt.Errorf("raft restore: read: %w", err)
 	}
-	var snap raftv1.Snapshot
-	if err := proto.Unmarshal(data, &snap); err != nil {
-		return fmt.Errorf("raft restore: unmarshal: %w", err)
-	}
-
-	hdr := snap.GetHeader()
-	if hdr.GetMagic() != snapshotMagic {
-		return fmt.Errorf("raft restore: bad magic %q (want %q)", hdr.GetMagic(), snapshotMagic)
-	}
-	if hdr.GetVersion() != snapshotVersion {
-		return fmt.Errorf("raft restore: unsupported version %d (want %d)", hdr.GetVersion(), snapshotVersion)
-	}
-
-	content := inmemory.SnapshotContent{}
-	for _, m := range snap.GetAgents() {
-		a, err := wire.AgentFromProto(m)
-		if err != nil {
-			return fmt.Errorf("raft restore: agent: %w", err)
-		}
-		content.Agents = append(content.Agents, a)
-	}
-	for _, m := range snap.GetAgentCredentials() {
-		c, err := wire.AgentCredentialFromProto(m)
-		if err != nil {
-			return fmt.Errorf("raft restore: agent credential: %w", err)
-		}
-		content.AgentCreds = append(content.AgentCreds, c)
-	}
-	for _, m := range snap.GetUsers() {
-		u, err := wire.UserFromProto(m)
-		if err != nil {
-			return fmt.Errorf("raft restore: user: %w", err)
-		}
-		content.Users = append(content.Users, u)
-	}
-	for _, m := range snap.GetRoles() {
-		ro, err := wire.RoleFromProto(m)
-		if err != nil {
-			return fmt.Errorf("raft restore: role: %w", err)
-		}
-		content.Roles = append(content.Roles, ro)
-	}
-	for _, m := range snap.GetCredentials() {
-		c, err := wire.CredentialFromProto(m)
-		if err != nil {
-			return fmt.Errorf("raft restore: credential: %w", err)
-		}
-		content.Credentials = append(content.Credentials, c)
-	}
-	for _, m := range snap.GetVerifiers() {
-		ver, err := wire.VerifierFromProto(m)
-		if err != nil {
-			return fmt.Errorf("raft restore: verifier: %w", err)
-		}
-		content.Verifiers = append(content.Verifiers, ver)
-	}
-	for _, m := range snap.GetSessions() {
-		s, err := wire.SessionFromProto(m)
-		if err != nil {
-			return fmt.Errorf("raft restore: session: %w", err)
-		}
-		content.Sessions = append(content.Sessions, s)
-	}
-	for _, m := range snap.GetSpecs() {
-		sp, err := wire.SpecFromProto(m)
-		if err != nil {
-			return fmt.Errorf("raft restore: spec: %w", err)
-		}
-		content.Specs = append(content.Specs, sp)
-	}
-	for _, m := range snap.GetRollouts() {
-		ro, err := wire.RolloutFromProto(m)
-		if err != nil {
-			return fmt.Errorf("raft restore: rollout: %w", err)
-		}
-		content.Rollouts = append(content.Rollouts, ro)
+	content, err := snapshot.Unmarshal(data)
+	if err != nil {
+		return fmt.Errorf("raft restore: %w", err)
 	}
 
 	store.RestoreFromSnapshot(content)

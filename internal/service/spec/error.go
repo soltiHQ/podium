@@ -3,6 +3,8 @@ package spec
 import (
 	"fmt"
 	"strings"
+
+	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
 // UnknownTargetsError is returned by Deploy when the spec declares one
@@ -37,3 +39,12 @@ func (e *ConflictError) Error() string {
 		e.Expected, e.Actual,
 	)
 }
+
+// UnsupportedTargetsError identifies advertised runner inventories that cannot
+// execute the requested workload with its runner-label selector.
+type UnsupportedTargetsError struct{ Agents []string }
+
+func (e *UnsupportedTargetsError) Error() string {
+	return fmt.Sprintf("deploy rejected: no compatible workload runner on agents: %s", strings.Join(e.Agents, ", "))
+}
+func (e *UnsupportedTargetsError) Unwrap() error { return storage.ErrInvalidArgument }

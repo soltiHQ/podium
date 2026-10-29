@@ -31,3 +31,6 @@ tailwindcss.css
 
 # Taskfile
 .task/
+
+# local runtime state (default standalone data_dir)
+data/

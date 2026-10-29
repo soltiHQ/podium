@@ -96,7 +96,11 @@ func TestSpec_ProtoRoundtrip(t *testing.T) {
 	ts.MarkForDeletion()
 	ts.SetCreatedAt(nowTruncated())
 
-	back, err := wire.SpecFromProto(wire.SpecToProto(ts))
+	message, err := wire.SpecToProto(ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := wire.SpecFromProto(message)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +129,11 @@ func TestSpec_KindConfigNestedRoundtrip(t *testing.T) {
 	})
 	ts.SetCreatedAt(nowTruncated())
 
-	data, err := proto.Marshal(wire.SpecToProto(ts))
+	message, err := wire.SpecToProto(ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := proto.Marshal(message)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}

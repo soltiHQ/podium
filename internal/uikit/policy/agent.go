@@ -8,7 +8,9 @@ import "github.com/soltiHQ/control-plane/internal/auth/identity"
 //
 // Passed into the templ component, markup stays free of auth logic.
 type AgentDetail struct {
-	CanEditLabels bool
+	CanEditLabels   bool
+	CanOperateTasks bool
+	CanViewHistory  bool
 }
 
 // BuildAgentDetail derives UI action flags from the authenticated identity.
@@ -19,6 +21,8 @@ func BuildAgentDetail(id *identity.Identity) AgentDetail {
 
 	perms := permSet(id)
 	return AgentDetail{
-		CanEditLabels: hasAny(perms, agentsEdit),
+		CanEditLabels:   hasAny(perms, agentsEdit),
+		CanOperateTasks: hasAny(perms, agentsEdit),
+		CanViewHistory:  hasAny(perms, agentsGet),
 	}
 }

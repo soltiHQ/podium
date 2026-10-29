@@ -27,11 +27,12 @@ func TestBuildNav(t *testing.T) {
 	t.Run("full flag mapping", func(t *testing.T) {
 		got := BuildNav(id("u1", usersAdd, specsGet, specsAdd, agentsGet))
 		want := Nav{
-			ShowUsers:  true, // usersAdd
-			ShowTasks:  true, // specsGet
-			ShowAgents: true, // agentsGet
-			CanAddUser: true, // usersAdd
-			CanAddSpec: true, // specsAdd
+			ShowUsers:   true, // usersAdd
+			ShowTasks:   true, // specsGet
+			ShowAgents:  true, // agentsGet
+			ShowHistory: true, // agentsGet
+			CanAddUser:  true, // usersAdd
+			CanAddSpec:  true, // specsAdd
 		}
 		if got != want {
 			t.Fatalf("BuildNav = %+v, want %+v", got, want)
@@ -101,5 +102,25 @@ func TestBuildSpecDetail(t *testing.T) {
 
 	if got = BuildSpecDetail(id("u1", specsDeploy)); !got.CanDeploy {
 		t.Fatalf("specsDeploy should grant CanDeploy, got %+v", got)
+	}
+}
+
+func TestPlacementPolicyRequiresSpecAndAgentRead(t *testing.T) {
+	for _, tc := range []struct {
+		permissions []enum.Permission
+		want        bool
+	}{{nil, false}, {[]enum.Permission{specsGet}, false}, {[]enum.Permission{agentsGet}, false}, {[]enum.Permission{specsGet, agentsEdit}, false}, {[]enum.Permission{specsGet, agentsGet}, true}} {
+		if got := BuildSpecDetail(id("reader", tc.permissions...)).CanViewPlacement; got != tc.want {
+			t.Fatalf("%v: %v", tc.permissions, got)
+		}
+	}
+}
+
+func TestArchiveNavigationRequiresAgentRead(t *testing.T) {
+	if BuildNav(id("editor", agentsEdit)).ShowHistory || BuildAgentDetail(id("editor", agentsEdit)).CanViewHistory {
+		t.Fatal("agent edit exposes archive without read")
+	}
+	if !BuildNav(id("reader", agentsGet)).ShowHistory || !BuildAgentDetail(id("reader", agentsGet)).CanViewHistory {
+		t.Fatal("agent read missing archive navigation")
 	}
 }

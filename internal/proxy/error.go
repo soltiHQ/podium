@@ -3,6 +3,7 @@ package proxy
 import "errors"
 
 var (
+	ErrClosed = errors.New("proxy: pool closed")
 	// ErrUnsupportedEndpointType indicates the agent reported an unknown endpoint type.
 	ErrUnsupportedEndpointType = errors.New("proxy: unsupported endpoint type")
 	// ErrDial indicates a failure to establish a gRPC connection to an agent.

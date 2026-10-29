@@ -23,6 +23,7 @@ import (
 	hraft "github.com/hashicorp/raft"
 	boltdb "github.com/hashicorp/raft-boltdb/v2"
 	"github.com/rs/zerolog"
+	bolt "go.etcd.io/bbolt"
 
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/event"
@@ -126,35 +127,73 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 	if err != nil {
 		return nil, fmt.Errorf("raft: resolve advertise %q: %w", advertise, err)
 	}
-	transport, err := hraft.NewTCPTransport(cfg.BindAddr, advTCP, 3, 10*time.Second, os.Stderr)
-	if err != nil {
-		return nil, fmt.Errorf("raft: tcp transport on %s: %w", cfg.BindAddr, err)
-	}
-
-	logStore, err := boltdb.NewBoltStore(filepath.Join(cfg.DataDir, "raft-log.bolt"))
-	if err != nil {
-		return nil, fmt.Errorf("raft: open log store: %w", err)
-	}
-	stable, err := boltdb.NewBoltStore(filepath.Join(cfg.DataDir, "raft-stable.bolt"))
-	if err != nil {
-		return nil, fmt.Errorf("raft: open stable store: %w", err)
+	// Inspect existing commands with a read-only database handle before any
+	// writable stores or Raft goroutines can initialize/replay legacy state.
+	if err := preflightLogFile(filepath.Join(cfg.DataDir, "raft-log.bolt")); err != nil {
+		return nil, err
 	}
 	snap, err := hraft.NewFileSnapshotStore(cfg.DataDir, 2, os.Stderr)
 	if err != nil {
 		return nil, fmt.Errorf("raft: snapshot store: %w", err)
 	}
+	if err := preflightSnapshots(snap); err != nil {
+		return nil, err
+	}
+
+	var (
+		transport        *hraft.NetworkTransport
+		logStore, stable *boltdb.BoltStore
+		r                *hraft.Raft
+	)
+	constructed := false
+	defer func() {
+		if constructed {
+			return
+		}
+		if r != nil {
+			_ = r.Shutdown().Error()
+		}
+		if stable != nil {
+			_ = stable.Close()
+		}
+		if logStore != nil {
+			_ = logStore.Close()
+		}
+		if transport != nil {
+			_ = transport.Close()
+		}
+	}()
+
+	logStore, err = boltdb.New(boltdb.Options{Path: filepath.Join(cfg.DataDir, "raft-log.bolt"), BoltOptions: &bolt.Options{Timeout: 250 * time.Millisecond}})
+	if err != nil {
+		return nil, fmt.Errorf("raft: open log store: %w", err)
+	}
+	stable, err = boltdb.New(boltdb.Options{Path: filepath.Join(cfg.DataDir, "raft-stable.bolt"), BoltOptions: &bolt.Options{Timeout: 250 * time.Millisecond}})
+	if err != nil {
+		return nil, fmt.Errorf("raft: open stable store: %w", err)
+	}
+	// Recheck after the read-only handle was closed and the exclusive write
+	// lock acquired: another process cannot change log state during replay.
+	if err := preflightLogs(logStore); err != nil {
+		return nil, err
+	}
+	hasState, err := hraft.HasExistingState(logStore, stable, snap)
+	if err != nil {
+		return nil, fmt.Errorf("raft: has existing state: %w", err)
+	}
+	transport, err = hraft.NewTCPTransport(cfg.BindAddr, advTCP, 3, 10*time.Second, os.Stderr)
+	if err != nil {
+		return nil, fmt.Errorf("raft: tcp transport on %s: %w", cfg.BindAddr, err)
+	}
 
 	fsm := NewFSM(inner, hub)
-	r, err := hraft.NewRaft(rcfg, fsm, logStore, stable, snap, transport)
+	r, err = hraft.NewRaft(rcfg, fsm, logStore, stable, snap, transport)
 	if err != nil {
 		return nil, fmt.Errorf("raft: new raft: %w", err)
 	}
 
 	// Bootstrap if log is empty (first start in this DataDir).
-	hasState, err := hraft.HasExistingState(logStore, stable, snap)
-	if err != nil {
-		return nil, fmt.Errorf("raft: has existing state: %w", err)
-	}
+
 	if !hasState {
 		// Use the CONFIG advertise string (FQDN as written by the user)
 		// for the bootstrap config, not transport.LocalAddr() — that one
@@ -186,6 +225,7 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 	// this point Notify/Record/DeleteIssues on any replica go via the log;
 	// the FSM fires ApplyLocal* on every node.
 	hub.SetWriter(NewEventWriter(r, hub))
+	constructed = true
 	return p, nil
 }
 

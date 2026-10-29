@@ -21,6 +21,8 @@ import (
 // (range queries reflecting overlay) is NOT supported — List* operations
 // bypass the overlay. That's fine in practice: nothing inside the
 // services' WithTx closures reads a listing after writing to it.
+var _ storage.ClockedSessionRotation = (*txView)(nil)
+
 type txView struct {
 	inner storage.Storage
 	ops   []*raftv1.Op
@@ -36,6 +38,7 @@ type txView struct {
 	sessions    map[string]*model.Session
 	specs       map[string]*model.Spec
 	rollouts    map[string]*model.Rollout
+	executions  map[string]*model.ExecutionRecord
 }
 
 func newTxView(inner storage.Storage) *txView {
@@ -50,6 +53,7 @@ func newTxView(inner storage.Storage) *txView {
 		sessions:    map[string]*model.Session{},
 		specs:       map[string]*model.Spec{},
 		rollouts:    map[string]*model.Rollout{},
+		executions:  map[string]*model.ExecutionRecord{},
 	}
 }
 
@@ -274,7 +278,7 @@ func (v *txView) CreateSession(ctx context.Context, s *model.Session) error {
 	if s == nil {
 		return storage.ErrInvalidArgument
 	}
-	v.sessions[s.ID()] = s
+	v.sessions[s.ID()] = s.Clone()
 	v.ops = append(v.ops, &raftv1.Op{Op: &raftv1.Op_SessionCreate{SessionCreate: wire.SessionToProto(s)}})
 	return nil
 }
@@ -284,7 +288,7 @@ func (v *txView) GetSession(ctx context.Context, id string) (*model.Session, err
 		if tomb {
 			return nil, storage.ErrNotFound
 		}
-		return val, nil
+		return val.Clone(), nil
 	}
 	return v.inner.GetSession(ctx, id)
 }
@@ -294,17 +298,43 @@ func (v *txView) ListSessionsByUser(ctx context.Context, userID string) ([]*mode
 }
 
 func (v *txView) RotateRefresh(ctx context.Context, sessionID string, newHash []byte, newExpiresAt time.Time) error {
-	v.ops = append(v.ops, &raftv1.Op{Op: &raftv1.Op_SessionRotateRefresh{
-		SessionRotateRefresh: &raftv1.SessionRotateRefreshMsg{
-			Id:          sessionID,
-			RefreshHash: append([]byte(nil), newHash...),
-			ExpiresAtNs: newExpiresAt.UnixNano(),
-		},
-	}})
+	return v.RotateRefreshAt(ctx, sessionID, newHash, newExpiresAt, time.Now())
+}
+
+func (v *txView) RotateRefreshAt(ctx context.Context, sessionID string, newHash []byte, newExpiresAt, updatedAt time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if sessionID == "" || len(newHash) == 0 || newExpiresAt.IsZero() {
+		return storage.ErrInvalidArgument
+	}
+	cur, err := v.GetSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if err := cur.RotateRefreshAt(newHash, newExpiresAt, updatedAt); err != nil {
+		return err
+	}
+	v.sessions[sessionID] = cur
+	v.ops = append(v.ops, sessionRefreshOp(sessionID, newHash, newExpiresAt, updatedAt))
 	return nil
 }
 
 func (v *txView) RevokeSession(ctx context.Context, sessionID string, revokedAt time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if sessionID == "" || revokedAt.IsZero() {
+		return storage.ErrInvalidArgument
+	}
+	cur, err := v.GetSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if err := cur.Revoke(revokedAt); err != nil {
+		return err
+	}
+	v.sessions[sessionID] = cur
 	v.ops = append(v.ops, &raftv1.Op{Op: &raftv1.Op_SessionRevoke{
 		SessionRevoke: &raftv1.SessionRevokeMsg{Id: sessionID, RevokedAtNs: revokedAt.UnixNano()},
 	}})
@@ -328,8 +358,12 @@ func (v *txView) UpsertSpec(ctx context.Context, ts *model.Spec) error {
 	if ts == nil {
 		return storage.ErrInvalidArgument
 	}
+	message, err := wire.SpecToProto(ts)
+	if err != nil {
+		return err
+	}
 	v.specs[ts.ID()] = ts
-	v.ops = append(v.ops, &raftv1.Op{Op: &raftv1.Op_SpecUpsert{SpecUpsert: wire.SpecToProto(ts)}})
+	v.ops = append(v.ops, &raftv1.Op{Op: &raftv1.Op_SpecUpsert{SpecUpsert: message}})
 	return nil
 }
 

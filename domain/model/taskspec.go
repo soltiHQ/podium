@@ -135,7 +135,7 @@ func (ts *Spec) SetDeletionRequested(b bool) { ts.deletionRequested = b }
 func (ts *Spec) KindConfig() map[string]any {
 	out := make(map[string]any, len(ts.kindConfig))
 	for k, v := range ts.kindConfig {
-		out[k] = v
+		out[k] = cloneConfigValue(v)
 	}
 	return out
 }
@@ -190,7 +190,7 @@ func (ts *Spec) SetKindConfig(cfg map[string]any) {
 	}
 	cp := make(map[string]any, len(cfg))
 	for k, v := range cfg {
-		cp[k] = v
+		cp[k] = cloneConfigValue(v)
 	}
 	ts.kindConfig = cp
 	ts.updatedAt = time.Now()
@@ -294,7 +294,7 @@ func (ts *Spec) MarkForDeletion() {
 func (ts *Spec) Clone() *Spec {
 	kindConfig := make(map[string]any, len(ts.kindConfig))
 	for k, v := range ts.kindConfig {
-		kindConfig[k] = v
+		kindConfig[k] = cloneConfigValue(v)
 	}
 	targets := make([]string, len(ts.targets))
 	copy(targets, ts.targets)
@@ -371,4 +371,34 @@ func anyMapEqual(a, b map[string]any) bool {
 		}
 	}
 	return true
+}
+
+// cloneConfigValue copies the JSON-compatible containers accepted by the API.
+func cloneConfigValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, v := range x {
+			out[k] = cloneConfigValue(v)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, v := range x {
+			out[i] = cloneConfigValue(v)
+		}
+		return out
+	case map[string]string:
+		out := make(map[string]string, len(x))
+		for k, v := range x {
+			out[k] = v
+		}
+		return out
+	case []string:
+		return slices.Clone(x)
+	case []byte:
+		return slices.Clone(x)
+	default:
+		return v
+	}
 }

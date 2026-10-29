@@ -30,11 +30,13 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
+	"github.com/soltiHQ/control-plane/internal/service/history"
 	"github.com/soltiHQ/control-plane/internal/service/role"
 	"github.com/soltiHQ/control-plane/internal/service/session"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
 	"github.com/soltiHQ/control-plane/internal/service/user"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/storage/durable"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/grpc/interceptor"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
@@ -46,6 +48,7 @@ import (
 // services groups all domain services constructed at startup.
 type services struct {
 	credential *credential.Service
+	history    *history.Service
 	session    *session.Service
 	access     *access.Service
 	agent      *agent.Service
@@ -54,8 +57,13 @@ type services struct {
 	role       *role.Service
 }
 
-func initServices(store storage.Storage, authModel *kit.Auth, logger zerolog.Logger) services {
+func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history.Config, logger zerolog.Logger) (services, error) {
+	historySVC, err := history.New(store, historyCfg)
+	if err != nil {
+		return services{}, err
+	}
 	return services{
+		history:    historySVC,
 		access:     access.New(authModel, store, logger),
 		credential: credential.New(store, logger),
 		session:    session.New(store, logger),
@@ -63,19 +71,36 @@ func initServices(store storage.Storage, authModel *kit.Auth, logger zerolog.Log
 		spec:       spec.New(store, logger),
 		role:       role.New(store, logger),
 		user:       user.New(store, logger),
-	}
+	}, nil
 }
 
 // buildCluster assembles the storage + leadership + event-hub trio declared
 // by cfg. In raft mode the hub is also wired to replicate mutations through
 // the Raft log. Returns the store/leadership/hub the rest of the app uses,
-// plus a shutdown function for the Raft node (nil in standalone).
+// plus a shutdown function for the storage resources (nil for ephemeral standalone).
 func buildCluster(cfg cluster.Config, logger zerolog.Logger) (storage.Storage, cluster.Leadership, *event.Hub, func(), error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("cluster: %w", err)
+	}
 	inner := inmemory.New()
 	hub := event.NewHub(logger)
 	switch cfg.Backend {
 	case "", cluster.BackendStandalone:
-		return inner, standalone.NewLeadership(), hub, nil, nil
+		if cfg.Standalone.Ephemeral {
+			logger.Warn().Msg("standalone.ephemeral=true: control-plane state will be lost on restart")
+			return inner, standalone.NewLeadership(), hub, nil, nil
+		}
+		store, err := durable.Open(cfg.Standalone.DataDir)
+		if err != nil {
+			hub.Close()
+			return nil, nil, nil, nil, err
+		}
+		logger.Info().Str("data_dir", cfg.Standalone.DataDir).Msg("standalone durable storage restored")
+		return store, standalone.NewLeadership(), hub, func() {
+			if err := store.Close(); err != nil {
+				logger.Error().Err(err).Msg("close standalone storage")
+			}
+		}, nil
 	case cluster.BackendRaft:
 		disco, err := buildDiscovery(cfg.Discovery)
 		if err != nil {
@@ -120,29 +145,48 @@ func msToDuration(ms int) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-// waitForLeader polls until any leader is elected or timeout elapses.
-// Returns true if a leader exists at return (which might be us or a peer).
-// Used on startup so subsequent leader-only work (bootstrap, singleton
-// runners) runs against a stable cluster, not a half-formed one.
-func waitForLeader(ctx context.Context, l cluster.Leadership, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+// readyForBootstrap distinguishes leader election from applied-state readiness.
+// Followers skip seeding; leaders must finish replay before reading seed data.
+func readyForBootstrap(ctx context.Context, leader cluster.Leadership, timeout time.Duration) (bool, error) {
+	readyCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if !waitForLeader(readyCtx, leader) || !leader.AmLeader() {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if err := cluster.AwaitLeaderReady(readyCtx, leader); err != nil {
+		return false, fmt.Errorf("cluster: wait for leader state replay: %w", err)
+	}
+	return true, nil
+}
+
+// waitForLeader polls until a leader is elected or ctx expires. Election is
+// followed by AwaitLeaderReady before any bootstrap reads on the leader.
+func waitForLeader(ctx context.Context, l cluster.Leadership) bool {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
 		if ctx.Err() != nil {
 			return false
 		}
 		if l.AmLeader() || l.CurrentLeader() != "" {
 			return true
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		}
 	}
-	return l.AmLeader() || l.CurrentLeader() != ""
 }
 
-func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership) http.Handler {
+func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership) (http.Handler, *loghub.Hub) {
 	var (
 		logHub        = buildLogHub(logger, svc.agent, proxyPool, cfg.Streams)
 		streamLimit   = middleware.NewStreamLimiter(cfg.Streams.MaxPerIP)
-		apiHandler    = handler.NewAPI(logger, svc.user, svc.access, svc.session, svc.credential, svc.agent, svc.spec, proxyPool, eventHub, logHub, streamLimit)
+		apiHandler    = handler.NewAPI(logger, svc.user, svc.access, svc.session, svc.credential, svc.agent, svc.spec, svc.history, proxyPool, eventHub, logHub, streamLimit)
 		authMW        = middleware.Auth(authModel.Verifier, authModel.Session)
 		uiHandler     = handler.NewUI(logger, svc.access, svc.spec, eventHub)
 		staticHandler = handler.NewStatic(logger)
@@ -158,7 +202,7 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 	uiHandler.Routes(mux, authMW, permMW)
 	staticHandler.Routes(mux)
 
-	route.HandleFunc(mux, routepath.ApiEventStream, eventHub.SSEHandler(), ridMW, logMW, authMW)
+	route.HandleFunc(mux, routepath.ApiEventStream, eventHub.SSEHandler(), ridMW, logMW, authMW, middleware.StreamLimit(streamLimit))
 
 	var h http.Handler = mux
 	h = middleware.Negotiate(responder.NewJSON(), responder.NewHTML())(h)
@@ -169,7 +213,7 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 	h = middleware.RateLimit(authModel.Limiter)(h)
 	h = middleware.CORS(cfg.CORS)(h)
 	h = middleware.Recovery(logger)(h)
-	return h
+	return h, logHub
 }
 
 func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, requireAuth bool, targetTLS bool) http.Handler {
@@ -192,7 +236,7 @@ func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, event
 // the agent, gets its proxy, and opens the underlying StreamTaskLogs — all
 // inside a closure so the hub itself stays decoupled from agent/proxy.
 func buildLogHub(logger zerolog.Logger, agentSVC *agent.Service, proxyPool *proxy.Pool, cfg middleware.StreamsConfig) *loghub.Hub {
-	open := func(ctx context.Context, agentID, taskID string) (<-chan *taskv1.StreamTaskLogsResponse, error) {
+	open := func(ctx context.Context, agentID, taskID, taskUID string) (<-chan *taskv1.StreamTaskLogsResponse, error) {
 		ag, err := agentSVC.Get(ctx, agentID)
 		if err != nil {
 			return nil, err
@@ -208,9 +252,16 @@ func buildLogHub(logger zerolog.Logger, agentSVC *agent.Service, proxyPool *prox
 		if err != nil {
 			return nil, err
 		}
+		if taskUID != "" {
+			pinned, ok := p.(proxy.TaskLogStreamer)
+			if !ok {
+				return nil, fmt.Errorf("agent proxy cannot pin task UID")
+			}
+			return pinned.StreamTaskLogsForUID(ctx, taskID, taskUID)
+		}
 		return p.StreamTaskLogs(ctx, taskID)
 	}
-	return loghub.New(open, loghub.Options{SubscriberBuffer: cfg.SubscriberBuffer})
+	return loghub.NewIdentity(open, loghub.Options{SubscriberBuffer: cfg.SubscriberBuffer})
 }
 
 // addrPort extracts the port number from a listen address like ":8080" or

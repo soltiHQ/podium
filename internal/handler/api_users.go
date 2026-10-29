@@ -171,6 +171,13 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 
+	if action == modeCreate && (in.RoleIDs != nil || in.Permissions != nil) {
+		actor := a.identity(r)
+		if actor == nil || !actor.HasPermission(enum.UsersEdit) {
+			response.Forbidden(w, r, mode)
+			return
+		}
+	}
 	var u *model.User
 
 	switch action {
@@ -212,10 +219,14 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	if in.Subject != "" {
 		u.SetSubject(in.Subject)
 	}
-	if len(in.RoleIDs) > 0 {
+	if action == modeUpdate && a.identity(r) != nil && a.identity(r).UserID == id && (in.RoleIDs != nil || in.Permissions != nil) {
+		response.BadRequestMsg(w, r, mode, "You cannot change your own roles or permissions.")
+		return
+	}
+	if in.RoleIDs != nil {
 		u.SetRoleIDs(in.RoleIDs)
 	}
-	if len(in.Permissions) > 0 {
+	if in.Permissions != nil {
 		u.SetPermissions(in.Permissions)
 	}
 	if err = a.userSVC.Upsert(r.Context(), u); err != nil {
@@ -252,6 +263,10 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 }
 
 func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
+	if actor := a.identity(r); actor != nil && actor.UserID == id {
+		response.BadRequestMsg(w, r, mode, "You cannot delete your own account.")
+		return
+	}
 	var name string
 	if u, err := a.userSVC.Get(r.Context(), id); err == nil {
 		name = u.Name()
@@ -273,6 +288,10 @@ func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 }
 
 func (a *API) userSetStatus(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, userID string, status userStatusMode) {
+	if actor := a.identity(r); status == userDisable && actor != nil && actor.UserID == userID {
+		response.BadRequestMsg(w, r, mode, "You cannot disable your own account.")
+		return
+	}
 	u, err := a.userSVC.Get(r.Context(), userID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {

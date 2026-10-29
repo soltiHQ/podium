@@ -23,12 +23,12 @@ type Runner struct {
 
 	hub    *event.Hub
 	logger zerolog.Logger
-	store  storage.AgentStore
+	store  storage.Storage
 	cfg    Config
 }
 
 // New creates a lifecycle runner.
-func New(cfg Config, logger zerolog.Logger, store storage.AgentStore, hub *event.Hub, leadership cluster.Leadership) (*Runner, error) {
+func New(cfg Config, logger zerolog.Logger, store storage.Storage, hub *event.Hub, leadership cluster.Leadership) (*Runner, error) {
 	if store == nil {
 		return nil, fmt.Errorf("lifecycle: %w", storage.ErrNilStore)
 	}
@@ -51,88 +51,79 @@ func New(cfg Config, logger zerolog.Logger, store storage.AgentStore, hub *event
 }
 
 func (r *Runner) tick(ctx context.Context) {
-	var (
-		now    = time.Now()
-		filter = inmemory.NewAgentFilter().StaleAtBefore(now)
-
-		res, err = r.store.ListAgents(ctx, filter, storage.ListOptions{
-			Limit: storage.MaxListLimit,
-		})
-	)
+	now := time.Now()
+	items, err := storage.AllAgents(ctx, r.store, inmemory.NewAgentFilter().StaleAtBefore(now))
 	if err != nil {
 		r.logger.Error().Err(err).Msg("tick: list agents failed")
 		return
 	}
-
 	var g errgroup.Group
 	g.SetLimit(r.cfg.MaxConcurrency)
-
-	for _, a := range res.Items {
+	for _, a := range items {
 		if a == nil {
 			continue
 		}
-
-		g.Go(func() error {
-			r.reconcile(ctx, now, a)
-			return nil
-		})
+		if ctx.Err() != nil {
+			break
+		}
+		g.Go(func() error { r.reconcile(ctx, now, a); return nil })
 	}
-	if err = g.Wait(); err != nil {
-		r.logger.Error().Err(err).Msg("tick: reconcile failed")
-	}
+	_ = g.Wait()
 }
 
-func (r *Runner) reconcile(ctx context.Context, now time.Time, a *model.Agent) {
-	hb := a.HeartbeatInterval()
-	if hb <= 0 {
-		hb = r.cfg.DefaultHeartbeat
-	}
-
-	silence := now.Sub(a.LastSeenAt())
-	switch {
-	case silence > hb*time.Duration(r.cfg.DeleteMultiplier):
-		if err := r.store.DeleteAgent(ctx, a.ID()); err != nil {
-			r.logger.Warn().Err(err).Str("agent_id", a.ID()).Msg("reconcile: delete failed")
-			return
+func (r *Runner) reconcile(ctx context.Context, now time.Time, observed *model.Agent) {
+	var kind string
+	var changed *model.Agent
+	err := r.store.WithTx(ctx, func(tx storage.Storage) error {
+		a, err := tx.GetAgent(ctx, observed.ID())
+		if err != nil {
+			return err
 		}
-		r.logger.Info().
-			Str("agent_id", a.ID()).
-			Dur("silence", silence).
-			Msg("agent deleted (stale)")
-
-		r.hub.Record(event.AgentDeleted, event.Payload{ID: a.ID(), Name: a.Name(), By: "lifecycle"})
-		r.hub.Notify(event.RefreshAgents)
-
-	case silence > hb*time.Duration(r.cfg.DisconnectMultiplier):
-		if a.Status() != enum.AgentStatusDisconnected {
+		// Discovery may have refreshed this agent after the stale snapshot was taken.
+		if !a.LastSeenAt().Equal(observed.LastSeenAt()) {
+			return nil
+		}
+		hb := a.HeartbeatInterval()
+		if hb <= 0 {
+			hb = r.cfg.DefaultHeartbeat
+		}
+		silence := now.Sub(a.LastSeenAt())
+		switch {
+		case silence > hb*time.Duration(r.cfg.DeleteMultiplier):
+			if err = tx.DeleteAgent(ctx, a.ID()); err != nil {
+				return err
+			}
+			kind = event.AgentDeleted
+		case silence > hb*time.Duration(r.cfg.DisconnectMultiplier):
+			if a.Status() == enum.AgentStatusDisconnected {
+				return nil
+			}
 			a.MarkStatus(enum.AgentStatusDisconnected)
-
-			if err := r.store.UpsertAgent(ctx, a); err != nil {
-				r.logger.Warn().Err(err).Str("agent_id", a.ID()).Msg("reconcile: upsert disconnected failed")
-				return
+			if err = tx.UpsertAgent(ctx, a); err != nil {
+				return err
 			}
-			r.logger.Info().
-				Str("agent_id", a.ID()).
-				Msg("agent → disconnected")
-
-			r.hub.Record(event.AgentDisconnected, event.Payload{ID: a.ID(), Name: a.Name(), By: "lifecycle"})
-			r.hub.Notify(event.RefreshAgents)
-		}
-
-	case silence > hb*time.Duration(r.cfg.InactiveMultiplier):
-		if a.Status() != enum.AgentStatusInactive {
+			kind = event.AgentDisconnected
+		case silence > hb*time.Duration(r.cfg.InactiveMultiplier):
+			if a.Status() == enum.AgentStatusInactive {
+				return nil
+			}
 			a.MarkStatus(enum.AgentStatusInactive)
-
-			if err := r.store.UpsertAgent(ctx, a); err != nil {
-				r.logger.Warn().Err(err).Str("agent_id", a.ID()).Msg("reconcile: upsert inactive failed")
-				return
+			if err = tx.UpsertAgent(ctx, a); err != nil {
+				return err
 			}
-			r.logger.Info().
-				Str("agent_id", a.ID()).
-				Msg("agent → inactive")
-
-			r.hub.Record(event.AgentInactive, event.Payload{ID: a.ID(), Name: a.Name(), By: "lifecycle"})
-			r.hub.Notify(event.RefreshAgents)
+			kind = event.AgentInactive
+		default:
+			return nil
 		}
+		changed = a
+		return nil
+	})
+	if err != nil {
+		r.logger.Warn().Err(err).Str("agent_id", observed.ID()).Msg("lifecycle reconcile failed")
+		return
+	}
+	if changed != nil {
+		r.hub.Record(kind, event.Payload{ID: changed.ID(), Name: changed.Name(), By: "lifecycle"})
+		r.hub.Notify(event.RefreshAgents)
 	}
 }

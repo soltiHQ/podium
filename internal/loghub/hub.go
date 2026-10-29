@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
 )
@@ -31,26 +32,41 @@ type Options struct {
 	// Larger = more tolerance for slow readers before Lagged kicks in.
 	// Default: 64.
 	SubscriberBuffer int
+	// OpenTimeout bounds establishment without limiting a healthy stream lifetime.
+	OpenTimeout time.Duration
 }
 
 // Hub multiplexes one backing log stream per (agentID, taskID) over N
 // subscribers.
 type Hub struct {
-	open OpenFunc
+	open OpenIdentityFunc
 	opts Options
 
 	mu      sync.Mutex
 	sources map[key]*source
+	closed  bool
 }
 
 type key struct {
 	agentID string
 	taskID  string
+	taskUID string
 }
 
 // New builds a Hub. open is the factory that produces a backing stream
 // when no source for the given (agentID, taskID) exists.
+type OpenIdentityFunc func(context.Context, string, string, string) (<-chan *taskv1.StreamTaskLogsResponse, error)
+
 func New(open OpenFunc, opts Options) *Hub {
+	return NewIdentity(func(ctx context.Context, agentID, taskID, _ string) (<-chan *taskv1.StreamTaskLogsResponse, error) {
+		return open(ctx, agentID, taskID)
+	}, opts)
+}
+
+func NewIdentity(open OpenIdentityFunc, opts Options) *Hub {
+	if opts.OpenTimeout <= 0 {
+		opts.OpenTimeout = 10 * time.Second
+	}
 	if opts.SubscriberBuffer <= 0 {
 		opts.SubscriberBuffer = 64
 	}
@@ -78,50 +94,97 @@ func New(open OpenFunc, opts Options) *Hub {
 // delivered. Callers should treat both as "retry": a fresh Subscribe reopens
 // the source.
 func (h *Hub) Subscribe(ctx context.Context, agentID, taskID string) (<-chan *taskv1.StreamTaskLogsResponse, func(), error) {
-	k := key{agentID: agentID, taskID: taskID}
-
-	h.mu.Lock()
-	src, ok := h.sources[k]
-	if !ok {
-		s, err := h.startSource(ctx, k)
-		if err != nil {
-			h.mu.Unlock()
-			return nil, nil, err
-		}
-		h.sources[k] = s
-		src = s
-	}
-	h.mu.Unlock()
-
-	return src.addSub(h.opts.SubscriberBuffer)
+	return h.SubscribeIdentity(ctx, agentID, taskID, "")
 }
 
-func (h *Hub) startSource(parentCtx context.Context, k key) (*source, error) {
-	// Source lives independently of the first subscriber's ctx — its
-	// lifetime is bounded by len(subs) > 0, not by who happened to open
-	// it. Use Background so a subscriber unsubscribing doesn't drop the
-	// agent connection underneath any remaining subscribers.
-	ctx, cancel := context.WithCancel(context.Background())
-	stream, err := h.open(ctx, k.agentID, k.taskID)
+func (h *Hub) SubscribeIdentity(ctx context.Context, agentID, taskID, taskUID string) (<-chan *taskv1.StreamTaskLogsResponse, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	k := key{agentID: agentID, taskID: taskID, taskUID: taskUID}
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return nil, nil, ErrSourceClosed
+	}
+	src, exists := h.sources[k]
+	if !exists {
+		sourceCtx, cancel := context.WithCancel(context.Background())
+		src = &source{hub: h, key: k, ctx: sourceCtx, cancel: cancel, subs: make(map[*sub]struct{}), opened: make(chan struct{})}
+		h.sources[k] = src
+	}
+	// Register before opening/pumping, so initial output cannot race registration.
+	ch, unsub, err := src.addSub(ctx, h.opts.SubscriberBuffer)
+	h.mu.Unlock()
 	if err != nil {
-		cancel()
-		return nil, err
+		return nil, nil, err
 	}
-	s := &source{
-		hub:    h,
-		key:    k,
-		cancel: cancel,
-		subs:   make(map[*sub]struct{}),
+	if !exists {
+		go src.openSource()
 	}
-	go s.pump(stream)
-	return s, nil
+	select {
+	case <-src.opened:
+		src.mu.Lock()
+		openErr := src.openErr
+		src.mu.Unlock()
+		if openErr != nil {
+			unsub()
+			return nil, nil, openErr
+		}
+	case <-ctx.Done():
+		unsub()
+		return nil, nil, ctx.Err()
+	case <-src.ctx.Done():
+		unsub()
+		return nil, nil, ErrSourceClosed
+	}
+	return ch, unsub, nil
+}
+
+func (s *source) openSource() {
+	timer := time.AfterFunc(s.hub.opts.OpenTimeout, s.cancel)
+	stream, err := s.hub.open(s.ctx, s.key.agentID, s.key.taskID, s.key.taskUID)
+	timer.Stop()
+	if err == nil && s.ctx.Err() != nil {
+		err = s.ctx.Err()
+	}
+	s.mu.Lock()
+	s.openErr = err
+	close(s.opened)
+	s.mu.Unlock()
+	if err != nil {
+		s.shutdown()
+		return
+	}
+	s.pump(stream)
+}
+
+// Close stops established and opening streams and rejects new subscriptions.
+func (h *Hub) Close() {
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return
+	}
+	h.closed = true
+	sources := make([]*source, 0, len(h.sources))
+	for _, s := range h.sources {
+		sources = append(sources, s)
+	}
+	h.mu.Unlock()
+	for _, s := range sources {
+		s.shutdown()
+	}
 }
 
 // source represents one backing log stream + its subscribers.
 type source struct {
-	hub    *Hub
-	key    key
-	cancel context.CancelFunc
+	hub     *Hub
+	key     key
+	cancel  context.CancelFunc
+	ctx     context.Context
+	opened  chan struct{}
+	openErr error
 
 	mu     sync.Mutex
 	subs   map[*sub]struct{}
@@ -130,11 +193,12 @@ type source struct {
 
 type sub struct {
 	ch      chan *taskv1.StreamTaskLogsResponse
+	done    chan struct{}
 	dropped uint64 // pending Lagged count; guarded by source.mu
 }
 
-func (s *source) addSub(buffer int) (<-chan *taskv1.StreamTaskLogsResponse, func(), error) {
-	sb := &sub{ch: make(chan *taskv1.StreamTaskLogsResponse, buffer)}
+func (s *source) addSub(ctx context.Context, buffer int) (<-chan *taskv1.StreamTaskLogsResponse, func(), error) {
+	sb := &sub{ch: make(chan *taskv1.StreamTaskLogsResponse, buffer), done: make(chan struct{})}
 
 	s.mu.Lock()
 	if s.closed {
@@ -144,6 +208,13 @@ func (s *source) addSub(buffer int) (<-chan *taskv1.StreamTaskLogsResponse, func
 	s.subs[sb] = struct{}{}
 	s.mu.Unlock()
 
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.removeSub(sb)
+		case <-sb.done:
+		}
+	}()
 	return sb.ch, func() { s.removeSub(sb) }, nil
 }
 
@@ -155,6 +226,7 @@ func (s *source) removeSub(sb *sub) {
 	}
 	delete(s.subs, sb)
 	close(sb.ch)
+	close(sb.done)
 	last := len(s.subs) == 0
 	s.mu.Unlock()
 
@@ -168,8 +240,16 @@ func (s *source) removeSub(sb *sub) {
 // subscriber channels.
 func (s *source) pump(stream <-chan *taskv1.StreamTaskLogsResponse) {
 	defer s.shutdown()
-	for ev := range stream {
-		s.broadcast(ev)
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case ev, ok := <-stream:
+			if !ok {
+				return
+			}
+			s.broadcast(ev)
+		}
 	}
 }
 
@@ -238,5 +318,6 @@ func (s *source) shutdown() {
 
 	for _, sb := range subs {
 		close(sb.ch)
+		close(sb.done)
 	}
 }

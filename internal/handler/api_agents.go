@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"slices"
-	"strings"
 
 	"google.golang.org/protobuf/encoding/protojson"
 
@@ -145,7 +144,7 @@ func (a *API) AgentTaskLogsStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ch, unsub, err := a.logHub.Subscribe(r.Context(), agentID, taskID)
+	ch, unsub, err := a.logHub.SubscribeIdentity(r.Context(), agentID, taskID, r.URL.Query().Get("task_uid"))
 	if err != nil {
 		a.logger.Warn().Err(err).
 			Str("agent_id", agentID).
@@ -194,7 +193,7 @@ func (a *API) AgentTaskLogsStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// TODO: remove "q" - need to understand a correct way for getting tasks from agent with paginator and etc.
+// Exact slot/status filters are passed to the agent before pagination.
 func (a *API) agentTasksList(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, agentID string) {
 	ag, err := a.agentSVC.Get(r.Context(), agentID)
 	if err != nil {
@@ -220,11 +219,12 @@ func (a *API) agentTasksList(w http.ResponseWriter, r *http.Request, mode httpct
 		filter = proxy.TaskFilter{
 			Status: r.URL.Query().Get("status"),
 			Limit:  queryInt(r, "limit", 0),
-			Offset: queryInt(r, "offset", 0),
+			Cursor: r.URL.Query().Get("cursor"),
 		}
-		q = r.URL.Query().Get("q")
+		q = r.URL.Query().Get("slot")
 	)
 
+	filter.Slot = q
 	token, err := a.agentSVC.AgentToken(r.Context(), agentID)
 	if err != nil {
 		a.logger.Error().Err(err).Str("agent_id", agentID).Msg("agent tasks: token lookup failed")
@@ -257,23 +257,11 @@ func (a *API) agentTasksList(w http.ResponseWriter, r *http.Request, mode httpct
 		response.FromError(w, r, mode, err)
 		return
 	}
-	if q != "" {
-		lower := strings.ToLower(q)
-		filtered := result.Tasks[:0]
-		for _, t := range result.Tasks {
-			if strings.Contains(strings.ToLower(t.Slot), lower) ||
-				strings.Contains(strings.ToLower(t.ID), lower) {
-				filtered = append(filtered, t)
-			}
-		}
-		result.Tasks = filtered
-		result.Total = len(filtered)
-	}
 	slices.SortFunc(result.Tasks, func(a, b proxyv1.Task) int {
 		return cmp.Compare(enum.ParseTaskStatus(a.Status).Priority(), enum.ParseTaskStatus(b.Status).Priority())
 	})
 	response.OK(w, r, mode, &responder.View{
 		Data:      result,
-		Component: contentAgent.Tasks(agentID, result.Tasks, result.Total, q, filter.Offset),
+		Component: contentAgent.Tasks(agentID, result.Tasks, result.Total, q, result.NextCursor),
 	})
 }

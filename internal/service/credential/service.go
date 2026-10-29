@@ -110,6 +110,13 @@ func (s *Service) SetPassword(ctx context.Context, req SetPasswordRequest) error
 			}
 		}
 
+		if old, err := tx.GetCredential(ctx, credID); err == nil {
+			if old.UserID() != req.UserID || old.AuthKind() != enum.Password {
+				return storage.ErrInvalidArgument
+			}
+		} else if !errors.Is(err, storage.ErrNotFound) {
+			return err
+		}
 		cred, err := model.NewCredential(credID, req.UserID, enum.Password)
 		if err != nil {
 			return storage.ErrInvalidArgument
@@ -126,7 +133,10 @@ func (s *Service) SetPassword(ctx context.Context, req SetPasswordRequest) error
 		if err = tx.DeleteVerifierByCredential(ctx, credID); err != nil {
 			return err
 		}
-		return tx.UpsertVerifier(ctx, ver)
+		if err := tx.UpsertVerifier(ctx, ver); err != nil {
+			return err
+		}
+		return tx.DeleteSessionsByUser(ctx, req.UserID)
 	})
 	if err != nil {
 		return err

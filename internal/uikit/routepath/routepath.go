@@ -10,6 +10,8 @@ const (
 	PageUsers    = "/users"
 	PageUserInfo = "/users/info/"
 
+	PageHistory = "/history"
+
 	PageAgents    = "/agents"
 	PageAgentInfo = "/agents/info/"
 
@@ -22,6 +24,8 @@ const (
 
 	ApiUsers = "/api/v1/users"
 	ApiUser  = "/api/v1/users/"
+
+	ApiHistory = "/api/v1/history"
 
 	ApiAgents = "/api/v1/agents"
 	ApiAgent  = "/api/v1/agents/"
@@ -54,8 +58,12 @@ func ApiAgentByID(id string) string      { return ApiAgent + id }
 func ApiAgentLabels(id string) string    { return ApiAgent + id + "/labels" }
 func ApiAgentTasks(id string) string     { return ApiAgent + id + "/tasks" }
 
-func ApiAgentTaskLogs(agentID, taskID string) string {
-	return ApiAgent + agentID + "/tasks/" + taskID + "/logs/stream"
+func ApiAgentTaskLogs(agentID, taskID string, uid ...string) string {
+	path := ApiAgent + url.PathEscape(agentID) + "/tasks/" + url.PathEscape(taskID) + "/logs/stream"
+	if len(uid) > 0 && uid[0] != "" {
+		path += "?task_uid=" + url.QueryEscape(uid[0])
+	}
+	return path
 }
 
 // Specs.
@@ -64,6 +72,7 @@ func PageSpecInfoByID(id string) string   { return PageSpecInfo + id }
 func PageSpecEditByID(id string) string   { return PageSpecEdit + id }
 func ApiSpecByID(id string) string        { return ApiSpec + id }
 func ApiSpecDeploy(id string) string      { return ApiSpec + id + "/deploy" }
+func ApiSpecPlacement(id string) string   { return ApiSpec + id + "/placement" }
 func ApiSpecSync(id string) string        { return ApiSpec + id + "/sync" }
 func ApiSpecForceDelete(id string) string { return ApiSpec + id + "/force" }
 
@@ -82,3 +91,9 @@ func CursorURL(base, cursor, q string) string {
 	}
 	return base + "?" + qs
 }
+
+func ApiAgentTask(agentID, taskID string) string {
+	return ApiAgent + url.PathEscape(agentID) + "/tasks/" + url.PathEscape(taskID)
+}
+
+func PageHistoryByAgent(id string) string { return PageHistory + "?agent_id=" + url.QueryEscape(id) }

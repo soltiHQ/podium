@@ -31,12 +31,12 @@ templ Detail(ts restv1.RolloutSpec, p policy.SpecDetail) {
 		<!-- Header: name + version + actions -->
 		@card.Card("") {
 			@card.CardBody() {
-				<div class="flex items-start justify-between gap-4">
-					<div class="min-w-0">
-						<h2 class="text-lg font-semibold text-fg truncate">{ ts.Name }</h2>
+				<div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4">
+					<div class="min-w-0 w-full sm:w-auto sm:flex-1">
+						<h2 class="text-lg font-semibold text-fg break-words sm:truncate">{ ts.Name }</h2>
 						<div class="text-[11px] font-mono text-muted tracking-wide mt-1">{ ts.ID }</div>
 					</div>
-					<div class="flex items-center gap-2 shrink-0">
+					<div class="flex items-center gap-2 flex-wrap w-full sm:w-auto sm:justify-end">
 						@visual.Badge(fmt.Sprintf("v%d", ts.Version), visual.VariantMuted)
 						@visual.Badge(fmt.Sprintf("gen %d", ts.Generation), visual.VariantMuted)
 						if ts.DeletionRequested {
@@ -110,7 +110,7 @@ templ Detail(ts restv1.RolloutSpec, p policy.SpecDetail) {
 			@card.Card("") {
 				@card.CardBody() {
 					<div class="flex items-center justify-between mb-3">
-						<span class={ visual.SectionLabel + " font-semibold" }>Agent CreateSpec</span>
+						<span class={ visual.SectionLabel + " font-semibold" }>Agent Task Manifest</span>
 						<button type="button"
 							class="text-[11px] text-primary hover:text-primary/80 transition-colors"
 							onclick={ copySpec(ts.CreateSpec) }>Copy</button>
@@ -180,7 +180,8 @@ templ Rollouts(states []restv1.RolloutEntry) {
 		@status.NotFound("No rollouts")
 	} else {
 		<div class="space-y-3">
-			<h3 class={ visual.SectionTitle }>Rollouts</h3>
+			<h3 class={ visual.SectionTitle }>Desired-state rollouts</h3>
+ <p class="text-xs text-muted">Synced confirms that the agent accepted the desired-state commit. Check the task execution phase, conditions and run history on the agent for actual reconciliation and execution results.</p>
 			for _, ss := range states {
 				@card.Card("") {
 					@card.CardBody() {
@@ -269,7 +270,7 @@ script copySpec(spec any) {
 templ syncStatusBadge(s string) {
 	switch s {
 		case "synced":
-			@visual.Badge("Synced", visual.VariantSuccess) {
+			@visual.Badge("Synced · desired state committed", visual.VariantSuccess) {
 				@visual.StatusDot("success")
 			}
 		case "pending":

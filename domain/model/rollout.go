@@ -201,3 +201,15 @@ func (ss *Rollout) Clone() *Rollout {
 		intent: ss.intent,
 	}
 }
+
+// RestoreState restores exact persisted observations without invoking lifecycle
+// transitions, which would otherwise replace historical times and retry counts.
+func (ss *Rollout) RestoreState(status enum.SyncStatus, intent enum.RolloutIntent, observedGeneration, attempts int, errMsg string, lastPushedAt, lastSyncedAt time.Time) {
+	ss.status = status
+	ss.intent = intent
+	ss.observedGeneration = observedGeneration
+	ss.attempts = attempts
+	ss.errMsg = errMsg
+	ss.lastPushedAt = lastPushedAt
+	ss.lastSyncedAt = lastSyncedAt
+}

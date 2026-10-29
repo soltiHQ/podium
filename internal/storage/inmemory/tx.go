@@ -21,9 +21,10 @@ type snapshot struct {
 	sessions    map[string]*model.Session
 	specs       map[string]*model.Spec
 	rollouts    map[string]*model.Rollout
+	executions  map[string]*model.ExecutionRecord
 }
 
-func (s *Store) takeSnapshot() snapshot {
+func (s *state) takeSnapshot() snapshot {
 	return snapshot{
 		agents:      copyMap(s.agents),
 		agentCreds:  copyMap(s.agentCreds),
@@ -34,10 +35,11 @@ func (s *Store) takeSnapshot() snapshot {
 		sessions:    copyMap(s.sessions),
 		specs:       copyMap(s.specs),
 		rollouts:    copyMap(s.rollouts),
+		executions:  copyMap(s.executions),
 	}
 }
 
-func (s *Store) restoreSnapshot(snap snapshot) {
+func (s *state) restoreSnapshot(snap snapshot) {
 	restoreMap(s.agents, snap.agents)
 	restoreMap(s.agentCreds, snap.agentCreds)
 	restoreMap(s.users, snap.users)
@@ -47,6 +49,7 @@ func (s *Store) restoreSnapshot(snap snapshot) {
 	restoreMap(s.sessions, snap.sessions)
 	restoreMap(s.specs, snap.specs)
 	restoreMap(s.rollouts, snap.rollouts)
+	restoreMap(s.executions, snap.executions)
 }
 
 func copyMap[T domain.Entity[T]](g *GenericStore[T]) map[string]T {
@@ -65,26 +68,10 @@ func restoreMap[T domain.Entity[T]](g *GenericStore[T], snap map[string]T) {
 	g.data = snap
 }
 
-// WithTx serialises transactions and runs fn as an atomic unit: on nil it
-// commits (the in-memory Store mutates directly), on error it restores the
-// pre-transaction snapshot.
-//
-// Isolation contract — IMPORTANT:
-//
-// txMu serialises WithTx calls against EACH OTHER, but NOT against direct
-// (non-WithTx) writes such as UpsertAgent. Rollback restores a whole-map
-// snapshot, so a direct write that commits while a transaction is in flight is
-// LOST if that transaction then fails.
-//
-// This is safe whenever all writes are serialised by the caller:
-//   - Raft mode: every write is applied by the single FSM goroutine (see
-//     internal/raft/fsm.go), so direct writes never overlap a transaction.
-//   - Standalone mode: concurrent direct writes CAN race a failing transaction.
-//     Full standalone isolation needs a store-wide write lock held across fn
-//     (a gated/ungated split, since Go locks are not reentrant) — tracked
-//     separately.
-//
-// Nested WithTx inside fn runs fn without re-locking (already-inside-a-tx).
+// WithTx excludes every public read and write until the callback commits or
+// rolls back. The callback receives ungated operations, so nested transactions
+// compose without attempting to reacquire the gate. A cancelled callback is
+// rolled back even when it returns nil.
 func (s *Store) WithTx(ctx context.Context, fn func(tx storage.Storage) error) error {
 	if fn == nil {
 		return storage.ErrInvalidArgument
@@ -92,27 +79,34 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx storage.Storage) error) e
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-
-	s.txMu.Lock()
-	defer s.txMu.Unlock()
-
-	snap := s.takeSnapshot()
-	if err := fn(&txView{Store: s}); err != nil {
-		s.restoreSnapshot(snap)
+	s.gate.Lock()
+	defer s.gate.Unlock()
+	if err := ctx.Err(); err != nil {
 		return err
 	}
+	snap := s.state.takeSnapshot()
+	committed := false
+	defer func() {
+		if !committed {
+			s.state.restoreSnapshot(snap)
+		}
+	}()
+	if err := fn(s.state); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	committed = true
 	return nil
 }
 
-// txView wraps *Store so nested WithTx calls inside fn don't re-lock.
-type txView struct{ *Store }
-
-func (t *txView) WithTx(ctx context.Context, fn func(tx storage.Storage) error) error {
+func (s *state) WithTx(ctx context.Context, fn func(tx storage.Storage) error) error {
 	if fn == nil {
 		return storage.ErrInvalidArgument
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return fn(t)
+	return fn(s)
 }

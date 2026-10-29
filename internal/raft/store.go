@@ -16,7 +16,10 @@ import (
 )
 
 // Compile-time check.
-var _ storage.Storage = (*Store)(nil)
+var (
+	_ storage.Storage                = (*Store)(nil)
+	_ storage.ClockedSessionRotation = (*Store)(nil)
+)
 
 // applyTimeout bounds the wait for a Raft log entry to be committed.
 const applyTimeout = 5 * time.Second
@@ -72,7 +75,11 @@ func (s *Store) apply(ops []*raftv1.Op) error {
 	return nil
 }
 
-func (s *Store) applyOp(op *raftv1.Op) error { return s.apply([]*raftv1.Op{op}) }
+func (s *Store) applyOp(op *raftv1.Op) error {
+	s.txMu.Lock()
+	defer s.txMu.Unlock()
+	return s.apply([]*raftv1.Op{op})
+}
 
 // === Agents ===
 
@@ -240,16 +247,44 @@ func (s *Store) ListSessionsByUser(ctx context.Context, userID string) ([]*model
 }
 
 func (s *Store) RotateRefresh(ctx context.Context, sessionID string, newHash []byte, newExpiresAt time.Time) error {
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_SessionRotateRefresh{
+	return s.RotateRefreshAt(ctx, sessionID, newHash, newExpiresAt, time.Now())
+}
+
+func (s *Store) RotateRefreshAt(ctx context.Context, sessionID string, newHash []byte, newExpiresAt, updatedAt time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if sessionID == "" || len(newHash) == 0 || newExpiresAt.IsZero() {
+		return storage.ErrInvalidArgument
+	}
+	return s.applyOp(sessionRefreshOp(sessionID, newHash, newExpiresAt, updatedAt))
+}
+
+// sessionRefreshOp records presence separately from the Unix nanosecond value:
+// nil is the historical preserve-UpdatedAt operation; pointer-to-zero is epoch.
+func sessionRefreshOp(sessionID string, newHash []byte, newExpiresAt, updatedAt time.Time) *raftv1.Op {
+	var updatedAtNs *int64
+	if !updatedAt.IsZero() {
+		ns := updatedAt.UnixNano()
+		updatedAtNs = &ns
+	}
+	return &raftv1.Op{Op: &raftv1.Op_SessionRotateRefresh{
 		SessionRotateRefresh: &raftv1.SessionRotateRefreshMsg{
 			Id:          sessionID,
 			RefreshHash: append([]byte(nil), newHash...),
 			ExpiresAtNs: newExpiresAt.UnixNano(),
+			UpdatedAtNs: updatedAtNs,
 		},
-	}})
+	}}
 }
 
 func (s *Store) RevokeSession(ctx context.Context, sessionID string, revokedAt time.Time) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if sessionID == "" || revokedAt.IsZero() {
+		return storage.ErrInvalidArgument
+	}
 	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_SessionRevoke{
 		SessionRevoke: &raftv1.SessionRevokeMsg{Id: sessionID, RevokedAtNs: revokedAt.UnixNano()},
 	}})
@@ -269,7 +304,11 @@ func (s *Store) UpsertSpec(ctx context.Context, ts *model.Spec) error {
 	if ts == nil {
 		return storage.ErrInvalidArgument
 	}
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_SpecUpsert{SpecUpsert: wire.SpecToProto(ts)}})
+	message, err := wire.SpecToProto(ts)
+	if err != nil {
+		return err
+	}
+	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_SpecUpsert{SpecUpsert: message}})
 }
 
 func (s *Store) GetSpec(ctx context.Context, id string) (*model.Spec, error) {
@@ -347,8 +386,16 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx storage.Storage) error) e
 	s.txMu.Lock()
 	defer s.txMu.Unlock()
 
+	// A newly elected leader may still be replaying committed commands. Never
+	// evaluate a transaction against the temporarily empty/stale inner store.
+	if err := awaitApplied(ctx, s.raft); err != nil {
+		return err
+	}
 	view := newTxView(s.inner)
 	if err := fn(view); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if len(view.ops) == 0 {

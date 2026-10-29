@@ -63,7 +63,11 @@ func editFormData(fields []Field, selects []AsyncSelect) string {
 	}
 
 	for _, s := range selects {
-		v, _ := json.Marshal(s.Selected)
+		selected := s.Selected
+		if selected == nil {
+			selected = []string{}
+		}
+		v, _ := json.Marshal(selected)
 		parts = append(parts, fmt.Sprintf("%s: %s", s.ID, string(v)))
 		parts = append(parts, fmt.Sprintf("%s_opts: []", s.ID))
 		parts = append(parts, fmt.Sprintf("%s_open: false", s.ID))
@@ -93,13 +97,13 @@ func initExpr(selects []AsyncSelect) string {
 					` const items = d.items || [];`+
 					` %s_opts = items.map(x => x.%s);`+
 					` %s_labels = Object.fromEntries(items.map(x => [x.%s, x.%s]));`+
-					` }).catch(() => {})`,
+					` }).catch(() => { error = "Could not load selection options. Retry opening this form." })`,
 				s.Endpoint, s.ID, s.ValueKey, s.ID, s.ValueKey, s.LabelKey,
 			))
 		} else {
 			// Flat string items.
 			fetches = append(fetches, fmt.Sprintf(
-				`fetch('%s').then(r => r.json()).then(d => { %s_opts = d.items || [] }).catch(() => {})`,
+				`fetch('%s').then(r => r.json()).then(d => { %s_opts = d.items || [] }).catch(() => { error = "Could not load selection options. Retry opening this form." })`,
 				s.Endpoint, s.ID,
 			))
 		}
@@ -139,11 +143,13 @@ func passwordSubmitExpr(action string) string {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
+                'Accept': 'application/json',
 				'HX-Request': 'true'
 			},
 			body: JSON.stringify({ password: password })
 		}).then(async r => {
-			if (r.ok) {
+			if (r.status === 401) { window.location.href = r.headers.get('HX-Redirect') || '/login'; return; }
+            if (r.ok) {
 				password = ""; confirm = ""; error = "";
 				show = false;
 				htmx.trigger(document.body, 'user_update');
@@ -177,11 +183,13 @@ func formSubmitExpr(method, action string, fields []Field, selects []AsyncSelect
 			method: '%s',
 			headers: {
 				'Content-Type': 'application/json',
+                'Accept': 'application/json',
 				'HX-Request': 'true'
 			},
 			body: JSON.stringify(%s)
 		}).then(async r => {
-			if (r.ok) {
+			if (r.status === 401) { window.location.href = r.headers.get('HX-Redirect') || '/login'; return; }
+            if (r.ok) {
 				const redirect = r.headers.get('HX-Redirect');
 				if (redirect) { window.location.href = redirect; return; }
 				error = "";

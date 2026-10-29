@@ -6,7 +6,9 @@ templ Icon(name string) {
         @Solti()
 	} else if name == "agents" {
 		@Agents()
-	} else if name == "tasks" {
+	} else if name == "history" {
+ @History()
+ } else if name == "tasks" {
 		@Tasks()
 	} else if name == "users" {
 		@Users()
@@ -337,4 +339,8 @@ templ Preload() {
 				begin="0" />
 		</circle>
 	</svg>
+}
+
+templ History() {
+ <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11a9 9 0 1 1 2.5 7"/><path d="M3 4v7h7"/><path d="M12 7v5l3 2"/></svg>
 }

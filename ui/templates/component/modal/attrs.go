@@ -1,14 +1,18 @@
 package modal
 
-import "github.com/a-h/templ"
+import (
+	"encoding/hex"
+
+	"github.com/a-h/templ"
+)
 
 // xOn returns a dynamic Alpine x-on attribute that listens for
-// a custom DOM event "modal:open:<name>" and sets show = true.
+// the encoded custom DOM event for name and sets show = true.
 //
 // Usage in templ:  { xOn(name)... }
 func xOn(name string) templ.Attributes {
 	return templ.Attributes{
-		"x-on:modal:open:" + name + ".window": "show = true",
+		"x-on:" + openEventName(name) + ".window": "show = true",
 	}
 }
 
@@ -17,7 +21,14 @@ func xOn(name string) templ.Attributes {
 //
 //	Example:  x-on:click={ modal.OpenEvent("delete-user") }
 func OpenEvent(name string) string {
-	return "$dispatch('modal:open:" + name + "')"
+	return "$dispatch('" + openEventName(name) + "')"
+}
+
+// HTML lowercases attribute names. Encoding the complete UTF-8 identifier as
+// lowercase hex gives listener and dispatch the same event without merging
+// distinct case-sensitive task UIDs or inserting quotes into Alpine code.
+func openEventName(name string) string {
+	return "modal:open:" + hex.EncodeToString([]byte(name))
 }
 
 // hxMethod returns a templ.Attributes map with the correct hx-* attribute

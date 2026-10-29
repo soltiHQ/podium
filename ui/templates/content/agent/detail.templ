@@ -34,6 +34,8 @@ templ Identity(a restv1.Agent, p policy.AgentDetail) {
 							@visual.KV("Agent ID", a.ID)
 							@visual.KV("Name", a.Name)
 							@visual.KV("Endpoint", a.Endpoint)
+ @visual.KV("Transport",a.EndpointType+" / "+a.APIVersion)
+ @visual.KV("Last heartbeat",a.LastSeenAt)
 							@visual.KV("Platform", a.Platform)
 							@visual.KV("OS", a.OS)
 							@visual.KV("Arch", a.Arch)
@@ -50,10 +52,30 @@ templ Identity(a restv1.Agent, p policy.AgentDetail) {
 						</dl>
 					</div>
 				</div>
+ <section class="space-y-3">
+ <h3 class="text-sm font-medium">Runner inventory</h3>
+ if len(a.Capabilities)==0 {
+ <p class="text-xs text-muted">No runners advertised.</p>
+ } else {
+ for _,runner:=range a.Capabilities {
+ <div class="rounded border border-border p-3 space-y-2">
+ <h4 class="text-sm font-medium">{ runner.Name }</h4>
+ <dl>@visual.BadgeMap("Routing labels",runner.Labels,visual.VariantSecondary)</dl>
+ for _,gvk:=range runner.Workloads {
+ <p class="text-xs font-mono text-muted">{ gvk.Group+"/"+gvk.Version+" · "+gvk.Kind }</p>
+ }
+ </div>
+ }
+ }
+ </section>
+
 			</div>
 		}
 
 		@card.CardFooter() {
+ if p.CanViewHistory {
+ <a class="text-xs text-primary hover:underline" href={ templ.SafeURL(routepath.PageHistoryByAgent(a.ID)) }>Captured execution history</a>
+ }
 			if p.CanEditLabels {
 				@button.Button("", "button", false, button.VariantSecondary, false,
 					templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent("edit-agent-labels")},
@@ -117,7 +139,8 @@ templ labelsEditor(a restv1.Agent) {
 					</div>
 				</template>
 
-				<!-- add button -->
+				<p x-show="error" x-text="error" role="alert" class="text-sm text-danger"></p>
+ <!-- add button -->
 				<button
 					type="button"
 					class="inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:text-primary/80 transition-colors"

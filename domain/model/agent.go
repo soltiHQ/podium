@@ -33,7 +33,7 @@ type Agent struct {
 
 	metadata     map[string]string
 	labels       map[string]string
-	capabilities []string
+	capabilities []RunnerCapability
 }
 
 // NewAgent creates a new agent domain entity.
@@ -75,7 +75,7 @@ type AgentParams struct {
 	Platform string
 
 	Metadata     map[string]string
-	Capabilities []string
+	Capabilities []RunnerCapability
 }
 
 // NewAgentFrom constructs an Agent from AgentParams.
@@ -91,13 +91,12 @@ func NewAgentFrom(p AgentParams) (*Agent, error) {
 
 	var (
 		now  = time.Now()
-		caps = make([]string, len(p.Capabilities))
+		caps = cloneCapabilities(p.Capabilities)
 		md   = make(map[string]string, len(p.Metadata))
 	)
 	for k, v := range p.Metadata {
 		md[k] = v
 	}
-	copy(caps, p.Capabilities)
 
 	return &Agent{
 		createdAt: now,
@@ -151,21 +150,30 @@ func (a *Agent) Arch() string { return a.arch }
 // Platform returns the agent's platform.
 func (a *Agent) Platform() string { return a.platform }
 
-// Capabilities returns the agent's declared capabilities.
-func (a *Agent) Capabilities() []string {
-	out := make([]string, len(a.capabilities))
-	copy(out, a.capabilities)
-	return out
+// GroupVersionKind identifies an executable workload contract.
+type GroupVersionKind struct{ Group, Version, Kind string }
+
+// RunnerCapability advertises workload support and runner-routing labels.
+type RunnerCapability struct {
+	Name      string
+	Labels    map[string]string
+	Workloads []GroupVersionKind
 }
 
-// HasCapability checks whether the agent declares a specific capability.
-func (a *Agent) HasCapability(capability string) bool {
-	for _, c := range a.capabilities {
-		if c == capability {
-			return true
+// Capabilities returns a defensive copy of the structured runner inventory.
+func (a *Agent) Capabilities() []RunnerCapability { return cloneCapabilities(a.capabilities) }
+
+func cloneCapabilities(c []RunnerCapability) []RunnerCapability {
+	out := make([]RunnerCapability, len(c))
+	for i, v := range c {
+		out[i].Name = v.Name
+		out[i].Labels = make(map[string]string, len(v.Labels))
+		for k, val := range v.Labels {
+			out[i].Labels[k] = val
 		}
+		out[i].Workloads = append([]GroupVersionKind(nil), v.Workloads...)
 	}
-	return false
+	return out
 }
 
 // Status returns the agent's lifecycle status.
@@ -252,10 +260,8 @@ func (a *Agent) SetLabels(m map[string]string) {
 }
 
 // SetCapabilities replaces the capability list with a defensive copy.
-func (a *Agent) SetCapabilities(c []string) {
-	cp := make([]string, len(c))
-	copy(cp, c)
-	a.capabilities = cp
+func (a *Agent) SetCapabilities(c []RunnerCapability) {
+	a.capabilities = cloneCapabilities(c)
 }
 
 // Metadata returns the metadata value for the given key.
@@ -311,7 +317,7 @@ func (a *Agent) Clone() *Agent {
 	var (
 		md     = make(map[string]string, len(a.metadata))
 		labels = make(map[string]string, len(a.labels))
-		caps   = make([]string, len(a.capabilities))
+		caps   = cloneCapabilities(a.capabilities)
 	)
 	for k, v := range a.metadata {
 		md[k] = v
@@ -319,7 +325,6 @@ func (a *Agent) Clone() *Agent {
 	for k, v := range a.labels {
 		labels[k] = v
 	}
-	copy(caps, a.capabilities)
 
 	return &Agent{
 		createdAt: a.createdAt,

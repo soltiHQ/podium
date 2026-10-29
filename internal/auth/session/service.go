@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
+	"fmt"
 
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
@@ -211,80 +212,104 @@ func (s *Service) Refresh(ctx context.Context, sessionID, refreshRaw string) (*T
 	if sessionID == "" || refreshRaw == "" {
 		return nil, nil, auth.ErrInvalidRefresh
 	}
-
 	sess, err := s.store.GetSession(ctx, sessionID)
 	if err != nil {
 		return nil, nil, auth.ErrInvalidRefresh
 	}
-
-	now := s.clock.Now()
 	if sess.Revoked() {
 		return nil, nil, auth.ErrRevoked
 	}
-	if sess.Expired(now) {
+	if sess.Expired(s.clock.Now()) {
 		return nil, nil, auth.ErrInvalidRefresh
 	}
-
 	inHash, err := hashRefreshToken(refreshRaw)
-	if err != nil {
+	if err != nil || subtle.ConstantTimeCompare(inHash, sess.RefreshHash()) != 1 {
 		return nil, nil, auth.ErrInvalidRefresh
 	}
-	if subtle.ConstantTimeCompare(inHash, sess.RefreshHash()) != 1 {
+	user, err := s.store.GetUser(ctx, sess.UserID())
+	if err != nil || user.Disabled() {
 		return nil, nil, auth.ErrInvalidRefresh
 	}
-
-	u, err := s.store.GetUser(ctx, sess.UserID())
-	if err != nil {
-		return nil, nil, auth.ErrInvalidRefresh
-	}
-	if u.Disabled() {
-		return nil, nil, auth.ErrInvalidRefresh
-	}
-
-	perms, err := s.rbac.ResolveUserPermissions(ctx, u)
+	// The RBAC resolver uses the outer store. Resolve before admission, then
+	// revalidate the session and user immediately before signing/rotation.
+	perms, err := s.rbac.ResolveUserPermissions(ctx, user)
 	if err != nil || len(perms) == 0 {
 		return nil, nil, auth.ErrUnauthorized
 	}
-
 	outRefresh := refreshRaw
+	var newHash []byte
 	if s.cfg.RotateRefresh {
-		newRaw, newHash, err := newRefreshToken()
+		outRefresh, newHash, err = newRefreshToken()
 		if err != nil {
 			return nil, nil, err
 		}
-		newExp := now.Add(s.cfg.RefreshTTL)
-		if err := s.store.RotateRefresh(ctx, sessionID, newHash, newExp); err != nil {
-			return nil, nil, err
-		}
-		outRefresh = newRaw
 	}
-
 	tokenID, err := newID16()
 	if err != nil {
 		return nil, nil, err
 	}
-	id := &identity.Identity{
-		IssuedAt:  now,
-		NotBefore: now,
-		ExpiresAt: now.Add(s.cfg.AccessTTL),
-
-		Subject: u.Subject(),
-		UserID:  u.ID(),
-		Name:    u.Name(),
-		Email:   u.Email(),
-
-		Issuer:    s.cfg.Issuer,
-		Audience:  []string{s.cfg.Audience},
-		TokenID:   tokenID,
-		SessionID: sessionID,
-
-		Permissions: perms,
+	var pair *TokenPair
+	var id *identity.Identity
+	issueCurrent := func(tx storage.Storage) error {
+		current, err := tx.GetSession(ctx, sessionID)
+		if err != nil {
+			return auth.ErrInvalidRefresh
+		}
+		if current.Revoked() {
+			return auth.ErrRevoked
+		}
+		// Bind the pre-resolved permissions to the same session principal. A
+		// deleted/recreated session must not inherit another principal's resolution.
+		if current.UserID() != sess.UserID() || current.CredentialID() != sess.CredentialID() || current.AuthKind() != sess.AuthKind() || subtle.ConstantTimeCompare(inHash, current.RefreshHash()) != 1 {
+			return auth.ErrInvalidRefresh
+		}
+		now := s.clock.Now()
+		if current.Expired(now) {
+			return auth.ErrInvalidRefresh
+		}
+		currentUser, err := tx.GetUser(ctx, current.UserID())
+		if err != nil || currentUser.Disabled() {
+			return auth.ErrInvalidRefresh
+		}
+		var rotation storage.ClockedSessionRotation
+		if s.cfg.RotateRefresh {
+			var ok bool
+			rotation, ok = tx.(storage.ClockedSessionRotation)
+			if !ok {
+				return fmt.Errorf("%w: explicit session rotation timestamps are unsupported", storage.ErrInternal)
+			}
+		}
+		id = &identity.Identity{
+			IssuedAt: now, NotBefore: now, ExpiresAt: now.Add(s.cfg.AccessTTL),
+			Subject: currentUser.Subject(), UserID: currentUser.ID(), Name: currentUser.Name(), Email: currentUser.Email(),
+			Issuer: s.cfg.Issuer, Audience: []string{s.cfg.Audience}, TokenID: tokenID, SessionID: sessionID, Permissions: perms,
+		}
+		// For rotation, signing stays inside the transaction so issuer failure cannot
+		// consume the refresh token. Issuers sign locally and must not reenter storage.
+		access, err := s.issuer.Issue(ctx, id)
+		if err != nil {
+			return err
+		}
+		if rotation != nil {
+			if err := rotation.RotateRefreshAt(ctx, sessionID, newHash, now.Add(s.cfg.RefreshTTL), now); err != nil {
+				return err
+			}
+		}
+		pair = &TokenPair{AccessToken: access, RefreshToken: outRefresh}
+		return nil
 	}
-	access, err := s.issuer.Issue(ctx, id)
+	if s.cfg.RotateRefresh {
+		// Rotation validates and consumes the old hash under one storage transaction.
+		err = s.store.WithTx(ctx, issueCurrent)
+	} else {
+		// Without a mutation, retain read-only refresh instead of rewriting the
+		// complete durable snapshot. HTTP admission rechecks current authorization.
+		err = issueCurrent(s.store)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
-	return &TokenPair{AccessToken: access, RefreshToken: outRefresh}, id, nil
+	return pair, id, nil
 }
 
 // Revoke revokes a session by ID.

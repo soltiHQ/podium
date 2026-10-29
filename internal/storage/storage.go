@@ -458,6 +458,8 @@ type RolloutStore interface {
 
 // FilterFactory defines constructors for backend-specific filters built from backend-agnostic query criteria.
 type FilterFactory interface {
+	BuildExecutionFilter(c ExecutionQueryCriteria) ExecutionFilter
+
 	// BuildRolloutFilter constructs a RolloutFilter for this backend from the supplied criteria.
 	// Empty criteria match every rollout.
 	BuildRolloutFilter(c RolloutQueryCriteria) RolloutFilter
@@ -481,6 +483,7 @@ type TxStore interface {
 
 // Storage aggregates all storage capabilities for domain entities.
 type Storage interface {
+	ExecutionStore
 	CredentialStore
 	FilterFactory
 	VerifierStore

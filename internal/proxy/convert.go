@@ -1,8 +1,14 @@
 package proxy
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
+	"regexp"
+	"strings"
+	"unicode/utf8"
 
 	"google.golang.org/protobuf/encoding/protojson"
 
@@ -11,196 +17,325 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 )
 
-// SpecToProto converts a domain Spec into the generated proto CreateSpec.
-//
-// The returned value is marshaled to the wire via protojson (canonical
-// proto-JSON: camelCase + enum-as-string + uint64-as-string) on the HTTP
-// path, and passed directly into gRPC calls on the gRPC path — so both
-// transports share a single source of truth defined in
-// api/proto/v1/types.proto.
-//
-// Errors:
-//   - ts == nil
-//   - unknown TaskKindType
-//   - the UI-supplied KindConfig cannot be round-tripped into proto
-//     (invalid field names or value types — see solti.task.v1.TaskKind).
-func SpecToProto(ts *model.Spec) (*taskv1.CreateSpec, error) {
+// TaskNameForSpec gives a control-plane spec one stable DNS-1123 resource name.
+// Spec IDs are case-sensitive KSUIDs; hashing preserves their distinct identity.
+func TaskNameForSpec(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return fmt.Sprintf("podium-%x", sum)
+}
+
+// SpecToProto converts desired control-plane state to the current Task manifest.
+// KindConfig uses strict protobuf JSON for the selected built-in workload spec.
+func SpecToProto(ts *model.Spec) (*taskv1.TaskManifest, error) {
 	if ts == nil {
 		return nil, fmt.Errorf("proxy: nil spec")
 	}
-
-	tk, err := buildTaskKind(ts.KindType(), ts.KindConfig())
+	if !slotPattern.MatchString(ts.Slot()) || len(ts.Slot()) > 64 || ts.Slot() == "." || ts.Slot() == ".." {
+		return nil, fmt.Errorf("proxy: slot must contain 1 to 64 ASCII letters, digits, '.', '_' or '-'")
+	}
+	if ts.IntervalMs() < 0 || (ts.RestartType() != enum.RestartAlways && ts.IntervalMs() != 0) {
+		return nil, fmt.Errorf("proxy: restart interval must be non-negative and is valid only for always")
+	}
+	if len(ts.ID())+len("podium.solti.io/spec-id") > 256*1024 {
+		return nil, fmt.Errorf("proxy: spec identity exceeds annotation byte limit")
+	}
+	for key, value := range ts.RunnerLabels() {
+		if !validLabelKey(key) || (value != "" && (len(value) > 63 || !labelPartPattern.MatchString(value))) {
+			return nil, fmt.Errorf("proxy: invalid runner label %q", key)
+		}
+	}
+	workload, err := buildTaskWorkload(ts.KindType(), ts.KindConfig())
 	if err != nil {
-		return nil, fmt.Errorf("proxy: task kind: %w", err)
+		return nil, err
 	}
-
 	b := ts.Backoff()
-	out := &taskv1.CreateSpec{
-		Slot:      ts.Slot(),
-		Kind:      tk,
-		TimeoutMs: clampU64(ts.TimeoutMs()),
-		Restart:   restartStrategyToProto(ts.RestartType()),
-		Backoff: &taskv1.BackoffStrategy{
-			Jitter:  jitterStrategyToProto(b.Jitter),
-			FirstMs: clampU64(b.FirstMs),
-			MaxMs:   clampU64(b.MaxMs),
-			Factor:  b.Factor,
-		},
-		// Admission is CP-managed. The sync runner upgrades via ApplyTask,
-		// which force-replaces at the agent regardless of this field — so a
-		// new spec version always wins the slot. We still pin Replace here so
-		// the value matches the effective behaviour (e.g. in the wire preview);
-		// the UI doesn't expose the field.
-		Admission: taskv1.AdmissionStrategy_ADMISSION_STRATEGY_REPLACE,
+	if ts.TimeoutMs() <= 0 || b.FirstMs <= 0 || b.MaxMs < b.FirstMs || math.IsNaN(b.Factor) || math.IsInf(b.Factor, 0) || b.Factor < 1 {
+		return nil, fmt.Errorf("proxy: invalid timeout or backoff policy")
 	}
-
+	restart := restartStrategyToProto(ts.RestartType())
+	jitter := jitterStrategyToProto(b.Jitter)
+	if restart == taskv1.RestartPolicy_RESTART_POLICY_UNSPECIFIED || jitter == taskv1.JitterPolicy_JITTER_POLICY_UNSPECIFIED {
+		return nil, fmt.Errorf("proxy: unsupported restart or jitter policy")
+	}
+	spec := &taskv1.TaskSpec{
+		Slot: ts.Slot(), Workload: workload, TimeoutMs: uint64(ts.TimeoutMs()), Restart: restart,
+		Backoff:   &taskv1.BackoffPolicy{Jitter: jitter, FirstMs: uint64(b.FirstMs), MaxMs: uint64(b.MaxMs), Factor: b.Factor},
+		Admission: taskv1.AdmissionPolicy_ADMISSION_POLICY_REPLACE,
+	}
 	if ts.RestartType() == enum.RestartAlways && ts.IntervalMs() > 0 {
 		iv := uint64(ts.IntervalMs())
-		out.RestartIntervalMs = &iv
+		spec.RestartIntervalMs = &iv
 	}
-
 	if labels := ts.RunnerLabels(); len(labels) > 0 {
-		out.Labels = labels
+		spec.RunnerSelector = &taskv1.LabelSelector{MatchLabels: labels}
 	}
-
-	return out, nil
+	return &taskv1.TaskManifest{
+		ApiVersion: "solti.io/v1", Kind: "Task",
+		Metadata: &taskv1.TaskManifestMeta{Name: TaskNameForSpec(ts.ID()), Annotations: map[string]string{"podium.solti.io/spec-id": ts.ID()}},
+		Spec:     spec,
+	}, nil
 }
 
-// CreateSpecWirePreview marshals a proto CreateSpec into canonical proto-JSON
-// bytes suitable for displaying in the UI as the exact payload the
-// control-plane would send to an agent.
-func CreateSpecWirePreview(spec *taskv1.CreateSpec) (json.RawMessage, error) {
-	if spec == nil {
-		return nil, nil
-	}
-	return protojson.MarshalOptions{
-		UseProtoNames:   false,
-		EmitUnpopulated: false,
-	}.Marshal(spec)
-}
-
-// buildTaskKind re-serializes the UI-stored kind config map through protojson
-// so the UI-level JSON (which is expected to already follow proto schema
-// field names) lands in the strongly-typed generated struct without
-// per-field manual mapping.
-//
-// The input `cfg` must already be canonical proto3-JSON for the payload of
-// the selected TaskKind variant. For `subprocess`, that means the `oneof mode`
-// is inlined (`{"command":{...}}` or `{"script":{...}}`, not
-// `{"mode":{"command":{...}}}`) and `env` is `repeated KeyValue`
-// (`[{"key","value"}]`, not a map).
-//
-// DiscardUnknown is kept on so forward-compatible extensions of the proto
-// schema don't hard-fail old control-planes. That, however, means silently
-// misnamed fields (`{"mode":{...}}`) get dropped. We therefore run a
-// post-decode sanity check that raises a loud error instead of handing a
-// half-populated TaskKind to the agent.
-func buildTaskKind(kt enum.TaskKindType, cfg map[string]any) (*taskv1.TaskKind, error) {
-	name, err := taskKindName(kt)
-	if err != nil {
-		return nil, err
-	}
-	// Wrap into a oneof shell: {"subprocess": {...}}, {"container": {...}}, {"wasm": {...}}.
-	payload, err := json.Marshal(map[string]any{name: cfg})
-	if err != nil {
-		return nil, fmt.Errorf("marshal kind config: %w", err)
-	}
-	var tk taskv1.TaskKind
-	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(payload, &tk); err != nil {
-		return nil, fmt.Errorf("protojson decode: %w", err)
-	}
-	if err := sanityCheckTaskKind(&tk, kt, cfg); err != nil {
-		return nil, err
-	}
-	return &tk, nil
-}
-
-// sanityCheckTaskKind surfaces silent data loss caused by DiscardUnknown: if
-// protojson dropped the entire oneof payload (the common symptom is a caller
-// that wrapped it in an extra envelope field), we report exactly which key
-// the caller supplied that we could not map onto the proto schema.
-func sanityCheckTaskKind(tk *taskv1.TaskKind, kt enum.TaskKindType, cfg map[string]any) error {
-	if tk.GetKind() == nil {
-		return fmt.Errorf("proxy: TaskKind.kind unset after decode for %q (likely bad JSON shape)", kt)
-	}
+func buildTaskWorkload(kt enum.TaskKindType, cfg map[string]any) (*taskv1.TaskWorkload, error) {
+	field, kind := "", ""
 	switch kt {
 	case enum.TaskKindSubprocess:
-		sub := tk.GetSubprocess()
-		if sub == nil {
-			return fmt.Errorf("proxy: SubprocessTask unset after decode")
+		field, kind = "subprocess", "Subprocess"
+	case enum.TaskKindContainer:
+		field, kind = "container", "Container"
+	case enum.TaskKindWasm:
+		field, kind = "wasm", "Wasm"
+	default:
+		return nil, fmt.Errorf("proxy: unknown task kind %q", kt)
+	}
+	// Earlier Podium specs used an inline command/script oneof. Normalize only
+	// that exact shape; strict decoding still rejects unknown or mixed fields.
+	if kt == enum.TaskKindSubprocess {
+		if _, current := cfg["mode"]; !current {
+			_, command := cfg["command"]
+			_, script := cfg["script"]
+			if command != script {
+				normalized := make(map[string]any, len(cfg))
+				for key, value := range cfg {
+					normalized[key] = value
+				}
+				variant := "command"
+				if script {
+					variant = "script"
+				}
+				normalized["mode"] = map[string]any{variant: normalized[variant]}
+				delete(normalized, variant)
+				cfg = normalized
+			}
 		}
-		if sub.GetMode() == nil {
-			// Most common cause: UI wraps the oneof in an extra "mode" field.
-			// Canonical proto3-JSON inlines the oneof directly.
-			for key := range cfg {
-				switch key {
-				case "command", "script", "env", "cwd", "failOnNonZero", "fail_on_non_zero":
-					// Known top-level SubprocessTask fields, not suspicious.
-				default:
-					return fmt.Errorf("proxy: SubprocessTask.mode unset after decode; "+
-						"unrecognized top-level key %q in subprocess config "+
-						"(oneof must be inlined: {\"command\":{...}} or {\"script\":{...}})", key)
+	}
+	if kt == enum.TaskKindSubprocess {
+		if mode, ok := cfg["mode"].(map[string]any); ok {
+			if script, ok := mode["script"].(map[string]any); ok {
+				if _, old := script["wellKnown"]; old {
+					return nil, fmt.Errorf("proxy: legacy wellKnown script runtime requires explicit migration to an interpreter; inline-script and file-script arguments differ")
+				}
+				if _, old := script["well_known"]; old {
+					return nil, fmt.Errorf("proxy: legacy well_known script runtime requires explicit migration to an interpreter; inline-script and file-script arguments differ")
+				}
+				if _, old := script["custom"]; old {
+					return nil, fmt.Errorf("proxy: legacy custom script runtime requires explicit migration; its inline flag cannot be dropped when choosing a file interpreter")
 				}
 			}
-			return fmt.Errorf("proxy: SubprocessTask.mode unset after decode " +
-				"(neither \"command\" nor \"script\" found at top level)")
-		}
-	case enum.TaskKindWasm:
-		if tk.GetWasm() == nil {
-			return fmt.Errorf("proxy: WasmTask unset after decode")
-		}
-	case enum.TaskKindContainer:
-		if tk.GetContainer() == nil {
-			return fmt.Errorf("proxy: ContainerTask unset after decode")
 		}
 	}
-	return nil
-}
-
-func taskKindName(kt enum.TaskKindType) (string, error) {
+	if kt == enum.TaskKindContainer {
+		if command, exists := cfg["command"]; exists {
+			switch items := command.(type) {
+			case []string:
+				normalized := make(map[string]any, len(cfg))
+				for key, value := range cfg {
+					normalized[key] = value
+				}
+				if len(items) == 0 {
+					delete(normalized, "command")
+				} else {
+					normalized["command"] = map[string]any{"items": items}
+				}
+				cfg = normalized
+			case []any:
+				normalized := make(map[string]any, len(cfg))
+				for key, value := range cfg {
+					normalized[key] = value
+				}
+				if len(items) == 0 {
+					delete(normalized, "command")
+				} else {
+					normalized["command"] = map[string]any{"items": items}
+				}
+				cfg = normalized
+			}
+		}
+	}
+	data, err := json.Marshal(map[string]any{"apiVersion": "solti.io/v1", "kind": kind, field: cfg})
+	if err != nil {
+		return nil, fmt.Errorf("proxy: marshal workload: %w", err)
+	}
+	var out taskv1.TaskWorkload
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("proxy: invalid %s config: %w", kt, err)
+	}
 	switch kt {
 	case enum.TaskKindSubprocess:
-		return "subprocess", nil
+		sub := out.GetSubprocess()
+		if sub == nil || sub.GetMode() == nil || sub.GetMode().GetMode() == nil {
+			return nil, fmt.Errorf("proxy: subprocess requires mode.command or mode.script")
+		}
+		if cmd := sub.GetMode().GetCommand(); cmd != nil && strings.TrimSpace(cmd.GetCommand()) == "" {
+			return nil, fmt.Errorf("proxy: subprocess command must not be empty")
+		}
+		if script := sub.GetMode().GetScript(); script != nil {
+			if len(script.GetBody()) > ((2*1024*1024+2)/3)*4 {
+				return nil, fmt.Errorf("proxy: script body exceeds 2 MiB decoded limit")
+			}
+			body, err := base64.StdEncoding.DecodeString(script.GetBody())
+			if strings.TrimSpace(script.GetInterpreter()) == "" || err != nil || len(body) == 0 || len(body) > 2*1024*1024 || !utf8.Valid(body) {
+				return nil, fmt.Errorf("proxy: script requires an interpreter and non-empty UTF-8 base64 body up to 2 MiB")
+			}
+		}
 	case enum.TaskKindContainer:
-		return "container", nil
+		if strings.TrimSpace(out.GetContainer().GetImage()) == "" {
+			return nil, fmt.Errorf("proxy: container image must not be empty")
+		}
 	case enum.TaskKindWasm:
-		return "wasm", nil
-	default:
-		return "", fmt.Errorf("unknown task kind: %q", kt)
+		if strings.TrimSpace(out.GetWasm().GetModule()) == "" {
+			return nil, fmt.Errorf("proxy: wasm module must not be empty")
+		}
 	}
+	return &out, nil
 }
 
-func restartStrategyToProto(rt enum.RestartType) taskv1.RestartStrategy {
+// CreateSpecWirePreview returns the exact HTTP TaskManifest JSON sent to agents.
+func CreateSpecWirePreview(manifest *taskv1.TaskManifest) (json.RawMessage, error) {
+	if manifest == nil {
+		return nil, nil
+	}
+	return TaskManifestJSON(manifest)
+}
+
+// TaskManifestJSON encodes SDK resource JSON. Task API HTTP does not use protojson.
+func TaskManifestJSON(manifest *taskv1.TaskManifest) ([]byte, error) {
+	if manifest == nil || manifest.GetMetadata() == nil || manifest.GetSpec() == nil || manifest.GetSpec().GetWorkload() == nil {
+		return nil, fmt.Errorf("proxy: incomplete task manifest")
+	}
+	spec := manifest.GetSpec()
+	w := spec.GetWorkload()
+	data, err := protojson.Marshal(w)
+	if err != nil {
+		return nil, err
+	}
+	var typed map[string]json.RawMessage
+	if err = json.Unmarshal(data, &typed); err != nil {
+		return nil, err
+	}
+	var config map[string]any
+	field := ""
+	switch w.GetSpec().(type) {
+	case *taskv1.TaskWorkload_Subprocess:
+		field = "subprocess"
+	case *taskv1.TaskWorkload_Container:
+		field = "container"
+	case *taskv1.TaskWorkload_Wasm:
+		field = "wasm"
+	default:
+		return nil, fmt.Errorf("proxy: unsupported HTTP workload")
+	}
+	if err = json.Unmarshal(typed[field], &config); err != nil {
+		return nil, err
+	}
+	if field == "subprocess" {
+		// The SDK's HTTP default is true; a protobuf false must stay explicit.
+		config["failOnNonZero"] = w.GetSubprocess().GetFailOnNonZero()
+	}
+	if command, ok := config["command"].(map[string]any); ok && field == "container" {
+		items := command["items"]
+		if items == nil {
+			items = []string{}
+		}
+		config["command"] = items
+	}
+	restart := map[string]any{"type": restartPolicyString(spec.GetRestart())}
+	if spec.RestartIntervalMs != nil {
+		restart["intervalMs"] = *spec.RestartIntervalMs
+	}
+	backoff := spec.GetBackoff()
+	if backoff == nil {
+		return nil, fmt.Errorf("proxy: missing backoff")
+	}
+	desired := map[string]any{
+		"slot": spec.GetSlot(), "workload": map[string]any{"apiVersion": w.GetApiVersion(), "kind": w.GetKind(), "spec": config},
+		"timeout": spec.GetTimeoutMs(), "restart": restart,
+		"backoff":   map[string]any{"jitter": jitterPolicyString(backoff.GetJitter()), "firstMs": backoff.GetFirstMs(), "maxMs": backoff.GetMaxMs(), "factor": backoff.GetFactor()},
+		"admission": admissionPolicyString(spec.GetAdmission()),
+	}
+	if spec.MaxRetries != nil {
+		desired["maxRetries"] = *spec.MaxRetries
+	}
+	if selector := spec.GetRunnerSelector(); selector != nil {
+		if len(selector.GetMatchExpressions()) > 0 {
+			return nil, fmt.Errorf("proxy: unsupported selector expression")
+		}
+		desired["runnerSelector"] = map[string]any{"matchLabels": selector.GetMatchLabels()}
+	}
+	metadata := map[string]any{"name": manifest.GetMetadata().GetName()}
+	if labels := manifest.GetMetadata().GetLabels(); len(labels) > 0 {
+		metadata["labels"] = labels
+	}
+	if annotations := manifest.GetMetadata().GetAnnotations(); len(annotations) > 0 {
+		metadata["annotations"] = annotations
+	}
+	return json.Marshal(map[string]any{"apiVersion": manifest.GetApiVersion(), "kind": manifest.GetKind(), "metadata": metadata, "spec": desired})
+}
+
+func restartStrategyToProto(rt enum.RestartType) taskv1.RestartPolicy {
 	switch rt {
 	case enum.RestartNever:
-		return taskv1.RestartStrategy_RESTART_STRATEGY_NEVER
+		return taskv1.RestartPolicy_RESTART_POLICY_NEVER
 	case enum.RestartOnFailure:
-		return taskv1.RestartStrategy_RESTART_STRATEGY_ON_FAILURE
+		return taskv1.RestartPolicy_RESTART_POLICY_ON_FAILURE
 	case enum.RestartAlways:
-		return taskv1.RestartStrategy_RESTART_STRATEGY_ALWAYS
+		return taskv1.RestartPolicy_RESTART_POLICY_ALWAYS
 	default:
-		return taskv1.RestartStrategy_RESTART_STRATEGY_UNSPECIFIED
+		return taskv1.RestartPolicy_RESTART_POLICY_UNSPECIFIED
 	}
 }
 
-func jitterStrategyToProto(j enum.JitterStrategy) taskv1.JitterStrategy {
+func jitterStrategyToProto(j enum.JitterStrategy) taskv1.JitterPolicy {
 	switch j {
 	case enum.JitterNone:
-		return taskv1.JitterStrategy_JITTER_STRATEGY_NONE
+		return taskv1.JitterPolicy_JITTER_POLICY_NONE
 	case enum.JitterFull:
-		return taskv1.JitterStrategy_JITTER_STRATEGY_FULL
+		return taskv1.JitterPolicy_JITTER_POLICY_FULL
 	case enum.JitterEqual:
-		return taskv1.JitterStrategy_JITTER_STRATEGY_EQUAL
+		return taskv1.JitterPolicy_JITTER_POLICY_EQUAL
 	case enum.JitterDecorrelated:
-		return taskv1.JitterStrategy_JITTER_STRATEGY_DECORRELATED
+		return taskv1.JitterPolicy_JITTER_POLICY_DECORRELATED
 	default:
-		return taskv1.JitterStrategy_JITTER_STRATEGY_UNSPECIFIED
+		return taskv1.JitterPolicy_JITTER_POLICY_UNSPECIFIED
 	}
 }
 
-func clampU64(v int64) uint64 {
-	if v < 0 {
-		return 0
+func restartPolicyString(p taskv1.RestartPolicy) string {
+	return map[taskv1.RestartPolicy]string{taskv1.RestartPolicy_RESTART_POLICY_NEVER: "never", taskv1.RestartPolicy_RESTART_POLICY_ON_FAILURE: "onFailure", taskv1.RestartPolicy_RESTART_POLICY_ALWAYS: "always"}[p]
+}
+
+func jitterPolicyString(p taskv1.JitterPolicy) string {
+	return map[taskv1.JitterPolicy]string{taskv1.JitterPolicy_JITTER_POLICY_NONE: "none", taskv1.JitterPolicy_JITTER_POLICY_FULL: "full", taskv1.JitterPolicy_JITTER_POLICY_EQUAL: "equal", taskv1.JitterPolicy_JITTER_POLICY_DECORRELATED: "decorrelated"}[p]
+}
+
+func admissionPolicyString(p taskv1.AdmissionPolicy) string {
+	return map[taskv1.AdmissionPolicy]string{taskv1.AdmissionPolicy_ADMISSION_POLICY_REPLACE: "replace", taskv1.AdmissionPolicy_ADMISSION_POLICY_DROP_IF_RUNNING: "dropIfRunning", taskv1.AdmissionPolicy_ADMISSION_POLICY_QUEUE: "queue"}[p]
+}
+
+var (
+	slotPattern       = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	labelPartPattern  = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$`)
+	dnsSegmentPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`)
+)
+
+func validLabelKey(key string) bool {
+	parts := strings.Split(key, "/")
+	if len(parts) > 2 {
+		return false
 	}
-	return uint64(v)
+	name := parts[len(parts)-1]
+	if len(name) == 0 || len(name) > 63 || !labelPartPattern.MatchString(name) {
+		return false
+	}
+	if len(parts) == 2 {
+		if len(parts[0]) == 0 || len(parts[0]) > 253 {
+			return false
+		}
+		for _, segment := range strings.Split(parts[0], ".") {
+			if !dnsSegmentPattern.MatchString(segment) {
+				return false
+			}
+		}
+	}
+	return true
 }

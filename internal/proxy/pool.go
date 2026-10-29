@@ -35,7 +35,8 @@ const maxAgentMessageBytes = 4 * 1024 * 1024
 // For HTTP it holds a single *http.Client whose Transport pools TCP connections.
 // For gRPC it caches one *grpc.ClientConn per endpoint address.
 type Pool struct {
-	mu sync.RWMutex
+	mu     sync.RWMutex
+	closed bool
 
 	httpCli   *http.Client
 	grpcConns map[string]*grpc.ClientConn
@@ -66,10 +67,11 @@ func NewPool(clientTLS *tls.Config) *Pool {
 					Timeout:   5 * time.Second,
 					KeepAlive: 30 * time.Second,
 				}).DialContext,
-				TLSClientConfig:     httpTLS,
-				IdleConnTimeout:     90 * time.Second,
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 10,
+				TLSClientConfig:       httpTLS,
+				IdleConnTimeout:       90 * time.Second,
+				ResponseHeaderTimeout: 10 * time.Second,
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   10,
 			},
 		},
 		grpcConns: make(map[string]*grpc.ClientConn),
@@ -83,6 +85,12 @@ func NewPool(clientTLS *tls.Config) *Pool {
 // token. An empty token means "send no credential" (auth disabled, or the agent
 // is not yet enrolled). The proxy presents the token on every call.
 func (p *Pool) Get(endpoint string, epType enum.EndpointType, apiVersion enum.APIVersion, token string) (AgentProxy, error) {
+	p.mu.RLock()
+	closed := p.closed
+	p.mu.RUnlock()
+	if closed {
+		return nil, ErrClosed
+	}
 	switch apiVersion {
 	case enum.APIVersionV1:
 		return p.getV1(endpoint, epType, token)
@@ -125,6 +133,10 @@ func (p *Pool) grpcConn(endpoint string) (*grpc.ClientConn, error) {
 	target := normalizeGrpcTarget(endpoint)
 
 	p.mu.RLock()
+	if p.closed {
+		p.mu.RUnlock()
+		return nil, ErrClosed
+	}
 	conn, ok := p.grpcConns[target]
 	p.mu.RUnlock()
 	if ok {
@@ -134,6 +146,9 @@ func (p *Pool) grpcConn(endpoint string) (*grpc.ClientConn, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if p.closed {
+		return nil, ErrClosed
+	}
 	if conn, ok = p.grpcConns[target]; ok {
 		return conn, nil
 	}
@@ -176,6 +191,10 @@ func (p *Pool) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if p.closed {
+		return nil
+	}
+	p.closed = true
 	var errs []error
 	for ep, conn := range p.grpcConns {
 		if err := conn.Close(); err != nil {

@@ -131,7 +131,28 @@ func (s *Session) SetExpiresAt(expiresAt time.Time) error {
 	return nil
 }
 
-// Revoke marks the session as revoked at the provided time.
+// RotateRefreshAt atomically replaces the refresh hash and expiration using an
+// explicit modification time. A zero updatedAt preserves the previous timestamp
+// when replaying legacy commands without an authoritative clock. Unix epoch zero
+// is a nonzero time.Time and remains an explicit timestamp. An unchanged hash
+// and expiration are an idempotent no-op, including UpdatedAt.
+func (s *Session) RotateRefreshAt(hash []byte, expiresAt, updatedAt time.Time) error {
+	if len(hash) == 0 || expiresAt.IsZero() {
+		return domain.ErrFieldEmpty
+	}
+	if bytes.Equal(s.refreshHash, hash) && s.expiresAt.Equal(expiresAt) {
+		return nil
+	}
+	s.refreshHash = append(s.refreshHash[:0], hash...)
+	s.expiresAt = expiresAt
+	if !updatedAt.IsZero() {
+		s.updatedAt = updatedAt
+	}
+	return nil
+}
+
+// Revoke marks the session as revoked at the provided time. UpdatedAt uses the
+// same authoritative timestamp. Repeating revocation preserves the first time.
 func (s *Session) Revoke(at time.Time) error {
 	if at.IsZero() {
 		return domain.ErrFieldEmpty
@@ -139,7 +160,7 @@ func (s *Session) Revoke(at time.Time) error {
 	if !s.revokedAt.IsZero() {
 		return nil
 	}
-	s.updatedAt = time.Now()
+	s.updatedAt = at
 	s.revokedAt = at
 	return nil
 }

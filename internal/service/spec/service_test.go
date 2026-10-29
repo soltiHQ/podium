@@ -28,6 +28,7 @@ func mkSpec(t *testing.T, svc *Service, store *inmemory.Store, id string, target
 		t.Fatalf("NewSpec: %v", err)
 	}
 	ts.SetTargets(targets)
+	ts.SetKindConfig(map[string]any{"command": map[string]any{"command": "echo"}})
 	if err = store.UpsertSpec(context.Background(), ts); err != nil {
 		t.Fatalf("UpsertSpec: %v", err)
 	}

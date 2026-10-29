@@ -206,9 +206,9 @@ func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts
 	}
 
 	sort.Slice(snapshot, func(i, j int) bool {
-		ti, tj := snapshot[i].CreatedAt(), snapshot[j].CreatedAt()
-		if !ti.Equal(tj) {
-			return ti.After(tj) // DESC
+		ti, tj := snapshot[i].CreatedAt().UnixNano(), snapshot[j].CreatedAt().UnixNano()
+		if ti != tj {
+			return ti > tj // DESC; use the same wall clock as persisted cursors
 		}
 		return snapshot[i].ID() < snapshot[j].ID()
 	})
