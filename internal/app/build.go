@@ -90,7 +90,7 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger) (storage.Storage, c
 	hub := event.NewHub(logger)
 	switch cfg.Backend {
 	case "", cluster.BackendStandalone:
-		if cfg.Standalone.Ephemeral {
+		if cfg.Ephemeral() {
 			logger.Warn().Msg("standalone.ephemeral=true: control-plane state will be lost on restart")
 			return inner, standalone.NewLeadership(), hub, nil, nil
 		}

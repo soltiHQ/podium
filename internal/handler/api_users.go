@@ -81,10 +81,10 @@ func (a *API) UsersRouter(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
-// SessionsRouter handles /api/v1/sessions/{id} action subroutes.
+// SessionsRouter handles /api/v1/session/{id} action subroutes.
 //
 // Supported:
-//   - POST /api/v1/sessions/{sessionID}/revoke
+//   - POST /api/v1/session/{sessionID}/revoke
 func (a *API) SessionsRouter(w http.ResponseWriter, r *http.Request) {
 	route.Router(w, r, routepath.ApiSession,
 		route.Subroute{Action: "revoke", Method: http.MethodPost, Perm: enum.UsersEdit, Fn: a.userRevokeSession},

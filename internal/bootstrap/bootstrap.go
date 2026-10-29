@@ -159,8 +159,12 @@ func seedAdmin(ctx context.Context, logger zerolog.Logger, opts Options, userSVC
 		if path, err = writePasswordFile(opts.DataDir, password); err != nil {
 			return fmt.Errorf("bootstrap: write admin password file: %w", err)
 		}
+		path = absPath(path)
 	}
 	if err = storeAdmin(ctx, logger, opts, seed, password, userSVC, credSVC); err != nil {
+		if path != "" {
+			return fmt.Errorf("bootstrap: store the admin password written to %s: %w", path, err)
+		}
 		return err
 	}
 
@@ -185,13 +189,22 @@ func removeStalePasswordFile(logger zerolog.Logger, dir string) {
 	if dir == "" {
 		return
 	}
-	path := filepath.Join(dir, PasswordFile)
+	path := absPath(filepath.Join(dir, PasswordFile))
 	switch err := os.Remove(path); {
 	case err == nil:
 		logger.Info().Str("path", path).Msg("bootstrap: stale admin password file removed: the password comes from " + AdminPasswordEnv)
 	case !errors.Is(err, os.ErrNotExist):
 		logger.Warn().Err(err).Str("path", path).Msg("bootstrap: remove stale admin password file")
 	}
+}
+
+// absPath returns path made absolute for the log, or path itself when the
+// working directory is unknown.
+func absPath(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
 }
 
 // adminSeedNeeded decides what seeding the administrator takes. Restart must

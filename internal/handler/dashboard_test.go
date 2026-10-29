@@ -13,6 +13,26 @@ import (
 	"github.com/soltiHQ/control-plane/internal/event"
 )
 
+// hasIssue reports whether the hub lists an issue of kind for entity.
+func hasIssue(f *apiFixture, kind, entity string) bool {
+	return slices.ContainsFunc(f.hub.RecentIssues(100), func(r event.Record) bool { return r.Kind == kind && r.Payload.ID == entity })
+}
+
+// closedIssues counts the issue_closed events of the hub.
+func closedIssues(f *apiFixture) int {
+	n := 0
+	for _, r := range f.hub.RecentEvents(100) {
+		if r.Kind == event.IssueClosed {
+			n++
+		}
+	}
+	return n
+}
+
+// Dismissing an issue needs the edit permission of its subject, all three for
+// a kind without one. A dismissal touches only issues of its kind and entity:
+// another issue of the same entity stays, and a kind that is no issue (which
+// the hub never lists) dismisses nothing and closes nothing.
 func TestDismissIssueRequiresSubjectEditPermission(t *testing.T) {
 	for _, tc := range []struct {
 		kind string
@@ -27,8 +47,16 @@ func TestDismissIssueRequiresSubjectEditPermission(t *testing.T) {
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			f := newAPIFixture(t)
+			bystander := event.SyncFailed
+			if tc.kind == event.SyncFailed {
+				bystander = event.AgentInactive
+			}
+			f.hub.Record(bystander, event.Payload{ID: "subject-1", Name: "subject-1"})
 			f.hub.Record(tc.kind, event.Payload{ID: "subject-1", Name: "subject-1"})
-			issues := len(f.hub.RecentIssues(100))
+			listed := event.IsIssueKind(tc.kind)
+			if hasIssue(f, tc.kind, "subject-1") != listed || !hasIssue(f, bystander, "subject-1") {
+				t.Fatalf("issues before the dismissal %+v, want %s listed: %v, and %s", f.hub.RecentIssues(100), tc.kind, listed, bystander)
+			}
 			target := "/api/v1/dashboard/issues?kind=" + url.QueryEscape(tc.kind) + "&entity=subject-1"
 			for _, missing := range tc.need {
 				viewer := &identity.Identity{UserID: "viewer", Permissions: allExcept(missing)}
@@ -36,14 +64,21 @@ func TestDismissIssueRequiresSubjectEditPermission(t *testing.T) {
 					t.Fatalf("every permission but %s: %d, want 403", missing, w.Code)
 				}
 			}
-			if got := len(f.hub.RecentIssues(100)); got != issues {
-				t.Fatalf("refused dismissal left %d issues, want %d", got, issues)
+			if hasIssue(f, tc.kind, "subject-1") != listed || !hasIssue(f, bystander, "subject-1") || closedIssues(f) != 0 {
+				t.Fatalf("refused dismissal changed the issues: %+v", f.hub.RecentIssues(100))
 			}
 			if w := f.do(http.MethodDelete, target, "", &identity.Identity{UserID: "viewer", Permissions: tc.need}); w.Code != http.StatusNoContent {
 				t.Fatalf("with %v: %d %s, want 204", tc.need, w.Code, w.Body.String())
 			}
-			if got := len(f.hub.RecentIssues(100)); got != 0 {
-				t.Fatalf("dismissed issue still listed (%d)", got)
+			if hasIssue(f, tc.kind, "subject-1") || !hasIssue(f, bystander, "subject-1") {
+				t.Fatalf("after the dismissal %+v, want %s gone and %s kept", f.hub.RecentIssues(100), tc.kind, bystander)
+			}
+			want := 0
+			if listed {
+				want = 1
+			}
+			if got := closedIssues(f); got != want {
+				t.Fatalf("%d issue_closed events, want %d", got, want)
 			}
 		})
 	}

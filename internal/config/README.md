@@ -211,7 +211,7 @@ When the user table is empty, the first start creates the administrator
   0600, to `bootstrap-admin-password` in the data directory of the selected
   backend: `cluster.standalone.data_dir` (default `data/podium`), or
   `cluster.raft.data_dir` in raft mode, where the file sits on the node that led
-  at first boot. The log names only that path.
+  at first boot. The log names only that path, made absolute.
 - In ephemeral mode (`cluster.standalone.ephemeral: true`) there is no data
   directory, so the generated password is logged once, at WARN, with the prefix
   `ephemeral mode:`. No other mode logs a password.

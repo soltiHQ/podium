@@ -34,7 +34,7 @@ may grant.
 
 ## routepath
 All URL constants in one place — pages (`Page*`) and API endpoints (`Api*`).
-Path-builder functions append entity IDs, each escaped as one path segment, so an ID can never add segments, a query or a fragment, or break out of the HTML attribute or JavaScript string the URL ends up in:
+Path-builder functions append entity IDs, each escaped as one path segment, so an ID can never add a query or a fragment, or break out of the HTML attribute or JavaScript string the URL ends up in:
 
 ```go
 routepath.PageUserInfoByID("abc")  // → "/users/info/abc"
@@ -42,7 +42,7 @@ routepath.ApiAgentTasks("xyz")     // → "/api/v1/agents/xyz/tasks"
 routepath.ApiAgentLabels("a/b c")  // → "/api/v1/agents/a%2Fb%20c/labels"
 ```
 
-Handlers route on the decoded `r.URL.Path` and receive the original ID. Never build an entity URL with `+ id`; add a helper here.
+Handlers route on the decoded `r.URL.Path`, where an escaped `/` is a separator again: an ID with a `/` gets 404, and any other ID reaches its handler unchanged. Never build an entity URL with `+ id`; add a helper here.
 
 ## timeformat
 Human-readable time formatting helpers used by templ templates.

@@ -18,7 +18,8 @@ import (
 )
 
 // routepath escapes IDs for the browser; the router and the page handlers split
-// the decoded path, so every ID must come back unchanged.
+// the decoded path, so every ID without a "/" must come back unchanged. A "/"
+// is a separator again once decoded: such an ID gets 404.
 func TestRoutepathIDsReachHandlersDecoded(t *testing.T) {
 	ctx := transportctx.WithIdentity(context.Background(), &identity.Identity{
 		UserID:      "actor",
@@ -44,5 +45,24 @@ func TestRoutepathIDsReachHandlersDecoded(t *testing.T) {
 		if paged != id {
 			t.Errorf("page handler: %q reached the template as %q", id, paged)
 		}
+	}
+
+	reached := func(http.ResponseWriter, *http.Request, httpctx.RenderMode, string) {
+		t.Error("an ID with a / reached the API handler")
+	}
+	w := httptest.NewRecorder()
+	route.Router(w, httptest.NewRequest(http.MethodPut, routepath.ApiAgentLabels("a/b"), nil).WithContext(ctx), routepath.ApiAgent,
+		route.Subroute{Action: "labels", Method: http.MethodPut, Perm: enum.AgentsEdit, Fn: reached})
+	if w.Code != http.StatusNotFound {
+		t.Errorf("API router with an ID holding a /: HTTP %d, want 404", w.Code)
+	}
+	w = httptest.NewRecorder()
+	(&UI{}).pageParam(w, httptest.NewRequest(http.MethodGet, routepath.PageAgentInfoByID("a/b"), nil).WithContext(ctx), http.MethodGet, routepath.PageAgentInfo,
+		func(policy.Nav, string) templ.Component {
+			t.Error("an ID with a / reached the page template")
+			return templ.NopComponent
+		})
+	if w.Code != http.StatusNotFound {
+		t.Errorf("page handler with an ID holding a /: HTTP %d, want 404", w.Code)
 	}
 }

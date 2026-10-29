@@ -4,6 +4,8 @@ import (
 	"encoding/hex"
 
 	"github.com/a-h/templ"
+
+	"github.com/soltiHQ/control-plane/ui/templates/jsexpr"
 )
 
 // xOn returns a dynamic Alpine x-on attribute that listens for
@@ -21,7 +23,7 @@ func xOn(name string) templ.Attributes {
 //
 //	Example:  x-on:click={ modal.OpenEvent("delete-user") }
 func OpenEvent(name string) string {
-	return "$dispatch('" + openEventName(name) + "')"
+	return "$dispatch(" + jsexpr.String(openEventName(name)) + ")"
 }
 
 // HTML lowercases attribute names. Encoding the complete UTF-8 identifier as

@@ -47,8 +47,8 @@ func TestEveryIDHelperEscapesItsSegment(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, want)
 			}
 
-			// The server routes on the decoded path, so the ID must come back
-			// as one segment of it, with nothing leaking into query or fragment.
+			// The server routes on the decoded path: the ID must come back
+			// whole in it, with nothing leaking into the query or the fragment.
 			u, err := url.Parse(got)
 			if err != nil {
 				t.Fatal(err)

@@ -675,8 +675,8 @@ func (c commitThenFail) WithTx(ctx context.Context, fn func(storage.Storage) err
 }
 
 // A write can fail after it took effect. The password is then stored, and the
-// file is the only readable copy of it, so a failed start keeps the file and the
-// next start leaves it alone.
+// file is the only readable copy of it, so a failed start keeps the file, names
+// it in its error (never the password), and the next start leaves it alone.
 func TestBootstrapKeepsPasswordFileWhenWriteOutcomeIsUncertain(t *testing.T) {
 	f, dir := newFixture(), t.TempDir()
 	uncertain := credential.New(commitThenFail{f.store}, f.logger)
@@ -688,6 +688,9 @@ func TestBootstrapKeepsPasswordFileWhenWriteOutcomeIsUncertain(t *testing.T) {
 	if !passwordWorks(t, f.store, password) {
 		t.Fatal("the password in the file is not the stored one")
 	}
+	if msg := err.Error(); !strings.Contains(msg, filepath.Join(dir, PasswordFile)) || strings.Contains(msg, password) {
+		t.Fatalf("start error %q, want the password file path and not the password", msg)
+	}
 
 	if err = f.run(Options{DataDir: dir}); err != nil {
 		t.Fatal(err)
@@ -696,6 +699,32 @@ func TestBootstrapKeepsPasswordFileWhenWriteOutcomeIsUncertain(t *testing.T) {
 		t.Fatal("the restart replaced the only copy of the stored password")
 	}
 	login(t, f.store, password)
+}
+
+// The log names the password file by its absolute path, also for a relative
+// data directory, so the operator finds it whatever the working directory.
+func TestBootstrapLogsTheAbsolutePasswordFilePath(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.Mkdir("data", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture()
+	if err := f.run(Options{DataDir: "data"}); err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	for _, e := range f.entries(t) {
+		if e.Path != "" {
+			logged = append(logged, e.Path)
+		}
+	}
+	if len(logged) != 1 || !filepath.IsAbs(logged[0]) {
+		t.Fatalf("logged paths %q, want one absolute path", logged)
+	}
+	b, err := os.ReadFile(logged[0])
+	if err != nil || strings.TrimSpace(string(b)) != filePassword(t, "data") {
+		t.Fatalf("logged path %q does not hold the password file: %v", logged[0], err)
+	}
 }
 
 // The password is written down before it is stored, so a start cannot end with

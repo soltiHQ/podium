@@ -56,8 +56,8 @@ In order:
      password on one line and has mode 0600. It goes to a temporary file in the
      same directory, which is synced and renamed over the target, so the file is
      never half written and a stale one from an earlier install is replaced whole.
-     The log names only the path: `bootstrap: admin password generated: read it
-     from the file, log in and change it`, with `login` and `path`.
+     The log names only the absolute path: `bootstrap: admin password generated:
+     read it from the file, log in and change it`, with `login` and `path`.
    - **Ephemeral mode** (`Options.Ephemeral`, which the app sets from
      `cluster.standalone.ephemeral: true`; there is no data directory): the
      password is logged once, at WARN, as `ephemeral mode: admin password
@@ -70,12 +70,13 @@ In order:
 
 The file is written before the password is stored. A start that stops in between
 leaves a file nobody needs, never a stored password nobody can read. A start that
-fails while storing keeps its file too: a write can fail after it took effect (a
-raft apply that loses leadership once its entry committed, a failed fsync), and
-then the file is the only readable copy of the stored password. If nothing was
-stored, the next start seeds again and replaces the file whole; if the password
-was stored, the next start leaves the file alone. A restart never touches an
-existing file; delete it once the password is changed.
+fails while storing keeps its file too, and its error names the file's absolute
+path, never the password: a write can fail after it took effect (a raft apply
+that loses leadership once its entry committed, a failed fsync), and then the
+file is the only readable copy of the stored password. If nothing was stored,
+the next start seeds again and replaces the file whole; if the password was
+stored, the next start leaves the file alone. A restart with nothing to seed
+never touches an existing file; delete it once the password is changed.
 
 In raft mode the leader seeds, so the file sits in the raft `data_dir` of the node
 that led at first boot. The other replicas do not have it.
@@ -85,8 +86,9 @@ that led at first boot. The other replicas do not have it.
 `bootstrap_test.go` covers:
 
 - the password file: mode, login with its contents, no rewrite on restart,
-  replacement of a stale file, no stored password without a written file, and the
-  file kept after a failed or uncertain write;
+  replacement of a stale file, no stored password without a written file, the
+  file kept after a failed or uncertain write and named in its error, and its
+  absolute path in the log, also for a relative data directory;
 - a deleted `user-admin` that stays deleted, the first start that stopped
   halfway, and `user-admin` without a password next to other users, which is left
   alone wherever it sits in the user list;

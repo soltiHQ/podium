@@ -64,7 +64,7 @@ func DefaultConfig() Config {
 func (c Config) Validate() error {
 	switch c.Backend {
 	case "", BackendStandalone:
-		if !c.Standalone.Ephemeral && strings.TrimSpace(c.Standalone.DataDir) == "" {
+		if !c.Ephemeral() && strings.TrimSpace(c.Standalone.DataDir) == "" {
 			return fmt.Errorf("standalone.data_dir is required unless standalone.ephemeral is explicitly true")
 		}
 	case BackendRaft:

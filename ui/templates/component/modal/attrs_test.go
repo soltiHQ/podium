@@ -30,7 +30,7 @@ func TestOpenEventIsCaseStableCollisionFreeAndQuoteSafe(t *testing.T) {
 		if xOn(name)[listener] != "show = true" {
 			t.Fatalf("listener differs from dispatch: %+v", xOn(name))
 		}
-		if got := OpenEvent(name); got != "$dispatch('"+event+"')" {
+		if got := OpenEvent(name); got != `$dispatch("`+event+`")` {
 			t.Fatalf("unsafe or mismatched dispatch: %s", got)
 		}
 		var buf bytes.Buffer

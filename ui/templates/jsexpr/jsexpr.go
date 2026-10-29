@@ -22,10 +22,10 @@ import "encoding/json"
 // String returns s as a double-quoted JavaScript string literal.
 //
 // The literal cannot end early or reach the surrounding HTML: encoding/json
-// escapes quotes, backslashes, control characters and invalid UTF-8, plus
-// <, > and & (so "</script>" stays inert) and U+2028 and U+2029, which end a
-// line in JavaScript. A single quote is left alone: it is inert inside a
-// double-quoted literal.
+// escapes quotes, backslashes and control characters, plus <, > and & (so
+// "</script>" stays inert) and U+2028 and U+2029, which end a line in
+// JavaScript, and it replaces invalid UTF-8 with U+FFFD. A single quote is
+// left alone: it is inert inside a double-quoted literal.
 func String(s string) string {
 	// Encoding a string cannot fail.
 	b, _ := json.Marshal(s)

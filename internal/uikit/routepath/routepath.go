@@ -42,9 +42,10 @@ const (
 )
 
 // Every ID below is data: each helper path-escapes it as one URL segment, so
-// it can neither add segments, a query or a fragment, nor break out of the
-// HTML attribute or JavaScript string the URL is later placed in. The server
-// routes on the decoded r.URL.Path and sees the original ID.
+// it can neither add a query or a fragment, nor break out of the HTML
+// attribute or JavaScript string the URL is later placed in. The server routes
+// on the decoded r.URL.Path, where an escaped "/" is a separator again: an ID
+// with a "/" gets 404, and any other ID reaches its handler unchanged.
 
 // Users.
 

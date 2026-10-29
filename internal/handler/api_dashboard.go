@@ -22,8 +22,8 @@ import (
 
 const (
 	// dashboardScan is how many recent events and issues the dashboard
-	// filters; it matches the hub's ring capacity.
-	dashboardScan = 100
+	// filters: all the hub keeps.
+	dashboardScan = event.RingSize
 	// dashboardFeed caps the activity feed after filtering.
 	dashboardFeed = 30
 )

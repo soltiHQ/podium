@@ -139,7 +139,7 @@ Every event kind maps to a subject (`event.SubjectOf`):
 | HTTP      | POST               | `/api/v1/discovery/sync`       |
 | gRPC      | `DiscoverService/Sync` | proto-defined                |
 
-Both parse the agent heartbeat payload, call `model.NewAgentFrom{Sync,Proto}`, then `agentSVC.Upsert`.
+Both parse the agent heartbeat payload, call `model.NewAgentFrom`, then `agentSVC.Upsert`.
 
 With agent auth required, the first sync of an unknown agent ID enrolls the token it presents (trust on first use) and
 sets the endpoint podium calls; every later sync of that ID must present the same token. Until enrollment tokens exist,
