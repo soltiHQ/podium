@@ -350,9 +350,9 @@ func TestSameOriginMutationsAllowed(t *testing.T) {
 	})
 }
 
-// Every response that sets or clears the auth cookies marks them Secure when
-// the client used HTTPS, also behind a trusted TLS-terminating proxy, or
-// always with auth.cookie_secure "always".
+// Every response that sets or clears the auth cookies, or sets the device
+// cookie, marks them Secure when the client used HTTPS, also behind a trusted
+// TLS-terminating proxy, or always with auth.cookie_secure "always".
 func TestAuthCookiesSecureBehindTrustedProxy(t *testing.T) {
 	for _, tc := range []struct {
 		name, cookieSecure, peer, proto string
@@ -369,7 +369,7 @@ func TestAuthCookiesSecureBehindTrustedProxy(t *testing.T) {
 			cfg.TrustedProxies = []string{"10.0.0.1"}
 			cfg.Auth.CookieSecure = tc.cookieSecure
 			f := newBrowserFixture(t, cfg, nil)
-			serve := func(step string, r *http.Request, wantStatus int) []*http.Cookie {
+			serve := func(step string, r *http.Request, wantStatus, wantCookies int) []*http.Cookie {
 				t.Helper()
 				r.RemoteAddr = tc.peer
 				if tc.proto != "" {
@@ -380,8 +380,8 @@ func TestAuthCookiesSecureBehindTrustedProxy(t *testing.T) {
 					t.Fatalf("%s: HTTP %d, want %d", step, w.Code, wantStatus)
 				}
 				cookies := w.Result().Cookies()
-				if len(cookies) != 3 {
-					t.Fatalf("%s: %d cookies, want the 3 auth cookies", step, len(cookies))
+				if len(cookies) != wantCookies {
+					t.Fatalf("%s: %d cookies, want %d", step, len(cookies), wantCookies)
 				}
 				for _, c := range cookies {
 					if c.Secure != tc.want {
@@ -391,10 +391,14 @@ func TestAuthCookiesSecureBehindTrustedProxy(t *testing.T) {
 				return cookies
 			}
 
-			login := serve("login", browserRequest(http.MethodPost, "/login", formType, loginForm("alice"), nil), http.StatusFound)
-			serve("refresh", browserRequest(http.MethodGet, "/api/v1/users", "", "", without(login, httpcookie.NameAccessToken)), http.StatusOK)
-			serve("logout", browserRequest(http.MethodPost, "/logout", formType, "", login), http.StatusSeeOther)
-			serve("revoked session", browserRequest(http.MethodGet, "/api/v1/users", "", "", login), http.StatusUnauthorized)
+			// Login sets the device cookie too.
+			login := serve("login", browserRequest(http.MethodPost, "/login", formType, loginForm("alice"), nil), http.StatusFound, 4)
+			if cookieValue(login, httpcookie.NameDeviceToken) == "" {
+				t.Fatal("login set no device cookie")
+			}
+			serve("refresh", browserRequest(http.MethodGet, "/api/v1/users", "", "", without(login, httpcookie.NameAccessToken)), http.StatusOK, 3)
+			serve("logout", browserRequest(http.MethodPost, "/logout", formType, "", login), http.StatusSeeOther, 3)
+			serve("revoked session", browserRequest(http.MethodGet, "/api/v1/users", "", "", login), http.StatusUnauthorized, 3)
 		})
 	}
 }

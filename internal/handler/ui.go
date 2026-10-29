@@ -53,8 +53,8 @@ type UI struct {
 // NewUI creates a new UI handler.
 //
 // resolver gives the client IP of login attempts; nil trusts no proxy. secure
-// decides whether the auth cookies that login and logout write carry the
-// Secure attribute.
+// decides whether the auth and device cookies that login and logout write
+// carry the Secure attribute.
 func NewUI(logger zerolog.Logger, accessSVC *access.Service, specSVC *spec.Service, hub *event.Hub, resolver *clientip.Resolver, secure func(*http.Request) bool) *UI {
 	if accessSVC == nil {
 		panic(service.ErrNilService)
@@ -100,6 +100,10 @@ func (u *UI) Routes(mux *http.ServeMux, auth, optionalAuth route.BaseMW, perm ro
 }
 
 // Login handles GET/POST /login.
+//
+// A successful login sets the auth cookies and a new device cookie that only
+// /login receives. The device cookie a login attempt sends back lets it count
+// its failures apart from the account (see access.Service.Login).
 func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 	mode := httpctx.ModeFromRequest(r)
 
@@ -143,10 +147,15 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 	if redirect == "" {
 		redirect = routepath.PageHome
 	}
+	var device string
+	if c, err := httpcookie.GetDevice(r); err == nil {
+		device = c.Value
+	}
 	id, res, err := u.accessSVC.Login(r.Context(), access.LoginRequest{
-		Subject:  subject,
-		Password: password,
-		ClientIP: u.resolver.IP(r),
+		Subject:      subject,
+		Password:     password,
+		ClientIP:     u.resolver.IP(r),
+		DeviceCookie: device,
 	})
 	// Logs and events name the account as stored, however the subject was typed.
 	account := model.NormalizeSubject(subject)
@@ -177,7 +186,9 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 	u.hub.Record(event.SessionCreated, event.Payload{
 		ID: id.UserID, Name: id.Name, By: "auth",
 	})
-	httpcookie.SetAuth(w, u.secure(r), res.AccessToken, res.RefreshToken, res.SessionID)
+	secure := u.secure(r)
+	httpcookie.SetAuth(w, secure, res.AccessToken, res.RefreshToken, res.SessionID)
+	httpcookie.SetDevice(w, secure, routepath.PageLogin, res.DeviceCookie)
 	http.Redirect(w, r, redirect, http.StatusFound)
 }
 

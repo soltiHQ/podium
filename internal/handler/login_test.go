@@ -9,12 +9,15 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth"
+	"github.com/soltiHQ/control-plane/internal/auth/devicecookie"
+	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service/access"
@@ -30,14 +33,19 @@ const (
 	loginIP       = "203.0.113.9:40000"
 )
 
+// loginSecret is the JWT secret of the fixture's auth stack, from which the
+// device cookie key is derived.
+var loginSecret = strings.Repeat("k", auth.MinJWTSecretLen)
+
 // loginFixture is the UI login handler over an in-memory store that holds
 // the user alice. The login limiter has the default configuration: five
 // failures block.
 type loginFixture struct {
-	ui    *UI
-	hub   *event.Hub
-	store *inmemory.Store
-	logs  *bytes.Buffer // the UI handler's log
+	ui     *UI
+	hub    *event.Hub
+	store  *inmemory.Store
+	logs   *bytes.Buffer // the UI handler's log
+	secure bool          // the cookie Secure decision
 }
 
 func newLoginFixture(t *testing.T) *loginFixture {
@@ -64,9 +72,9 @@ func newLoginFixtureWith(t *testing.T, cfg auth.Config) *loginFixture {
 	f.setPassword(t, loginPassword)
 	f.hub = event.NewHub(logger)
 	t.Cleanup(f.hub.Close)
-	cfg.JWTSecret = strings.Repeat("k", auth.MinJWTSecretLen)
+	cfg.JWTSecret = loginSecret
 	authModel := kit.New(store, cfg)
-	f.ui = NewUI(zerolog.New(f.logs), access.New(authModel, store, logger), spec.New(store, logger), f.hub, nil, func(*http.Request) bool { return false })
+	f.ui = NewUI(zerolog.New(f.logs), access.New(authModel, store, logger), spec.New(store, logger), f.hub, nil, func(*http.Request) bool { return f.secure })
 	return f
 }
 
@@ -78,19 +86,45 @@ func (f *loginFixture) setPassword(t *testing.T, password string) {
 	}
 }
 
-// post submits the login form from the TCP peer remoteAddr.
-func (f *loginFixture) post(form url.Values, remoteAddr, userAgent string) *httptest.ResponseRecorder {
+// post submits the login form from the TCP peer remoteAddr, with cookies.
+func (f *loginFixture) post(form url.Values, remoteAddr, userAgent string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(http.MethodPost, routepath.PageLogin, strings.NewReader(form.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("User-Agent", userAgent)
 	r.RemoteAddr = remoteAddr
+	for _, c := range cookies {
+		r.AddCookie(c)
+	}
 	w := httptest.NewRecorder()
 	f.ui.Login(w, r)
 	return w
 }
 
-func (f *loginFixture) login(subject, password, remoteAddr string) *httptest.ResponseRecorder {
-	return f.post(url.Values{"subject": {subject}, "password": {password}}, remoteAddr, "test-browser")
+func (f *loginFixture) login(subject, password, remoteAddr string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	return f.post(url.Values{"subject": {subject}, "password": {password}}, remoteAddr, "test-browser", cookies...)
+}
+
+// blockAccount blocks subject with five failed logins, each from its own
+// client IP, none of them loginIP.
+func (f *loginFixture) blockAccount(t *testing.T, subject string) {
+	t.Helper()
+	for i := range 5 {
+		if w := f.login(subject, "wrong-password", fmt.Sprintf("198.51.100.%d:40000", i+1)); w.Code != http.StatusSeeOther {
+			t.Fatalf("failure %d on %s: HTTP %d, want 303", i+1, subject, w.Code)
+		}
+	}
+}
+
+// deviceCookie returns the device cookie that w sets.
+func deviceCookie(t *testing.T, w *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	for _, c := range w.Result().Cookies() {
+		if c.Name == httpcookie.NameDeviceToken {
+			return c
+		}
+	}
+	t.Fatalf("HTTP %d sets no device cookie", w.Code)
+	return nil
 }
 
 func (f *loginFixture) rateLimitedEvents() []event.Record {
@@ -253,5 +287,154 @@ func TestLoginRejectsOversizedInput(t *testing.T) {
 	}
 	if w := f.login(loginSubject, strings.Repeat("p", 16<<10), loginIP); w.Code != http.StatusBadRequest {
 		t.Fatalf("body over 16 KiB: HTTP %d, want 400", w.Code)
+	}
+}
+
+// Failed logins from anywhere can keep an account, even the public admin,
+// blocked. They cannot keep out a browser that logged in as that account
+// before: its device cookie gets it a limit of its own, while every client
+// without one still finds the account blocked.
+func TestLockedAccountAdmitsKnownDevice(t *testing.T) {
+	f := newLoginFixture(t)
+	device := deviceCookie(t, f.login(loginSubject, loginPassword, loginIP))
+	f.blockAccount(t, loginSubject)
+
+	w := f.login(loginSubject, loginPassword, loginIP, device)
+	if w.Code != http.StatusFound || w.Header().Get("Location") != routepath.PageHome {
+		t.Fatalf("known device with the right password: HTTP %d to %q, want 302 to %s", w.Code, w.Header().Get("Location"), routepath.PageHome)
+	}
+	var sessionID string
+	for _, c := range w.Result().Cookies() {
+		if c.Name == httpcookie.NameSessionID {
+			sessionID = c.Value
+		}
+	}
+	if _, err := f.store.GetSession(context.Background(), sessionID); err != nil {
+		t.Fatalf("known device login stored no session %q: %v", sessionID, err)
+	}
+
+	// That success resets the device only: the account stays blocked.
+	for _, remoteAddr := range []string{loginIP, "192.0.2.7:40000"} {
+		if w := f.login(loginSubject, loginPassword, remoteAddr); w.Code != http.StatusTooManyRequests {
+			t.Fatalf("client without the cookie at %s, right password: HTTP %d, want 429", remoteAddr, w.Code)
+		}
+	}
+}
+
+// A device cookie vouches only for the account that earned it: alice's cookie
+// leaves an attempt on admin untrusted.
+func TestDeviceCookieIsBoundToSubject(t *testing.T) {
+	f := newLoginFixture(t)
+	device := deviceCookie(t, f.login(loginSubject, loginPassword, loginIP))
+	f.blockAccount(t, "admin")
+	if w := f.login("admin", "admin-password", loginIP, device); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("admin with alice's device cookie: HTTP %d, want 429", w.Code)
+	}
+}
+
+// Only a cookie that podium signed for the subject, at most 90 days ago and
+// not in the future, makes an attempt trusted. Any other value leaves the
+// attempt on the blocked account.
+func TestForgedOrExpiredDeviceCookieIsUntrusted(t *testing.T) {
+	f := newLoginFixture(t)
+	f.blockAccount(t, loginSubject)
+	signer := devicecookie.NewSigner([]byte(loginSecret))
+	issue := func(at time.Time) string {
+		t.Helper()
+		value, err := signer.Issue(loginSubject, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	now := time.Now()
+	valid := issue(now)
+	parts := strings.Split(valid, ".")
+	forged := "A" + parts[3][1:]
+	if forged == parts[3] {
+		forged = "B" + parts[3][1:]
+	}
+	for _, tc := range []struct{ name, value string }{
+		{"bad mac", strings.Join([]string{parts[0], parts[1], parts[2], forged}, ".")},
+		{"future timestamp", issue(now.Add(2 * time.Minute))},
+		{"older than 90 days", issue(now.Add(-91 * 24 * time.Hour))},
+		{"wrong version", "v2." + strings.Join(parts[1:], ".")},
+		{"garbage", "not-a-device-cookie"},
+	} {
+		cookie := &http.Cookie{Name: httpcookie.NameDeviceToken, Value: tc.value}
+		if w := f.login(loginSubject, loginPassword, loginIP, cookie); w.Code != http.StatusTooManyRequests {
+			t.Errorf("%s: HTTP %d, want 429", tc.name, w.Code)
+		}
+	}
+
+	// The cookie signed now is trusted: the values above failed on their own.
+	if w := f.login(loginSubject, loginPassword, loginIP, &http.Cookie{Name: httpcookie.NameDeviceToken, Value: valid}); w.Code != http.StatusFound {
+		t.Fatalf("valid device cookie: HTTP %d, want 302", w.Code)
+	}
+}
+
+// A known device has a limit of its own: rate_attempts failures block that
+// device, with one rate_limited event, and leave the account and client IP
+// keys untouched.
+func TestKnownDeviceHasItsOwnLimit(t *testing.T) {
+	f := newLoginFixture(t)
+	device := deviceCookie(t, f.login(loginSubject, loginPassword, loginIP))
+	for i := range 5 {
+		if w := f.login(loginSubject, "wrong-password", loginIP, device); w.Code != http.StatusSeeOther {
+			t.Fatalf("failure %d with the device cookie: HTTP %d, want 303", i+1, w.Code)
+		}
+		want := 0
+		if i == 4 {
+			want = 1
+		}
+		if got := len(f.rateLimitedEvents()); got != want {
+			t.Fatalf("after failure %d: %d rate_limited events, want %d", i+1, got, want)
+		}
+	}
+	if w := f.login(loginSubject, loginPassword, loginIP, device); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("blocked device with the right password: HTTP %d, want 429", w.Code)
+	}
+	events := f.rateLimitedEvents()
+	if len(events) != 1 {
+		t.Fatalf("%d rate_limited events, want 1", len(events))
+	}
+	if p := events[0].Payload; p.ID != loginSubject || p.Name != loginSubject || p.By != "auth" {
+		t.Fatalf("rate_limited payload %+v, want the subject %q by auth", p, loginSubject)
+	}
+
+	// Neither the account nor the client IP counted those failures: after four
+	// more failures without the cookie, from the same IP, a fifth attempt runs.
+	for i := range 4 {
+		if w := f.login(loginSubject, "wrong-password", loginIP); w.Code != http.StatusSeeOther {
+			t.Fatalf("failure %d without the cookie: HTTP %d, want 303", i+1, w.Code)
+		}
+	}
+	if w := f.login(loginSubject, loginPassword, loginIP); w.Code != http.StatusFound {
+		t.Fatalf("right password without the cookie after four failures: HTTP %d, want 302", w.Code)
+	}
+}
+
+// Every successful login sets a new device cookie: sent only to the login
+// route, kept 90 days, out of reach of scripts and cross-site requests, and
+// Secure per the shared cookie decision. A failed login sets none.
+func TestLoginSetsDeviceCookie(t *testing.T) {
+	for _, secure := range []bool{false, true} {
+		t.Run(fmt.Sprintf("secure %t", secure), func(t *testing.T) {
+			f := newLoginFixture(t)
+			f.secure = secure
+			first := deviceCookie(t, f.login(loginSubject, loginPassword, loginIP))
+			if !first.HttpOnly || first.SameSite != http.SameSiteStrictMode || first.Path != routepath.PageLogin || first.Secure != secure || first.MaxAge != 90*24*60*60 {
+				t.Fatalf("device cookie %+v, want HttpOnly, SameSite=Strict, Path=%s, Secure=%t, Max-Age=7776000", first, routepath.PageLogin, secure)
+			}
+			second := deviceCookie(t, f.login(loginSubject, loginPassword, loginIP, first))
+			if second.Value == first.Value {
+				t.Fatal("a login with the device cookie kept it, want a new one")
+			}
+			for _, c := range f.login(loginSubject, "wrong-password", loginIP, second).Result().Cookies() {
+				if c.Name == httpcookie.NameDeviceToken {
+					t.Fatalf("failed login set a device cookie: %v", c)
+				}
+			}
+		})
 	}
 }

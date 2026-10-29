@@ -5,6 +5,7 @@ import "testing"
 func TestKeyFormats(t *testing.T) {
 	for _, tc := range []struct{ name, got, want string }{
 		{"account subject normalized like user storage", AccountKey("  Alice\t"), "login:acct:alice"},
+		{"known device", DeviceKey("q83vEjRWeJA"), "login:dev:q83vEjRWeJA"},
 		{"login IPv4", LoginIPKey("203.0.113.9"), "login:ip:203.0.113.9"},
 		{"login IPv4-mapped", LoginIPKey("::ffff:203.0.113.9"), "login:ip:203.0.113.9"},
 		{"login IPv6 counts the /64", LoginIPKey("2001:db8:1:2:aaaa:bbbb:cccc:dddd"), "login:ip:2001:db8:1:2::/64"},

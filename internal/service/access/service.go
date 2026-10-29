@@ -33,6 +33,9 @@ func New(authSvc *kit.Auth, store storage.Storage, logger zerolog.Logger) *Servi
 	if authSvc.Limiter == nil {
 		panic("access.Service: nil login limiter")
 	}
+	if authSvc.Devices == nil {
+		panic("access.Service: nil device cookie signer")
+	}
 	return &Service{
 		logger: logger.With().Str("service", "access").Logger(),
 		auth:   authSvc,
@@ -43,25 +46,35 @@ func New(authSvc *kit.Auth, store storage.Storage, logger zerolog.Logger) *Servi
 // Login authenticates a user and returns issued tokens and identity.
 //
 // The subject is normalized once, the way user storage normalizes it, for the
-// limiter and the password check alike. Before the password check, the
-// attempt reserves a slot on its account key and on its client IP key, so
-// attempts in flight count like failures: an attempt is refused with
-// ErrRateLimited while, for either key, failures plus attempts in flight reach
-// the limit. Only a wrong subject or password (ErrInvalidCredentials) records
-// a failure on both keys; the failure that blocks one of them comes back
-// joined with ErrRateLimitReached. Any other error, such as a storage outage,
-// releases the slots. A successful login resets the account only, never the
-// client IP.
+// limiter, the device cookie and the password check alike. An attempt with a
+// device cookie valid for the subject comes from a known device and counts on
+// its device key alone; any other attempt counts on its account key and on its
+// client IP key. Before the password check, the attempt reserves a slot on its
+// keys, so attempts in flight count like failures: an attempt is refused with
+// ErrRateLimited while, for any of its keys, failures plus attempts in flight
+// reach the limit. Only a wrong subject or password (ErrInvalidCredentials)
+// records a failure on the keys; the failure that blocks one of them comes
+// back joined with ErrRateLimitReached. Any other error, such as a storage
+// outage, releases the slots. A successful login resets the device key of a
+// known device, or else the account key, never the client IP, and returns a
+// new device cookie.
 func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identity, LoginResult, error) {
 	subject := model.NormalizeSubject(req.Subject)
 	if subject == "" || req.Password == "" {
 		return nil, LoginResult{}, iauth.ErrInvalidRequest
 	}
 
-	s.logger.Debug().Str("subject", subject).Msg("login attempt")
+	now := s.auth.Clock.Now()
+	reset := ratelimit.AccountKey(subject)
+	keys := []string{reset, ratelimit.LoginIPKey(req.ClientIP)}
+	deviceID, known := s.auth.Devices.Verify(req.DeviceCookie, subject, now)
+	if known {
+		reset = ratelimit.DeviceKey(deviceID)
+		keys = []string{reset}
+	}
+	s.logger.Debug().Str("subject", subject).Bool("known_device", known).Msg("login attempt")
 
-	account := ratelimit.AccountKey(subject)
-	attempt, err := s.auth.Limiter.Reserve(s.auth.Clock.Now(), account, ratelimit.LoginIPKey(req.ClientIP))
+	attempt, err := s.auth.Limiter.Reserve(now, keys...)
 	if err != nil {
 		return nil, LoginResult{}, err
 	}
@@ -80,12 +93,17 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identi
 		return nil, LoginResult{}, err
 	}
 	attempt.Release()
-	s.auth.Limiter.Reset(account)
+	s.auth.Limiter.Reset(reset)
+	device, err := s.auth.Devices.Issue(subject, s.auth.Clock.Now())
+	if err != nil {
+		return nil, LoginResult{}, err
+	}
 	s.logger.Info().Str("subject", subject).Str("user_id", id.UserID).Msg("login success")
 	return id, LoginResult{
 		AccessToken:  pair.AccessToken,
 		RefreshToken: pair.RefreshToken,
 		SessionID:    id.SessionID,
+		DeviceCookie: device,
 	}, nil
 }
 

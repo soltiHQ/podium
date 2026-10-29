@@ -12,6 +12,12 @@ func AccountKey(subject string) string {
 	return "login:acct:" + model.NormalizeSubject(subject)
 }
 
+// DeviceKey is the login key of a known device, a browser with a valid device
+// cookie: "login:dev:<deviceID>".
+func DeviceKey(deviceID string) string {
+	return "login:dev:" + deviceID
+}
+
 // LoginIPKey is the login key of a client IP: "login:ip:<network>".
 func LoginIPKey(ip string) string {
 	return "login:ip:" + network(ip)

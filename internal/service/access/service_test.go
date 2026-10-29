@@ -13,6 +13,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	iauth "github.com/soltiHQ/control-plane/internal/auth"
+	"github.com/soltiHQ/control-plane/internal/auth/devicecookie"
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
 	"github.com/soltiHQ/control-plane/internal/auth/providers"
 	"github.com/soltiHQ/control-plane/internal/auth/rbac"
@@ -50,6 +51,7 @@ func TestLoginLimiterBoundsConcurrentAttempts(t *testing.T) {
 	svc := New(&kit.Auth{
 		Clock:   clock,
 		Limiter: kit.NewLimiter(cfg),
+		Devices: devicecookie.NewSigner([]byte(cfg.JWTSecret)),
 		Session: session.New(store, jwt.NewHSIssuer([]byte(cfg.JWTSecret), clock), clock, session.Config{}, rbac.NewResolver(store),
 			map[enum.Auth]providers.Provider{enum.Password: gate}),
 	}, store, zerolog.Nop())

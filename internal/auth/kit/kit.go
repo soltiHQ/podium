@@ -1,8 +1,9 @@
 // Package kit is the composition root for the authentication subsystem.
 //
 // It wires together independently-developed pieces (JWT issuance/verification,
-// session service, RBAC resolver, password provider, login rate limiter) into
-// a single [Auth] aggregate ready for use by HTTP/transport layers.
+// session service, RBAC resolver, password provider, login rate limiter,
+// device cookies) into a single [Auth] aggregate ready for use by
+// HTTP/transport layers.
 //
 // Kit lives in a sub-package because providers under internal/auth/providers/*
 // import the parent internal/auth package for sentinel errors; placing the
@@ -12,6 +13,7 @@ package kit
 import (
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth"
+	"github.com/soltiHQ/control-plane/internal/auth/devicecookie"
 	"github.com/soltiHQ/control-plane/internal/auth/providers"
 	passwordprovider "github.com/soltiHQ/control-plane/internal/auth/providers/password"
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
@@ -28,8 +30,13 @@ type Auth struct {
 	Clock token.Clock
 
 	// Limiter counts failed logins, and logins in flight, per account and
-	// per client IP. Discovery gets its own instance from [NewLimiter].
+	// per client IP, or per known device. Discovery gets its own instance
+	// from [NewLimiter].
 	Limiter *ratelimit.Limiter
+
+	// Devices issues and checks device cookies, which let a browser that
+	// logged in before count its login attempts apart from the account.
+	Devices *devicecookie.Signer
 
 	// Session provides login, refresh, and revoke operations.
 	Session *session.Service
@@ -84,5 +91,6 @@ func New(store storage.Storage, cfg auth.Config) *Auth {
 			},
 		),
 		Limiter: NewLimiter(cfg),
+		Devices: devicecookie.NewSigner(secretb),
 	}
 }

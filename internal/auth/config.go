@@ -30,17 +30,17 @@ type Config struct {
 	RateAttempts  int           `yaml:"rate_attempts"  envconfig:"RATE_ATTEMPTS"`
 	RotateRefresh bool          `yaml:"rotate_refresh" envconfig:"ROTATE_REFRESH"`
 
-	// CookieSecure decides when the auth cookies carry the Secure attribute:
-	// CookieSecureAuto (the default) or CookieSecureAlways.
+	// CookieSecure decides when the auth and device cookies carry the Secure
+	// attribute: CookieSecureAuto (the default) or CookieSecureAlways.
 	CookieSecure string `yaml:"cookie_secure" envconfig:"COOKIE_SECURE"`
 }
 
 // Values of [Config.CookieSecure].
 const (
-	// CookieSecureAuto marks the auth cookies Secure when the client used
+	// CookieSecureAuto marks the cookies Secure when the client used
 	// HTTPS: a TLS connection, or X-Forwarded-Proto https from a trusted proxy.
 	CookieSecureAuto = "auto"
-	// CookieSecureAlways marks the auth cookies Secure on every response.
+	// CookieSecureAlways marks the cookies Secure on every response.
 	CookieSecureAlways = "always"
 )
 

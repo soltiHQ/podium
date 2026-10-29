@@ -199,8 +199,8 @@ func waitForLeader(ctx context.Context, l cluster.Leadership) bool {
 }
 
 // buildMainHandler wires the UI and API listener. resolver gives client IPs to
-// the login limiter and the stream limiter, and tells the auth cookies whether
-// the client used HTTPS. The listener has no limit on failed authentication:
+// the login limiter and the stream limiter, and tells the auth and device
+// cookies whether the client used HTTPS. The listener has no limit on failed authentication:
 // its tokens and session IDs cannot be guessed, and passwords go through the
 // login limiter. Cross-origin browser mutations are refused before any route.
 func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership, resolver *clientip.Resolver) (http.Handler, *loghub.Hub) {
@@ -239,9 +239,9 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 	return h, logHub
 }
 
-// cookieSecure decides whether the auth cookies of a response carry the Secure
-// attribute: always with auth.cookie_secure "always", otherwise when the client
-// used HTTPS, directly or through a trusted proxy.
+// cookieSecure decides whether the auth and device cookies of a response carry
+// the Secure attribute: always with auth.cookie_secure "always", otherwise when
+// the client used HTTPS, directly or through a trusted proxy.
 func cookieSecure(mode string, resolver *clientip.Resolver) func(*http.Request) bool {
 	always := mode == auth.CookieSecureAlways
 	return func(r *http.Request) bool {
