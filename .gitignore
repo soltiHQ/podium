@@ -1,36 +1,35 @@
-# Dependency directories (remove the comment below to include it)
-vendor/
+# Local environment
+.env
+.env.*
 
-# build output
-bin/
+# Build artifacts
+/bin/
 
-# temporary cache
-.cache/
+# Local runtime state (default standalone data_dir)
+/data/
 
-# Editor/IDE
-.idea/
-.vscode/
+# Vendored proto schemas and generated Go bindings (task generate)
+/api/proto/
+/api/gen/
 
-# OS specific
+# Generated templ components (task generate)
+*_templ.go
+
+# Downloaded and built UI assets (task assets)
+/ui/static/js/alpine.min.js
+/ui/static/js/htmx.min.js
+/ui/static/css/tailwindcss.css
+
+# OS files
 .DS_Store
 
-# static
-ui/static/js/alpine.min.js
-ui/static/js/htmx.min.js
+# IDE
+.vscode/
+.idea/
 
-# proto — vendored from soltiHQ/proto (api/proto) and generated (api/gen);
-# both refreshed via `task gen` (proto/vendor + buf generate).
-api/proto/
-api/gen/
-
-# templ
-ui/**/*_templ.go
-
-# tailwindcss
-tailwindcss.css
-
-# Taskfile
+# Task runner cache
+.cache/
 .task/
 
-# local runtime state (default standalone data_dir)
-data/
+# vendor
+vendor/

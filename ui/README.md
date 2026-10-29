@@ -82,10 +82,11 @@ go test ./internal/auth/... ./internal/handler ./internal/transport/http/middlew
   ./internal/uikit/... ./domain/wire ./ui/templates/...
 ```
 
-Generate templates with the version pinned in `go.mod` (`templ v0.3.1020`), and
-compile CSS with Tailwind 4 using `static/css/app.css` as input. The repository's
-`Taskfile.yaml` contains the established generation workflow. Generated template
-and CSS files must be present before building the embedded binary.
+`task generate` runs `go tool templ generate`, so the generator is always the
+templ version pinned in `go.mod`. `task assets` downloads Alpine and HTMX and
+compiles CSS with Tailwind 4 using `static/css/app.css` as input; `task prepare`
+runs both. Generated templates are required to build; the CSS and JS assets are
+required for a working UI in the embedded binary.
 
 The builder currently supports the original built-in Subprocess, Wasm and
 Container workload types. Arbitrary extension workload creation and durable log

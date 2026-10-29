@@ -1,0 +1,33 @@
+name: Go checks
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: ${{ matrix.task }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [ci/golang/fmt, ci/golang/lint, ci/golang/test, ci/golang/audit]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Restore Go compilation and download cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/go
+          key: go-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.task }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.task }}-${{ hashFiles('go.sum') }}-
+            go-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.task }}-
+      - name: Run check
+        uses: mr-chelyshkin/actions/task-run@577ea5b38e0b2ad2bffe7977574fda5e59657a60 # v2
+        with:
+          task: ${{ matrix.task }}

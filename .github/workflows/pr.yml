@@ -1,38 +1,48 @@
-name: Pr
+name: PR flow
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    branches: [main]
+    types: [opened, reopened, synchronize]
 
 concurrency:
-  group: pr-${{ github.ref }}
+  group: pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
-permissions: {
-  contents: read,
-  actions: write,
-  pull-requests: read
-}
+permissions:
+  contents: read
 
 jobs:
-  label-check:
-    name: Label check
-    uses: ./.github/workflows/.label-check.yml
+  markdown:
+    name: Markdown formatting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: mr-chelyshkin/actions/task-run@577ea5b38e0b2ad2bffe7977574fda5e59657a60 # v2
+        with:
+          task: ci/markdown/fmt
 
-  prepare:
-    name: Prepare
-    needs: label-check
-    uses: ./.github/workflows/.vendor.yml
+  go:
+    uses: ./.github/workflows/_checks.yml
+    permissions:
+      contents: read
 
   build:
-    name: Build
-    needs: prepare
-    uses: ./.github/workflows/.build.yml
+    uses: ./.github/workflows/_build.yml
+    permissions:
+      contents: read
 
-  pr-check:
-    name: Pr Check
-    needs: [label-check, build]
-    runs-on: ${{ vars.RUNS_ON }}
+  gate:
+    if: always()
+    needs: [markdown, go, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
     steps:
-      - name: All checks passed
-        run: echo "All Pr checks completed successfully!"
+      - uses: mr-chelyshkin/actions/job-results-check@577ea5b38e0b2ad2bffe7977574fda5e59657a60 # v2
+        with:
+          results: ${{ toJSON(needs) }}

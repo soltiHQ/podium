@@ -71,10 +71,11 @@ There is no automatic legacy state migration; do not mix old and new replicas.
 
 ## Generating bindings
 
-The authoritative schemas live in `soltiHQ/proto`. `task prepare` vendors the
+The authoritative schemas live in `soltiHQ/proto`. `task generate` vendors the
 `agent`, `discover`, `task` and `raft` packages at the release pinned by
-`proto_ref` in `Taskfile.yaml` into `api/proto` and generates Go bindings into
-`api/gen` with `buf generate`. Both directories are git-ignored.
+`proto_ref` in `Taskfile.yml` into `api/proto` and generates Go bindings into
+`api/gen` with `buf generate`. The `protoc-gen-go` and `protoc-gen-go-grpc`
+plugins are the `tool` versions from `go.mod`. Both directories are git-ignored.
 
 The pool shares HTTP connections and caches gRPC connections per endpoint.
 `Close` releases both. `agentError` translates HTTP/gRPC status into the shared

@@ -7,12 +7,13 @@ managed:
   override:
     - file_option: go_package_prefix
       value: github.com/soltiHQ/control-plane/api/gen
+# Plugins are the go.mod tool versions, built by `task proto/generate`.
 plugins:
-  - remote: buf.build/protocolbuffers/go
+  - local: .cache/proto-plugins/protoc-gen-go
     out: api/gen
     opt:
       - paths=source_relative
-  - remote: buf.build/grpc/go
+  - local: .cache/proto-plugins/protoc-gen-go-grpc
     out: api/gen
     opt:
       - paths=source_relative
