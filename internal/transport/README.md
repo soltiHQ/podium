@@ -78,8 +78,8 @@ gRPC requests carry no forwarding headers: gRPC discovery uses the peer address.
 ## Rate limits
 
 - The main listener has no limit on failed authentication: its tokens and session IDs cannot be guessed, and passwords go through the login limiter (`internal/auth`).
-- Discovery has no per-IP limit. Both Sync handlers count agent token failures per (client IP, agent ID) in one shared limiter, so a failure over HTTP counts toward gRPC and back,
-  and one agent with a stale token never blocks the other agents behind its egress IP. HTTP answers 429, gRPC `ResourceExhausted`.
+- Discovery has no per-IP limit. Both Sync handlers reserve an attempt per (client IP, agent ID) before the token check, in one shared limiter, so checks in flight and failures count
+  together and across HTTP and gRPC, and one agent with a stale token never blocks the other agents behind its egress IP. HTTP answers 429, gRPC `ResourceExhausted`.
 - `middleware.StreamLimit` caps concurrent streams per client IP.
 
 ## Error model (shared)

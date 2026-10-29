@@ -100,3 +100,20 @@ func TestLoginLimiterBoundsConcurrentAttempts(t *testing.T) {
 		t.Fatal("an attempt on the blocked account reached the password check")
 	}
 }
+
+// A blank subject or password is an invalid request: it never reaches the
+// limiter, where a whitespace-only subject would land on the shared
+// "login:acct:" key.
+func TestLoginRejectsBlankSubjectOrPassword(t *testing.T) {
+	store := inmemory.New()
+	svc := New(kit.New(store, iauth.Config{JWTSecret: strings.Repeat("k", iauth.MinJWTSecretLen)}), store, zerolog.Nop())
+	for _, req := range []LoginRequest{
+		{Subject: "", Password: "password", ClientIP: "203.0.113.9"},
+		{Subject: " \t\n", Password: "password", ClientIP: "203.0.113.9"},
+		{Subject: "alice", Password: "", ClientIP: "203.0.113.9"},
+	} {
+		if _, _, err := svc.Login(context.Background(), req); !errors.Is(err, iauth.ErrInvalidRequest) {
+			t.Errorf("Login(%q, %q): %v, want ErrInvalidRequest", req.Subject, req.Password, err)
+		}
+	}
+}

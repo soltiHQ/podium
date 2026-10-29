@@ -3,6 +3,7 @@ package access
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -50,7 +51,7 @@ func New(authSvc *kit.Auth, store storage.Storage, logger zerolog.Logger) *Servi
 // ErrRateLimitReached. A successful login resets the account only, never the
 // client IP.
 func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identity, LoginResult, error) {
-	if req.Subject == "" || req.Password == "" {
+	if strings.TrimSpace(req.Subject) == "" || req.Password == "" {
 		return nil, LoginResult{}, iauth.ErrInvalidRequest
 	}
 

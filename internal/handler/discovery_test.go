@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -239,5 +240,161 @@ func TestGRPCDiscoveryAuthFailuresBlockOnlyThatAgent(t *testing.T) {
 	}
 	if err := sync(otherIP, "agent-a", "token-agent-a"); err != nil {
 		t.Fatalf("agent-a from another IP: %v", err)
+	}
+}
+
+// gatedTx holds each transaction, once armed, until release is closed. A
+// bad-token sync runs exactly one transaction: its token check.
+type gatedTx struct {
+	storage.Storage
+	armed   atomic.Bool
+	checks  atomic.Int32
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedTx) WithTx(ctx context.Context, fn func(storage.Storage) error) error {
+	if g.armed.Load() {
+		g.checks.Add(1)
+		g.entered <- struct{}{}
+		<-g.release
+	}
+	return g.Storage.WithTx(ctx, fn)
+}
+
+type syncOutcome string
+
+const (
+	synced          syncOutcome = "synced"
+	refused         syncOutcome = "refused"
+	unauthenticated syncOutcome = "unauthenticated"
+)
+
+// Concurrent bad-token syncs for one (IP, agent ID) reserve their attempt
+// before the token check, so at most rate_attempts checks ever run.
+func TestDiscoveryBoundsConcurrentTokenChecks(t *testing.T) {
+	const attempts, limit = 20, 5 // limit is discoveryLimiter's MaxAttempts
+	for _, tc := range []struct {
+		name    string
+		handler func(svc *agent.Service, hub *event.Hub) func(token string) syncOutcome
+	}{
+		{"http", func(svc *agent.Service, hub *event.Hub) func(string) syncOutcome {
+			h := NewHTTPDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), nil, true)
+			body := `{"id":"agent-a","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
+			return func(token string) syncOutcome {
+				switch code := syncHTTPFrom(h, "203.0.113.9:40000", body, token).Code; code {
+				case http.StatusOK:
+					return synced
+				case http.StatusTooManyRequests:
+					return refused
+				case http.StatusUnauthorized:
+					return unauthenticated
+				default:
+					return syncOutcome(fmt.Sprintf("HTTP %d", code))
+				}
+			}
+		}},
+		{"grpc", func(svc *agent.Service, hub *event.Hub) func(string) syncOutcome {
+			g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), true)
+			from := peer.NewContext(context.Background(), &peer.Peer{Addr: &net.TCPAddr{IP: net.ParseIP("203.0.113.9"), Port: 40000}})
+			return func(token string) syncOutcome {
+				ctx := metadata.NewIncomingContext(from, metadata.Pairs("authorization", "Bearer "+token))
+				_, err := g.Sync(ctx, &discoverv1.SyncRequest{Id: "agent-a", Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})
+				switch grpcstatus.Code(err) {
+				case codes.OK:
+					return synced
+				case codes.ResourceExhausted:
+					return refused
+				case codes.Unauthenticated:
+					return unauthenticated
+				default:
+					return syncOutcome(err.Error())
+				}
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logger := zerolog.Nop()
+			store := &gatedTx{Storage: inmemory.New(), entered: make(chan struct{}, attempts), release: make(chan struct{})}
+			hub := event.NewHub(logger)
+			defer hub.Close()
+			sync := tc.handler(agent.New(store, logger), hub)
+			if got := sync("token-a"); got != synced {
+				t.Fatalf("enroll agent-a: %s", got)
+			}
+
+			store.armed.Store(true)
+			results := make(chan syncOutcome, attempts)
+			for range attempts {
+				go func() { results <- sync("stale-token") }()
+			}
+			// Each sync either waits inside its token check or comes back refused.
+			admitted := 0
+			for range attempts {
+				select {
+				case <-store.entered:
+					admitted++
+				case got := <-results:
+					if got != refused {
+						t.Errorf("sync that skipped the token check: %s, want refused", got)
+					}
+				}
+			}
+			if admitted > limit {
+				t.Errorf("%d concurrent token checks ran, want at most %d", admitted, limit)
+			}
+
+			close(store.release)
+			for range admitted {
+				if got := <-results; got != unauthenticated {
+					t.Errorf("bad token: %s, want unauthenticated", got)
+				}
+			}
+			// The pair is blocked: even the right token is refused before any check.
+			checks := store.checks.Load()
+			if got := sync("token-a"); got != refused {
+				t.Fatalf("agent-a after the burst: %s, want refused", got)
+			}
+			if store.checks.Load() != checks {
+				t.Fatal("a sync of the blocked pair ran a token check")
+			}
+		})
+	}
+}
+
+// unavailableTx fails every transaction, once armed, as an unreachable store would.
+type unavailableTx struct {
+	storage.Storage
+	armed atomic.Bool
+}
+
+func (u *unavailableTx) WithTx(ctx context.Context, fn func(storage.Storage) error) error {
+	if u.armed.Load() {
+		return storage.ErrUnavailable
+	}
+	return u.Storage.WithTx(ctx, fn)
+}
+
+// A token check that fails for any reason but a wrong token releases its
+// attempt: storage outages never block an agent.
+func TestDiscoveryStorageErrorsDoNotCountAsFailures(t *testing.T) {
+	logger := zerolog.Nop()
+	store := &unavailableTx{Storage: inmemory.New()}
+	hub := event.NewHub(logger)
+	defer hub.Close()
+	h := NewHTTPDiscovery(logger, agent.New(store, logger), hub, discoveryLimiter(), nil, true)
+	body := `{"id":"agent-a","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
+	if res := syncHTTP(h, body, "token-a"); res.Code != http.StatusOK {
+		t.Fatalf("enroll agent-a: HTTP %d", res.Code)
+	}
+	store.armed.Store(true)
+	for i := range 10 {
+		if res := syncHTTP(h, body, "token-a"); res.Code != http.StatusServiceUnavailable {
+			t.Fatalf("sync %d with the store down: HTTP %d, want 503", i+1, res.Code)
+		}
+	}
+	store.armed.Store(false)
+	if res := syncHTTP(h, body, "token-a"); res.Code != http.StatusOK {
+		t.Fatalf("sync after the outage: HTTP %d, want 200", res.Code)
 	}
 }

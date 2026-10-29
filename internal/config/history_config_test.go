@@ -19,7 +19,7 @@ func TestLoadHistoryConfigurationAndEnvironmentPrecedence(t *testing.T) {
 	t.Setenv("SOLTI_HISTORY_ARCHIVE_MAX_RECORDS", "31")
 	t.Setenv("SOLTI_HISTORY_COLLECTOR_PAGE_SIZE", "9")
 	t.Setenv("SOLTI_HISTORY_COLLECTOR_MAX_RUN_CONTINUATIONS", "13")
-	cfg, err := Load()
+	cfg, err := load(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestLoadRejectsInvalidArchiveAndCollectorBudgets(t *testing.T) {
 			t.Setenv("CONFIG_PATH", "")
 			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
 			t.Setenv(tc.key, tc.value)
-			_, err := Load()
+			_, err := load(nil)
 			if err == nil || !strings.Contains(err.Error(), tc.errorPath) {
 				t.Fatalf("want actionable %s error, got %v", tc.errorPath, err)
 			}

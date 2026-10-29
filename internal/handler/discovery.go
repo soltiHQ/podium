@@ -20,6 +20,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/domain/wire"
+	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service"
@@ -60,9 +61,9 @@ type HTTPDiscovery struct {
 // NewHTTPDiscovery creates a new HTTP discovery handler.
 //
 // requireAuth turns on per-agent bearer-token authentication (TOFU enroll +
-// constant-time verify) on every sync. limiter counts the authentication
-// failures of each (client IP, agent ID) pair; resolver gives the client IP
-// (nil trusts no proxy).
+// constant-time verify) on every sync. limiter bounds the token checks of each
+// (client IP, agent ID) pair, see verifyAgentToken; resolver gives the client
+// IP (nil trusts no proxy).
 func NewHTTPDiscovery(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, limiter *ratelimit.Limiter, resolver *clientip.Resolver, requireAuth bool) *HTTPDiscovery {
 	if agentSVC == nil {
 		panic(service.ErrNilService)
@@ -121,20 +122,17 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.requireAuth {
-		key := ratelimit.AgentKey(h.resolver.IP(r), in.GetId())
-		if h.limiter.Blocked(key, time.Now()) {
-			response.AuthRateLimit(w, r, mode)
-			return
-		}
 		token := bearerToken(r.Header.Get("Authorization"))
-		if err := h.agentSVC.VerifyOrEnrollToken(r.Context(), in.GetId(), token); err != nil {
-			if errors.Is(err, agent.ErrUnauthenticated) {
-				h.limiter.RecordFailure(key, time.Now())
+		if err := verifyAgentToken(r.Context(), h.agentSVC, h.limiter, h.resolver.IP(r), in.GetId(), token); err != nil {
+			switch {
+			case errors.Is(err, auth.ErrRateLimited):
+				response.AuthRateLimit(w, r, mode)
+			case errors.Is(err, agent.ErrUnauthenticated):
 				response.Unauthorized(w, r, mode)
-				return
+			default:
+				h.logger.Error().Err(err).Str("agent_id", in.GetId()).Msg("token verify failed")
+				response.Unavailable(w, r, mode)
 			}
-			h.logger.Error().Err(err).Str("agent_id", in.GetId()).Msg("token verify failed")
-			response.Unavailable(w, r, mode)
 			return
 		}
 	}
@@ -170,8 +168,8 @@ type GRPCDiscovery struct {
 // NewGRPCDiscovery creates a new gRPC discovery handler.
 //
 // requireAuth turns on per-agent bearer-token authentication (TOFU enroll +
-// constant-time verify) on every sync. limiter counts the authentication
-// failures of each (peer IP, agent ID) pair.
+// constant-time verify) on every sync. limiter bounds the token checks of each
+// (peer IP, agent ID) pair, see verifyAgentToken.
 func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event.Hub, limiter *ratelimit.Limiter, requireAuth bool) *GRPCDiscovery {
 	if agentSVC == nil {
 		panic(service.ErrNilService)
@@ -199,18 +197,16 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 	}
 
 	if g.requireAuth {
-		key := ratelimit.AgentKey(grpcPeerIP(ctx), req.GetId())
-		if g.limiter.Blocked(key, time.Now()) {
-			return nil, status.Errorf(ctx, codes.ResourceExhausted, "rate limited")
-		}
-		token := grpcBearerToken(ctx)
-		if err := g.agentSVC.VerifyOrEnrollToken(ctx, req.GetId(), token); err != nil {
-			if errors.Is(err, agent.ErrUnauthenticated) {
-				g.limiter.RecordFailure(key, time.Now())
+		if err := verifyAgentToken(ctx, g.agentSVC, g.limiter, grpcPeerIP(ctx), req.GetId(), grpcBearerToken(ctx)); err != nil {
+			switch {
+			case errors.Is(err, auth.ErrRateLimited):
+				return nil, status.Errorf(ctx, codes.ResourceExhausted, "rate limited")
+			case errors.Is(err, agent.ErrUnauthenticated):
 				return nil, status.Errorf(ctx, codes.Unauthenticated, "agent authentication failed")
+			default:
+				g.logger.Error().Err(err).Str("agent_id", req.GetId()).Msg("token verify failed")
+				return nil, status.FromError(ctx, err).Err()
 			}
-			g.logger.Error().Err(err).Str("agent_id", req.GetId()).Msg("token verify failed")
-			return nil, status.FromError(ctx, err).Err()
 		}
 	}
 
@@ -221,6 +217,26 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 	}
 	recordSyncEvents(g.hub, req.GetId(), req.GetName(), existing, getErr)
 	return &discoverv1.SyncResponse{Success: true}, nil
+}
+
+// verifyAgentToken checks the bearer token of agentID synced from clientIP, for
+// both Sync transports. It first reserves an attempt on the (client IP, agent ID)
+// pair, so checks in flight count like failures: it returns auth.ErrRateLimited
+// while the failures plus the checks in flight of the pair reach the limit.
+// A wrong token (agent.ErrUnauthenticated) becomes a failure; every other
+// outcome, a panic included, releases the attempt.
+func verifyAgentToken(ctx context.Context, svc *agent.Service, limiter *ratelimit.Limiter, clientIP, agentID, token string) error {
+	attempt, err := limiter.Reserve(time.Now(), ratelimit.AgentKey(clientIP, agentID))
+	if err != nil {
+		return err
+	}
+	defer attempt.Release() // a no-op once the attempt has failed
+
+	err = svc.VerifyOrEnrollToken(ctx, agentID, token)
+	if errors.Is(err, agent.ErrUnauthenticated) {
+		attempt.Fail(time.Now())
+	}
+	return err
 }
 
 // agentFromSyncRequest builds a domain Agent from a discovery heartbeat. Shared

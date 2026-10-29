@@ -136,8 +136,9 @@ Every event kind maps to a subject (`event.SubjectOf`):
 
 Both parse the agent heartbeat payload, call `model.NewAgentFrom{Sync,Proto}`, then `agentSVC.Upsert`.
 
-With agent auth required, every token failure counts against the pair (client IP, agent ID); the limiter is checked
-before the token. Both transports share one limiter, so failures over HTTP count toward gRPC and back.
+With agent auth required, each sync reserves an attempt on the pair (client IP, agent ID) before its token check
+(`verifyAgentToken`), so checks in flight count like failures; a wrong token turns the attempt into a failure, any
+other outcome releases it. Both transports share one limiter, so failures over HTTP count toward gRPC and back.
 `auth.rate_attempts` failures block that pair for `auth.rate_window`: HTTP answers 429, gRPC `ResourceExhausted`.
 There is no per-IP limit, so agents behind one egress IP (NAT, Kubernetes) never block each other.
 HTTP takes the client IP from `trusted_proxies`; gRPC uses the peer address.

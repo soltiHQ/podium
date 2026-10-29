@@ -19,29 +19,28 @@ auth/
 ```
 
 ## Login flow
+access.Service.Login → Limiter.Reserve(account, client IP); see "Login rate limiting"
 ```text
   handler
     │
     ▼
   wire.Auth.Session.Login(ctx, authKind, subject, secret)
     │
-    ├─ 1. rate limit check              (ratelimit.Limiter)
-    │
-    ├─ 2. authenticate                  (providers/password.Provider)
+    ├─ 1. authenticate                  (providers/password.Provider)
     │      ├─ find user by subject
     │      ├─ find credential
     │      └─ bcrypt verify              (credentials.VerifyPassword)
     │
-    ├─ 3. resolve permissions            (rbac.Resolver)
+    ├─ 2. resolve permissions            (rbac.Resolver)
     │      └─ user direct ∪ role perms → sorted, de-duped
     │
-    ├─ 4. create session                 (storage)
+    ├─ 3. create session                 (storage)
     │      ├─ generate session ID        (16-byte random hex)
     │      └─ store refresh hash         (SHA3-256)
     │
-    ├─ 5. issue access token             (token/jwt.HSIssuer → HS256 JWT)
+    ├─ 4. issue access token             (token/jwt.HSIssuer → HS256 JWT)
     │
-    └─ 6. return TokenPair + Identity
+    └─ 5. return TokenPair + Identity
 ```
 
 ## Refresh flow

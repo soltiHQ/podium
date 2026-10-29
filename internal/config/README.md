@@ -108,10 +108,10 @@ that, the least recently updated key is evicted.
 | Surface                 | Counted per                  | Counts                                                                | Blocked answer            |
 |-------------------------|------------------------------|-----------------------------------------------------------------------|---------------------------|
 | Login (`POST /login`)   | account, and client IP       | failed logins and logins in flight; a success resets the account only | 429                       |
-| HTTP and gRPC discovery | client IP + agent ID, shared | agent token failures                                                  | 429 / `ResourceExhausted` |
+| HTTP and gRPC discovery | client IP + agent ID, shared | agent token failures and token checks in flight                       | 429 / `ResourceExhausted` |
 
-A login attempt reserves a slot on both of its keys before the password check,
-so a burst of parallel attempts gets at most `rate_attempts` password checks per
+Every attempt reserves a slot on its keys before its check (password or agent
+token), so a burst of parallel attempts gets at most `rate_attempts` checks per
 key. A client IP is counted by its /64 prefix for IPv6; IPv4-mapped IPv6
 addresses count as IPv4. Nothing resets a client IP key, and the User-Agent
 plays no part. Agents behind one egress IP never block each other. The

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -31,7 +32,7 @@ func TestLoadTrustedProxies(t *testing.T) {
 			if tc.env != "" {
 				t.Setenv("SOLTI_TRUSTED_PROXIES", tc.env)
 			}
-			cfg, err := Load()
+			cfg, err := load(nil)
 			if tc.errorPath != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.errorPath) {
 					t.Fatalf("want a %s error, got %v", tc.errorPath, err)
@@ -45,5 +46,46 @@ func TestLoadTrustedProxies(t *testing.T) {
 				t.Fatalf("trusted_proxies = %q, want %q", cfg.TrustedProxies, tc.want)
 			}
 		})
+	}
+}
+
+func TestLoadReadsTheConfigFlag(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("trusted_proxies:\n  - 10.0.0.9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONFIG_PATH", "")
+	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+	cfg, err := load([]string{"--config", path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"10.0.0.9"}; !slices.Equal(cfg.TrustedProxies, want) {
+		t.Fatalf("trusted_proxies = %q, want %q from the --config file", cfg.TrustedProxies, want)
+	}
+}
+
+// A mistyped flag is still reported on stderr; the path then comes from CONFIG_PATH.
+func TestMistypedConfigFlagIsReported(t *testing.T) {
+	t.Setenv("CONFIG_PATH", "from-env.yaml")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = r.Close() }()
+	stderr := os.Stderr
+	os.Stderr = w
+	path := configPath([]string{"--confg", "typo.yaml"})
+	os.Stderr = stderr
+	_ = w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "flag provided but not defined: -confg") {
+		t.Fatalf("stderr = %q, want the unknown flag reported", out)
+	}
+	if path != "from-env.yaml" {
+		t.Fatalf("config path = %q, want CONFIG_PATH", path)
 	}
 }

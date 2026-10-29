@@ -135,10 +135,16 @@ func (c Config) Validate() error {
 }
 
 // Load reads configuration in priority order: defaults → YAML file → ENV.
+// The YAML file comes from the --config flag or CONFIG_PATH.
 // Refuses to return a Config that fails [Config.Validate].
 func Load() (Config, error) {
+	return load(os.Args[1:])
+}
+
+// load is [Load] with the command-line arguments passed in.
+func load(args []string) (Config, error) {
 	var (
-		path = configPath()
+		path = configPath(args)
 		cfg  = Default()
 	)
 	if path != "" {
@@ -159,12 +165,13 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// configPath returns the config file path from --config flag or CONFIG_PATH env.
-func configPath() string {
+// configPath returns the config file path from the --config flag in args or the
+// CONFIG_PATH env. A flag error is reported on stderr by the FlagSet itself.
+func configPath(args []string) string {
 	var path string
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	fs.StringVar(&path, "config", "", "path to YAML config file")
-	_ = fs.Parse(os.Args[1:])
+	_ = fs.Parse(args)
 
 	if path != "" {
 		return path
