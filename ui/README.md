@@ -10,6 +10,14 @@ color, radius and elevation tokens live in `static/css/app.css` and
 - `templates/`: HTML components and typed presentation models. Permission
   controls come from `internal/uikit/policy`; every API action independently
   enforces authorization.
+- `templates/jsexpr`: the only way a Go string enters an Alpine or HTMX
+  expression. templ HTML-escapes attributes, but the browser decodes them
+  before Alpine evaluates them as code, so `fetch('%s')` lets a quote in an
+  agent ID, name or label inject statements. Write `fetch(%s)` with
+  `jsexpr.String(value)`, which renders a double-quoted literal with quotes,
+  `<`, `>`, `&` and line separators escaped. Slices and maps go through
+  `json.Marshal`. Identifiers (Alpine data keys) cannot be quoted and must be
+  compile-time constants.
 - `static/js/spec-builder.js`: spec editing state, exact argument/environment
   round trips, validation, cursor-based agent selection, and submit recovery.
   It serializes the current protobuf JSON workload shape. It also exports its

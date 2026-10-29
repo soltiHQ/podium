@@ -6,9 +6,15 @@ import (
 	"strings"
 
 	"github.com/a-h/templ"
+
+	"github.com/soltiHQ/control-plane/ui/templates/jsexpr"
 )
 
 // Field describes a single form field inside an Edit modal.
+//
+// ID is emitted as a JavaScript identifier (Alpine data key and x-model
+// target), so it must be a compile-time constant, never data. Value is data
+// and is emitted as a string literal.
 type Field struct {
 	ID          string // input name and x-model key (matches JSON field name)
 	Label       string // human-readable label
@@ -29,6 +35,10 @@ type Field struct {
 //
 //	Endpoint returns { "items": [{"id": "role-admin", "name": "admin"}, ...] }
 //	ValueKey = "id", LabelKey = "name".
+//
+// ID, ValueKey and LabelKey are emitted as JavaScript identifiers and
+// property names, so they must be compile-time constants, never data.
+// Endpoint and Selected are emitted as string literals.
 type AsyncSelect struct {
 	ID       string // JSON field name (e.g. "permissions", "role_ids")
 	Label    string
@@ -58,8 +68,7 @@ func editFormData(fields []Field, selects []AsyncSelect) string {
 		if f.Disabled {
 			continue
 		}
-		v, _ := json.Marshal(f.Value)
-		parts = append(parts, fmt.Sprintf("%s: %s", f.ID, string(v)))
+		parts = append(parts, fmt.Sprintf("%s: %s", f.ID, jsexpr.String(f.Value)))
 	}
 
 	for _, s := range selects {
@@ -93,18 +102,18 @@ func initExpr(selects []AsyncSelect) string {
 		if s.ValueKey != "" {
 			// Object items: extract values and build label map.
 			fetches = append(fetches, fmt.Sprintf(
-				`fetch('%s').then(r => r.json()).then(d => {`+
+				`fetch(%s).then(r => r.json()).then(d => {`+
 					` const items = d.items || [];`+
 					` %s_opts = items.map(x => x.%s);`+
 					` %s_labels = Object.fromEntries(items.map(x => [x.%s, x.%s]));`+
 					` }).catch(() => { error = "Could not load selection options. Retry opening this form." })`,
-				s.Endpoint, s.ID, s.ValueKey, s.ID, s.ValueKey, s.LabelKey,
+				jsexpr.String(s.Endpoint), s.ID, s.ValueKey, s.ID, s.ValueKey, s.LabelKey,
 			))
 		} else {
 			// Flat string items.
 			fetches = append(fetches, fmt.Sprintf(
-				`fetch('%s').then(r => r.json()).then(d => { %s_opts = d.items || [] }).catch(() => { error = "Could not load selection options. Retry opening this form." })`,
-				s.Endpoint, s.ID,
+				`fetch(%s).then(r => r.json()).then(d => { %s_opts = d.items || [] }).catch(() => { error = "Could not load selection options. Retry opening this form." })`,
+				jsexpr.String(s.Endpoint), s.ID,
 			))
 		}
 	}
@@ -139,7 +148,7 @@ func passwordSubmitExpr(action string) string {
 		if (password.length === 0) { error = "Password cannot be empty"; return; }
 		error = "";
 		submitting = true;
-		fetch('%s', {
+		fetch(%s, {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
@@ -160,7 +169,7 @@ func passwordSubmitExpr(action string) string {
 		}).catch(() => {
 			error = "Network error";
 		}).finally(() => submitting = false)`,
-		action,
+		jsexpr.String(action),
 	)
 }
 
@@ -179,8 +188,8 @@ func formSubmitExpr(method, action string, fields []Field, selects []AsyncSelect
 	return fmt.Sprintf(
 		`error = "";
 		submitting = true;
-		fetch('%s', {
-			method: '%s',
+		fetch(%s, {
+			method: %s,
 			headers: {
 				'Content-Type': 'application/json',
                 'Accept': 'application/json',
@@ -202,6 +211,6 @@ func formSubmitExpr(method, action string, fields []Field, selects []AsyncSelect
 		}).catch(() => {
 			error = "Network error";
 		}).finally(() => submitting = false)`,
-		action, method, jsonObj,
+		jsexpr.String(action), jsexpr.String(method), jsonObj,
 	)
 }

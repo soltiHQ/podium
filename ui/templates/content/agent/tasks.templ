@@ -3,7 +3,6 @@ package agent
 import (
 	"fmt"
  "encoding/hex"
- "strconv"
  "net/url"
 
 	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
@@ -14,6 +13,7 @@ import (
 	"github.com/soltiHQ/control-plane/ui/templates/component/list"
 	"github.com/soltiHQ/control-plane/ui/templates/component/status"
 	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
+	"github.com/soltiHQ/control-plane/ui/templates/jsexpr"
 )
 
 // Tasks renders the paginated task table for a specific agent.
@@ -142,5 +142,5 @@ func inspectorID(agentID,uid string) string {
 }
 
 func inspectorTrigger(agentID,uid string) string {
- return "toggle[event.target.open] from:closest details, every 5s [document.getElementById("+strconv.Quote(inspectorID(agentID,uid))+").open]"
+ return "toggle[event.target.open] from:closest details, every 5s [document.getElementById("+jsexpr.String(inspectorID(agentID,uid))+").open]"
 }
