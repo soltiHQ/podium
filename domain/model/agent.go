@@ -4,23 +4,17 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 var _ domain.Entity[*Agent] = (*Agent)(nil)
 
 // Agent is a core domain entity that represents an Agent connected to the control-plane.
-//
-// Agent is a remote worker/node that runs an agent process and periodically reports its state to the control-plane.
-//
-// Notes:
-//   - Metadata is agent-owned data reported by the agent (not modified).
-//   - Labels are control-plane owned annotations (operators/system), not reported by the agent.
 type Agent struct {
+	heartbeatInterval time.Duration
 	createdAt         time.Time
 	updatedAt         time.Time
 	lastSeenAt        time.Time
-	heartbeatInterval time.Duration
 	staleAt           time.Time
 
 	uptimeSeconds int64
@@ -33,12 +27,13 @@ type Agent struct {
 	arch     string
 	platform string
 
-	endpointType kind.EndpointType
-	apiVersion   kind.APIVersion
-	status       kind.AgentStatus
+	endpointType enum.EndpointType
+	apiVersion   enum.APIVersion
+	status       enum.AgentStatus
 
-	metadata map[string]string
-	labels   map[string]string
+	metadata     map[string]string
+	labels       map[string]string
+	capabilities []RunnerCapability
 }
 
 // NewAgent creates a new agent domain entity.
@@ -59,16 +54,18 @@ func NewAgent(id, name, endpoint string) (*Agent, error) {
 		metadata: make(map[string]string),
 		labels:   make(map[string]string),
 
-		status: kind.AgentStatusActive,
+		status: enum.AgentStatusActive,
 	}, nil
 }
 
-// AgentParams is a transport-agnostic set of fields for constructing an Agent
-// from an external discovery payload (HTTP or gRPC).
+// AgentParams is set of fields for constructing an Agent from an external discovery payload (HTTP or gRPC).
 type AgentParams struct {
 	ID       string
 	Name     string
 	Endpoint string
+
+	UptimeSeconds      int64
+	HeartbeatIntervalS int
 
 	EndpointType int
 	APIVersion   int
@@ -77,27 +74,26 @@ type AgentParams struct {
 	Arch     string
 	Platform string
 
-	UptimeSeconds      int64
-	HeartbeatIntervalS int
-
-	Metadata map[string]string
+	Metadata     map[string]string
+	Capabilities []RunnerCapability
 }
 
-// NewAgentFrom constructs an Agent from transport-agnostic AgentParams.
-//
-// Performs a defensive copy of Metadata.
+// NewAgentFrom constructs an Agent from AgentParams.
 func NewAgentFrom(p AgentParams) (*Agent, error) {
 	if p.ID == "" {
 		return nil, domain.ErrEmptyID
 	}
 
-	epType, err := kind.EndpointTypeFromInt(p.EndpointType)
+	epType, err := enum.EndpointTypeFromInt(p.EndpointType)
 	if err != nil {
 		return nil, err
 	}
 
-	now := time.Now()
-	md := make(map[string]string, len(p.Metadata))
+	var (
+		now  = time.Now()
+		caps = cloneCapabilities(p.Capabilities)
+		md   = make(map[string]string, len(p.Metadata))
+	)
 	for k, v := range p.Metadata {
 		md[k] = v
 	}
@@ -106,21 +102,22 @@ func NewAgentFrom(p AgentParams) (*Agent, error) {
 		createdAt: now,
 		updatedAt: now,
 
-		metadata: md,
-		labels:   make(map[string]string),
+		metadata:     md,
+		labels:       make(map[string]string),
+		capabilities: caps,
 
 		id:           p.ID,
 		name:         p.Name,
 		endpoint:     p.Endpoint,
 		endpointType: epType,
-		apiVersion:   kind.APIVersionFromInt(p.APIVersion),
+		apiVersion:   enum.APIVersionFromInt(p.APIVersion),
 		os:           p.OS,
 		arch:         p.Arch,
 		platform:     p.Platform,
 
 		uptimeSeconds: p.UptimeSeconds,
 
-		status:            kind.AgentStatusActive,
+		status:            enum.AgentStatusActive,
 		lastSeenAt:        now,
 		heartbeatInterval: time.Duration(p.HeartbeatIntervalS) * time.Second,
 	}, nil
@@ -136,10 +133,10 @@ func (a *Agent) Name() string { return a.name }
 func (a *Agent) Endpoint() string { return a.endpoint }
 
 // EndpointType returns the agent's transport protocol.
-func (a *Agent) EndpointType() kind.EndpointType { return a.endpointType }
+func (a *Agent) EndpointType() enum.EndpointType { return a.endpointType }
 
 // APIVersion returns the agent's API version.
-func (a *Agent) APIVersion() kind.APIVersion { return a.apiVersion }
+func (a *Agent) APIVersion() enum.APIVersion { return a.apiVersion }
 
 // UptimeSeconds returns the agent-reported uptime in seconds.
 func (a *Agent) UptimeSeconds() int64 { return a.uptimeSeconds }
@@ -153,8 +150,34 @@ func (a *Agent) Arch() string { return a.arch }
 // Platform returns the agent's platform.
 func (a *Agent) Platform() string { return a.platform }
 
+// GroupVersionKind identifies an executable workload contract.
+type GroupVersionKind struct{ Group, Version, Kind string }
+
+// RunnerCapability advertises workload support and runner-routing labels.
+type RunnerCapability struct {
+	Name      string
+	Labels    map[string]string
+	Workloads []GroupVersionKind
+}
+
+// Capabilities returns a defensive copy of the structured runner inventory.
+func (a *Agent) Capabilities() []RunnerCapability { return cloneCapabilities(a.capabilities) }
+
+func cloneCapabilities(c []RunnerCapability) []RunnerCapability {
+	out := make([]RunnerCapability, len(c))
+	for i, v := range c {
+		out[i].Name = v.Name
+		out[i].Labels = make(map[string]string, len(v.Labels))
+		for k, val := range v.Labels {
+			out[i].Labels[k] = val
+		}
+		out[i].Workloads = append([]GroupVersionKind(nil), v.Workloads...)
+	}
+	return out
+}
+
 // Status returns the agent's lifecycle status.
-func (a *Agent) Status() kind.AgentStatus { return a.status }
+func (a *Agent) Status() enum.AgentStatus { return a.status }
 
 // LastSeenAt returns the timestamp of the agent's last successful sync.
 func (a *Agent) LastSeenAt() time.Time { return a.lastSeenAt }
@@ -162,17 +185,24 @@ func (a *Agent) LastSeenAt() time.Time { return a.lastSeenAt }
 // HeartbeatInterval returns the agent-reported heartbeat interval.
 func (a *Agent) HeartbeatInterval() time.Duration { return a.heartbeatInterval }
 
-// SetStatus updates the agent's lifecycle status.
-func (a *Agent) SetStatus(s kind.AgentStatus) {
+// MarkStatus transitions the agent's lifecycle status.
+func (a *Agent) MarkStatus(s enum.AgentStatus) {
+	if a.status == s {
+		return
+	}
 	a.status = s
 	a.updatedAt = time.Now()
+}
+
+// SetStatus restores the agent's status WITHOUT bumping UpdatedAt.
+func (a *Agent) SetStatus(s enum.AgentStatus) {
+	a.status = s
 }
 
 // SetHeartbeatInterval sets the agent's heartbeat interval.
 func (a *Agent) SetHeartbeatInterval(d time.Duration) { a.heartbeatInterval = d }
 
 // StaleAt returns the time by which the next heartbeat is expected.
-// Zero value means the agent has no computed staleness deadline.
 func (a *Agent) StaleAt() time.Time { return a.staleAt }
 
 // SetStaleAt sets the staleness deadline for the agent.
@@ -181,11 +211,58 @@ func (a *Agent) SetStaleAt(t time.Time) { a.staleAt = t }
 // CreatedAt returns the creation timestamp.
 func (a *Agent) CreatedAt() time.Time { return a.createdAt }
 
-// SetCreatedAt overrides the creation timestamp (used to preserve the original value during sync).
-func (a *Agent) SetCreatedAt(t time.Time) { a.createdAt = t }
-
 // UpdatedAt returns the last modification timestamp.
 func (a *Agent) UpdatedAt() time.Time { return a.updatedAt }
+
+// SetCreatedAt restores the creation timestamp (persistence hook).
+func (a *Agent) SetCreatedAt(t time.Time) { a.createdAt = t }
+
+// SetUpdatedAt restores the modification timestamp (persistence hook).
+func (a *Agent) SetUpdatedAt(t time.Time) { a.updatedAt = t }
+
+// SetLastSeenAt restores the last-seen timestamp (persistence hook).
+func (a *Agent) SetLastSeenAt(t time.Time) { a.lastSeenAt = t }
+
+// SetEndpointType restores the transport type (persistence hook).
+func (a *Agent) SetEndpointType(e enum.EndpointType) { a.endpointType = e }
+
+// SetAPIVersion restores the API version (persistence hook).
+func (a *Agent) SetAPIVersion(v enum.APIVersion) { a.apiVersion = v }
+
+// SetOS restores the operating system (persistence hook).
+func (a *Agent) SetOS(s string) { a.os = s }
+
+// SetArch restores the architecture (persistence hook).
+func (a *Agent) SetArch(s string) { a.arch = s }
+
+// SetPlatform restores the platform (persistence hook).
+func (a *Agent) SetPlatform(s string) { a.platform = s }
+
+// SetUptimeSeconds restores the reported uptime (persistence hook).
+func (a *Agent) SetUptimeSeconds(v int64) { a.uptimeSeconds = v }
+
+// SetMetadata replaces the full metadata map with a defensive copy.
+func (a *Agent) SetMetadata(m map[string]string) {
+	cp := make(map[string]string, len(m))
+	for k, v := range m {
+		cp[k] = v
+	}
+	a.metadata = cp
+}
+
+// SetLabels replaces the full label map with a defensive copy.
+func (a *Agent) SetLabels(m map[string]string) {
+	cp := make(map[string]string, len(m))
+	for k, v := range m {
+		cp[k] = v
+	}
+	a.labels = cp
+}
+
+// SetCapabilities replaces the capability list with a defensive copy.
+func (a *Agent) SetCapabilities(c []RunnerCapability) {
+	a.capabilities = cloneCapabilities(c)
+}
 
 // Metadata returns the metadata value for the given key.
 func (a *Agent) Metadata(key string) (string, bool) {
@@ -219,12 +296,18 @@ func (a *Agent) LabelsAll() map[string]string {
 
 // LabelAdd sets a control-plane owned label on the agent.
 func (a *Agent) LabelAdd(key, value string) {
+	if existing, ok := a.labels[key]; ok && existing == value {
+		return
+	}
 	a.labels[key] = value
 	a.updatedAt = time.Now()
 }
 
 // LabelDelete removes a control-plane owned label from the agent.
 func (a *Agent) LabelDelete(key string) {
+	if _, ok := a.labels[key]; !ok {
+		return
+	}
 	delete(a.labels, key)
 	a.updatedAt = time.Now()
 }
@@ -234,6 +317,7 @@ func (a *Agent) Clone() *Agent {
 	var (
 		md     = make(map[string]string, len(a.metadata))
 		labels = make(map[string]string, len(a.labels))
+		caps   = cloneCapabilities(a.capabilities)
 	)
 	for k, v := range a.metadata {
 		md[k] = v
@@ -246,8 +330,9 @@ func (a *Agent) Clone() *Agent {
 		createdAt: a.createdAt,
 		updatedAt: a.updatedAt,
 
-		metadata: md,
-		labels:   labels,
+		metadata:     md,
+		labels:       labels,
+		capabilities: caps,
 
 		id:           a.id,
 		name:         a.name,

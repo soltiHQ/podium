@@ -1,6 +1,6 @@
 package password
 
-import "github.com/soltiHQ/control-plane/domain/kind"
+import "github.com/soltiHQ/control-plane/domain/enum"
 
 // Request carries password credentials for authentication.
 type Request struct {
@@ -8,4 +8,4 @@ type Request struct {
 	Password string
 }
 
-func (Request) AuthKind() kind.Auth { return kind.Password }
+func (Request) AuthKind() enum.Auth { return enum.Password }

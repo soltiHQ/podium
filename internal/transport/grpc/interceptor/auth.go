@@ -8,17 +8,13 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
 	"github.com/soltiHQ/control-plane/internal/transport/grpc/status"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
 )
 
-// UnaryAuth returns a unary server interceptor that verifies the access token
-// from metadata and stores the identity in context.
-//
-// skipMethods is a set of full method names that bypass authentication
-// (e.g. "/package.Service/Health").
+// UnaryAuth returns a unary server interceptor that verifies the access token from metadata and stores the identity in context.
 func UnaryAuth(verifier token.Verifier, skipMethods map[string]struct{}) grpc.UnaryServerInterceptor {
 	if skipMethods == nil {
 		skipMethods = make(map[string]struct{})
@@ -44,11 +40,10 @@ func UnaryAuth(verifier token.Verifier, skipMethods map[string]struct{}) grpc.Un
 	}
 }
 
-// UnaryRequirePermission returns a unary server interceptor that checks
-// identity for a specific permission. Returns PermissionDenied if missing.
+// UnaryRequirePermission returns a unary server interceptor that checks identity for a specific permission.
 //
 // Must be chained after UnaryAuth.
-func UnaryRequirePermission(perm kind.Permission) grpc.UnaryServerInterceptor {
+func UnaryRequirePermission(perm enum.Permission) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		id, ok := transportctx.Identity(ctx)
 		if !ok {

@@ -1,21 +1,16 @@
 package model
 
 import (
+	"bytes"
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 var _ domain.Entity[*Session] = (*Session)(nil)
 
 // Session represents an authenticated session issued by the system.
-// It is created after successful authentication and is typically backed by a refresh token.
-//
-// Security notes:
-//   - Never store raw refresh tokens; store only a hash.
-//   - ExpiresAt controls session validity.
-//   - RevokedAt supports explicit invalidation (logout / compromise response).
 type Session struct {
 	createdAt time.Time
 	updatedAt time.Time
@@ -26,12 +21,12 @@ type Session struct {
 	userID       string
 	credentialID string
 
-	auth        kind.Auth
+	auth        enum.Auth
 	refreshHash []byte
 }
 
 // NewSession creates a new session entity.
-func NewSession(id, userID, credentialID string, auth kind.Auth, refreshHash []byte, expiresAt time.Time) (*Session, error) {
+func NewSession(id, userID, credentialID string, auth enum.Auth, refreshHash []byte, expiresAt time.Time) (*Session, error) {
 	if id == "" {
 		return nil, domain.ErrEmptyID
 	}
@@ -74,7 +69,7 @@ func (s *Session) UserID() string { return s.userID }
 func (s *Session) CredentialID() string { return s.credentialID }
 
 // AuthKind returns the authentication kind used for this session.
-func (s *Session) AuthKind() kind.Auth { return s.auth }
+func (s *Session) AuthKind() enum.Auth { return s.auth }
 
 // RefreshHash returns a copy of the stored refresh token hash.
 func (s *Session) RefreshHash() []byte {
@@ -93,6 +88,15 @@ func (s *Session) CreatedAt() time.Time { return s.createdAt }
 // UpdatedAt returns the timestamp of the last modification.
 func (s *Session) UpdatedAt() time.Time { return s.updatedAt }
 
+// SetCreatedAt restores the creation timestamp (persistence hook).
+func (s *Session) SetCreatedAt(t time.Time) { s.createdAt = t }
+
+// SetUpdatedAt restores the modification timestamp (persistence hook).
+func (s *Session) SetUpdatedAt(t time.Time) { s.updatedAt = t }
+
+// SetRevokedAt restores the revocation timestamp (persistence hook).
+func (s *Session) SetRevokedAt(t time.Time) { s.revokedAt = t }
+
 // Expired reports whether the session is expired at the given time.
 func (s *Session) Expired(at time.Time) bool {
 	return !s.expiresAt.IsZero() && !at.Before(s.expiresAt)
@@ -102,10 +106,12 @@ func (s *Session) Expired(at time.Time) bool {
 func (s *Session) Revoked() bool { return !s.revokedAt.IsZero() }
 
 // SetRefreshHash replaces the stored refresh hash.
-// Caller must provide hash bytes (raw refresh tokens must never be stored).
 func (s *Session) SetRefreshHash(hash []byte) error {
 	if len(hash) == 0 {
 		return domain.ErrFieldEmpty
+	}
+	if bytes.Equal(s.refreshHash, hash) {
+		return nil
 	}
 	s.refreshHash = append(s.refreshHash[:0], hash...)
 	s.updatedAt = time.Now()
@@ -117,13 +123,36 @@ func (s *Session) SetExpiresAt(expiresAt time.Time) error {
 	if expiresAt.IsZero() {
 		return domain.ErrFieldEmpty
 	}
-	s.expiresAt = expiresAt
+	if s.expiresAt.Equal(expiresAt) {
+		return nil
+	}
 	s.updatedAt = time.Now()
+	s.expiresAt = expiresAt
 	return nil
 }
 
-// Revoke marks the session as revoked at the provided time.
-// It is idempotent.
+// RotateRefreshAt atomically replaces the refresh hash and expiration using an
+// explicit modification time. A zero updatedAt preserves the previous timestamp
+// when replaying legacy commands without an authoritative clock. Unix epoch zero
+// is a nonzero time.Time and remains an explicit timestamp. An unchanged hash
+// and expiration are an idempotent no-op, including UpdatedAt.
+func (s *Session) RotateRefreshAt(hash []byte, expiresAt, updatedAt time.Time) error {
+	if len(hash) == 0 || expiresAt.IsZero() {
+		return domain.ErrFieldEmpty
+	}
+	if bytes.Equal(s.refreshHash, hash) && s.expiresAt.Equal(expiresAt) {
+		return nil
+	}
+	s.refreshHash = append(s.refreshHash[:0], hash...)
+	s.expiresAt = expiresAt
+	if !updatedAt.IsZero() {
+		s.updatedAt = updatedAt
+	}
+	return nil
+}
+
+// Revoke marks the session as revoked at the provided time. UpdatedAt uses the
+// same authoritative timestamp. Repeating revocation preserves the first time.
 func (s *Session) Revoke(at time.Time) error {
 	if at.IsZero() {
 		return domain.ErrFieldEmpty
@@ -131,8 +160,8 @@ func (s *Session) Revoke(at time.Time) error {
 	if !s.revokedAt.IsZero() {
 		return nil
 	}
+	s.updatedAt = at
 	s.revokedAt = at
-	s.updatedAt = time.Now()
 	return nil
 }
 

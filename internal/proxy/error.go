@@ -3,6 +3,7 @@ package proxy
 import "errors"
 
 var (
+	ErrClosed = errors.New("proxy: pool closed")
 	// ErrUnsupportedEndpointType indicates the agent reported an unknown endpoint type.
 	ErrUnsupportedEndpointType = errors.New("proxy: unsupported endpoint type")
 	// ErrDial indicates a failure to establish a gRPC connection to an agent.
@@ -19,14 +20,21 @@ var (
 	ErrUnexpectedStatus = errors.New("proxy: unexpected status")
 	// ErrDecode indicates the agent's response body could not be decoded.
 	ErrDecode = errors.New("proxy: decode response")
-	// ErrListTasks indicates a gRPC ListTasks call failed.
-	ErrListTasks = errors.New("proxy: grpc list tasks")
+	// ErrListTasks indicates a ListTasks call failed (HTTP or gRPC).
+	ErrListTasks = errors.New("proxy: list tasks")
 	// ErrUnsupportedAPIVersion indicates the agent reported an unknown API version.
 	ErrUnsupportedAPIVersion = errors.New("proxy: unsupported api version")
-	// ErrSubmitTask indicates a task submission call failed.
-	ErrSubmitTask = errors.New("proxy: submit task")
-	// ErrExportSpecs indicates an export call failed.
-	ErrExportSpecs = errors.New("proxy: export task specs")
+	// ErrApplyTask indicates an apply (supersede-or-install) call failed.
+	ErrApplyTask = errors.New("proxy: apply task")
+	// ErrGetTask indicates a GetTask call failed.
+	ErrGetTask = errors.New("proxy: get task")
+	// ErrListTaskRuns indicates a ListTaskRuns call failed.
+	ErrListTaskRuns = errors.New("proxy: list task runs")
+	// ErrDeleteTask indicates a DeleteTask call failed.
+	ErrDeleteTask = errors.New("proxy: delete task")
+	// ErrStreamTaskLogs indicates a StreamTaskLogs call failed before any
+	// events arrived. Errors mid-stream are surfaced by closing the channel.
+	ErrStreamTaskLogs = errors.New("proxy: stream task logs")
 	// ErrNilPool indicates a required *Pool dependency is nil.
 	ErrNilPool = errors.New("proxy: nil pool")
 )

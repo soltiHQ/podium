@@ -4,7 +4,7 @@ import (
 	"context"
 	"sort"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -38,14 +38,14 @@ func NewResolver(store storage.Storage) *Resolver {
 //   - auth.ErrInvalidArgument if resolver/store/user is nil.
 //   - Propagates storage errors from role lookup (e.g., ErrInvalidArgument, ErrNotFound,
 //     ErrUnavailable, ErrInternal), without wrapping them into auth-level errors.
-func (r *Resolver) ResolveUserPermissions(ctx context.Context, u *model.User) ([]kind.Permission, error) {
+func (r *Resolver) ResolveUserPermissions(ctx context.Context, u *model.User) ([]enum.Permission, error) {
 	if r == nil || r.store == nil || u == nil {
 		return nil, auth.ErrInvalidArgument
 	}
 
 	var (
 		userPerms = u.PermissionsAll()
-		set       = make(map[kind.Permission]struct{}, len(userPerms)+8)
+		set       = make(map[enum.Permission]struct{}, len(userPerms)+8)
 	)
 	for _, p := range userPerms {
 		if p != "" {
@@ -71,10 +71,10 @@ func (r *Resolver) ResolveUserPermissions(ctx context.Context, u *model.User) ([
 		}
 	}
 	if len(set) == 0 {
-		return []kind.Permission{}, nil
+		return []enum.Permission{}, nil
 	}
 
-	out := make([]kind.Permission, 0, len(set))
+	out := make([]enum.Permission, 0, len(set))
 	for p := range set {
 		out = append(out, p)
 	}

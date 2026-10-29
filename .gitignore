@@ -1,54 +1,35 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-
-# Test binary, built with `go test -c`
-*.test
-
-# Code coverage profiles and other test artifacts
-*.out
-coverage.*
-*.coverprofile
-profile.cov
-
-# Dependency directories (remove the comment below to include it)
-vendor/
-
-# Go workspace file
-go.work
-go.work.sum
-
-# env file
+# Local environment
 .env
+.env.*
 
-# build output
-bin/
+# Build artifacts
+/bin/
 
-# temporary cache
-.cache/
+# Local runtime state (default standalone data_dir)
+/data/
 
-# Editor/IDE
-.idea/
-.vscode/
+# Vendored proto schemas and generated Go bindings (task generate)
+/api/proto/
+/api/gen/
 
-# OS specific
+# Generated templ components (task generate)
+*_templ.go
+
+# Downloaded and built UI assets (task assets)
+/ui/static/js/alpine.min.js
+/ui/static/js/htmx.min.js
+/ui/static/css/tailwindcss.css
+
+# OS files
 .DS_Store
 
-# static
-ui/static/js/alpine.min.js
-ui/static/js/htmx.min.js
+# IDE
+.vscode/
+.idea/
 
-# proto
-api/gen/
+# Task runner cache
+.cache/
+.task/
 
-# templ
-ui/**/*_templ.go
-
-# tailwindcss
-tailwindcss.css
+# vendor
+vendor/

@@ -9,9 +9,9 @@ const defaultListLimit = 30
 
 // ListQuery describes a paginated task spec listing request.
 type ListQuery struct {
-	Filter storage.SpecFilter
-	Cursor string
-	Limit  int
+	Criteria storage.SpecQueryCriteria
+	Cursor   string
+	Limit    int
 }
 
 // Page is a paginated task spec listing the result.

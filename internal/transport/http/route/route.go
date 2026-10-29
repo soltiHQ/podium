@@ -1,20 +1,29 @@
-// Package route provides helpers for registering HTTP routes with middleware chains.
+// Package route provides HTTP routing helpers used across UI and API handlers.
 //
-// BaseMW and PermMW are the two middleware signatures used across the project.
-// Chain, Handle, and HandleFunc let handlers compose middleware without nesting.
+// Composition:
+//   - [BaseMW], [PermMW]     - middleware signatures.
+//   - [Chain]                - wrap a handler with middleware left-to-right.
+//   - [Handle], [HandleFunc] - register a pattern on ServeMux with a chain.
+//
+// REST dispatch (see dispatch.go):
+//   - [CollectionHandler], [EntityHandler] - handler types with render mode.
+//   - [Endpoint], [Subroute]               - method/permission/handler triples.
+//   - [Guard]                              - apply permission middleware.
+//   - [Resource]                           - dispatch /collection by method.
+//   - [Router]                             - dispatch /collection/{id}[/action].
 package route
 
 import (
 	"net/http"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 // BaseMW is a standard HTTP middleware signature.
 type BaseMW func(http.Handler) http.Handler
 
 // PermMW creates a middleware that guards a route with the given permission.
-type PermMW func(kind.Permission) BaseMW
+type PermMW func(enum.Permission) BaseMW
 
 // Chain wraps a handler with middleware applied left-to-right:
 //

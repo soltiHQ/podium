@@ -1,0 +1,15 @@
+package agent
+
+import "github.com/soltiHQ/control-plane/internal/uikit/routepath"
+
+// TaskLogs is preserved across task refreshes. The shared controller closes
+// detached viewers, bounds browser output and exposes reconnect state.
+templ TaskLogs(agentID, taskID, uid string) {
+ <details id={ "logs-"+agentID+"-"+uid } hx-preserve class="mt-2 group">
+ <summary class="text-xs text-muted cursor-pointer select-none hover:text-fg">Live logs</summary>
+ <div class="mt-2 rounded border border-border bg-surface-dim" data-stream-url={ routepath.ApiAgentTaskLogs(agentID,taskID,uid) }>
+ <p class="task-logs-state px-3 py-2 text-xs text-muted" role="status">Paused</p>
+ <pre class="task-logs-pre h-48 overflow-auto p-3 text-xs font-mono leading-snug text-fg whitespace-pre-wrap break-words"></pre>
+ </div>
+ </details>
+}

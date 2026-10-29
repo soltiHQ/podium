@@ -1,14 +1,17 @@
 package middleware
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/internal/auth"
+
+	"github.com/soltiHQ/control-plane/domain/enum"
+	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/auth/session"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
-	"github.com/soltiHQ/control-plane/internal/transport/http/cookie"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
@@ -19,16 +22,38 @@ func Auth(verifier token.Verifier, sessionSvc *session.Service) func(http.Handle
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var (
-				mode            = httpctx.Mode(r.Context())
+				mode            = httpctx.ModeFromRequest(r)
 				raw, fromHeader = extractBearer(r)
 			)
-			if raw == "" {
+			if raw == "" && fromHeader {
 				response.Unauthorized(w, r, mode)
+				return
+			}
+			if raw == "" {
+				id, err := tryRefresh(w, r, sessionSvc)
+				if err != nil || id == nil {
+					response.Unauthorized(w, r, mode)
+					return
+				}
+				next.ServeHTTP(w, r.WithContext(transportctx.WithIdentity(r.Context(), id)))
 				return
 			}
 
 			id, err := verifier.Verify(r.Context(), raw)
 			if err == nil {
+				id, err = sessionSvc.AuthorizeAccess(r.Context(), id)
+				if err != nil {
+					switch {
+					case errors.Is(err, auth.ErrRevoked), errors.Is(err, auth.ErrInvalidToken), errors.Is(err, auth.ErrUnauthorized):
+						if !fromHeader {
+							httpcookie.DeleteAuth(w, r)
+						}
+						response.Unauthorized(w, r, mode)
+					default:
+						response.Unavailable(w, r, mode)
+					}
+					return
+				}
 				next.ServeHTTP(w, r.WithContext(transportctx.WithIdentity(r.Context(), id)))
 				return
 			}
@@ -48,11 +73,11 @@ func Auth(verifier token.Verifier, sessionSvc *session.Service) func(http.Handle
 }
 
 // RequirePermission returns middleware that checks identity for a specific permission.
-func RequirePermission(perm kind.Permission) func(http.Handler) http.Handler {
+func RequirePermission(perm enum.Permission) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var (
-				mode   = httpctx.Mode(r.Context())
+				mode   = httpctx.ModeFromRequest(r)
 				id, ok = transportctx.Identity(r.Context())
 			)
 			if !ok {
@@ -74,28 +99,37 @@ func extractBearer(r *http.Request) (token string, fromHeader bool) {
 		if len(h) >= len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
 			return strings.TrimSpace(h[len(prefix):]), true
 		}
+		return "", true
 	}
-	if c, err := cookie.GetAccessToken(r); err == nil && c.Value != "" {
+	if c, err := httpcookie.GetAccessToken(r); err == nil && c.Value != "" {
 		return c.Value, false
 	}
 	return "", false
 }
 
 func tryRefresh(w http.ResponseWriter, r *http.Request, svc *session.Service) (*identity.Identity, error) {
-	refreshCookie, err := cookie.GetRefreshToken(r)
+	refreshCookie, err := httpcookie.GetRefreshToken(r)
 	if err != nil || refreshCookie.Value == "" {
-		return nil, err
+		return nil, auth.ErrInvalidRefresh
 	}
-	sessionCookie, err := cookie.GetSessionID(r)
+	sessionCookie, err := httpcookie.GetSessionID(r)
 	if err != nil || sessionCookie.Value == "" {
-		return nil, err
+		return nil, auth.ErrInvalidRefresh
+	}
+	if svc == nil {
+		return nil, auth.ErrInvalidRequest
 	}
 
 	pair, id, err := svc.Refresh(r.Context(), sessionCookie.Value, refreshCookie.Value)
 	if err != nil {
-		cookie.DeleteAuth(w, r)
+		// A parallel rotation may already have installed newer browser cookies.
+		// Reject this request without overwriting that successful response.
 		return nil, err
 	}
-	cookie.SetAuth(w, r, pair.AccessToken, pair.RefreshToken, id.SessionID)
+	id, err = svc.AuthorizeAccess(r.Context(), id)
+	if err != nil {
+		return nil, err
+	}
+	httpcookie.SetAuth(w, r, pair.AccessToken, pair.RefreshToken, id.SessionID)
 	return id, nil
 }

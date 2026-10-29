@@ -2,8 +2,9 @@ package agent
 
 import (
 	"fmt"
-	"net/url"
-	"strconv"
+ "encoding/hex"
+ "strconv"
+ "net/url"
 
 	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
@@ -16,7 +17,7 @@ import (
 )
 
 // Tasks renders the paginated task table for a specific agent.
-templ Tasks(agentID string, items []proxyv1.Task, total int, q string, offset int) {
+templ Tasks(agentID string, items []proxyv1.Task, total int, q string, nextCursor string) {
 	@card.Card("") {
 		@card.CardHeader() {
 			<h2 class={ visual.SectionLabel + " select-none" }>
@@ -31,15 +32,15 @@ templ Tasks(agentID string, items []proxyv1.Task, total int, q string, offset in
 			<div class="mb-4">
 				@form.SearchInput(
 					"tasks-search",
-					"q",
+					"slot",
 					q,
-					"Filter by slot…",
+					"Filter by exact slot…",
 					routepath.ApiAgentTasks(agentID),
 					"#tasks-results",
 				)
 			</div>
 
-			@TaskResults(agentID, items, total, q, offset)
+			@TaskResults(agentID, items, total, q, nextCursor)
 		}
 	}
 }
@@ -47,7 +48,7 @@ templ Tasks(agentID string, items []proxyv1.Task, total int, q string, offset in
 // TaskResults is the HTMX-swappable wrapper for task rows + pagination.
 // SSE and polling triggers live here (not on the outer panel) so that refreshes
 // replace only the results, leaving the search input untouched.
-templ TaskResults(agentID string, items []proxyv1.Task, total int, q string, offset int) {
+templ TaskResults(agentID string, items []proxyv1.Task, total int, q string, nextCursor string) {
 	<div
 		id="tasks-results"
 		hx-get={ routepath.ApiAgentTasks(agentID) }
@@ -58,26 +59,26 @@ templ TaskResults(agentID string, items []proxyv1.Task, total int, q string, off
 		hx-include="#tasks-search"
 	>
 		<div id="tasks-rows" class={ list.StripedClass }>
-			@TaskRows(items)
-			if nextOffset(offset, len(items)) < total {
-				@list.Sentinel("tasks-sentinel", tasksURL(agentID, q, nextOffset(offset, len(items))), "tasks-rows")
+			@TaskRows(agentID, items)
+			if nextCursor != "" {
+				@list.Sentinel("tasks-sentinel", tasksURL(agentID, q, nextCursor), "tasks-rows")
 			}
 		</div>
 	</div>
 }
 
 // TaskRows renders table rows for a slice of tasks.
-templ TaskRows(items []proxyv1.Task) {
+templ TaskRows(agentID string, items []proxyv1.Task) {
 	if len(items) == 0 {
 		@status.NotFound("No tasks found")
 	} else {
 		for _, t := range items {
-			@taskRow(t)
+			@taskRow(agentID, t)
 		}
 	}
 }
 
-templ taskRow(t proxyv1.Task) {
+templ taskRow(agentID string, t proxyv1.Task) {
 	<div class="px-5 py-3 space-y-1.5">
 		<div class="flex items-center justify-between gap-3">
 			<div class="flex items-center gap-2 min-w-0">
@@ -101,6 +102,9 @@ templ taskRow(t proxyv1.Task) {
 				{ t.Error }
 			</div>
 		}
+
+		<details id={ inspectorID(agentID,t.UID) } hx-preserve class="mt-2"><summary class="text-xs text-muted cursor-pointer hover:text-fg">Task details and run history</summary><div class="mt-3" hx-get={ routepath.ApiAgentTask(agentID,t.ID) } hx-target="this" hx-select=".task-execution" hx-trigger={ inspectorTrigger(agentID,t.UID) } hx-swap="innerHTML"><p class="text-xs text-muted">Loading task…</p></div></details>
+ @TaskLogs(agentID, t.ID, t.UID)
 	</div>
 }
 
@@ -127,22 +131,16 @@ templ taskStatusBadge(s string) {
 	}
 }
 
-func nextOffset(offset int, count int) int {
-	return offset + count
+func tasksURL(agentID,q,cursor string) string {
+ return routepath.CursorURL(routepath.ApiAgentTasks(agentID),cursor,"")+"&slot="+url.QueryEscape(q)
 }
 
-func tasksURL(agentID string, q string, offset int) string {
-	v := url.Values{}
-	if q != "" {
-		v.Set("q", q)
-	}
-	if offset > 0 {
-		v.Set("offset", strconv.Itoa(offset))
-	}
-	qs := v.Encode()
-	base := routepath.ApiAgentTasks(agentID)
-	if qs == "" {
-		return base
-	}
-	return base + "?" + qs
+// Preserve only this resource incarnation, and poll an expanded inspector
+// independently of the surrounding task list. IDs also remain safe in filters.
+func inspectorID(agentID,uid string) string {
+ return "task-inspector-"+hex.EncodeToString([]byte(agentID))+"-"+hex.EncodeToString([]byte(uid))
+}
+
+func inspectorTrigger(agentID,uid string) string {
+ return "toggle[event.target.open] from:closest details, every 5s [document.getElementById("+strconv.Quote(inspectorID(agentID,uid))+").open]"
 }

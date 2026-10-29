@@ -1,0 +1,140 @@
+package agent
+
+import (
+	"fmt"
+	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
+	"github.com/soltiHQ/control-plane/internal/uikit/policy"
+	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
+	"github.com/soltiHQ/control-plane/ui/templates/component/button"
+	"github.com/soltiHQ/control-plane/ui/templates/component/modal"
+	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
+	"time"
+)
+
+templ TaskExecution(agentID string, t proxyv1.Task, runs []proxyv1.TaskRun, p policy.AgentDetail) {
+	<div class="task-execution space-y-3">
+		<div class="flex items-center gap-2 flex-wrap"><span class="text-xs text-muted">Observed execution phase</span>@taskStatusBadge(t.Status)
+</div>
+		if t.Error!="" {
+			<p class="text-xs text-danger break-words">{ t.Error }</p>
+		}
+		<dl class="grid grid-cols-2 gap-3 text-xs">
+			@visual.KV("Resource version", t.ResourceVersion)
+			@visual.KV("UID", t.UID)
+			@visual.KV("Generation", fmt.Sprintf("%d / observed %d", t.Generation, t.ObservedGeneration))
+			@visual.KV("Created", executionTime(t.CreatedAt))
+			if t.ExitCode!=nil {
+				@visual.KV("Exit code", fmt.Sprintf("%d", *t.ExitCode))
+			}
+		</dl>
+		if p.CanOperateTasks && (t.Status=="running" || t.Status=="pending") {
+			@button.Button("Cancel task", "button", false, button.VariantDanger, false, templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent("cancel-" + t.UID)})
+			@modal.Confirm("cancel-"+t.UID, "Cancel task", "Request logical cancellation? Run history is retained. Cancellation records a logical request; physical process shutdown may complete later.", "Cancel task", routepath.ApiAgentTask(agentID, t.ID)+"/cancel", modal.MethodPost, modal.VariantDanger)
+		}
+		@TaskConditions(t)
+		<h3 class="text-sm font-medium">Run history</h3>
+		if len(runs)==0 {
+			<p class="text-xs text-muted">No recorded attempts.</p>
+		} else {
+			<div class="space-y-3">
+				for _,run:=range runs {
+					<div class="rounded border border-border p-3 space-y-2">
+						<div class="flex items-center gap-2"><span class="text-xs">Generation { fmt.Sprintf("%d",run.Generation) } · attempt { fmt.Sprintf("%d",run.Attempt) }</span>@taskStatusBadge(run.Status)
+</div>
+						<p class="text-xs text-muted">{ executionTime(run.StartedAt) } → { executionTime(run.FinishedAt) }</p>
+						if run.ExitCode!=nil {
+							<p class="text-xs">Exit { fmt.Sprintf("%d",*run.ExitCode) }</p>
+						}
+						if run.Error!="" {
+							<p class="text-xs text-danger break-words">{ run.Error }</p>
+						}
+					</div>
+				}
+			</div>
+		}
+	</div>
+}
+
+func executionTime(ms int64) string {
+	if ms <= 0 {
+		return "—"
+	}
+	return time.UnixMilli(ms).UTC().Format("2006-01-02 15:04:05 UTC")
+}
+
+// TaskConditions presents the agent's reconciliation diagnostics independently
+// from its execution phase. A processed generation can still be rejected.
+templ TaskConditions(t proxyv1.Task) {
+	<section class="task-conditions space-y-3" aria-label="Agent conditions">
+		<h3 class="text-sm font-medium">Agent conditions</h3>
+		<p class="text-xs text-muted">A current Reconciled=True condition means the desired generation crossed controller command intake. It can still be queued or rejected. Check execution phase and run history for execution results.</p>
+		if len(t.Conditions)==0 {
+			<p class="text-xs text-muted">The agent reported no conditions. Generation counters alone do not confirm reconciliation or execution success.</p>
+		} else {
+			for _,c:=range t.Conditions {
+				<div class="rounded border border-border p-3 space-y-2">
+					<div class="flex items-center gap-2 flex-wrap"><span class="text-xs font-medium">{ conditionSummary(t,c) }</span>@visual.Badge(conditionStatus(c.Status), conditionVariant(t, c))
+</div>
+					<p class="text-xs text-muted">Condition generation { fmt.Sprintf("%d",c.ObservedGeneration) } · desired { fmt.Sprintf("%d",t.Generation) }</p>
+					if c.ObservedGeneration!=t.Generation {
+						<p class="text-xs text-warning">This condition belongs to a different generation and does not confirm the current desired state.</p>
+					}
+					if c.Reason!="" {
+						<p class="text-xs font-mono break-words">{ c.Reason }</p>
+					}
+					if c.Message!="" {
+						<p class="text-xs break-words">{ c.Message }</p>
+					}
+					<p class="text-xs text-muted">Transition: { conditionTime(c.LastTransitionTime) }</p>
+				</div>
+			}
+		}
+	</section>
+}
+
+func conditionSummary(t proxyv1.Task, c proxyv1.TaskCondition) string {
+	if c.Type == "Reconciled" && c.ObservedGeneration == t.Generation {
+		switch c.Status {
+		case "True":
+			return "Reconciliation accepted at intake"
+		case "False":
+			return "Reconciliation blocked"
+		case "Unknown":
+			return "Reconciliation pending"
+		default:
+			return "Reconciliation status unavailable"
+		}
+	}
+	if c.Type == "" {
+		return "Unspecified condition"
+	}
+	return c.Type
+}
+
+func conditionStatus(status string) string {
+	if status == "" {
+		return "Not reported"
+	}
+	return status
+}
+
+func conditionVariant(t proxyv1.Task, c proxyv1.TaskCondition) visual.Variant {
+	if c.ObservedGeneration != t.Generation {
+		return visual.VariantMuted
+	}
+	switch c.Status {
+	case "True":
+		return visual.VariantSuccess
+	case "False":
+		return visual.VariantDanger
+	default:
+		return visual.VariantMuted
+	}
+}
+
+func conditionTime(ms *int64) string {
+	if ms == nil {
+		return "Not reported"
+	}
+	return time.UnixMilli(*ms).UTC().Format("2006-01-02 15:04:05 UTC")
+}

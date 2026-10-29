@@ -1,48 +1,43 @@
 package model
 
 import (
+	"reflect"
+	"slices"
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 var _ domain.Entity[*Spec] = (*Spec)(nil)
 
 // BackoffConfig holds backoff parameters for task restart delays.
 type BackoffConfig struct {
-	Jitter  kind.JitterStrategy
+	Jitter  enum.JitterStrategy
+	Factor  float64
 	FirstMs int64
 	MaxMs   int64
-	Factor  float64
 }
 
 // Spec represents a desired task specification managed by the control-plane.
-//
-// A Spec defines what task should run on which agents. It is the "desired state"
-// in the reconciliation model — the sync runner compares it against what agents actually have.
-//
-// The spec fields mirror the agent's CreateSpec format: slot, kind, timeout, restart,
-// backoff, admission, and runner labels.
 type Spec struct {
-	// CP metadata
-	id           string
-	name         string
-	version      int
-	targets      []string          // concrete agent IDs
-	targetLabels map[string]string // label selector for dynamic targeting
-	createdAt    time.Time
-	updatedAt    time.Time
+	id                string
+	name              string
+	version           int
+	generation        int
+	deletionRequested bool
+	targets           []string
+	targetLabels      map[string]string
+	createdAt         time.Time
+	updatedAt         time.Time
 
-	// Spec (mirrors agent CreateSpec)
 	slot         string
-	kindType     kind.TaskKindType
-	kindConfig   map[string]any // e.g. {command, args, env, cwd, failOnNonZero} for subprocess
+	kindType     enum.TaskKindType
+	restartType  enum.RestartType
 	timeoutMs    int64
-	restartType  kind.RestartType
-	intervalMs   int64 // only for RestartAlways
+	intervalMs   int64
 	backoff      BackoffConfig
-	admission    kind.AdmissionStrategy
+	kindConfig   map[string]any
 	runnerLabels map[string]string
 }
 
@@ -59,54 +54,93 @@ func NewSpec(id, name, slot string) (*Spec, error) {
 		createdAt: now,
 		updatedAt: now,
 
-		id:      id,
-		name:    name,
-		slot:    slot,
-		version: 1,
+		id:         id,
+		name:       name,
+		slot:       slot,
+		version:    1,
+		generation: 1,
 
 		targets:      nil,
 		targetLabels: make(map[string]string),
-		kindType:     kind.TaskKindSubprocess,
-		kindConfig:   make(map[string]any),
+		kindType:     enum.TaskKindSubprocess,
+		restartType:  enum.RestartNever,
 		timeoutMs:    30000,
-		restartType:  kind.RestartNever,
 		intervalMs:   0,
 		backoff: BackoffConfig{
-			Jitter:  kind.JitterNone,
+			Jitter:  enum.JitterNone,
 			FirstMs: 1000,
 			MaxMs:   5000,
 			Factor:  2.0,
 		},
-		admission:    kind.AdmissionDropIfRunning,
+		kindConfig:   make(map[string]any),
 		runnerLabels: make(map[string]string),
 	}, nil
 }
 
-// --- Getters ---
+// ID returns the spec's unique identifier.
+func (ts *Spec) ID() string { return ts.id }
 
-func (ts *Spec) ID() string            { return ts.id }
-func (ts *Spec) Name() string           { return ts.name }
-func (ts *Spec) Slot() string           { return ts.slot }
-func (ts *Spec) Version() int           { return ts.version }
-func (ts *Spec) CreatedAt() time.Time   { return ts.createdAt }
-func (ts *Spec) UpdatedAt() time.Time   { return ts.updatedAt }
-func (ts *Spec) KindType() kind.TaskKindType       { return ts.kindType }
-func (ts *Spec) TimeoutMs() int64                   { return ts.timeoutMs }
-func (ts *Spec) RestartType() kind.RestartType      { return ts.restartType }
-func (ts *Spec) IntervalMs() int64                  { return ts.intervalMs }
-func (ts *Spec) Backoff() BackoffConfig             { return ts.backoff }
-func (ts *Spec) Admission() kind.AdmissionStrategy  { return ts.admission }
+// Name returns the human-readable spec name.
+func (ts *Spec) Name() string { return ts.name }
+
+// Slot returns the immutable task slot — its lane/identity on the agent.
+func (ts *Spec) Slot() string { return ts.slot }
+
+// Version returns the edits counter (bumps on every Upsert).
+func (ts *Spec) Version() int { return ts.version }
+
+// Generation returns the runtime-change counter (drives re-create on agents).
+func (ts *Spec) Generation() int { return ts.generation }
+
+// DeletionRequested reports whether the spec is soft-deleted and awaiting finalization.
+func (ts *Spec) DeletionRequested() bool { return ts.deletionRequested }
+
+// CreatedAt returns the creation timestamp.
+func (ts *Spec) CreatedAt() time.Time { return ts.createdAt }
+
+// UpdatedAt returns the last modification timestamp.
+func (ts *Spec) UpdatedAt() time.Time { return ts.updatedAt }
+
+// KindType returns the task backend kind.
+func (ts *Spec) KindType() enum.TaskKindType { return ts.kindType }
+
+// TimeoutMs returns the task execution timeout in milliseconds.
+func (ts *Spec) TimeoutMs() int64 { return ts.timeoutMs }
+
+// RestartType returns the task restart policy.
+func (ts *Spec) RestartType() enum.RestartType { return ts.restartType }
+
+// IntervalMs returns the restart interval in milliseconds (meaningful only for RestartAlways).
+func (ts *Spec) IntervalMs() int64 { return ts.intervalMs }
+
+// Backoff returns the restart backoff parameters.
+func (ts *Spec) Backoff() BackoffConfig { return ts.backoff }
+
+// SetCreatedAt restores the creation timestamp (persistence hook).
+func (ts *Spec) SetCreatedAt(t time.Time) { ts.createdAt = t }
+
+// SetUpdatedAt restores the modification timestamp (persistence hook).
+func (ts *Spec) SetUpdatedAt(t time.Time) { ts.updatedAt = t }
+
+// SetVersion restores the edits counter (persistence hook).
+func (ts *Spec) SetVersion(v int) { ts.version = v }
+
+// SetGeneration restores the runtime-change counter (persistence hook).
+func (ts *Spec) SetGeneration(g int) { ts.generation = g }
+
+// SetDeletionRequested restores the soft-delete flag (persistence hook).
+func (ts *Spec) SetDeletionRequested(b bool) { ts.deletionRequested = b }
 
 // KindConfig returns a defensive copy of the kind configuration.
 func (ts *Spec) KindConfig() map[string]any {
 	out := make(map[string]any, len(ts.kindConfig))
 	for k, v := range ts.kindConfig {
-		out[k] = v
+		out[k] = cloneConfigValue(v)
 	}
 	return out
 }
 
-// Targets returns a copy of the target agent IDs.
+// Targets return a copy of the target agent IDs.
 func (ts *Spec) Targets() []string {
 	out := make([]string, len(ts.targets))
 	copy(out, ts.targets)
@@ -131,65 +165,89 @@ func (ts *Spec) RunnerLabels() map[string]string {
 	return out
 }
 
-// --- Setters ---
-
+// SetName updates the spec name (metadata-only).
 func (ts *Spec) SetName(name string) {
+	if ts.name == name {
+		return
+	}
 	ts.name = name
 	ts.updatedAt = time.Now()
 }
 
-func (ts *Spec) SetSlot(slot string) {
-	ts.slot = slot
-	ts.updatedAt = time.Now()
-}
-
-func (ts *Spec) SetKindType(kt kind.TaskKindType) {
+// SetKindType updates the task backend kind (runtime field).
+func (ts *Spec) SetKindType(kt enum.TaskKindType) {
+	if ts.kindType == kt {
+		return
+	}
 	ts.kindType = kt
 	ts.updatedAt = time.Now()
 }
 
+// SetKindConfig replaces the backend config with a defensive copy (runtime field).
 func (ts *Spec) SetKindConfig(cfg map[string]any) {
+	if anyMapEqual(ts.kindConfig, cfg) {
+		return
+	}
 	cp := make(map[string]any, len(cfg))
 	for k, v := range cfg {
-		cp[k] = v
+		cp[k] = cloneConfigValue(v)
 	}
 	ts.kindConfig = cp
 	ts.updatedAt = time.Now()
 }
 
+// SetTimeoutMs updates the execution timeout in milliseconds (runtime field).
 func (ts *Spec) SetTimeoutMs(ms int64) {
+	if ts.timeoutMs == ms {
+		return
+	}
 	ts.timeoutMs = ms
 	ts.updatedAt = time.Now()
 }
 
-func (ts *Spec) SetRestartType(rt kind.RestartType) {
+// SetRestartType updates the restart policy (runtime field).
+func (ts *Spec) SetRestartType(rt enum.RestartType) {
+	if ts.restartType == rt {
+		return
+	}
 	ts.restartType = rt
 	ts.updatedAt = time.Now()
 }
 
+// SetIntervalMs updates the restart interval in milliseconds (runtime field).
 func (ts *Spec) SetIntervalMs(ms int64) {
+	if ts.intervalMs == ms {
+		return
+	}
 	ts.intervalMs = ms
 	ts.updatedAt = time.Now()
 }
 
+// SetBackoff updates the restart backoff parameters (runtime field).
 func (ts *Spec) SetBackoff(b BackoffConfig) {
+	if ts.backoff == b {
+		return
+	}
 	ts.backoff = b
 	ts.updatedAt = time.Now()
 }
 
-func (ts *Spec) SetAdmission(a kind.AdmissionStrategy) {
-	ts.admission = a
-	ts.updatedAt = time.Now()
-}
-
+// SetTargets replaces the explicit target agent IDs with a defensive copy (metadata-only).
 func (ts *Spec) SetTargets(targets []string) {
+	if slices.Equal(ts.targets, targets) {
+		return
+	}
 	cp := make([]string, len(targets))
 	copy(cp, targets)
 	ts.targets = cp
 	ts.updatedAt = time.Now()
 }
 
+// SetTargetLabels replaces the target label selector with a defensive copy (metadata-only).
 func (ts *Spec) SetTargetLabels(labels map[string]string) {
+	if stringMapEqual(ts.targetLabels, labels) {
+		return
+	}
 	cp := make(map[string]string, len(labels))
 	for k, v := range labels {
 		cp[k] = v
@@ -198,7 +256,11 @@ func (ts *Spec) SetTargetLabels(labels map[string]string) {
 	ts.updatedAt = time.Now()
 }
 
+// SetRunnerLabels replaces the runner labels with a defensive copy (runtime field).
 func (ts *Spec) SetRunnerLabels(labels map[string]string) {
+	if stringMapEqual(ts.runnerLabels, labels) {
+		return
+	}
 	cp := make(map[string]string, len(labels))
 	for k, v := range labels {
 		cp[k] = v
@@ -207,60 +269,32 @@ func (ts *Spec) SetRunnerLabels(labels map[string]string) {
 	ts.updatedAt = time.Now()
 }
 
-// IncrementVersion bumps the version number and updates the timestamp.
+// IncrementVersion bumps the edits counter (version) and updates the timestamp. Callers should invoke this on every Upsert.
 func (ts *Spec) IncrementVersion() {
 	ts.version++
 	ts.updatedAt = time.Now()
 }
 
-// ToCreateSpec builds a map[string]any in the agent's CreateSpec JSON format.
-//
-// Example output:
-//
-//	{"slot":"worker","kind":{"subprocess":{"command":"sleep","args":["30"]}},"timeoutMs":60000,
-//	 "restart":{"type":"never"},"backoff":{"jitter":"none","firstMs":1000,"maxMs":5000,"factor":2.0},
-//	 "admission":"dropIfRunning"}
-func (ts *Spec) ToCreateSpec() map[string]any {
-	// kind
-	kindCfg := make(map[string]any, len(ts.kindConfig))
-	for k, v := range ts.kindConfig {
-		kindCfg[k] = v
-	}
+// BumpGeneration bumps the runtime-change counter.
+func (ts *Spec) BumpGeneration() {
+	ts.generation++
+	ts.updatedAt = time.Now()
+}
 
-	// restart
-	restart := map[string]any{"type": string(ts.restartType)}
-	if ts.restartType == kind.RestartAlways && ts.intervalMs > 0 {
-		restart["intervalMs"] = ts.intervalMs
+// MarkForDeletion flips the soft-delete flag.
+func (ts *Spec) MarkForDeletion() {
+	if ts.deletionRequested {
+		return
 	}
-
-	spec := map[string]any{
-		"slot":      ts.slot,
-		"kind":      map[string]any{string(ts.kindType): kindCfg},
-		"timeoutMs": ts.timeoutMs,
-		"restart":   restart,
-		"backoff": map[string]any{
-			"jitter":  string(ts.backoff.Jitter),
-			"firstMs": ts.backoff.FirstMs,
-			"maxMs":   ts.backoff.MaxMs,
-			"factor":  ts.backoff.Factor,
-		},
-		"admission": string(ts.admission),
-	}
-	if len(ts.runnerLabels) > 0 {
-		labels := make(map[string]string, len(ts.runnerLabels))
-		for k, v := range ts.runnerLabels {
-			labels[k] = v
-		}
-		spec["labels"] = labels
-	}
-	return spec
+	ts.deletionRequested = true
+	ts.updatedAt = time.Now()
 }
 
 // Clone creates a deep copy of the Spec.
 func (ts *Spec) Clone() *Spec {
 	kindConfig := make(map[string]any, len(ts.kindConfig))
 	for k, v := range ts.kindConfig {
-		kindConfig[k] = v
+		kindConfig[k] = cloneConfigValue(v)
 	}
 	targets := make([]string, len(ts.targets))
 	copy(targets, ts.targets)
@@ -274,13 +308,15 @@ func (ts *Spec) Clone() *Spec {
 	}
 
 	return &Spec{
-		id:           ts.id,
-		name:         ts.name,
-		version:      ts.version,
-		targets:      targets,
-		targetLabels: targetLabels,
-		createdAt:    ts.createdAt,
-		updatedAt:    ts.updatedAt,
+		id:                ts.id,
+		name:              ts.name,
+		version:           ts.version,
+		generation:        ts.generation,
+		deletionRequested: ts.deletionRequested,
+		targets:           targets,
+		targetLabels:      targetLabels,
+		createdAt:         ts.createdAt,
+		updatedAt:         ts.updatedAt,
 
 		slot:         ts.slot,
 		kindType:     ts.kindType,
@@ -289,7 +325,80 @@ func (ts *Spec) Clone() *Spec {
 		restartType:  ts.restartType,
 		intervalMs:   ts.intervalMs,
 		backoff:      ts.backoff,
-		admission:    ts.admission,
 		runnerLabels: runnerLabels,
+	}
+}
+
+// RuntimeEquals reports whether two specs are equals.
+func (ts *Spec) RuntimeEquals(other *Spec) bool {
+	if ts == nil || other == nil {
+		return ts == other
+	}
+	if ts.slot != other.slot ||
+		ts.kindType != other.kindType ||
+		ts.timeoutMs != other.timeoutMs ||
+		ts.restartType != other.restartType ||
+		ts.intervalMs != other.intervalMs ||
+		ts.backoff != other.backoff {
+		return false
+	}
+	if !stringMapEqual(ts.runnerLabels, other.runnerLabels) {
+		return false
+	}
+	return anyMapEqual(ts.kindConfig, other.kindConfig)
+}
+
+func stringMapEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}
+
+func anyMapEqual(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		bv, ok := b[k]
+		if !ok || !reflect.DeepEqual(v, bv) {
+			return false
+		}
+	}
+	return true
+}
+
+// cloneConfigValue copies the JSON-compatible containers accepted by the API.
+func cloneConfigValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, v := range x {
+			out[k] = cloneConfigValue(v)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, v := range x {
+			out[i] = cloneConfigValue(v)
+		}
+		return out
+	case map[string]string:
+		out := make(map[string]string, len(x))
+		for k, v := range x {
+			out[k] = v
+		}
+		return out
+	case []string:
+		return slices.Clone(x)
+	case []byte:
+		return slices.Clone(x)
+	default:
+		return v
 	}
 }

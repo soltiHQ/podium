@@ -1,26 +1,30 @@
 package spec
 
 import (
+	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 	"github.com/soltiHQ/control-plane/internal/uikit/policy"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
-	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 	"github.com/soltiHQ/control-plane/ui/templates/layout"
 )
 
-// Detail renders the spec detail page with stacked full-width sections.
-templ Detail(nav policy.Nav, specID string) {
-	@layout.SectionPage("Spec", "tasks", nav, routepath.PageSpecs, "Back to Specs",
-		layout.SectionPanel{
-			ID:         "spec-identity",
-			URL:        routepath.ApiSpecByID(specID),
-			Trigger:    htmx.LoadAndPoll(htmx.GetSpecDetailRefresh(), htmx.SpecUpdate),
-			PreloadMsg: "Loading spec...",
-		},
-		layout.SectionPanel{
-			ID:         "spec-rollouts",
-			URL:        routepath.ApiSpecSync(specID),
-			Trigger:    htmx.LoadAndPoll(htmx.GetSpecsRefresh(), htmx.SpecUpdate),
-			PreloadMsg: "Loading rollouts...",
-		},
-	)
+// Detail renders the saved spec, optional placement preview and rollout state.
+templ Detail(nav policy.Nav, specID string, p policy.SpecDetail) {
+	@layout.SectionPage("Spec", "tasks", nav, routepath.PageSpecs, "Back to Specs", detailPanels(specID, p)...)
+}
+
+func detailPanels(specID string, p policy.SpecDetail) []layout.SectionPanel {
+	panels := []layout.SectionPanel{{
+		ID: "spec-identity", URL: routepath.ApiSpecByID(specID),
+		Trigger: htmx.LoadAndPoll(htmx.GetSpecDetailRefresh(), htmx.SpecUpdate), PreloadMsg: "Loading spec...",
+	}}
+	if p.CanViewPlacement {
+		panels = append(panels, layout.SectionPanel{
+			ID: "spec-placement", URL: routepath.ApiSpecPlacement(specID),
+			Trigger: "load, " + htmx.PollMulti(htmx.GetSpecDetailRefresh(), htmx.SpecUpdate, htmx.AgentUpdate), PreloadMsg: "Calculating placement...",
+		})
+	}
+	return append(panels, layout.SectionPanel{
+		ID: "spec-rollouts", URL: routepath.ApiSpecSync(specID),
+		Trigger: htmx.LoadAndPoll(htmx.GetSpecsRefresh(), htmx.SpecUpdate), PreloadMsg: "Loading rollouts...",
+	})
 }

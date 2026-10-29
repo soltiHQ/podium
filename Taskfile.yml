@@ -1,0 +1,170 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3.53.1'
+
+includes:
+  golang:
+    # v0.1.0
+    taskfile: https://raw.githubusercontent.com/mr-chelyshkin/tasks/3aa8c569bdc71b41fa50fc33f66e2ef1317813ed/taskfiles/golang/Taskfile.yml
+    internal: false
+  proto:
+    # v0.1.0
+    taskfile: https://raw.githubusercontent.com/mr-chelyshkin/tasks/3aa8c569bdc71b41fa50fc33f66e2ef1317813ed/taskfiles/proto/Taskfile.yml
+    internal: true
+  markdown:
+    # v0.1.0
+    taskfile: https://raw.githubusercontent.com/mr-chelyshkin/tasks/3aa8c569bdc71b41fa50fc33f66e2ef1317813ed/taskfiles/markdown/Taskfile.yml
+    internal: true
+
+vars:
+  name: podium
+
+  proto_repo: https://github.com/soltiHQ/proto.git
+  proto_ref: v0.1.2
+  proto_packages: agent discover task raft
+  proto_plugins_dir: .cache/proto-plugins
+
+  alpinejs_version: '3.13.5'
+  htmx_version: '1.9.12'
+  tailwind_version: '4.3.2'
+  tailwind_command: |
+    case "$(uname -m)" in
+      x86_64) arch=x64 ;;
+      aarch64) arch=arm64 ;;
+      *) printf 'unsupported architecture: %s\n' "$(uname -m)" >&2; exit 1 ;;
+    esac
+    dir=.cache/tailwind/{{.tailwind_version}}
+    bin="$dir/tailwindcss-linux-$arch"
+    if [ ! -x "$bin" ]; then
+      base=https://github.com/tailwindlabs/tailwindcss/releases/download/v{{.tailwind_version}}
+      mkdir -p "$dir"
+      curl -fsSL -o "$dir/sha256sums.txt" "$base/sha256sums.txt"
+      curl -fsSL -o "$bin.download" "$base/tailwindcss-linux-$arch"
+      expected=$(awk -v name="./tailwindcss-linux-$arch" '$2 == name { print $1 }' "$dir/sha256sums.txt")
+      actual=$(sha256sum "$bin.download" | cut -d ' ' -f 1)
+      if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+        printf 'tailwindcss-linux-%s: sha256 %s, expected %s\n' "$arch" "$actual" "$expected" >&2
+        exit 1
+      fi
+      chmod +x "$bin.download"
+      mv "$bin.download" "$bin"
+    fi
+    exec "$bin" --input ui/static/css/app.css --output ui/static/css/tailwindcss.css --minify
+
+  go_paths: api cmd domain internal ui
+  markdown_paths: README.md
+
+tasks:
+  ci/markdown/fmt:
+    desc: Check source Markdown formatting without modifying files
+    cmds:
+      - task: markdown:fmt
+        vars:
+          FMT_ARGS: '{{.markdown_paths}}'
+
+  markdown/fix:
+    desc: Format source Markdown with the same settings used in CI
+    cmds:
+      - task: markdown:fmt/fix
+        vars:
+          FMT_ARGS: '{{.markdown_paths}}'
+
+  ci/golang/fmt:
+    desc: Run Go fmt check
+    cmds:
+      - task: golang:fmt
+        vars:
+          FMT_ARGS: '{{.go_paths}}'
+
+  golang/fix:
+    desc: Format Go sources with the same settings used in CI
+    cmds:
+      - task: golang:fmt/fix
+        vars:
+          FMT_ARGS: '{{.go_paths}}'
+
+  ci/golang/lint:
+    desc: Run Go lint
+    cmds:
+      - task: generate
+      - task: golang:lint
+        vars:
+          LINT_ARGS: --timeout=5m ./...
+
+  ci/golang/test:
+    desc: Run Go tests with the race detector
+    cmds:
+      - task: generate
+      - task: golang:test
+        vars:
+          TEST_ARGS: -race -count=1 -timeout=10m ./...
+
+  ci/golang/audit:
+    desc: Run Go vuln check
+    cmds:
+      - task: generate
+      - task: golang:audit
+
+  ci/golang/build:
+    desc: Build the binary for GOOS/GOARCH (linux/amd64 by default)
+    cmds:
+      - task: generate
+      - task: golang:build
+        vars:
+          NAME: '{{.name}}'
+          GOOS: '{{.GOOS | default "linux"}}'
+          GOARCH: '{{.GOARCH | default "amd64"}}'
+
+  generate:
+    desc: Vendor proto schemas, generate Go bindings and templ components
+    cmds:
+      - task: proto/vendor
+      - task: proto/generate
+      - task: templ/generate
+
+  proto/vendor:
+    desc: Vendor the soltiHQ/proto release pinned by proto_ref into api/proto
+    cmds:
+      - |
+        set -eu
+        tmp=$(mktemp -d)
+        trap 'rm -rf "$tmp"' EXIT
+        git -c advice.detachedHead=false clone --quiet --depth 1 --branch {{.proto_ref | shellQuote}} {{.proto_repo | shellQuote}} "$tmp"
+        for pkg in {{.proto_packages}}; do
+          rm -rf "api/proto/solti/$pkg"
+          mkdir -p "api/proto/solti/$pkg"
+          cp -R "$tmp/solti/$pkg/." "api/proto/solti/$pkg/"
+        done
+        printf 'vendored %s %s\n' {{.proto_repo | shellQuote}} {{.proto_ref | shellQuote}}
+
+  proto/generate:
+    desc: Generate Go bindings with the protoc plugins pinned in go.mod
+    cmds:
+      - task: golang:exec
+        vars:
+          CMD: go build -o {{.proto_plugins_dir}}/ google.golang.org/protobuf/cmd/protoc-gen-go google.golang.org/grpc/cmd/protoc-gen-go-grpc
+          CONTAINER_ENVS: CGO_ENABLED=0
+      - task: proto:exec
+        vars:
+          CMD: buf generate
+
+  templ/generate:
+    desc: Generate templ components with the templ version pinned in go.mod
+    cmds:
+      - task: golang:exec
+        vars:
+          CMD: go tool templ generate -path ui
+
+  assets:
+    desc: Download the JS dependencies and build the Tailwind CSS bundle
+    cmds:
+      - curl -fsSL -o ui/static/js/alpine.min.js "https://cdn.jsdelivr.net/npm/alpinejs@{{.alpinejs_version}}/dist/cdn.min.js"
+      - curl -fsSL -o ui/static/js/htmx.min.js "https://unpkg.com/htmx.org@{{.htmx_version}}/dist/htmx.min.js"
+      - task: golang:exec
+        vars:
+          CMD: sh -euc {{.tailwind_command | shellQuote}}
+
+  prepare:
+    desc: Generate sources and build the UI assets for a local run
+    cmds:
+      - task: generate
+      - task: assets

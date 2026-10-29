@@ -21,15 +21,18 @@ templ Confirm(
 	variant Variant,
 ) {
 	@Modal(name) {
+ <div x-data="{ submitting:false, error:'' }">
 		@Body() {
 			@Title(titleText)
 			@Message(messageText)
+ <p x-show="error" x-text="error" role="alert" class="text-sm text-danger"></p>
 		}
 		@Footer() {
 			@CancelButton("Cancel")
-			<form { hxMethod(method, action)... } hx-swap="none" x-on:htmx:after-request="show = false">
-				@button.Button(confirmLabel, "submit", false, buttonVariant(variant), false)
+			<form { hxMethod(method, action)... } hx-swap="none" hx-disabled-elt="find button" x-on:htmx:before-request="submitting=true;error=''" x-on:htmx:after-request="submitting=false; if($event.detail.successful) { show=false } else { try { error=JSON.parse($event.detail.xhr.responseText).message || 'Request failed' } catch { error='Request failed. You can retry.' } }">
+				@button.Button(confirmLabel, "submit", false, buttonVariant(variant), false, templ.Attributes{"x-bind:disabled":"submitting"})
 			</form>
 		}
+ </div>
 	}
 }

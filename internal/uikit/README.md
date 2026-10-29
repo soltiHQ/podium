@@ -8,22 +8,21 @@ uikit/
 ├── policy/       permission-based UI visibility flags
 ├── routepath/    URL constants for pages and API endpoints
 ├── timeformat/   human-readable time formatting (relative, session, uptime)
-└── htmx/         HTMX response helpers, named trigger events, polling intervals
+└── htmx/         HTMX response helpers, polling intervals, event.Refresh* aliases
 ```
 
 ## policy
 Template-oriented permission models.
-Each `Build*` function takes an `identity.Identity` and returns a struct of bool flags
-that templ templates use to show/hide interactive elements.
+Each `Build*` function takes an `identity.Identity` and returns a struct of bool flags that templ templates use to show/hide interactive elements.
 
 ```text
 identity.Identity
        │
        ▼
-  BuildNav(id)          → Nav          (sidebar: ShowUsers, ShowAgents, CanAddUser…)
-  BuildUserDetail(id)   → UserDetail   (detail page: CanEdit, CanDelete, CanRevoke…)
-  BuildAgentDetail(id)  → AgentDetail  (detail page: CanEditLabels…)
-  BuildSpecDetail(id)   → SpecDetail   (detail page: CanEdit, CanDelete, CanDeploy…)
+  BuildNav(id)                       → Nav          (sidebar: ShowUsers, ShowAgents, CanAddUser…)
+  BuildUserDetail(id, targetUserID)  → UserDetail   (detail page: CanEdit, CanEditRoles, CanDelete + IsSelf guard)
+  BuildAgentDetail(id)               → AgentDetail  (detail page: CanEditLabels…)
+  BuildSpecDetail(id)                → SpecDetail   (detail page: CanEdit, CanDelete, CanDeploy…)
 ```
 
 ## routepath
@@ -38,33 +37,34 @@ routepath.ApiAgentTasks("xyz")     // → "/api/v1/agents/xyz/tasks"
 ## timeformat
 Human-readable time formatting helpers used by templ templates.
 
+Each helper degrades gracefully on missing data (zero time, negative duration) by rendering an em dash, so templates never show garbage:
 ```text
-  timeformat.Relative(t)   →  "just now", "5m ago", "2h ago", "3d ago"
-  timeformat.Session(t)    →  "Jan 02, 15:04" (current year) / "Jan 02 2006, 15:04"
-  timeformat.Uptime(secs)  →  "30s", "5m", "2h 15m", "3d 4h"
+  timeformat.Relative(t)   →  "—", "just now", "5m ago", "2h ago", "3d ago"
+  timeformat.Session(t)    →  "—", "Jan 02, 15:04" (current year) / "Jan 02 2006, 15:04"
+  timeformat.Uptime(secs)  →  "—", "0s", "30s", "5m", "2h 15m", "3d 4h"
 ```
 
 ## htmx
-HTMX response helpers, named trigger events, and configurable polling intervals.
+HTMX response helpers and configurable polling intervals.
 Event infrastructure (Hub, ring buffers, SSE) lives in `internal/event`.
 
 ### Helpers
 ```go
-htmx.Trigger(w, htmx.UserUpdate)       // set HX-Trigger header
-htmx.Redirect(w, routepath.PageUsers)   // set HX-Redirect header
-htmx.Poll(htmx.Every1m, htmx.AgentUpdate)         // "every 60s, agent_update from:body"
+htmx.Trigger(w, htmx.UserUpdate)                                 // set HX-Trigger header
+htmx.Redirect(w, routepath.PageUsers)                            // set HX-Redirect header
+htmx.Poll(htmx.Every1m, htmx.AgentUpdate)                        // "every 60s, agent_update from:body"
 htmx.PollMulti(htmx.Every3m, htmx.AgentUpdate, htmx.SpecUpdate)
-htmx.LoadAndPoll(htmx.Every1m, htmx.SpecUpdate)   // "load, every 60s, spec_update from:body"
+htmx.LoadAndPoll(htmx.Every1m, htmx.SpecUpdate)                  // "load, every 60s, spec_update from:body"
 ```
 
-### Trigger names
-| Constant          | Value              |
-|-------------------|--------------------|
-| `SessionUpdate`   | `session_update`   |
-| `AgentUpdate`     | `agent_update`     |
-| `SpecUpdate`      | `spec_update`      |
-| `UserUpdate`      | `user_update`      |
-| `DashboardUpdate` | `dashboard_update` |
+### Trigger names (aliases of `event.Refresh*`)
+| htmx alias (templates) | canonical (`internal/event`) | wire value         |
+|------------------------|------------------------------|--------------------|
+| `SessionUpdate`        | `event.RefreshSessions`      | `session_update`   |
+| `AgentUpdate`          | `event.RefreshAgents`        | `agent_update`     |
+| `SpecUpdate`           | `event.RefreshSpecs`         | `spec_update`      |
+| `UserUpdate`           | `event.RefreshUsers`         | `user_update`      |
+| `DashboardUpdate`      | `event.RefreshDashboard`     | `dashboard_update` |
 
 ### Polling intervals (defaults)
 | Scope           | Interval | Getter                     |
@@ -92,7 +92,7 @@ This keeps the search input untouched during a refresh cycle:
   +- List ------------------------------------+
   |  SearchInput  <- stays in DOM             |
   |                                           |
-  |  #results  (hx-trigger="every 60s,       | <- handles SSE + polling
+  |  #results  (hx-trigger="every 60s,        | <- handles SSE + polling
   |     agent_update from:body"               |
   |     hx-include="#search-input"            | <- preserves search query
   |     hx-swap="outerHTML"                   |

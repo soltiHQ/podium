@@ -1,0 +1,22 @@
+package history
+
+import (
+	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
+	"github.com/soltiHQ/control-plane/internal/uikit/policy"
+	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
+	contentHistory "github.com/soltiHQ/control-plane/ui/templates/content/history"
+	"github.com/soltiHQ/control-plane/ui/templates/layout"
+)
+
+templ History(nav policy.Nav, query restv1.HistoryQuery) {
+	@layout.ListPage("Execution history", "history", nav) {
+		@layout.ListHeader("Execution history")
+		<div class="rounded border border-border bg-surface-dim p-4 space-y-2">
+			<p class="text-sm">Captured terminal attempts remain available when agents are offline or removed.</p>
+			<p class="text-xs text-muted">Partial capture from periodic agent polling. Attempts completed and removed between polls may be absent. Retention is bounded by archive policy; records may be pruned. Logs are not archived.</p>
+			<p class="text-xs text-muted">A terminal attempt can be followed by retries or restarts and does not prove physical process shutdown. Source run timestamps come from the agent; capture time is Podium's first observation.</p>
+		</div>
+		@contentHistory.Filters(query)
+		@layout.HTMXLoader("history-list", contentHistory.QueryURL(routepath.ApiHistory, query, query.Cursor), "Loading captured attempts...")
+	}
+}

@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/rs/zerolog"
 )
@@ -24,7 +22,9 @@ type Server struct {
 	cfg    Config
 
 	runners      []Runner
-	shutdownOnce atomic.Bool
+	shutdownOnce sync.Once
+	shutdownDone chan struct{}
+	shutdownErr  error
 }
 
 // New creates a Server.
@@ -53,9 +53,10 @@ func New(cfg Config, logger zerolog.Logger, runners ...Runner) (*Server, error) 
 		rs = append(rs, r)
 	}
 	return &Server{
-		runners: rs,
-		cfg:     cfg,
-		logger:  logger,
+		runners:      rs,
+		cfg:          cfg,
+		logger:       logger,
+		shutdownDone: make(chan struct{}),
 	}, nil
 }
 
@@ -113,8 +114,16 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	runCancel()
 
-	shutdownErr := s.Shutdown(context.Background())
-	wg.Wait()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
+	defer cancelShutdown()
+	shutdownErr := s.Shutdown(shutdownCtx)
+	drained := make(chan struct{})
+	go func() { wg.Wait(); close(drained) }()
+	select {
+	case <-drained:
+	case <-shutdownCtx.Done():
+		shutdownErr = errors.Join(shutdownErr, shutdownCtx.Err())
+	}
 
 	if shutdownErr != nil {
 		return errors.Join(e, shutdownErr)
@@ -124,53 +133,40 @@ func (s *Server) Run(ctx context.Context) error {
 
 // Shutdown gracefully stops all runners.
 func (s *Server) Shutdown(ctx context.Context) error {
-	if !s.shutdownOnce.CompareAndSwap(false, true) {
-		return nil
-	}
-
-	start := time.Now()
-	ctx, cancel := context.WithTimeout(ctx, s.cfg.ShutdownTimeout)
-	defer cancel()
-
-	s.logger.Info().
-		Str("timeout", s.cfg.ShutdownTimeout.String()).
-		Int("runners", len(s.runners)).
-		Msg("shutdown starting")
-
-	var (
-		mu   sync.Mutex
-		errs []error
-		wg   sync.WaitGroup
-	)
-	for i := len(s.runners) - 1; i >= 0; i-- {
-		r := s.runners[i]
-
-		wg.Add(1)
+	s.shutdownOnce.Do(func() {
 		go func() {
-			defer wg.Done()
-
-			s.logger.Info().Str("runner", r.Name()).Msg("runner stopping")
-
-			if err := r.Stop(ctx); err != nil {
-				wrapped := &RunnerError{Runner: r.Name(), Phase: "stop", Err: err}
-
-				s.logger.Error().
-					Err(err).
-					Str("runner", r.Name()).
-					Msg("runner stop failed")
-
-				mu.Lock()
-				errs = append(errs, wrapped)
-				mu.Unlock()
-			} else {
-				s.logger.Info().Str("runner", r.Name()).Msg("runner stopped")
+			defer close(s.shutdownDone)
+			stopCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
+			defer cancel()
+			results := make(chan error, len(s.runners))
+			for _, runner := range s.runners {
+				go func() {
+					err := runner.Stop(stopCtx)
+					if err != nil {
+						err = &RunnerError{Runner: runner.Name(), Phase: "stop", Err: err}
+					}
+					results <- err
+				}()
 			}
+			var errs []error
+			for range s.runners {
+				select {
+				case err := <-results:
+					if err != nil {
+						errs = append(errs, err)
+					}
+				case <-stopCtx.Done():
+					s.shutdownErr = errors.Join(append(errs, stopCtx.Err())...)
+					return
+				}
+			}
+			s.shutdownErr = errors.Join(errs...)
 		}()
+	})
+	select {
+	case <-s.shutdownDone:
+		return s.shutdownErr
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	wg.Wait()
-
-	s.logger.Info().
-		Str("elapsed", time.Since(start).String()).
-		Msg("shutdown finished")
-	return errors.Join(errs...)
 }

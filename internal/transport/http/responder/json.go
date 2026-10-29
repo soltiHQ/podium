@@ -11,9 +11,18 @@ type JSONResponder struct{}
 // NewJSON creates a new JSONResponder.
 func NewJSON() *JSONResponder { return &JSONResponder{} }
 
-// Respond writes v.Data as JSON with the provided HTTP status code.
-func (x *JSONResponder) Respond(w http.ResponseWriter, r *http.Request, code int, v *View) {
-	if v == nil || v.Data == nil {
+// Respond writes the view body as JSON.
+func (x *JSONResponder) Respond(w http.ResponseWriter, _ *http.Request, code int, v *View) {
+	if v == nil {
+		x.writeHeaders(w, code)
+		return
+	}
+	if len(v.RawJSON) > 0 {
+		x.writeHeaders(w, code)
+		_, _ = w.Write(v.RawJSON)
+		return
+	}
+	if v.Data == nil {
 		x.writeHeaders(w, code)
 		return
 	}

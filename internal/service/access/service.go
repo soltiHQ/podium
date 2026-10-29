@@ -1,31 +1,27 @@
-// Package access implements authentication use-cases:
-//   - Login with rate-limiting
-//   - Logout (session revocation)
-//   - Permission/role listing.
 package access
 
 import (
 	"context"
 
 	"github.com/rs/zerolog"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	iauth "github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
-	"github.com/soltiHQ/control-plane/internal/auth/wire"
+	"github.com/soltiHQ/control-plane/internal/auth/kit"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
 // Service implements shared authentication use-cases.
 type Service struct {
-	auth *wire.Auth
+	auth *kit.Auth
 
 	logger zerolog.Logger
 	store  storage.Storage
 }
 
 // New creates a new authentication service.
-func New(authSvc *wire.Auth, store storage.Storage, logger zerolog.Logger) *Service {
+func New(authSvc *kit.Auth, store storage.Storage, logger zerolog.Logger) *Service {
 	if authSvc == nil {
 		panic("access.Service: nil auth service")
 	}
@@ -54,7 +50,7 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identi
 		}
 	}
 
-	pair, id, err := s.auth.Session.Login(ctx, kind.Password, req.Subject, req.Password)
+	pair, id, err := s.auth.Session.Login(ctx, enum.Password, req.Subject, req.Password)
 	if err != nil {
 		if s.auth.Limiter != nil && req.RateKey != "" {
 			s.auth.Limiter.RecordFailure(req.RateKey, now)
@@ -73,8 +69,8 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identi
 }
 
 // GetPermissions returns all available permissions in the system.
-func (s *Service) GetPermissions() []kind.Permission {
-	return kind.All
+func (s *Service) GetPermissions() []enum.Permission {
+	return enum.All
 }
 
 // GetRoles returns all roles from storage.

@@ -1,27 +1,29 @@
-// Package agent implements agent management use-cases:
-//   - Paginated listing and retrieval
-//   - Upsert with label and heartbeat preservation
-//   - Control-plane label patching.
 package agent
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 
 	"github.com/rs/zerolog"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
+// ErrUnauthenticated indicates an agent presented a missing or wrong bearer
+// token during discovery. Handlers map it to HTTP 401 / gRPC Unauthenticated.
+var ErrUnauthenticated = errors.New("agent: unauthenticated")
+
 // Service provides agent management operations.
 type Service struct {
 	logger zerolog.Logger
-	store  storage.AgentStore
+	store  storage.Storage
 }
 
 // New creates a new agent service.
-func New(store storage.AgentStore, logger zerolog.Logger) *Service {
+func New(store storage.Storage, logger zerolog.Logger) *Service {
 	if store == nil {
 		panic("agent.Service: store is nil")
 	}
@@ -41,15 +43,8 @@ func (s *Service) List(ctx context.Context, q ListQuery) (*Page, error) {
 		return nil, err
 	}
 
-	out := make([]*model.Agent, 0, len(res.Items))
-	for _, a := range res.Items {
-		if a == nil {
-			continue
-		}
-		out = append(out, a.Clone())
-	}
 	return &Page{
-		Items:      out,
+		Items:      res.Items,
 		NextCursor: res.NextCursor,
 	}, nil
 }
@@ -59,43 +54,117 @@ func (s *Service) Get(ctx context.Context, id string) (*model.Agent, error) {
 	if id == "" {
 		return nil, storage.ErrInvalidArgument
 	}
+	return s.store.GetAgent(ctx, id)
+}
 
-	a, err := s.store.GetAgent(ctx, id)
+// VerifyOrEnrollToken implements trust-on-first-use bearer auth for an agent.
+//
+// First contact (no stored credential) enrolls the presented token. Every later
+// sync must present the same token (constant-time compare); a missing or wrong
+// token returns ErrUnauthenticated. The read-check-write runs inside one
+// transaction so two concurrent first-contacts can't both enroll and race.
+func (s *Service) VerifyOrEnrollToken(ctx context.Context, agentID, presented string) error {
+	if agentID == "" {
+		return storage.ErrInvalidArgument
+	}
+	if presented == "" {
+		return ErrUnauthenticated
+	}
+
+	return s.store.WithTx(ctx, func(tx storage.Storage) error {
+		existing, err := tx.GetAgentCredential(ctx, agentID)
+		switch {
+		case err == nil:
+			if subtle.ConstantTimeCompare([]byte(existing.Token()), []byte(presented)) != 1 {
+				return ErrUnauthenticated
+			}
+			return nil
+		case errors.Is(err, storage.ErrNotFound):
+			cred, err := model.NewAgentCredential(agentID, presented)
+			if err != nil {
+				return err
+			}
+			return tx.UpsertAgentCredential(ctx, cred)
+		default:
+			return err
+		}
+	})
+}
+
+// AgentToken returns the bearer token the control plane must present when
+// calling this agent, or "" if the agent has no credential yet (not enrolled,
+// or agent auth disabled). A missing credential is not an error.
+func (s *Service) AgentToken(ctx context.Context, agentID string) (string, error) {
+	if agentID == "" {
+		return "", storage.ErrInvalidArgument
+	}
+	c, err := s.store.GetAgentCredential(ctx, agentID)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, storage.ErrNotFound) {
+			return "", nil
+		}
+		return "", err
 	}
-	if a == nil {
-		return nil, storage.ErrInternal
-	}
-	return a.Clone(), nil
+	return c.Token(), nil
 }
 
 // Upsert an agent.
-//
-// If the agent already exists, control-plane owned labels and the original
-// createdAt timestamp are preserved because they are not part of the
-// discovery payload reported by the agent.
 func (s *Service) Upsert(ctx context.Context, m *model.Agent) error {
+	if m == nil {
+		return storage.ErrInvalidArgument
+	}
+
 	var existed bool
-	existing, err := s.store.GetAgent(ctx, m.ID())
-	switch {
-	case err == nil:
-		existed = true
-		m.SetCreatedAt(existing.CreatedAt())
-		for k, v := range existing.LabelsAll() {
-			m.LabelAdd(k, v)
+	var reconnected bool
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		existing, err := tx.GetAgent(ctx, m.ID())
+		switch {
+		case err == nil:
+			existed = true
+			reconnected = existing.Status() != enum.AgentStatusActive || m.UptimeSeconds() < existing.UptimeSeconds()
+			m.SetCreatedAt(existing.CreatedAt())
+			for k, v := range existing.LabelsAll() {
+				m.LabelAdd(k, v)
+			}
+			if m.HeartbeatInterval() == 0 && existing.HeartbeatInterval() > 0 {
+				m.SetHeartbeatInterval(existing.HeartbeatInterval())
+			}
+		case errors.Is(err, storage.ErrNotFound):
+			reconnected = true
+		default:
+			return err
 		}
-		if m.HeartbeatInterval() == 0 && existing.HeartbeatInterval() > 0 {
-			m.SetHeartbeatInterval(existing.HeartbeatInterval())
+		if hb := m.HeartbeatInterval(); hb > 0 {
+			m.SetStaleAt(m.LastSeenAt().Add(hb))
 		}
-	case errors.Is(err, storage.ErrNotFound):
-	default:
-		return err
-	}
-	if hb := m.HeartbeatInterval(); hb > 0 {
-		m.SetStaleAt(m.LastSeenAt().Add(hb))
-	}
-	if err = s.store.UpsertAgent(ctx, m); err != nil {
+		if err := tx.UpsertAgent(ctx, m); err != nil {
+			return err
+		}
+		if reconnected {
+			rollouts, err := storage.AllRollouts(ctx, tx, tx.BuildRolloutFilter(storage.RolloutQueryCriteria{AgentID: m.ID()}))
+			if err != nil {
+				return err
+			}
+			for _, ro := range rollouts {
+				if ro.Status() != enum.SyncStatusFailed && ro.Status() != enum.SyncStatusUnknown {
+					continue
+				}
+				if ro.Intent() == enum.RolloutIntentNoop {
+					if ro.ActualTaskID() == "" {
+						ro.SetIntent(enum.RolloutIntentInstall)
+					} else {
+						ro.SetIntent(enum.RolloutIntentUpdate)
+					}
+				}
+				ro.MarkPending(ro.DesiredGeneration())
+				if err = tx.UpsertRollout(ctx, ro); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
 		return err
 	}
 
@@ -113,29 +182,45 @@ func (s *Service) PatchLabels(ctx context.Context, req PatchLabels) (*model.Agen
 		return nil, storage.ErrInvalidArgument
 	}
 
-	agent, err := s.store.GetAgent(ctx, req.ID)
+	var (
+		result  *model.Agent
+		changed bool
+	)
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		agent, err := tx.GetAgent(ctx, req.ID)
+		if err != nil {
+			return err
+		}
+
+		before := agent.UpdatedAt()
+		replaceLabels(agent, req.Labels)
+		if !agent.UpdatedAt().Equal(before) {
+			if err = tx.UpsertAgent(ctx, agent); err != nil {
+				return err
+			}
+			changed = true
+		}
+		result = agent.Clone()
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if agent == nil {
-		return nil, storage.ErrInternal
-	}
 
-	replaceLabels(agent, req.Labels)
-	if err = s.store.UpsertAgent(ctx, agent); err != nil {
-		return nil, err
+	if changed {
+		s.logger.Debug().
+			Str("agent_id", req.ID).
+			Int("labels", len(req.Labels)).
+			Msg("labels patched")
 	}
-
-	s.logger.Debug().
-		Str("agent_id", req.ID).
-		Int("labels", len(req.Labels)).
-		Msg("labels patched")
-	return agent.Clone(), nil
+	return result, nil
 }
 
 func replaceLabels(a *model.Agent, labels map[string]string) {
 	for k := range a.LabelsAll() {
-		a.LabelDelete(k)
+		if v, ok := labels[k]; !ok || v == "" {
+			a.LabelDelete(k)
+		}
 	}
 	for k, v := range labels {
 		if k == "" || v == "" {

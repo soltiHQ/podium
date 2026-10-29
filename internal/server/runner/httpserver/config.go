@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"time"
 )
@@ -25,7 +26,9 @@ type Config struct {
 	Name string `yaml:"name"`
 	Addr string `yaml:"addr"`
 
-	BaseContext func(net.Listener) context.Context                   `yaml:"-"`
+	TLSConfig *tls.Config `yaml:"-"`
+
+	BaseContext func(net.Listener) context.Context                    `yaml:"-"`
 	ConnContext func(ctx context.Context, c net.Conn) context.Context `yaml:"-"`
 }
 

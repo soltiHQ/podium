@@ -1,7 +1,3 @@
-// Package user implements user management use-cases:
-//   - Paginated listing and retrieval (by ID or subject)
-//   - Upsert with field normalization and uniqueness checks
-//   - Cascading deletion (sessions → verifiers → credentials → user).
 package user
 
 import (
@@ -42,15 +38,7 @@ func (s *Service) List(ctx context.Context, q ListQuery) (*Page, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	out := make([]*model.User, 0, len(res.Items))
-	for _, u := range res.Items {
-		if u == nil {
-			continue
-		}
-		out = append(out, u.Clone())
-	}
-	return &Page{Items: out, NextCursor: res.NextCursor}, nil
+	return &Page{Items: res.Items, NextCursor: res.NextCursor}, nil
 }
 
 // Get returns a single user by ID.
@@ -58,14 +46,7 @@ func (s *Service) Get(ctx context.Context, id string) (*model.User, error) {
 	if id == "" {
 		return nil, storage.ErrInvalidArgument
 	}
-	u, err := s.store.GetUser(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if u == nil {
-		return nil, storage.ErrInternal
-	}
-	return u.Clone(), nil
+	return s.store.GetUser(ctx, id)
 }
 
 // GetBySubject returns a single user by authentication subject.
@@ -73,14 +54,7 @@ func (s *Service) GetBySubject(ctx context.Context, subject string) (*model.User
 	if subject == "" {
 		return nil, storage.ErrInvalidArgument
 	}
-	u, err := s.store.GetUserBySubject(ctx, subject)
-	if err != nil {
-		return nil, err
-	}
-	if u == nil {
-		return nil, storage.ErrInternal
-	}
-	return u.Clone(), nil
+	return s.store.GetUserBySubject(ctx, subject)
 }
 
 // Delete a user by ID.
@@ -89,36 +63,37 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 		return storage.ErrInvalidArgument
 	}
 
-	if err := s.store.DeleteSessionsByUser(ctx, id); err != nil {
-		s.logger.Warn().Err(err).Str("user_id", id).Msg("delete: failed to remove sessions")
-		return err
-	}
-
-	creds, err := s.store.ListCredentialsByUser(ctx, id)
+	var credCount int
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		if err := tx.DeleteSessionsByUser(ctx, id); err != nil {
+			return err
+		}
+		creds, err := tx.ListCredentialsByUser(ctx, id)
+		if err != nil {
+			return err
+		}
+		credCount = len(creds)
+		for _, c := range creds {
+			if c == nil {
+				continue
+			}
+			if err = tx.DeleteVerifierByCredential(ctx, c.ID()); err != nil {
+				return err
+			}
+			if err = tx.DeleteCredential(ctx, c.ID()); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				return err
+			}
+		}
+		if err = tx.DeleteUser(ctx, id); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return err
+		}
+		return nil
+	})
 	if err != nil {
-		s.logger.Warn().Err(err).Str("user_id", id).Msg("delete: failed to list credentials")
+		s.logger.Warn().Err(err).Str("user_id", id).Msg("delete failed")
 		return err
 	}
-	for _, c := range creds {
-		if c == nil {
-			continue
-		}
-
-		if err = s.store.DeleteVerifierByCredential(ctx, c.ID()); err != nil {
-			s.logger.Warn().Err(err).Str("user_id", id).Str("credential_id", c.ID()).Msg("delete: failed to remove verifier")
-			return err
-		}
-		if err = s.store.DeleteCredential(ctx, c.ID()); err != nil && !errors.Is(err, storage.ErrNotFound) {
-			s.logger.Warn().Err(err).Str("user_id", id).Str("credential_id", c.ID()).Msg("delete: failed to remove credential")
-			return err
-		}
-	}
-	if err = s.store.DeleteUser(ctx, id); err != nil && !errors.Is(err, storage.ErrNotFound) {
-		s.logger.Warn().Err(err).Str("user_id", id).Msg("delete: failed to remove user record")
-		return err
-	}
-
-	s.logger.Debug().Str("user_id", id).Int("credentials", len(creds)).Msg("user deleted")
+	s.logger.Debug().Str("user_id", id).Int("credentials", credCount).Msg("user deleted")
 	return nil
 }
 
@@ -132,24 +107,32 @@ func (s *Service) Upsert(ctx context.Context, u *model.User) error {
 	if subject == "" {
 		return domain.ErrInvalidSubject
 	}
-	u.SubjectAdd(subject)
-	u.NameAdd(strings.TrimSpace(u.Name()))
+	u.SetSubject(subject)
+	u.SetName(strings.TrimSpace(u.Name()))
 
 	email := strings.TrimSpace(strings.ToLower(u.Email()))
 	if email != "" && !isValidEmail(email) {
 		return domain.ErrInvalidEmail
 	}
-	u.EmailAdd(email)
+	u.SetEmail(email)
 
-	if existing, err := s.store.GetUserBySubject(ctx, subject); err == nil && existing.ID() != u.ID() {
-		return storage.ErrAlreadyExists
-	}
-	if ids := u.RoleIDsAll(); len(ids) > 0 {
-		if _, err := s.store.GetRoles(ctx, ids); err != nil {
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		switch existing, err := tx.GetUserBySubject(ctx, subject); {
+		case err == nil:
+			if existing.ID() != u.ID() {
+				return storage.ErrAlreadyExists
+			}
+		case !errors.Is(err, storage.ErrNotFound):
 			return err
 		}
-	}
-	if err := s.store.UpsertUser(ctx, u); err != nil {
+		if ids := u.RoleIDsAll(); len(ids) > 0 {
+			if _, err := tx.GetRoles(ctx, ids); err != nil {
+				return err
+			}
+		}
+		return tx.UpsertUser(ctx, u)
+	})
+	if err != nil {
 		return err
 	}
 

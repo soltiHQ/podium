@@ -1,14 +1,16 @@
-// Package spec implements task spec management use-cases:
-//   - Paginated listing and retrieval
-//   - Creation, update with version increment, and deletion
-//   - Deployment (rollout creation for target agents)
-//   - Rollout querying by spec.
 package spec
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/soltiHQ/control-plane/internal/proxy"
 
 	"github.com/rs/zerolog"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -33,7 +35,7 @@ func New(store storage.Storage, logger zerolog.Logger) *Service {
 
 // List returns a page of task specs matching the query.
 func (s *Service) List(ctx context.Context, q ListQuery) (*Page, error) {
-	res, err := s.store.ListSpecs(ctx, q.Filter, storage.ListOptions{
+	res, err := s.store.ListSpecs(ctx, s.store.BuildSpecFilter(q.Criteria), storage.ListOptions{
 		Limit:  service.NormalizeListLimit(q.Limit, defaultListLimit),
 		Cursor: q.Cursor,
 	})
@@ -41,15 +43,8 @@ func (s *Service) List(ctx context.Context, q ListQuery) (*Page, error) {
 		return nil, err
 	}
 
-	out := make([]*model.Spec, 0, len(res.Items))
-	for _, ts := range res.Items {
-		if ts == nil {
-			continue
-		}
-		out = append(out, ts.Clone())
-	}
 	return &Page{
-		Items:      out,
+		Items:      res.Items,
 		NextCursor: res.NextCursor,
 	}, nil
 }
@@ -59,19 +54,28 @@ func (s *Service) Get(ctx context.Context, id string) (*model.Spec, error) {
 	if id == "" {
 		return nil, storage.ErrInvalidArgument
 	}
-	ts, err := s.store.GetSpec(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	return ts.Clone(), nil
+	return s.store.GetSpec(ctx, id)
 }
 
 // Create persists a new spec.
 func (s *Service) Create(ctx context.Context, ts *model.Spec) error {
-	if ts == nil {
+	if err := validateSpec(ts); err != nil {
+		return err
+	}
+	if ts.DeletionRequested() {
 		return storage.ErrInvalidArgument
 	}
-	if err := s.store.UpsertSpec(ctx, ts); err != nil {
+
+	if err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		_, err := tx.GetSpec(ctx, ts.ID())
+		if err == nil {
+			return storage.ErrAlreadyExists
+		}
+		if !errors.Is(err, storage.ErrNotFound) {
+			return err
+		}
+		return tx.UpsertSpec(ctx, ts)
+	}); err != nil {
 		return err
 	}
 
@@ -79,121 +83,298 @@ func (s *Service) Create(ctx context.Context, ts *model.Spec) error {
 	return nil
 }
 
-// Upsert persists changes to an existing task spec and increments its version.
-func (s *Service) Upsert(ctx context.Context, ts *model.Spec) error {
-	if ts == nil {
-		return storage.ErrInvalidArgument
-	}
-
-	if _, err := s.store.GetSpec(ctx, ts.ID()); err != nil {
+// Upsert persists changes to an existing task spec. `Version` bumps on every save (edits counter).
+// `Generation` bumps only if the **runtime** fields - those that end up in `SpecToProto`: actually changed;
+// metadata-only edits (rename, target-list) never rotate live tasks.
+//
+// `expectedVersion` is the optimistic-concurrency CAS token:
+// the client sends the version it last read, and Upsert rejects with a [ConflictError] if the stored version has advanced in the meantime.
+// Pass `0` to opt out of the check (background jobs with no rival writer); interactive UI flows should always pass the observed version.
+func (s *Service) Upsert(ctx context.Context, ts *model.Spec, expectedVersion int) error {
+	if err := validateSpec(ts); err != nil {
 		return err
 	}
-	ts.IncrementVersion()
-	if err := s.store.UpsertSpec(ctx, ts); err != nil {
+
+	var runtimeChanged bool
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		old, err := tx.GetSpec(ctx, ts.ID())
+		if err != nil {
+			return err
+		}
+
+		if old.DeletionRequested() {
+			return storage.ErrInvalidArgument
+		}
+
+		if expectedVersion > 0 && old.Version() != expectedVersion {
+			return &ConflictError{Expected: expectedVersion, Actual: old.Version()}
+		}
+		runtimeChanged = !old.RuntimeEquals(ts)
+
+		ts.SetVersion(old.Version())
+		ts.SetGeneration(old.Generation())
+		ts.SetCreatedAt(old.CreatedAt())
+		ts.IncrementVersion()
+		if runtimeChanged {
+			ts.BumpGeneration()
+		}
+		return tx.UpsertSpec(ctx, ts)
+	})
+	if err != nil {
 		return err
 	}
 
 	s.logger.Debug().
 		Str("spec_id", ts.ID()).
 		Int("version", ts.Version()).
+		Int("generation", ts.Generation()).
+		Bool("runtime_changed", runtimeChanged).
 		Msg("spec updated")
 	return nil
 }
 
-// Delete removes a task spec and all associated rollouts.
+// Delete soft-deletes a spec:
+// it flips `DeletionRequested` and marks every rollout `Intent=Uninstall, Pending`.
+//
+// The sync runner performs `DeleteTask` on each agent; the finalizer (run at the end of each sync tick)
+// actually drops the spec row once all rollouts are gone.
+//
+// If there are no rollouts (nobody ever deployed), the spec is removed synchronously - no reason to tombstone.
 func (s *Service) Delete(ctx context.Context, id string) error {
 	if id == "" {
 		return storage.ErrInvalidArgument
 	}
-	if err := s.store.DeleteRolloutsBySpec(ctx, id); err != nil {
-		return err
-	}
-	if err := s.store.DeleteSpec(ctx, id); err != nil {
+
+	var (
+		fastPath bool
+		pending  int
+	)
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		ts, err := tx.GetSpec(ctx, id)
+		if err != nil {
+			return err
+		}
+		rolloutsRes, err := storage.AllRollouts(ctx, tx, tx.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: id}))
+		if err != nil {
+			return err
+		}
+
+		if len(rolloutsRes) == 0 {
+			fastPath = true
+			return tx.DeleteSpec(ctx, id)
+		}
+
+		ts.MarkForDeletion()
+		if err = tx.UpsertSpec(ctx, ts); err != nil {
+			return err
+		}
+		for _, r := range rolloutsRes {
+			if r == nil {
+				continue
+			}
+			r.SetIntent(enum.RolloutIntentUninstall)
+			r.MarkPending(ts.Generation())
+			if err = tx.UpsertRollout(ctx, r); err != nil {
+				return err
+			}
+		}
+		pending = len(rolloutsRes)
+		return nil
+	})
+	if err != nil {
 		return err
 	}
 
-	s.logger.Debug().Str("spec_id", id).Msg("spec deleted")
+	if fastPath {
+		s.logger.Debug().Str("spec_id", id).Msg("spec deleted (no rollouts)")
+	} else {
+		s.logger.Debug().Str("spec_id", id).Int("pending_uninstalls", pending).Msg("spec soft-deleted")
+	}
 	return nil
 }
 
-// Rollouts return all rollout records associated with a spec.
-func (s *Service) Rollouts(ctx context.Context, filter storage.RolloutFilter) ([]*model.Rollout, error) {
-	res, err := s.store.ListRollouts(ctx, filter, storage.ListOptions{Limit: storage.MaxListLimit})
+// ForceDelete drops a spec and all its rollouts immediately, without waiting for agents to confirm task teardown.
+//
+// Use sparingly - any task still running on an agent becomes orphaned:
+// the agent keeps running it until its own lifecycle ends or a human manually cancels it.
+func (s *Service) ForceDelete(ctx context.Context, id string) error {
+	if id == "" {
+		return storage.ErrInvalidArgument
+	}
+
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		if err := tx.DeleteRolloutsBySpec(ctx, id); err != nil {
+			return err
+		}
+		return tx.DeleteSpec(ctx, id)
+	})
+	if err != nil {
+		return err
+	}
+	s.logger.Warn().Str("spec_id", id).Msg("spec force-deleted; agent tasks may be orphaned")
+	return nil
+}
+
+// Rollouts return all rollouts matching the given criteria.
+// The service owns the translation from domain-level criteria to the backend-specific filter - callers never import the storage backend.
+func (s *Service) Rollouts(ctx context.Context, c storage.RolloutQueryCriteria) ([]*model.Rollout, error) {
+	res, err := storage.AllRollouts(ctx, s.store, s.store.BuildRolloutFilter(c))
 	if err != nil {
 		return nil, err
 	}
-
-	out := make([]*model.Rollout, 0, len(res.Items))
-	for _, r := range res.Items {
-		if r != nil {
-			out = append(out, r)
-		}
-	}
-	return out, nil
+	return res, nil
 }
 
-func (s *Service) RolloutsBySpec(ctx context.Context, specID string, filter storage.RolloutFilter) ([]*model.Rollout, error) {
+// RolloutsBySpec is a thin wrapper over `Rollouts` that always filters by the given spec.
+func (s *Service) RolloutsBySpec(ctx context.Context, specID string) ([]*model.Rollout, error) {
 	if specID == "" {
 		return nil, storage.ErrInvalidArgument
 	}
 
-	res, err := s.store.ListRollouts(ctx, filter, storage.ListOptions{Limit: storage.MaxListLimit})
+	res, err := storage.AllRollouts(ctx, s.store, s.store.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: specID}))
 	if err != nil {
 		return nil, err
 	}
-
-	out := make([]*model.Rollout, 0, len(res.Items))
-	for _, ss := range res.Items {
-		if ss == nil {
-			continue
-		}
-		out = append(out, ss.Clone())
-	}
-	return out, nil
+	return res, nil
 }
 
-// Deploy initiates distribution of a spec to all its target agents.
+// Deploy is the reconciler that maps the current desired state (spec targets + spec generation) onto the set of Rollout records.
+// It is idempotent: clicking Deploy on a fully-synced spec is a no-op.
 //
-// For each agent in [model.Spec.Targets] the method either updates an existing rollout record or creates a new one,
-// setting status to pending with the current spec version.
+// For each agent:
+//   - Agent in `spec.Targets`, no rollout yet            → create, Intent=Install
+//   - Agent in `spec.Targets`, rollout behind generation → Intent=Update
+//   - Agent in `spec.Targets`, rollout at current gen    → leave (Noop)
+//   - Agent NOT in `spec.Targets`, rollout exists        → Intent=Uninstall
 //
-// The sync runner will later pick up pending rollouts and push the spec payload to the agents.
+// Deploying a spec flagged for deletion is rejected - the only valid transition from `DeletionRequested=true` is "finalized"
+// (rows drain, finalizer removes the spec).
 func (s *Service) Deploy(ctx context.Context, specID string) error {
-	ts, err := s.store.GetSpec(ctx, specID)
-	if err != nil {
-		return err
+	if specID == "" {
+		return storage.ErrInvalidArgument
 	}
 
-	targets := ts.Targets()
-	s.logger.Debug().
-		Str("spec_id", specID).
-		Int("targets", len(targets)).
-		Int("version", ts.Version()).
-		Msg("deploy started")
-
-	var existing *model.Rollout
-	for _, agentID := range targets {
-		existing, err = s.store.GetRollout(ctx, model.RolloutID(specID, agentID))
-		if err == nil {
-			existing.MarkPending(ts.Version())
-			if err = s.store.UpsertRollout(ctx, existing); err != nil {
-				return err
-			}
-
-			s.logger.Trace().Str("spec_id", specID).Str("agent_id", agentID).Msg("rollout updated")
-			continue
-		}
-
-		var rollout *model.Rollout
-		rollout, err = model.NewRollout(specID, agentID, ts.Version())
+	var (
+		generation                       int
+		install, update, uninstall, noop int
+	)
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		ts, err := tx.GetSpec(ctx, specID)
 		if err != nil {
 			return err
 		}
-		if err = s.store.UpsertRollout(ctx, rollout); err != nil {
+		if ts.DeletionRequested() {
+			return storage.ErrInvalidArgument
+		}
+		generation = ts.Generation()
+		plan, err := loadPlacement(ctx, tx, ts, time.Now())
+		if err != nil {
+			return err
+		}
+		missing, unsupported := blockedTargets(plan)
+		if len(missing) > 0 {
+			return &UnknownTargetsError{Agents: missing}
+		}
+		if len(unsupported) > 0 {
+			return &UnsupportedTargetsError{Agents: unsupported}
+		}
+		targets := make([]string, 0, len(plan.Targets))
+		for _, target := range plan.Targets {
+			targets = append(targets, target.AgentID)
+		}
+
+		wanted := make(map[string]struct{}, len(targets))
+		for _, id := range targets {
+			wanted[id] = struct{}{}
+		}
+
+		rolloutsRes, err := storage.AllRollouts(ctx, tx, tx.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: specID}))
+		if err != nil {
 			return err
 		}
 
-		s.logger.Trace().Str("spec_id", specID).Str("agent_id", agentID).Msg("rollout created")
+		existing := make(map[string]*model.Rollout, len(rolloutsRes))
+		for _, r := range rolloutsRes {
+			if r != nil {
+				existing[r.AgentID()] = r
+			}
+		}
+
+		for _, agentID := range targets {
+			if r, ok := existing[agentID]; ok {
+				if r.ObservedGeneration() == ts.Generation() && r.Status() == enum.SyncStatusSynced {
+					noop++
+					continue
+				}
+				if r.ActualTaskID() == "" {
+					r.SetIntent(enum.RolloutIntentInstall)
+					install++
+				} else {
+					r.SetIntent(enum.RolloutIntentUpdate)
+					update++
+				}
+				r.MarkPending(ts.Generation())
+				if err = tx.UpsertRollout(ctx, r); err != nil {
+					return err
+				}
+				continue
+			}
+			r, err := model.NewRollout(specID, agentID, ts.Generation())
+			if err != nil {
+				return err
+			}
+			r.SetIntent(enum.RolloutIntentInstall)
+			if err = tx.UpsertRollout(ctx, r); err != nil {
+				return err
+			}
+			install++
+		}
+
+		for agentID, r := range existing {
+			if _, kept := wanted[agentID]; kept {
+				continue
+			}
+			r.SetIntent(enum.RolloutIntentUninstall)
+			r.MarkPending(ts.Generation())
+			if err = tx.UpsertRollout(ctx, r); err != nil {
+				return err
+			}
+			uninstall++
+		}
+		return nil
+	})
+	if err != nil {
+		if unknown, ok := err.(*UnknownTargetsError); ok {
+			s.logger.Warn().
+				Str("spec_id", specID).
+				Strs("missing_agents", unknown.Agents).
+				Msg("deploy rejected: unknown target agents")
+		}
+		return err
+	}
+
+	s.logger.Debug().
+		Str("spec_id", specID).
+		Int("generation", generation).
+		Int("install", install).
+		Int("update", update).
+		Int("uninstall", uninstall).
+		Int("noop", noop).
+		Msg("deploy reconciled rollouts")
+	return nil
+}
+
+func validateSpec(ts *model.Spec) error {
+	if ts == nil || strings.TrimSpace(ts.Name()) == "" {
+		return fmt.Errorf("%w: spec name is required", storage.ErrInvalidArgument)
+	}
+	if _, err := proxy.SpecToProto(ts); err != nil {
+		return fmt.Errorf("%w: %v", storage.ErrInvalidArgument, err)
+	}
+	for k, v := range ts.TargetLabels() {
+		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+			return fmt.Errorf("%w: target selector key/value required", storage.ErrInvalidArgument)
+		}
 	}
 	return nil
 }

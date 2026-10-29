@@ -1,42 +1,10 @@
-// Package storage defines persistence contracts for control-plane domain entities.
-//
-// It provides backend-agnostic interfaces describing how domain objects
-// (User, Role, Agent, Credential, Session, Verifier) are stored and retrieved.
-//
-// Design goals
-//
-//   - Backend independence: domain and application layers depend only on
-//     these interfaces, not on concrete implementations.
-//
-//   - Explicit error semantics: all methods document which sentinel errors
-//     may be returned (ErrNotFound, ErrInvalidArgument, ErrConflict,
-//     ErrAlreadyExists, ErrUnavailable, ErrInternal).
-//
-//   - Deterministic pagination: all list operations must follow the ordering
-//
-//     (UpdatedAt DESC, ID ASC)
-//
-//     and use opaque cursor-based pagination.
-//
-//   - Filter isolation: filter types are backend-specific. A backend must
-//     validate that a provided filter was constructed for that backend and
-//     return ErrInvalidArgument otherwise.
-//
-// Error model
-//
-//   - ErrInvalidArgument — caller error (bad input, malformed cursor, wrong filter).
-//   - ErrNotFound — entity does not exist.
-//   - ErrAlreadyExists — create conflict.
-//   - ErrConflict — concurrent modification or version mismatch.
-//   - ErrUnavailable — temporary backend failure (retryable).
-//   - ErrInternal — unexpected or invariant-violating storage failure.
 package storage
 
 import (
 	"context"
 	"time"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 )
 
@@ -104,6 +72,38 @@ type AgentStore interface {
 	//   - ErrUnavailable if the backend is temporarily unavailable.
 	//   - ErrInternal for unexpected storage failures.
 	DeleteAgent(ctx context.Context, id string) error
+}
+
+// AgentCredentialStore persists per-agent bearer secrets learned at discovery
+// (trust-on-first-use). Keyed by agent ID — one credential per agent. The token
+// is raw (the control plane must present it on outbound calls), so it is never
+// surfaced to API/UI and never logged in clear.
+type AgentCredentialStore interface {
+	// UpsertAgentCredential stores or replaces an agent's credential.
+	//
+	// Returns:
+	//   - ErrInvalidArgument if the credential is nil or violates storage-level invariants.
+	//   - ErrUnavailable if the backend is temporarily unavailable.
+	//   - ErrInternal for unexpected storage failures.
+	UpsertAgentCredential(ctx context.Context, c *model.AgentCredential) error
+
+	// GetAgentCredential retrieves the credential bound to an agent.
+	//
+	// Returns:
+	//   - ErrNotFound if the agent has no credential yet (not enrolled).
+	//   - ErrInvalidArgument if the agent ID is empty or malformed.
+	//   - ErrUnavailable if the backend is temporarily unavailable.
+	//   - ErrInternal for unexpected storage failures.
+	GetAgentCredential(ctx context.Context, agentID string) (*model.AgentCredential, error)
+
+	// DeleteAgentCredential removes an agent's credential (revoke / reset).
+	//
+	// Returns:
+	//   - ErrNotFound if no credential exists for the agent.
+	//   - ErrInvalidArgument if the agent ID is empty or malformed.
+	//   - ErrUnavailable if the backend is temporarily unavailable.
+	//   - ErrInternal for unexpected storage failures.
+	DeleteAgentCredential(ctx context.Context, agentID string) error
 }
 
 // UserStore defines persistence operations for user entities.
@@ -180,7 +180,7 @@ type CredentialStore interface {
 	//   - ErrInvalidArgument if userID is empty.
 	//   - ErrUnavailable if the backend is temporarily unavailable.
 	//   - ErrInternal for unexpected storage failures.
-	GetCredentialByUserAndAuth(ctx context.Context, userID string, auth kind.Auth) (*model.Credential, error)
+	GetCredentialByUserAndAuth(ctx context.Context, userID string, auth enum.Auth) (*model.Credential, error)
 
 	// ListCredentialsByUser retrieves all credentials for a specific user.
 	//
@@ -408,9 +408,6 @@ type SpecStore interface {
 }
 
 // RolloutStore defines persistence operations for rollout entities.
-//
-// A rollout (model.Rollout) tracks the delivery state of a single Spec
-// on a specific agent: desired vs actual version, sync status, and attempts.
 type RolloutStore interface {
 	// UpsertRollout creates a new rollout or replaces an existing one.
 	//
@@ -459,14 +456,43 @@ type RolloutStore interface {
 	DeleteRolloutsBySpec(ctx context.Context, specID string) error
 }
 
+// FilterFactory defines constructors for backend-specific filters built from backend-agnostic query criteria.
+type FilterFactory interface {
+	BuildExecutionFilter(c ExecutionQueryCriteria) ExecutionFilter
+
+	// BuildRolloutFilter constructs a RolloutFilter for this backend from the supplied criteria.
+	// Empty criteria match every rollout.
+	BuildRolloutFilter(c RolloutQueryCriteria) RolloutFilter
+
+	// BuildSpecFilter constructs a SpecFilter for this backend from the supplied criteria.
+	// Empty criteria match every spec.
+	BuildSpecFilter(c SpecQueryCriteria) SpecFilter
+}
+
+// TxStore groups transactional operations.
+//
+// WithTx runs fn inside a single atomic transaction: mutations become visible after fn returns nil;
+// on error the transaction is rolled back and no changes are observed.
+//
+// Contract: fn must contain only calls to tx.
+// No network I/O, no event publication, no stateful side-effects - in a Raft-replicated backend fn runs on
+// every replica at apply time and must be deterministic.
+type TxStore interface {
+	WithTx(ctx context.Context, fn func(tx Storage) error) error
+}
+
 // Storage aggregates all storage capabilities for domain entities.
 type Storage interface {
+	ExecutionStore
 	CredentialStore
+	FilterFactory
 	VerifierStore
 	SessionStore
 	RolloutStore
 	AgentStore
+	AgentCredentialStore
 	RoleStore
 	UserStore
 	SpecStore
+	TxStore
 }

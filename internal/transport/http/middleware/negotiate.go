@@ -20,17 +20,13 @@ func Negotiate(json *responder.JSONResponder, html *responder.HTMLResponder) fun
 			mode := httpctx.ModeFromRequest(r)
 
 			var resp responder.Responder
-			if strings.HasPrefix(r.URL.Path, "/api/") && mode != httpctx.RenderBlock {
+			if strings.HasPrefix(r.URL.Path, "/api/") && (mode != httpctx.RenderBlock || strings.Contains(r.Header.Get("Accept"), "application/json")) {
 				resp = json
 			} else {
 				resp = html
 			}
 
-			ctx := r.Context()
-			ctx = httpctx.WithResponder(ctx, resp)
-			ctx = httpctx.WithRenderMode(ctx, mode)
-
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, r.WithContext(httpctx.WithResponder(r.Context(), resp)))
 		})
 	}
 }

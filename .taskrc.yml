@@ -1,0 +1,4 @@
+remote:
+  cache-expiry: 24h
+  trusted-hosts:
+    - raw.githubusercontent.com

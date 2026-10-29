@@ -1,0 +1,146 @@
+package history
+
+import (
+	"fmt"
+	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
+	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
+	"github.com/soltiHQ/control-plane/ui/templates/component/card"
+	"github.com/soltiHQ/control-plane/ui/templates/component/form"
+	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
+	"net/url"
+	"strconv"
+	"time"
+)
+
+// Filters uses a regular GET so every filtered page has a shareable URL and
+// changing criteria always starts from the first archive page.
+templ Filters(query restv1.HistoryQuery) {
+	<form method="get" action={ routepath.PageHistory } class="space-y-3">
+		<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+			@FilterInput("agent_id", "Agent ID", query.AgentID)
+			@FilterInput("spec_id", "Spec ID", query.SpecID)
+			@FilterInput("task_name", "Task name", query.TaskName)
+			@FilterInput("task_uid", "Task UID", query.TaskUID)
+			<label class="text-xs space-y-1">
+				<span>Attempt result</span>
+				<select name="status" class={ form.BaseInputClass + "h-10 px-3 text-sm" }>
+					<option value="" selected?={ query.Status=="" }>All terminal results</option>
+					for _,value:=range []string{"succeeded","failed","timeout","canceled","exhausted"} {
+						<option value={ value } selected?={ query.Status==value }>{ value }</option>
+					}
+				</select>
+			</label>
+			<label class="text-xs space-y-1"><span>Page size</span><input type="number" name="limit" min="1" max="100" value={ strconv.Itoa(query.Limit) } class={ form.BaseInputClass + "h-10 px-3 text-sm" }/></label>
+		</div>
+		<div class="flex items-center gap-3"><button type="submit" class="rounded border border-primary/30 bg-primary-bg px-3 py-2 text-sm text-primary">Apply filters</button><a class="text-xs text-muted hover:text-fg" href={ templ.SafeURL(routepath.PageHistory) }>Clear filters</a><span class="text-xs text-muted">All filters are exact matches.</span></div>
+	</form>
+}
+
+templ FilterInput(name, label, value string) {
+	<label class="text-xs space-y-1"><span>{ label }</span><input type="text" name={ name } value={ value } maxlength="512" class={ form.BaseInputClass + "h-10 px-3 text-sm font-mono" }/></label>
+}
+
+templ Results(page restv1.ListHistoryResponse, query restv1.HistoryQuery) {
+	<section id="history-results" class="space-y-4">
+		<div class="flex items-center justify-between gap-3 flex-wrap"><p class="text-xs text-muted">{ fmt.Sprintf("%d captured attempts on this page",len(page.Items)) }</p><button type="button" class="text-xs text-primary hover:text-primary/80" hx-get={ QueryURL(routepath.ApiHistory, query, query.Cursor) } hx-target="#history-results" hx-select="#history-results" hx-swap="outerHTML">Refresh captured results</button></div>
+		if len(page.Items)==0 {
+			<div class="rounded border border-border p-6 text-sm text-muted">No captured attempts match these filters. An empty archive does not prove that an agent never ran tasks.</div>
+		}
+		for _,record:=range page.Items {
+			@card.Card("") {
+				@card.CardBody() {
+					<div class="flex items-start justify-between gap-3 flex-wrap">
+ <div class="min-w-0">
+ <h2 class="text-sm font-medium break-words">{ historyRecordTitle(record) }</h2>
+ if record.SpecName!="" {
+ <p class="text-[11px] text-muted">Spec name at capture</p>
+ }
+ <p class="text-xs text-muted break-words">{ record.AgentName } · { record.AgentID }</p>
+ </div>
+ @visual.Badge(record.Status, historyStatusVariant(record.Status))
+ </div>
+					<div class="flex items-center gap-2 flex-wrap mt-3">
+						@visual.Badge(fmt.Sprintf("SDK gen %d · attempt %d", record.Generation, record.Attempt), visual.VariantMuted)
+						if record.WorkloadAPIVersion!="" || record.WorkloadKind!="" {
+							@visual.Badge(record.WorkloadAPIVersion+" · "+record.WorkloadKind, visual.VariantSecondary)
+						}
+					</div>
+					<p class="text-xs text-muted mt-3">Source run time: { runTime(record.StartedAtMs) } → { runTime(record.FinishedAtMs) }</p>
+					if record.ExitCode!=nil {
+						<p class="text-xs mt-2">Exit code: { fmt.Sprintf("%d",*record.ExitCode) }</p>
+					}
+					if record.Error!="" {
+						<p class="text-xs text-danger whitespace-pre-wrap break-words mt-2">{ record.Error }</p>
+					}
+					<details class="mt-3">
+						<summary class="cursor-pointer text-xs text-primary">Capture provenance and task identity</summary>
+						<dl class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs mt-3">
+							<div class="min-w-0"><dt class={ visual.SectionLabel+" mb-0.5" }>Task resource name</dt><dd class="text-xs font-mono text-fg break-all">{ record.TaskName }</dd></div>
+ @visual.KV("Task UID", record.TaskUID)
+							@visual.KV("SDK generation", fmt.Sprintf("%d", record.Generation))
+							@visual.KV("First captured by Podium", captureTime(record.CapturedAt))
+							@visual.KV("Source resource version", record.SourceResourceVersion)
+							@visual.KV("Record ID", record.ID)
+							if record.SpecID!="" {
+								@visual.KV("Spec at capture", record.SpecName+" · "+record.SpecID)
+							}
+						</dl>
+					</details>
+				}
+			}
+		}
+		<div class="flex items-center gap-3">
+			if query.Cursor!="" {
+				<a class="text-sm text-primary hover:underline" href={ templ.SafeURL(QueryURL(routepath.PageHistory, query, "")) }>First page</a>
+			}
+			if page.NextCursor!="" {
+				<a class="text-sm text-primary hover:underline" href={ templ.SafeURL(QueryURL(routepath.PageHistory, query, page.NextCursor)) }>Next page</a>
+			}
+		</div>
+	</section>
+}
+
+func QueryURL(base string, query restv1.HistoryQuery, cursor string) string {
+	values := url.Values{}
+	for key, value := range map[string]string{"agent_id": query.AgentID, "spec_id": query.SpecID, "task_name": query.TaskName, "task_uid": query.TaskUID, "status": query.Status, "cursor": cursor} {
+		if value != "" {
+			values.Set(key, value)
+		}
+	}
+	if query.Limit > 0 {
+		values.Set("limit", strconv.Itoa(query.Limit))
+	}
+	encoded := values.Encode()
+	if encoded == "" {
+		return base
+	}
+	return base + "?" + encoded
+}
+func runTime(ms int64) string {
+	if ms == 0 {
+		return "Not reported"
+	}
+	return time.UnixMilli(ms).UTC().Format("2006-01-02 15:04:05 UTC")
+}
+func captureTime(value string) string {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return value
+	}
+	return parsed.UTC().Format("2006-01-02 15:04:05 UTC")
+}
+func historyStatusVariant(status string) visual.Variant {
+	switch status {
+	case "succeeded":
+		return visual.VariantSuccess
+	case "failed", "timeout", "exhausted":
+		return visual.VariantDanger
+	default:
+		return visual.VariantMuted
+	}
+}
+
+func historyRecordTitle(record restv1.ExecutionRecord) string {
+ if record.SpecName!="" { return record.SpecName }
+ return record.TaskName
+}

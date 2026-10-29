@@ -4,12 +4,13 @@ import "github.com/soltiHQ/control-plane/internal/auth/identity"
 
 // AgentDetail is a UI-oriented policy for the agent detail page.
 //
-// It controls which interactive elements (buttons, forms) are rendered
-// in the agent detail view based on the caller's permissions.
+// It controls which interactive elements (buttons, forms) are rendered in the agent detail view based on the caller's permissions.
 //
-// Passed into the templ component so markup stays free of auth logic.
+// Passed into the templ component, markup stays free of auth logic.
 type AgentDetail struct {
-	CanEditLabels bool
+	CanEditLabels   bool
+	CanOperateTasks bool
+	CanViewHistory  bool
 }
 
 // BuildAgentDetail derives UI action flags from the authenticated identity.
@@ -20,6 +21,8 @@ func BuildAgentDetail(id *identity.Identity) AgentDetail {
 
 	perms := permSet(id)
 	return AgentDetail{
-		CanEditLabels: hasAny(perms, agentsEdit),
+		CanEditLabels:   hasAny(perms, agentsEdit),
+		CanOperateTasks: hasAny(perms, agentsEdit),
+		CanViewHistory:  hasAny(perms, agentsGet),
 	}
 }

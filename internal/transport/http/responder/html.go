@@ -4,7 +4,6 @@ import (
 	"net/http"
 
 	"github.com/a-h/templ"
-	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 )
 
 // HTMLResponder renders responses using templ components.
@@ -15,13 +14,13 @@ func NewHTML() *HTMLResponder { return &HTMLResponder{} }
 
 // Respond renders a templ component from v.Component.
 func (x *HTMLResponder) Respond(w http.ResponseWriter, r *http.Request, code int, v *View) {
-	if code == http.StatusUnauthorized {
+	if code == http.StatusUnauthorized && LoginPath != "" {
 		if r.Header.Get("HX-Request") == "true" {
-			w.Header().Set("HX-Redirect", routepath.PageLogin)
+			w.Header().Set("HX-Redirect", LoginPath)
 			x.writeHeaders(w, http.StatusUnauthorized)
 			return
 		}
-		http.Redirect(w, r, routepath.PageLogin, http.StatusFound)
+		http.Redirect(w, r, LoginPath, http.StatusFound)
 		return
 	}
 

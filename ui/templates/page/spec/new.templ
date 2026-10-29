@@ -13,6 +13,6 @@ templ New(nav policy.Nav) {
 	@layout.App("New Spec", "tasks", nav) {
 		@compnav.BackLink(routepath.PageSpecs, "Back to Specs")
 
-		@contentSpec.BuilderPage()
+		@contentSpec.BuilderPage(nil)
 	}
 }

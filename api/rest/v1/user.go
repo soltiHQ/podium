@@ -14,8 +14,13 @@ type User struct {
 	Disabled bool `json:"disabled"`
 }
 
-// UserListResponse is the paginated list of users.
-type UserListResponse struct {
+// ListUsersResponse is a cursor-paginated list of users (next_cursor).
+type ListUsersResponse struct {
 	Items      []User `json:"items"`
 	NextCursor string `json:"next_cursor,omitempty"`
+}
+
+// SetPasswordRequest is the request body for POST /users/{id}/password.
+type SetPasswordRequest struct {
+	Password string `json:"password"`
 }

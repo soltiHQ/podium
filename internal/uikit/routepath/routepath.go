@@ -1,11 +1,3 @@
-// Package routepath declares all URL constants used by the control-plane UI and API.
-//
-// Constants are split into two groups:
-//   - Page* — browser-facing paths served by the UI handler (HTML pages).
-//   - Api*  — JSON/REST endpoints served by the API handler.
-//
-// Path-builder functions (var block) append an entity ID to a base path, keeping URL construction consistent
-// and typo-free across handlers, templates, and Alpine.js fetch calls.
 package routepath
 
 import "net/url"
@@ -18,17 +10,22 @@ const (
 	PageUsers    = "/users"
 	PageUserInfo = "/users/info/"
 
+	PageHistory = "/history"
+
 	PageAgents    = "/agents"
 	PageAgentInfo = "/agents/info/"
 
 	PageSpecs    = "/specs"
 	PageSpecNew  = "/specs/new"
+	PageSpecEdit = "/specs/edit/"
 	PageSpecInfo = "/specs/info/"
 
 	ApiSession = "/api/v1/session/"
 
 	ApiUsers = "/api/v1/users"
 	ApiUser  = "/api/v1/users/"
+
+	ApiHistory = "/api/v1/history"
 
 	ApiAgents = "/api/v1/agents"
 	ApiAgent  = "/api/v1/agents/"
@@ -44,25 +41,40 @@ const (
 	ApiEventStream     = "/api/v1/events/stream"
 )
 
-var (
-	PageUserInfoByID     = func(id string) string { return PageUserInfo + id }
-	ApiUserCrudOp        = func(id string) string { return ApiUser + id }
-	ApiUserEnable        = func(id string) string { return ApiUser + id + "/enable" }
-	ApiUserDisable       = func(id string) string { return ApiUser + id + "/disable" }
-	ApiUserSessions      = func(id string) string { return ApiUser + id + "/sessions" }
-	ApiUserPassword      = func(id string) string { return ApiUser + id + "/password" }
-	ApiUserRevokeSession = func(id string) string { return ApiSession + id + "/revoke" }
+// Users.
 
-	PageAgentInfoByID = func(id string) string { return PageAgentInfo + id }
-	ApiAgentByID      = func(id string) string { return ApiAgent + id }
-	ApiAgentLabels    = func(id string) string { return ApiAgent + id + "/labels" }
-	ApiAgentTasks     = func(id string) string { return ApiAgent + id + "/tasks" }
+func PageUserInfoByID(id string) string     { return PageUserInfo + id }
+func ApiUserByID(id string) string          { return ApiUser + id }
+func ApiUserEnable(id string) string        { return ApiUser + id + "/enable" }
+func ApiUserDisable(id string) string       { return ApiUser + id + "/disable" }
+func ApiUserSessions(id string) string      { return ApiUser + id + "/sessions" }
+func ApiUserPassword(id string) string      { return ApiUser + id + "/password" }
+func ApiUserRevokeSession(id string) string { return ApiSession + id + "/revoke" }
 
-	PageSpecInfoByID = func(id string) string { return PageSpecInfo + id }
-	ApiSpecByID      = func(id string) string { return ApiSpec + id }
-	ApiSpecDeploy    = func(id string) string { return ApiSpec + id + "/deploy" }
-	ApiSpecSync      = func(id string) string { return ApiSpec + id + "/sync" }
-)
+// Agents.
+
+func PageAgentInfoByID(id string) string { return PageAgentInfo + id }
+func ApiAgentByID(id string) string      { return ApiAgent + id }
+func ApiAgentLabels(id string) string    { return ApiAgent + id + "/labels" }
+func ApiAgentTasks(id string) string     { return ApiAgent + id + "/tasks" }
+
+func ApiAgentTaskLogs(agentID, taskID string, uid ...string) string {
+	path := ApiAgent + url.PathEscape(agentID) + "/tasks/" + url.PathEscape(taskID) + "/logs/stream"
+	if len(uid) > 0 && uid[0] != "" {
+		path += "?task_uid=" + url.QueryEscape(uid[0])
+	}
+	return path
+}
+
+// Specs.
+
+func PageSpecInfoByID(id string) string   { return PageSpecInfo + id }
+func PageSpecEditByID(id string) string   { return PageSpecEdit + id }
+func ApiSpecByID(id string) string        { return ApiSpec + id }
+func ApiSpecDeploy(id string) string      { return ApiSpec + id + "/deploy" }
+func ApiSpecPlacement(id string) string   { return ApiSpec + id + "/placement" }
+func ApiSpecSync(id string) string        { return ApiSpec + id + "/sync" }
+func ApiSpecForceDelete(id string) string { return ApiSpec + id + "/force" }
 
 // CursorURL appends optional cursor and query parameters to a base API path.
 func CursorURL(base, cursor, q string) string {
@@ -79,3 +91,9 @@ func CursorURL(base, cursor, q string) string {
 	}
 	return base + "?" + qs
 }
+
+func ApiAgentTask(agentID, taskID string) string {
+	return ApiAgent + url.PathEscape(agentID) + "/tasks/" + url.PathEscape(taskID)
+}
+
+func PageHistoryByAgent(id string) string { return PageHistory + "?agent_id=" + url.QueryEscape(id) }

@@ -1,22 +1,28 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 
 	"github.com/rs/zerolog"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/event"
+	"github.com/soltiHQ/control-plane/internal/loghub"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
+	"github.com/soltiHQ/control-plane/internal/service/history"
 	"github.com/soltiHQ/control-plane/internal/service/session"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
 	"github.com/soltiHQ/control-plane/internal/service/user"
+	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/http/route"
@@ -25,7 +31,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
-	apimapv1 "github.com/soltiHQ/control-plane/internal/transport/http/apimap/v1"
+	wire "github.com/soltiHQ/control-plane/domain/wire"
 )
 
 // upsertMode selects create/update branch in upsert handlers.
@@ -43,9 +49,12 @@ type API struct {
 	accessSVC     *access.Service
 	agentSVC      *agent.Service
 	specSVC       *spec.Service
+	historySVC    *history.Service
 	userSVC       *user.Service
 	proxyPool     *proxy.Pool
 	hub           *event.Hub
+	logHub        *loghub.Hub
+	streamLimit   *middleware.StreamLimiter
 
 	logger zerolog.Logger
 }
@@ -59,8 +68,11 @@ func NewAPI(
 	credentialSVC *credential.Service,
 	agentSVC *agent.Service,
 	specSVC *spec.Service,
+	historySVC *history.Service,
 	proxyPool *proxy.Pool,
 	hub *event.Hub,
+	logHub *loghub.Hub,
+	streamLimit *middleware.StreamLimiter,
 ) *API {
 	if accessSVC == nil {
 		panic(service.ErrNilService)
@@ -80,11 +92,20 @@ func NewAPI(
 	if specSVC == nil {
 		panic(service.ErrNilService)
 	}
+	if historySVC == nil {
+		panic(service.ErrNilService)
+	}
 	if proxyPool == nil {
 		panic(proxy.ErrNilPool)
 	}
 	if hub == nil {
 		panic(event.ErrNilHub)
+	}
+	if logHub == nil {
+		panic("handler.NewAPI: nil log hub")
+	}
+	if streamLimit == nil {
+		panic("handler.NewAPI: nil stream limiter")
 	}
 	return &API{
 		logger: logger.With().Str("handler", "api").Logger(),
@@ -94,9 +115,12 @@ func NewAPI(
 		accessSVC:     accessSVC,
 		agentSVC:      agentSVC,
 		specSVC:       specSVC,
+		historySVC:    historySVC,
 		userSVC:       userSVC,
 		proxyPool:     proxyPool,
 		hub:           hub,
+		logHub:        logHub,
+		streamLimit:   streamLimit,
 	}
 }
 
@@ -107,7 +131,11 @@ func (a *API) Routes(mux *http.ServeMux, auth route.BaseMW, _ route.PermMW, comm
 	route.HandleFunc(mux, routepath.ApiUser, a.UsersRouter, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiSession, a.SessionsRouter, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiAgents, a.Agents, append(common, auth)...)
+	route.HandleFunc(mux, "GET /api/v1/agents/{id}/tasks/{taskID}/logs/stream", a.AgentTaskLogsStream, append(common, auth, middleware.RequirePermission(enum.AgentsGet), middleware.StreamLimit(a.streamLimit))...)
+	route.HandleFunc(mux, "POST /api/v1/agents/{id}/tasks/{taskID}/cancel", a.AgentTaskCancel, append(common, auth, middleware.RequirePermission(enum.AgentsEdit))...)
+	route.HandleFunc(mux, "GET /api/v1/agents/{id}/tasks/{taskID}", a.AgentTaskDetail, append(common, auth, middleware.RequirePermission(enum.AgentsGet))...)
 	route.HandleFunc(mux, routepath.ApiAgent, a.AgentsRouter, append(common, auth)...)
+	route.HandleFunc(mux, routepath.ApiHistory, a.History, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiSpecs, a.Specs, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiSpec, a.SpecsRouter, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiDashboard, a.Dashboard, append(common, auth)...)
@@ -119,14 +147,14 @@ func (a *API) Routes(mux *http.ServeMux, auth route.BaseMW, _ route.PermMW, comm
 // Permissions handles GET /api/v1/permissions.
 func (a *API) Permissions(w http.ResponseWriter, r *http.Request) {
 	route.Resource(w, r, "",
-		route.Endpoint{Method: http.MethodGet, Perm: kind.UsersEdit, Fn: a.permissionsList},
+		route.Endpoint{Method: http.MethodGet, Perm: enum.UsersEdit, Fn: a.permissionsList},
 	)
 }
 
 // Roles handles GET /api/v1/roles.
 func (a *API) Roles(w http.ResponseWriter, r *http.Request) {
 	route.Resource(w, r, "",
-		route.Endpoint{Method: http.MethodGet, Perm: kind.UsersEdit, Fn: a.rolesList},
+		route.Endpoint{Method: http.MethodGet, Perm: enum.UsersEdit, Fn: a.rolesList},
 	)
 }
 
@@ -135,10 +163,10 @@ func (a *API) permissionsList(w http.ResponseWriter, r *http.Request, mode httpc
 
 	items := make([]string, 0, len(perms))
 	for _, p := range perms {
-		items = append(items, apimapv1.Permission(p))
+		items = append(items, wire.PermissionToREST(p))
 	}
 	response.OK(w, r, mode, &responder.View{
-		Data: restv1.PermissionListResponse{Items: items},
+		Data: restv1.ListPermissionsResponse{Items: items},
 	})
 }
 
@@ -150,9 +178,9 @@ func (a *API) rolesList(w http.ResponseWriter, r *http.Request, mode httpctx.Ren
 		return
 	}
 
-	items := mapSlice(roles, apimapv1.Role)
+	items := mapSlice(roles, wire.RoleToREST)
 	response.OK(w, r, mode, &responder.View{
-		Data: restv1.RoleListResponse{Items: items},
+		Data: restv1.ListRolesResponse{Items: items},
 	})
 }
 
@@ -173,8 +201,22 @@ func (a *API) actor(r *http.Request) string {
 // decodeJSON reads and decodes a JSON request body into v.
 func decodeJSON[T any](r *http.Request) (T, error) {
 	var v T
-	err := json.NewDecoder(r.Body).Decode(&v)
-	return v, err
+	raw, err := io.ReadAll(io.LimitReader(r.Body, (2<<20)+1))
+	if err != nil {
+		return v, err
+	}
+	if len(raw) > 2<<20 {
+		return v, errors.New("JSON request exceeds 2 MiB")
+	}
+	d := json.NewDecoder(bytes.NewReader(raw))
+	if err := d.Decode(&v); err != nil {
+		return v, err
+	}
+	var extra any
+	if err := d.Decode(&extra); err != io.EOF {
+		return v, errors.New("request body must contain one JSON value")
+	}
+	return v, nil
 }
 
 // queryInt reads a query parameter as int, returning fallback if absent or invalid.

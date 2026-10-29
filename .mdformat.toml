@@ -1,0 +1,4 @@
+wrap = 80
+
+[plugin.tables]
+compact_tables = true

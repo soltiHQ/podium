@@ -1,17 +1,16 @@
 package handler
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 
-	"github.com/rs/zerolog"
 	"github.com/segmentio/ksuid"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/http/route"
@@ -21,7 +20,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
-	apimapv1 "github.com/soltiHQ/control-plane/internal/transport/http/apimap/v1"
+	wire "github.com/soltiHQ/control-plane/domain/wire"
 	contentSpec "github.com/soltiHQ/control-plane/ui/templates/content/spec"
 )
 
@@ -32,8 +31,8 @@ import (
 //   - POST /api/v1/specs
 func (a *API) Specs(w http.ResponseWriter, r *http.Request) {
 	route.Resource(w, r, routepath.ApiSpecs,
-		route.Endpoint{Method: http.MethodGet, Perm: kind.SpecsGet, Fn: a.specList},
-		route.Endpoint{Method: http.MethodPost, Perm: kind.SpecsAdd, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode) {
+		route.Endpoint{Method: http.MethodGet, Perm: enum.SpecsGet, Fn: a.specList},
+		route.Endpoint{Method: http.MethodPost, Perm: enum.SpecsAdd, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode) {
 			a.specUpsert(w, r, m, "", modeCreate)
 		}},
 	)
@@ -45,36 +44,33 @@ func (a *API) Specs(w http.ResponseWriter, r *http.Request) {
 //   - GET    /api/v1/specs/{id}
 //   - PUT    /api/v1/specs/{id}
 //   - DELETE /api/v1/specs/{id}
+//   - DELETE /api/v1/specs/{id}/force
 //   - POST   /api/v1/specs/{id}/deploy
 //   - GET    /api/v1/specs/{id}/sync
+//   - GET    /api/v1/specs/{id}/placement
 func (a *API) SpecsRouter(w http.ResponseWriter, r *http.Request) {
 	route.Router(w, r, routepath.ApiSpec,
-		route.Subroute{Action: "", Method: http.MethodGet, Perm: kind.SpecsGet, Fn: a.specDetails},
-		route.Subroute{Action: "", Method: http.MethodPut, Perm: kind.SpecsEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
+		route.Subroute{Action: "", Method: http.MethodGet, Perm: enum.SpecsGet, Fn: a.specDetails},
+		route.Subroute{Action: "", Method: http.MethodPut, Perm: enum.SpecsEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
 			a.specUpsert(w, r, m, id, modeUpdate)
 		}},
-		route.Subroute{Action: "", Method: http.MethodDelete, Perm: kind.SpecsEdit, Fn: a.specDelete},
-		route.Subroute{Action: "deploy", Method: http.MethodPost, Perm: kind.SpecsDeploy, Fn: a.specDeploy},
-		route.Subroute{Action: "sync", Method: http.MethodGet, Perm: kind.SpecsGet, Fn: a.specRollouts},
+		route.Subroute{Action: "", Method: http.MethodDelete, Perm: enum.SpecsEdit, Fn: a.specDelete},
+		route.Subroute{Action: "force", Method: http.MethodDelete, Perm: enum.SpecsEdit, Fn: a.specForceDelete},
+		route.Subroute{Action: "deploy", Method: http.MethodPost, Perm: enum.SpecsDeploy, Fn: a.specDeploy},
+		route.Subroute{Action: "sync", Method: http.MethodGet, Perm: enum.SpecsGet, Fn: a.specRollouts},
+		route.Subroute{Action: "placement", Method: http.MethodGet, Perm: enum.SpecsGet, Fn: a.specPlacement},
 	)
 }
 
 func (a *API) specList(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
-	var (
-		limit  = queryInt(r, "limit", 0)
-		filter storage.SpecFilter
-
-		cursor = r.URL.Query().Get("cursor")
-		q      = r.URL.Query().Get("q")
-	)
-	if q != "" {
-		filter = inmemory.NewSpecFilter().Query(q)
-	}
+	limit := queryInt(r, "limit", 0)
+	cursor := r.URL.Query().Get("cursor")
+	q := r.URL.Query().Get("q")
 
 	res, err := a.specSVC.List(r.Context(), spec.ListQuery{
-		Limit:  limit,
-		Cursor: cursor,
-		Filter: filter,
+		Limit:    limit,
+		Cursor:   cursor,
+		Criteria: storage.SpecQueryCriteria{Query: q},
 	})
 	if err != nil {
 		a.logger.Error().Err(err).Msg("spec list failed")
@@ -82,9 +78,9 @@ func (a *API) specList(w http.ResponseWriter, r *http.Request, mode httpctx.Rend
 		return
 	}
 
-	items := mapSlice(res.Items, apimapv1.Spec)
+	items := mapSlice(res.Items, wire.SpecToREST)
 	response.OK(w, r, mode, &responder.View{
-		Data: restv1.SpecListResponse{
+		Data: restv1.ListSpecsResponse{
 			Items:      items,
 			NextCursor: res.NextCursor,
 		},
@@ -95,23 +91,21 @@ func (a *API) specList(w http.ResponseWriter, r *http.Request, mode httpctx.Rend
 func (a *API) specDetails(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	ts, err := a.specSVC.Get(r.Context(), id)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			response.NotFound(w, r, mode)
-			return
+		if !errors.Is(err, storage.ErrNotFound) {
+			a.logger.Error().Err(err).Str("spec", id).Msg("spec get failed")
 		}
-		a.logger.Error().Err(err).Str("spec", id).Msg("spec get failed")
-		response.Unavailable(w, r, mode)
+		response.FromError(w, r, mode, err)
 		return
 	}
 
-	states, err := a.specSVC.RolloutsBySpec(r.Context(), id, inmemory.NewRolloutFilter().BySpecID(id))
+	states, err := a.specSVC.RolloutsBySpec(r.Context(), id)
 	if err != nil {
 		a.logger.Error().Err(err).Str("spec", id).Msg("spec rollouts failed")
 		response.Unavailable(w, r, mode)
 		return
 	}
 
-	dto := apimapv1.RolloutSpec(ts, states)
+	dto := wire.RolloutSpecToREST(ts, states)
 	response.OK(w, r, mode, &responder.View{
 		Data:      dto,
 		Component: contentSpec.Detail(dto, policy.BuildSpecDetail(a.identity(r))),
@@ -119,12 +113,24 @@ func (a *API) specDetails(w http.ResponseWriter, r *http.Request, mode httpctx.R
 }
 
 func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string, action upsertMode) {
-	in, err := decodeJSON[restv1.SpecCreateRequest](r)
+	raw, err := decodeJSON[json.RawMessage](r)
+	var in restv1.SpecCreateRequest
+	var fields map[string]json.RawMessage
+	if err == nil {
+		err = json.Unmarshal(raw, &in)
+	}
+	if err == nil {
+		err = json.Unmarshal(raw, &fields)
+	}
 	if err != nil {
 		response.BadRequest(w, r, mode)
 		return
 	}
 
+	if action == modeUpdate && in.Version <= 0 {
+		response.BadRequestMsg(w, r, mode, "The current spec version is required when updating.")
+		return
+	}
 	var ts *model.Spec
 
 	switch action {
@@ -150,11 +156,16 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 			response.Unavailable(w, r, mode)
 			return
 		}
-		if in.Name != "" {
+		if _, present := fields["name"]; present {
 			x.SetName(in.Name)
 		}
-		if in.Slot != "" {
-			x.SetSlot(in.Slot)
+		// Slot is immutable after create — it is the task's identity/lane on
+		// the agent, and ApplyTask supersedes only within a slot, so changing
+		// it would orphan the old task. A different slot is a new spec, not an
+		// edit. Echoing the same slot is fine; a different value is rejected.
+		if in.Slot != "" && in.Slot != x.Slot() {
+			response.BadRequest(w, r, mode)
+			return
 		}
 		ts = x
 	default:
@@ -164,48 +175,36 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 
 	// Kind
 	if in.KindType != "" {
-		ts.SetKindType(kind.TaskKindType(in.KindType))
+		ts.SetKindType(enum.TaskKindType(in.KindType))
 	}
 	if in.KindConfig != nil {
 		ts.SetKindConfig(in.KindConfig)
 	}
 
 	// Lifecycle
-	if in.TimeoutMs > 0 {
+	if _, present := fields["timeout_ms"]; present {
 		ts.SetTimeoutMs(in.TimeoutMs)
 	}
 	if in.RestartType != "" {
-		ts.SetRestartType(kind.RestartType(in.RestartType))
+		ts.SetRestartType(enum.RestartType(in.RestartType))
 	}
-	if in.IntervalMs > 0 {
+	if _, present := fields["interval_ms"]; present {
 		ts.SetIntervalMs(in.IntervalMs)
 	}
-	if action == modeCreate {
-		ts.SetBackoff(model.BackoffConfig{
-			Jitter:  kind.JitterStrategy(in.Jitter),
-			FirstMs: in.BackoffFirstMs,
-			MaxMs:   in.BackoffMaxMs,
-			Factor:  in.BackoffFactor,
-		})
-	} else if in.Jitter != "" || in.BackoffFirstMs > 0 || in.BackoffMaxMs > 0 || in.BackoffFactor > 0 {
-		b := ts.Backoff()
-		if in.Jitter != "" {
-			b.Jitter = kind.JitterStrategy(in.Jitter)
-		}
-		if in.BackoffFirstMs > 0 {
-			b.FirstMs = in.BackoffFirstMs
-		}
-		if in.BackoffMaxMs > 0 {
-			b.MaxMs = in.BackoffMaxMs
-		}
-		if in.BackoffFactor > 0 {
-			b.Factor = in.BackoffFactor
-		}
-		ts.SetBackoff(b)
+	b := ts.Backoff()
+	if _, present := fields["jitter"]; present {
+		b.Jitter = enum.JitterStrategy(in.Jitter)
 	}
-	if in.Admission != "" {
-		ts.SetAdmission(kind.AdmissionStrategy(in.Admission))
+	if _, present := fields["backoff_first_ms"]; present {
+		b.FirstMs = in.BackoffFirstMs
 	}
+	if _, present := fields["backoff_max_ms"]; present {
+		b.MaxMs = in.BackoffMaxMs
+	}
+	if _, present := fields["backoff_factor"]; present {
+		b.Factor = in.BackoffFactor
+	}
+	ts.SetBackoff(b)
 
 	// Targets
 	if action == modeCreate {
@@ -233,26 +232,44 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	if action == modeCreate {
 		if err := a.specSVC.Create(r.Context(), ts); err != nil {
 			a.logger.Error().Err(err).Msg("spec create failed")
-			response.Unavailable(w, r, mode)
+			response.FromError(w, r, mode, err)
 			return
 		}
 		a.logger.Info().Str("spec", ts.ID()).Str("name", ts.Name()).Msg("spec created")
 		a.hub.Record(event.SpecCreated, event.Payload{ID: ts.ID(), Name: ts.Name()})
-		a.hub.Notify(htmx.SpecUpdate)
+		a.hub.Notify(event.RefreshSpecs)
 		htmx.Redirect(w, routepath.PageSpecs)
 		response.NoContent(w, r)
 		return
 	}
 
-	if err = a.specSVC.Upsert(r.Context(), ts); err != nil {
+	if err = a.specSVC.Upsert(r.Context(), ts, in.Version); err != nil {
+		var conflict *spec.ConflictError
+		if errors.As(err, &conflict) {
+			a.logger.Warn().Str("spec", id).
+				Int("expected", conflict.Expected).
+				Int("actual", conflict.Actual).
+				Msg("spec update rejected: version conflict")
+			response.Conflict(w, r, mode, conflict.Error())
+			return
+		}
+		if errors.Is(err, storage.ErrInvalidArgument) {
+			response.BadRequest(w, r, mode)
+			return
+		}
 		a.logger.Error().Err(err).Str("spec", id).Msg("spec update failed")
 		response.Unavailable(w, r, mode)
 		return
 	}
 	a.logger.Info().Str("spec", id).Msg("spec updated")
 	a.hub.Record(event.SpecUpdated, event.Payload{ID: id, Name: ts.Name()})
-	htmx.Trigger(w, htmx.SpecUpdate)
-	a.hub.Notify(htmx.SpecUpdate)
+	a.hub.Notify(event.RefreshSpecs)
+	// Mirror the create path: after Save Changes send the user back to
+	// the specs list. The edit form's Alpine submit handler honors the
+	// HX-Redirect header. The old htmx.Trigger(SpecUpdate) no longer
+	// fires from this response — redirect obviates it, and the list page
+	// picks up the updated spec through its own poll/SSE stream.
+	htmx.Redirect(w, routepath.PageSpecs)
 	response.NoContent(w, r)
 }
 
@@ -264,38 +281,54 @@ func (a *API) specDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 	a.logger.Info().Str("spec", id).Msg("spec deleted")
-	a.hub.Notify(htmx.SpecUpdate)
+	a.hub.Notify(event.RefreshSpecs)
+	htmx.Redirect(w, routepath.PageSpecs)
+	response.NoContent(w, r)
+}
+
+// specForceDelete drops the spec and its rollouts immediately, without
+// waiting for agents to uninstall their tasks. Logs a warning because
+// any running task on an agent becomes orphaned: the agent keeps it
+// alive until a human intervenes. UI surfaces this option only when a
+// normal Delete got stuck on retry-exhausted Uninstall rollouts.
+func (a *API) specForceDelete(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
+	if err := a.specSVC.ForceDelete(r.Context(), id); err != nil && !errors.Is(err, storage.ErrNotFound) {
+		a.logger.Error().Err(err).Str("spec", id).Msg("spec force-delete failed")
+		response.Unavailable(w, r, mode)
+		return
+	}
+	a.logger.Warn().Str("spec", id).Msg("spec force-deleted; agent tasks may be orphaned")
+	a.hub.Notify(event.RefreshSpecs)
 	htmx.Redirect(w, routepath.PageSpecs)
 	response.NoContent(w, r)
 }
 
 func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	if err := a.specSVC.Deploy(r.Context(), id); err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			response.NotFound(w, r, mode)
+		var unsupported *spec.UnsupportedTargetsError
+		if errors.As(err, &unsupported) {
+			a.logger.Warn().Str("spec", id).Strs("unsupported_agents", unsupported.Agents).Msg("spec deploy rejected")
+			response.BadRequestMsg(w, r, mode, "Deployment blocked: a target has no compatible runner. Review the placement preview.")
 			return
 		}
-		a.logger.Error().Err(err).Str("spec", id).Msg("spec deploy failed")
-		response.Unavailable(w, r, mode)
+		var unknown *spec.UnknownTargetsError
+		if errors.As(err, &unknown) {
+			a.logger.Warn().Str("spec", id).Strs("missing_agents", unknown.Agents).Msg("spec deploy rejected")
+			response.BadRequestMsg(w, r, mode, "Deployment blocked: a target agent is missing from discovery. Review the placement preview.")
+			return
+		}
+		if !errors.Is(err, storage.ErrNotFound) {
+			a.logger.Error().Err(err).Str("spec", id).Msg("spec deploy failed")
+		}
+		response.FromError(w, r, mode, err)
 		return
 	}
 
-	rollouts, err := a.specSVC.RolloutsBySpec(r.Context(), id, inmemory.NewRolloutFilter().BySpecID(id))
+	rollouts, err := a.specSVC.RolloutsBySpec(r.Context(), id)
 	if err != nil {
 		a.logger.Warn().Err(err).Str("spec", id).Msg("spec deployed but rollout query failed")
 	} else {
 		a.logger.Info().Str("spec", id).Int("rollouts", len(rollouts)).Msg("spec deployed")
-		if a.logger.GetLevel() <= zerolog.DebugLevel {
-			for _, ss := range rollouts {
-				a.logger.Debug().
-					Str("rollout_id", ss.ID()).
-					Str("agent_id", ss.AgentID()).
-					Str("status", ss.Status().String()).
-					Int("desired", ss.DesiredVersion()).
-					Int("actual", ss.ActualVersion()).
-					Msg("deploy rollout")
-			}
-		}
 	}
 
 	var specName string
@@ -303,13 +336,13 @@ func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		specName = ts.Name()
 	}
 	a.hub.Record(event.SpecDeployed, event.Payload{ID: id, Name: specName})
-	htmx.Trigger(w, htmx.SpecUpdate)
-	a.hub.Notify(htmx.SpecUpdate)
+	htmx.Trigger(w, event.RefreshSpecs)
+	a.hub.Notify(event.RefreshSpecs)
 	response.NoContent(w, r)
 }
 
 func (a *API) specRollouts(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
-	states, err := a.specSVC.RolloutsBySpec(r.Context(), id, inmemory.NewRolloutFilter().BySpecID(id))
+	states, err := a.specSVC.RolloutsBySpec(r.Context(), id)
 	if err != nil {
 		a.logger.Error().Err(err).Str("spec", id).Msg("spec rollouts failed")
 		response.Unavailable(w, r, mode)
@@ -317,21 +350,8 @@ func (a *API) specRollouts(w http.ResponseWriter, r *http.Request, mode httpctx.
 	}
 
 	a.logger.Info().Str("spec", id).Int("count", len(states)).Msg("spec rollouts loaded")
-	if a.logger.GetLevel() <= zerolog.DebugLevel {
-		for _, ss := range states {
-			a.logger.Debug().
-				Str("rollout_id", ss.ID()).
-				Str("agent_id", ss.AgentID()).
-				Str("status", ss.Status().String()).
-				Int("desired", ss.DesiredVersion()).
-				Int("actual", ss.ActualVersion()).
-				Int("attempts", ss.Attempts()).
-				Str("error", ss.Error()).
-				Msg("rollout entry")
-		}
-	}
 
-	items := mapSlice(states, apimapv1.RolloutEntry)
+	items := mapSlice(states, wire.RolloutEntryToREST)
 	response.OK(w, r, mode, &responder.View{
 		Data:      items,
 		Component: contentSpec.Rollouts(items),

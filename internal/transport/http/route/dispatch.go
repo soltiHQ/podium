@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
@@ -19,7 +19,7 @@ type EntityHandler func(http.ResponseWriter, *http.Request, httpctx.RenderMode, 
 // Endpoint pairs an HTTP method with its permission and collection handler.
 type Endpoint struct {
 	Method string
-	Perm   kind.Permission
+	Perm   enum.Permission
 	Fn     CollectionHandler
 }
 
@@ -28,12 +28,12 @@ type Endpoint struct {
 type Subroute struct {
 	Action string
 	Method string
-	Perm   kind.Permission
+	Perm   enum.Permission
 	Fn     EntityHandler
 }
 
 // Guard wraps an http.HandlerFunc with a permission check and serves it.
-func Guard(w http.ResponseWriter, r *http.Request, perm kind.Permission, fn http.HandlerFunc) {
+func Guard(w http.ResponseWriter, r *http.Request, perm enum.Permission, fn http.HandlerFunc) {
 	middleware.RequirePermission(perm)(fn).ServeHTTP(w, r)
 }
 
@@ -56,8 +56,7 @@ func Resource(w http.ResponseWriter, r *http.Request, path string, routes ...End
 	response.NotAllowed(w, r, mode)
 }
 
-// Router handles /{prefix}/{id}[/{action}] dispatching: parses id and optional action,
-// then matches against the route table. Wrong method → 405, unknown action → 404.
+// Router handles /{prefix}/{id}[/{action}] dispatching: parses id and optional action, then matches against the route table.
 func Router(w http.ResponseWriter, r *http.Request, prefix string, routes ...Subroute) {
 	mode := httpctx.ModeFromRequest(r)
 	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, prefix), "/")

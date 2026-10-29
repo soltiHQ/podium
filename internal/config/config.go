@@ -12,13 +12,17 @@ import (
 	"github.com/kelseyhightower/envconfig"
 	"gopkg.in/yaml.v3"
 
-	"github.com/soltiHQ/control-plane/internal/auth/wire"
+	"github.com/soltiHQ/control-plane/internal/auth"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/server"
 	"github.com/soltiHQ/control-plane/internal/server/runner/grpcserver"
+	historyrunner "github.com/soltiHQ/control-plane/internal/server/runner/history"
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
 	syncrunner "github.com/soltiHQ/control-plane/internal/server/runner/sync"
+	"github.com/soltiHQ/control-plane/internal/service/history"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
+	"github.com/soltiHQ/control-plane/internal/transport/tlsconf"
 	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
 )
 
@@ -26,35 +30,100 @@ const (
 	envPrefix = "SOLTI"
 )
 
+// TLSConfig groups the control-plane's TLS settings: the server identity used by
+// the HTTP and gRPC listeners, and the client identity used when dialing agents.
+// Both are opt-in — empty means plaintext.
+type TLSConfig struct {
+	Server tlsconf.ServerConfig `yaml:"server" envconfig:"SERVER"`
+	Client tlsconf.ClientConfig `yaml:"client" envconfig:"CLIENT"`
+}
+
+// AgentAuthConfig controls bearer-token authentication between agents and the
+// control plane — one switch for both directions.
+//
+// When Require is true: discovery enrolls each agent's token on first contact
+// (trust-on-first-use) and verifies it on every subsequent sync, rejecting
+// mismatches; outbound proxy calls present the stored token. When false, no
+// token is verified inbound and none is sent outbound. Orthogonal to TLS.
+type AgentAuthConfig struct {
+	Require bool `yaml:"require" envconfig:"REQUIRE"`
+}
+
+// HistoryConfig separates durable retention from bounded collection.
+type HistoryConfig struct {
+	Archive   history.Config       `yaml:"archive" envconfig:"ARCHIVE"`
+	Collector historyrunner.Config `yaml:"collector" envconfig:"COLLECTOR"`
+}
+
 // Config holds the full application configuration.
 type Config struct {
-	HTTP          httpserver.Config     `yaml:"http"           envconfig:"HTTP"`
-	HTTPDiscovery httpserver.Config     `yaml:"http_discovery" envconfig:"HTTP_DISCOVERY"`
-	GRPC          grpcserver.Config     `yaml:"grpc"           envconfig:"GRPC"`
-	Sync          syncrunner.Config     `yaml:"sync"           envconfig:"SYNC"`
-	Lifecycle     lifecycle.Config      `yaml:"lifecycle"      envconfig:"LIFECYCLE"`
-	Triggers      htmx.Config           `yaml:"triggers"       envconfig:"TRIGGERS"`
-	Server        server.Config         `yaml:"server"         envconfig:"SERVER"`
-	Auth          wire.Config           `yaml:"auth"           envconfig:"AUTH"`
-	CORS          middleware.CORSConfig `yaml:"cors"           envconfig:"CORS"`
+	History       HistoryConfig            `yaml:"history" envconfig:"HISTORY"`
+	HTTP          httpserver.Config        `yaml:"http"           envconfig:"HTTP"`
+	HTTPDiscovery httpserver.Config        `yaml:"http_discovery" envconfig:"HTTP_DISCOVERY"`
+	GRPC          grpcserver.Config        `yaml:"grpc"           envconfig:"GRPC"`
+	Sync          syncrunner.Config        `yaml:"sync"           envconfig:"SYNC"`
+	Lifecycle     lifecycle.Config         `yaml:"lifecycle"      envconfig:"LIFECYCLE"`
+	Triggers      htmx.Config              `yaml:"triggers"       envconfig:"TRIGGERS"`
+	Server        server.Config            `yaml:"server"         envconfig:"SERVER"`
+	Auth          auth.Config              `yaml:"auth"           envconfig:"AUTH"`
+	CORS          middleware.CORSConfig    `yaml:"cors"           envconfig:"CORS"`
+	Cluster       cluster.Config           `yaml:"cluster"        envconfig:"CLUSTER"`
+	Streams       middleware.StreamsConfig `yaml:"streams"        envconfig:"STREAMS"`
+	TLS           TLSConfig                `yaml:"tls"            envconfig:"TLS"`
+	AgentAuth     AgentAuthConfig          `yaml:"agent_auth"     envconfig:"AGENT_AUTH"`
 }
 
 // Default returns the default development configuration.
+//
+// Security-sensitive fields (e.g. [auth.Config.JWTSecret]) are intentionally
+// left empty here: they must come from the environment (SOLTI_AUTH_JWT_SECRET)
+// or YAML at load time. [Load] enforces this via [Config.Validate].
 func Default() Config {
 	return Config{
 		HTTP:          httpserver.Config{Name: "http", Addr: ":8080"},
 		HTTPDiscovery: httpserver.Config{Name: "http-discovery", Addr: ":8082"},
 		GRPC:          grpcserver.Config{Name: "grpc-discovery", Addr: ":50051"},
-		Auth: wire.Config{
-			JWTSecret: "solti-fkhk5qo48thkads-85gnsdAdtXZvo9r",
-		},
+		Auth:          auth.Config{}, // JWTSecret must be supplied externally
 		CORS: middleware.CORSConfig{
 			AllowOrigins: []string{"*"},
+		},
+		Cluster: cluster.DefaultConfig(),
+		History: HistoryConfig{Archive: history.DefaultConfig(), Collector: historyrunner.DefaultConfig()},
+		Streams: middleware.StreamsConfig{
+			MaxPerIP:         10,
+			SubscriberBuffer: 64,
 		},
 	}
 }
 
+// Validate reports an error if any sub-config has invalid or unsafe values.
+func (c Config) Validate() error {
+	if err := c.History.Archive.Validate(); err != nil {
+		return fmt.Errorf("config.history.archive: %w", err)
+	}
+	if err := c.History.Collector.Validate(); err != nil {
+		return fmt.Errorf("config.history.collector: %w", err)
+	}
+	if err := c.Cluster.Validate(); err != nil {
+		return fmt.Errorf("config.cluster: %w", err)
+	}
+	if err := c.Auth.Validate(); err != nil {
+		return fmt.Errorf("config.auth: %w", err)
+	}
+	if err := c.CORS.Validate(); err != nil {
+		return fmt.Errorf("config.cors: %w", err)
+	}
+	if err := c.TLS.Server.Validate(); err != nil {
+		return fmt.Errorf("config.tls.server: %w", err)
+	}
+	if err := c.TLS.Client.Validate(); err != nil {
+		return fmt.Errorf("config.tls.client: %w", err)
+	}
+	return nil
+}
+
 // Load reads configuration in priority order: defaults → YAML file → ENV.
+// Refuses to return a Config that fails [Config.Validate].
 func Load() (Config, error) {
 	var (
 		path = configPath()
@@ -67,6 +136,9 @@ func Load() (Config, error) {
 	}
 	if err := envconfig.Process(envPrefix, &cfg); err != nil {
 		return Config{}, fmt.Errorf("config: env: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, fmt.Errorf("config: %w", err)
 	}
 	return cfg, nil
 }
@@ -90,7 +162,7 @@ func loadYAML(path string, dst *Config) error {
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if err = yaml.NewDecoder(f).Decode(dst); err != nil {
 		return fmt.Errorf("decode %s: %w", path, err)

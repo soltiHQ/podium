@@ -1,8 +1,3 @@
-// Package httpserver implements a server.Runner that manages the lifecycle
-// of an [http.Server]:
-//   - Builds the server from a provided [http.Handler] and timeout config
-//   - Binds a TCP listener on the configured address
-//   - Graceful shutdown via [http.Server.Shutdown] with hard-close fallback.
 package httpserver
 
 import (
@@ -87,12 +82,19 @@ func (r *Runner) Start(_ context.Context) error {
 	}
 	close(r.ready)
 
+	tlsEnabled := r.cfg.TLSConfig != nil
 	r.logger.Info().
 		Str("runner", r.cfg.Name).
 		Str("addr", r.cfg.Addr).
+		Bool("tls", tlsEnabled).
 		Msg("http server listening")
 
-	err = r.srv.Serve(ln)
+	if tlsEnabled {
+		r.srv.TLSConfig = r.cfg.TLSConfig
+		err = r.srv.ServeTLS(ln, "", "")
+	} else {
+		err = r.srv.Serve(ln)
+	}
 	if err == nil || errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}

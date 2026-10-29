@@ -4,24 +4,12 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
 var _ domain.Entity[*User] = (*User)(nil)
 
 // User is a core domain entity representing a system user.
-//
-// A user can be a human or a service identity. The user is identified by:
-//   - id: internal immutable identifier
-//   - subject: stable authentication subject (e.g. JWT "sub") used for login mapping
-//
-// Access is granted via:
-//   - role IDs (RBAC roles)
-//   - direct per-user permissions (exceptions/overrides)
-//
-// Notes:
-//   - roleIDs and permissions are unique sets (no duplicates).
-//   - This model stores assignments; role expansion into effective permissions belongs elsewhere.
 type User struct {
 	createdAt time.Time
 	updatedAt time.Time
@@ -32,7 +20,7 @@ type User struct {
 	name    string
 
 	roleIDs     []string
-	permissions []kind.Permission
+	permissions []enum.Permission
 
 	disabled bool
 }
@@ -53,7 +41,7 @@ func NewUser(id, subject string) (*User, error) {
 		id:          id,
 		subject:     subject,
 		roleIDs:     make([]string, 0),
-		permissions: make([]kind.Permission, 0),
+		permissions: make([]enum.Permission, 0),
 	}, nil
 }
 
@@ -79,8 +67,14 @@ func (u *User) CreatedAt() time.Time { return u.createdAt }
 // UpdatedAt returns the timestamp of the last modification.
 func (u *User) UpdatedAt() time.Time { return u.updatedAt }
 
-// EmailAdd updates the user's email.
-func (u *User) EmailAdd(email string) {
+// SetCreatedAt restores the creation timestamp (persistence hook).
+func (u *User) SetCreatedAt(t time.Time) { u.createdAt = t }
+
+// SetUpdatedAt restores the modification timestamp (persistence hook).
+func (u *User) SetUpdatedAt(t time.Time) { u.updatedAt = t }
+
+// SetEmail updates the user's email.
+func (u *User) SetEmail(email string) {
 	if u.email == email {
 		return
 	}
@@ -88,8 +82,8 @@ func (u *User) EmailAdd(email string) {
 	u.updatedAt = time.Now()
 }
 
-// NameAdd updates the user's display name.
-func (u *User) NameAdd(name string) {
+// SetName updates the user's display name.
+func (u *User) SetName(name string) {
 	if u.name == name {
 		return
 	}
@@ -97,8 +91,8 @@ func (u *User) NameAdd(name string) {
 	u.updatedAt = time.Now()
 }
 
-// SubjectAdd updates the user's subject.
-func (u *User) SubjectAdd(subject string) {
+// SetSubject updates the user's subject.
+func (u *User) SetSubject(subject string) {
 	if u.subject == subject {
 		return
 	}
@@ -131,46 +125,87 @@ func (u *User) RoleIDsAll() []string {
 	return out
 }
 
-// RolesIDsNew RoleIDsNew update full list of user's roles.
-func (u *User) RolesIDsNew(roles []string) {
-	u.roleIDs = make([]string, len(roles))
-	copy(u.roleIDs, roles)
+// SetRoleIDs replaces the user's full set of role IDs.
+func (u *User) SetRoleIDs(roles []string) {
+	var (
+		out  = make([]string, 0, len(roles))
+		seen = make(map[string]struct{}, len(roles))
+	)
+	for _, id := range roles {
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	if len(out) == len(u.roleIDs) {
+		same := true
+		for _, id := range u.roleIDs {
+			if _, ok := seen[id]; !ok {
+				same = false
+				break
+			}
+		}
+		if same {
+			return
+		}
+	}
+
+	if len(out) == 0 {
+		out = nil
+	}
+	u.roleIDs = out
 	u.updatedAt = time.Now()
 }
 
 // PermissionsAll returns a copy of permissions granted directly to the user.
-func (u *User) PermissionsAll() []kind.Permission {
-	out := make([]kind.Permission, len(u.permissions))
+func (u *User) PermissionsAll() []enum.Permission {
+	out := make([]enum.Permission, len(u.permissions))
 	copy(out, u.permissions)
 	return out
 }
 
-// PermissionsNew update full list of user's permissions.
-func (u *User) PermissionsNew(perms []string) {
-	u.updatedAt = time.Now()
-
-	if len(perms) == 0 {
-		u.permissions = nil
-		return
-	}
-
+// SetPermissions replaces the user's full set of directly-granted permissions.
+func (u *User) SetPermissions(perms []string) {
 	var (
-		out  = make([]kind.Permission, 0, len(perms))
-		seen = make(map[kind.Permission]struct{}, len(perms))
+		out  = make([]enum.Permission, 0, len(perms))
+		seen = make(map[enum.Permission]struct{}, len(perms))
 	)
 	for _, p := range perms {
 		if p == "" {
 			continue
 		}
 
-		perm := kind.Permission(p)
+		perm := enum.Permission(p)
 		if _, ok := seen[perm]; ok {
 			continue
 		}
 		seen[perm] = struct{}{}
 		out = append(out, perm)
 	}
+
+	// Both sets are de-duplicated, so equal length + full overlap == equal set.
+	if len(out) == len(u.permissions) {
+		same := true
+		for _, p := range u.permissions {
+			if _, ok := seen[p]; !ok {
+				same = false
+				break
+			}
+		}
+		if same {
+			return
+		}
+	}
+
+	if len(out) == 0 {
+		out = nil
+	}
 	u.permissions = out
+	u.updatedAt = time.Now()
 }
 
 // RoleHas reports whether the user has the given role ID assigned.
@@ -184,7 +219,7 @@ func (u *User) RoleHas(roleID string) bool {
 }
 
 // PermissionHas reports whether the user has the given permission granted directly.
-func (u *User) PermissionHas(p kind.Permission) bool {
+func (u *User) PermissionHas(p enum.Permission) bool {
 	for _, x := range u.permissions {
 		if x == p {
 			return true
@@ -194,7 +229,6 @@ func (u *User) PermissionHas(p kind.Permission) bool {
 }
 
 // RoleAdd assigns a role to the user.
-// It is idempotent: adding an existing role does nothing.
 func (u *User) RoleAdd(roleID string) error {
 	if roleID == "" {
 		return domain.ErrEmptyID
@@ -208,7 +242,6 @@ func (u *User) RoleAdd(roleID string) error {
 }
 
 // RoleDelete removes a role from the user.
-// If a role does not exist, nothing happens.
 func (u *User) RoleDelete(roleID string) {
 	for i, id := range u.roleIDs {
 		if id == roleID {
@@ -220,8 +253,7 @@ func (u *User) RoleDelete(roleID string) {
 }
 
 // PermissionAdd grants a permission directly to the user.
-// It is idempotent: adding an existing permission does nothing.
-func (u *User) PermissionAdd(p kind.Permission) error {
+func (u *User) PermissionAdd(p enum.Permission) error {
 	if p == "" {
 		return domain.ErrFieldEmpty
 	}
@@ -234,8 +266,7 @@ func (u *User) PermissionAdd(p kind.Permission) error {
 }
 
 // PermissionDelete revokes a permission from the user.
-// If permission does not exist, nothing happens.
-func (u *User) PermissionDelete(p kind.Permission) {
+func (u *User) PermissionDelete(p enum.Permission) {
 	for i, x := range u.permissions {
 		if x == p {
 			u.permissions = append(u.permissions[:i], u.permissions[i+1:]...)
@@ -249,7 +280,7 @@ func (u *User) PermissionDelete(p kind.Permission) {
 func (u *User) Clone() *User {
 	var (
 		roleIDs = make([]string, len(u.roleIDs))
-		perms   = make([]kind.Permission, len(u.permissions))
+		perms   = make([]enum.Permission, len(u.permissions))
 	)
 
 	copy(roleIDs, u.roleIDs)

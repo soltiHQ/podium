@@ -6,7 +6,7 @@ import (
 
 	jwtlib "github.com/golang-jwt/jwt/v5"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
@@ -85,25 +85,25 @@ func identityFromMapClaims(mc jwtlib.MapClaims, issuer, audience string) (*ident
 	return id, nil
 }
 
-func parsePermissions(v any) []kind.Permission {
+func parsePermissions(v any) []enum.Permission {
 	switch x := v.(type) {
 	case []any:
-		out := make([]kind.Permission, 0, len(x))
+		out := make([]enum.Permission, 0, len(x))
 		for _, it := range x {
 			s, ok := it.(string)
 			if !ok || s == "" {
 				continue
 			}
-			out = append(out, kind.Permission(s))
+			out = append(out, enum.Permission(s))
 		}
 		return out
 	case []string:
-		out := make([]kind.Permission, 0, len(x))
+		out := make([]enum.Permission, 0, len(x))
 		for _, s := range x {
 			if s == "" {
 				continue
 			}
-			out = append(out, kind.Permission(s))
+			out = append(out, enum.Permission(s))
 		}
 		return out
 	default:

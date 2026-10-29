@@ -13,7 +13,21 @@ const (
 	defaultMaxEvents = 100
 )
 
+// Writer routes mutating hub operations (Notify, Record, DeleteIssues)
+// through an external transport (Raft, Kafka, etc.) so every replica sees
+// the same events. Nil writer = in-process only (standalone profile).
+type Writer interface {
+	Notify(event string)
+	Record(kind string, payload Payload)
+	DeleteIssues(kind, id string) int
+}
+
 // Hub broadcasts UI update notifications to all SSE clients and keeps separate ring buffers for activity events and issues.
+//
+// Writes (Notify/Record/DeleteIssues) delegate to an external Writer when
+// one is attached (see SetWriter) — that transport is expected to call back
+// into ApplyLocal* on every replica to keep state consistent. Reads (Recent*,
+// Subscribe, SSEHandler) are always local.
 type Hub struct {
 	mu     sync.RWMutex
 	logger zerolog.Logger
@@ -24,6 +38,8 @@ type Hub struct {
 
 	events *Ring[Record]
 	issues *Ring[Record]
+
+	writer Writer
 }
 
 // NewHub creates a new notification hub.
@@ -52,15 +68,30 @@ func (h *Hub) Close() {
 	}
 }
 
-// Notify sends an event name to every connected client.
+// SetWriter attaches a replication transport. Must be called once before
+// any Notify/Record/DeleteIssues — typically by the cluster profile at
+// startup. Pass nil to detach.
+func (h *Hub) SetWriter(w Writer) { h.writer = w }
+
+// Notify broadcasts an event name. When a Writer is attached, routes
+// through it (replicated); otherwise fires locally.
 func (h *Hub) Notify(event string) {
+	if h.writer != nil {
+		h.writer.Notify(event)
+		return
+	}
+	h.ApplyLocalNotify(event)
+}
+
+// ApplyLocalNotify fires the notify locally without going through the
+// Writer. Called by the replication transport on every replica.
+func (h *Hub) ApplyLocalNotify(event string) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
 	if h.closed {
 		return
 	}
-
 	for id, ch := range h.clients {
 		select {
 		case ch <- event:
@@ -74,14 +105,24 @@ func (h *Hub) Notify(event string) {
 	}
 }
 
-// Record appends an event to the activity ring buffer.
+// Record appends an event to the activity ring buffer. When a Writer is
+// attached, routes through it.
 func (h *Hub) Record(kind string, payload Payload) {
+	if h.writer != nil {
+		h.writer.Record(kind, payload)
+		return
+	}
+	h.ApplyLocalRecord(kind, payload)
+}
+
+// ApplyLocalRecord appends to the ring buffer without going through the
+// Writer. Called by the replication transport on every replica.
+func (h *Hub) ApplyLocalRecord(kind string, payload Payload) {
 	rec := Record{
 		Time:    time.Now(),
 		Payload: payload,
 		Kind:    kind,
 	}
-
 	h.events.Append(rec)
 	if IsIssueKind(kind) {
 		h.issues.Append(rec)
@@ -98,8 +139,20 @@ func (h *Hub) RecentIssues(n int) []Record {
 	return h.issues.Recent(n)
 }
 
-// DeleteIssues removes all issues matching kind and payload ID.
+// DeleteIssues removes all issues matching (kind, id). Routes through the
+// Writer when attached; returns the local removal count. (Cluster-wide
+// count is not surfaced — matches the original single-node signature.)
 func (h *Hub) DeleteIssues(kind, id string) int {
+	if h.writer != nil {
+		return h.writer.DeleteIssues(kind, id)
+	}
+	return h.ApplyLocalDeleteIssues(kind, id)
+}
+
+// ApplyLocalDeleteIssues drops matching entries from the local ring without
+// going through the Writer. Called by the replication transport on every
+// replica.
+func (h *Hub) ApplyLocalDeleteIssues(kind, id string) int {
 	return h.issues.DeleteFunc(func(ev Record) bool {
 		return ev.Kind == kind && ev.Payload.ID == id
 	})

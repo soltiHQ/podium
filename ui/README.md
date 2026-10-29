@@ -1,0 +1,94 @@
+# Podium UI
+
+The UI uses server-rendered `templ` components, HTMX for read refreshes and
+mutations, and Alpine for form state and dialogs. The Material-style surface,
+color, radius and elevation tokens live in `static/css/app.css` and
+`tailwind.config.cjs`.
+
+## Responsibilities
+
+- `templates/`: HTML components and typed presentation models. Permission
+  controls come from `internal/uikit/policy`; every API action independently
+  enforces authorization.
+- `static/js/spec-builder.js`: spec editing state, exact argument/environment
+  round trips, validation, cursor-based agent selection, and submit recovery.
+  It serializes the current protobuf JSON workload shape. It also exports its
+  builder for Node's built-in test runner.
+- `static/js/control-plane.js`: shared HTTP failure recovery, live-update
+  connection status, and task-log lifecycle. Log viewers are preserved by task
+  UID across row refreshes, disconnected when removed, and retain at most
+  256 KiB in the browser. An open dialog prevents a background swap from
+  discarding the user's form.
+- `internal/handler/api_agent_task.go`: bounded task inspection and cancellation
+  requests. Inspection checks that the task and run history belong to the same
+  UID. Current conditions show reconciliation independently of phase: processed
+  generation equality also occurs for failed reconciliation. Open inspectors are
+  preserved by agent and task UID and refresh only while expanded. Cancellation
+  retains history and records a logical request; it does not
+  promise immediate physical process exit.
+- `internal/handler/api_spec_placement.go`: read-only saved-spec placement from the
+  same planner used by Deploy. Both SpecsGet and AgentsGet are required. It
+  exposes ordered runner compatibility and stored heartbeat observations; the
+  plan is advisory and Deploy evaluates the current inventory again.
+- `internal/handler/api_history.go`: stored terminal observations independent of
+  live agent/spec existence. AgentsGet protects both API and page. Exact agent,
+  spec, task name, UID and terminal-result filters use opaque continuations;
+  public pages default to 50 records and are capped at 100. Changing filters
+  starts from the first page.
+- `internal/auth/session/authorize.go`: checks durable session and current RBAC
+  after JWT verification, so revoke, account disable and permission changes
+  apply to the next request.
+
+## Contract and failure behavior
+
+Subprocess configuration uses `mode.command` or `mode.script` with an explicit
+interpreter. Argument inputs use a JSON string array, preserving spaces, empty
+arguments and Unicode. Environment entries preserve their order and duplicates;
+selector labels reject duplicate keys. Target agents and target label matches
+are combined by the control plane; all label requirements must match.
+
+Spec saves include the loaded version. HTTP 409, validation errors and network
+failures keep the draft intact. A conflict provides a link to the saved version
+in another tab rather than reloading the editor. Slot remains immutable after
+creation. Legacy flat command/script configurations are hydrated without losing
+arguments or body. Obsolete inline-script runtimes require an explicit operator
+review before switching to the current interpreter-and-file execution contract. Empty target and label selections are sent explicitly so they clear
+stored selectors.
+
+Fetch forms ask for `Accept: application/json` even when using HTMX redirect
+headers. API negotiation honors that header so error messages remain readable.
+HTMX confirmation dialogs close after success and retain errors after failure.
+
+The task list passes exact slot filters to the agent before pagination and uses
+opaque continuation cursors. Run history is bounded by the agent's history
+retention. Logs are live streams, not a durable log archive. Log stream URLs
+carry the inspected task UID so reconnection cannot silently switch to a
+same-name replacement. Modal identifiers are encoded as lowercase UTF-8 hex so
+HTML attribute normalization preserves case-sensitive UID identity.
+
+Execution history shows partial capture from periodic agent polling. It can
+miss attempts removed between polls and is bounded by retention policy. Each
+record displays original task UID, SDK generation/attempt, source resource
+version, workload API version/kind, and trusted first capture time. Source run
+timestamps are separate. Historical rows have no live task actions, manifests,
+commands, environment or logs. A terminal attempt can precede a retry/restart
+and does not prove physical process shutdown.
+
+## Verification
+
+```sh
+node --test ui/tests/spec-builder.test.cjs
+go test ./internal/auth/... ./internal/handler ./internal/transport/http/middleware \
+  ./internal/uikit/... ./domain/wire ./ui/templates/...
+```
+
+`task generate` runs `go tool templ generate`, so the generator is always the
+templ version pinned in `go.mod`. `task assets` downloads Alpine and HTMX and
+compiles CSS with Tailwind 4 using `static/css/app.css` as input; `task prepare`
+runs both. Generated templates are required to build; the CSS and JS assets are
+required for a working UI in the embedded binary.
+
+The builder currently supports the original built-in Subprocess, Wasm and
+Container workload types. Arbitrary extension workload creation and durable log
+archival remain outside this UI. Stored terminal execution observations are
+implemented separately from live logs.

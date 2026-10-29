@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth"
 )
@@ -19,8 +19,8 @@ func TestNewPasswordCredential_CreatesCredential(t *testing.T) {
 	if cred == nil {
 		t.Fatalf("expected non-nil credential")
 	}
-	if cred.AuthKind() != kind.Password {
-		t.Fatalf("expected kind.Password, got=%v", cred.AuthKind())
+	if cred.AuthKind() != enum.Password {
+		t.Fatalf("expected enum.Password, got=%v", cred.AuthKind())
 	}
 
 	// Credential must not store any verification material.
@@ -48,8 +48,8 @@ func TestNewPasswordVerifier_SetsHash(t *testing.T) {
 	if v == nil {
 		t.Fatalf("expected non-nil verifier")
 	}
-	if v.AuthKind() != kind.Password {
-		t.Fatalf("expected kind.Password, got=%v", v.AuthKind())
+	if v.AuthKind() != enum.Password {
+		t.Fatalf("expected enum.Password, got=%v", v.AuthKind())
 	}
 	if v.CredentialID() != "cred-1" {
 		t.Fatalf("expected CredentialID=cred-1, got=%q", v.CredentialID())
@@ -102,11 +102,11 @@ func TestVerifyPassword_NilInputs(t *testing.T) {
 func TestVerifyPassword_WrongAuthKind(t *testing.T) {
 	t.Parallel()
 
-	cred, err := model.NewCredential("cred-1", "user-1", kind.APIKey)
+	cred, err := model.NewCredential("cred-1", "user-1", enum.APIKey)
 	if err != nil {
 		t.Fatalf("model.NewCredential err=%v", err)
 	}
-	v, err := model.NewVerifier("ver-1", "cred-1", kind.Password)
+	v, err := model.NewVerifier("ver-1", "cred-1", enum.Password)
 	if err != nil {
 		t.Fatalf("model.NewVerifier err=%v", err)
 	}
@@ -140,7 +140,7 @@ func TestVerifyPassword_MissingHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPasswordCredential err=%v", err)
 	}
-	v, err := model.NewVerifier("ver-1", cred.ID(), kind.Password)
+	v, err := model.NewVerifier("ver-1", cred.ID(), enum.Password)
 	if err != nil {
 		t.Fatalf("model.NewVerifier err=%v", err)
 	}
@@ -157,7 +157,7 @@ func TestVerifyPassword_CorruptedHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPasswordCredential err=%v", err)
 	}
-	v, err := model.NewVerifier("ver-1", cred.ID(), kind.Password)
+	v, err := model.NewVerifier("ver-1", cred.ID(), enum.Password)
 	if err != nil {
 		t.Fatalf("model.NewVerifier err=%v", err)
 	}

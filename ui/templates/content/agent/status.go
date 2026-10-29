@@ -3,18 +3,18 @@ package agent
 import (
 	"strings"
 
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
 )
 
-// agentDotColor returns the StatusDot color for a kind.AgentStatus.
-func agentDotColor(s kind.AgentStatus) string {
+// agentDotColor returns the StatusDot color for a enum.AgentStatus.
+func agentDotColor(s enum.AgentStatus) string {
 	switch s {
-	case kind.AgentStatusActive:
+	case enum.AgentStatusActive:
 		return "success"
-	case kind.AgentStatusInactive:
+	case enum.AgentStatusInactive:
 		return "muted"
-	case kind.AgentStatusDisconnected:
+	case enum.AgentStatusDisconnected:
 		return "danger"
 	default:
 		return "muted"

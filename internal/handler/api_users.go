@@ -1,13 +1,15 @@
 package handler
 
 import (
+	"cmp"
 	"errors"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/segmentio/ksuid"
 	"github.com/soltiHQ/control-plane/domain"
-	"github.com/soltiHQ/control-plane/domain/kind"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/event"
@@ -24,11 +26,8 @@ import (
 	"github.com/soltiHQ/control-plane/internal/uikit/policy"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 
-	"cmp"
-	"slices"
-
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
-	apimapv1 "github.com/soltiHQ/control-plane/internal/transport/http/apimap/v1"
+	wire "github.com/soltiHQ/control-plane/domain/wire"
 	contentUser "github.com/soltiHQ/control-plane/ui/templates/content/user"
 )
 
@@ -47,8 +46,8 @@ const (
 //   - POST /api/v1/users
 func (a *API) Users(w http.ResponseWriter, r *http.Request) {
 	route.Resource(w, r, routepath.ApiUsers,
-		route.Endpoint{Method: http.MethodGet, Perm: kind.UsersGet, Fn: a.userList},
-		route.Endpoint{Method: http.MethodPost, Perm: kind.UsersAdd, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode) {
+		route.Endpoint{Method: http.MethodGet, Perm: enum.UsersGet, Fn: a.userList},
+		route.Endpoint{Method: http.MethodPost, Perm: enum.UsersAdd, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode) {
 			a.userUpsert(w, r, m, "", modeCreate)
 		}},
 	)
@@ -66,19 +65,19 @@ func (a *API) Users(w http.ResponseWriter, r *http.Request) {
 //   - POST   /api/v1/users/{id}/password
 func (a *API) UsersRouter(w http.ResponseWriter, r *http.Request) {
 	route.Router(w, r, routepath.ApiUser,
-		route.Subroute{Action: "", Method: http.MethodGet, Perm: kind.UsersGet, Fn: a.usersDetails},
-		route.Subroute{Action: "", Method: http.MethodPut, Perm: kind.UsersEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
+		route.Subroute{Action: "", Method: http.MethodGet, Perm: enum.UsersGet, Fn: a.usersDetails},
+		route.Subroute{Action: "", Method: http.MethodPut, Perm: enum.UsersEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
 			a.userUpsert(w, r, m, id, modeUpdate)
 		}},
-		route.Subroute{Action: "", Method: http.MethodDelete, Perm: kind.UsersDelete, Fn: a.userDelete},
-		route.Subroute{Action: "sessions", Method: http.MethodGet, Perm: kind.UsersGet, Fn: a.usersSessions},
-		route.Subroute{Action: "disable", Method: http.MethodPost, Perm: kind.UsersEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
+		route.Subroute{Action: "", Method: http.MethodDelete, Perm: enum.UsersDelete, Fn: a.userDelete},
+		route.Subroute{Action: "sessions", Method: http.MethodGet, Perm: enum.UsersGet, Fn: a.usersSessions},
+		route.Subroute{Action: "disable", Method: http.MethodPost, Perm: enum.UsersEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
 			a.userSetStatus(w, r, m, id, userDisable)
 		}},
-		route.Subroute{Action: "enable", Method: http.MethodPost, Perm: kind.UsersEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
+		route.Subroute{Action: "enable", Method: http.MethodPost, Perm: enum.UsersEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
 			a.userSetStatus(w, r, m, id, userActive)
 		}},
-		route.Subroute{Action: "password", Method: http.MethodPost, Perm: kind.UsersEdit, Fn: a.userSetPassword},
+		route.Subroute{Action: "password", Method: http.MethodPost, Perm: enum.UsersEdit, Fn: a.userSetPassword},
 	)
 }
 
@@ -88,7 +87,7 @@ func (a *API) UsersRouter(w http.ResponseWriter, r *http.Request) {
 //   - POST /api/v1/sessions/{sessionID}/revoke
 func (a *API) SessionsRouter(w http.ResponseWriter, r *http.Request) {
 	route.Router(w, r, routepath.ApiSession,
-		route.Subroute{Action: "revoke", Method: http.MethodPost, Perm: kind.UsersEdit, Fn: a.userRevokeSession},
+		route.Subroute{Action: "revoke", Method: http.MethodPost, Perm: enum.UsersEdit, Fn: a.userRevokeSession},
 	)
 }
 
@@ -115,9 +114,9 @@ func (a *API) userList(w http.ResponseWriter, r *http.Request, mode httpctx.Rend
 		return
 	}
 
-	items := mapSlice(res.Items, apimapv1.User)
+	items := mapSlice(res.Items, wire.UserToREST)
 	response.OK(w, r, mode, &responder.View{
-		Data: restv1.UserListResponse{
+		Data: restv1.ListUsersResponse{
 			Items:      items,
 			NextCursor: res.NextCursor,
 		},
@@ -128,16 +127,14 @@ func (a *API) userList(w http.ResponseWriter, r *http.Request, mode httpctx.Rend
 func (a *API) usersDetails(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	u, err := a.userSVC.Get(r.Context(), id)
 	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			response.NotFound(w, r, mode)
-			return
+		if !errors.Is(err, storage.ErrNotFound) {
+			a.logger.Error().Err(err).Str("user_id", id).Msg("user get failed")
 		}
-		a.logger.Error().Err(err).Str("user_id", id).Msg("user get failed")
-		response.Unavailable(w, r, mode)
+		response.FromError(w, r, mode, err)
 		return
 	}
 
-	apiUser := apimapv1.User(u)
+	apiUser := wire.UserToREST(u)
 	response.OK(w, r, mode, &responder.View{
 		Data:      apiUser,
 		Component: contentUser.Detail(apiUser, policy.BuildUserDetail(a.identity(r), id)),
@@ -152,17 +149,17 @@ func (a *API) usersSessions(w http.ResponseWriter, r *http.Request, mode httpctx
 		return
 	}
 
-	items := mapSlice(res.Items, apimapv1.Session)
+	items := mapSlice(res.Items, wire.SessionToREST)
 	slices.SortFunc(items, func(a, b restv1.Session) int {
-		pa := kind.DeriveSessionStatus(a.Revoked, a.ExpiresAt).Priority()
-		pb := kind.DeriveSessionStatus(b.Revoked, b.ExpiresAt).Priority()
+		pa := enum.DeriveSessionStatus(a.Revoked, a.ExpiresAt).Priority()
+		pb := enum.DeriveSessionStatus(b.Revoked, b.ExpiresAt).Priority()
 		if pa != pb {
 			return cmp.Compare(pa, pb)
 		}
 		return b.CreatedAt.Compare(a.CreatedAt)
 	})
 	response.OK(w, r, mode, &responder.View{
-		Data:      restv1.SessionResponse{Items: items},
+		Data:      restv1.ListSessionsResponse{Items: items},
 		Component: contentUser.Sessions(items),
 	})
 }
@@ -174,6 +171,13 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 
+	if action == modeCreate && (in.RoleIDs != nil || in.Permissions != nil) {
+		actor := a.identity(r)
+		if actor == nil || !actor.HasPermission(enum.UsersEdit) {
+			response.Forbidden(w, r, mode)
+			return
+		}
+	}
 	var u *model.User
 
 	switch action {
@@ -207,19 +211,23 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	}
 
 	if in.Name != "" {
-		u.NameAdd(in.Name)
+		u.SetName(in.Name)
 	}
 	if in.Email != "" {
-		u.EmailAdd(in.Email)
+		u.SetEmail(in.Email)
 	}
 	if in.Subject != "" {
-		u.SubjectAdd(in.Subject)
+		u.SetSubject(in.Subject)
 	}
-	if len(in.RoleIDs) > 0 {
-		u.RolesIDsNew(in.RoleIDs)
+	if action == modeUpdate && a.identity(r) != nil && a.identity(r).UserID == id && (in.RoleIDs != nil || in.Permissions != nil) {
+		response.BadRequestMsg(w, r, mode, "You cannot change your own roles or permissions.")
+		return
 	}
-	if len(in.Permissions) > 0 {
-		u.PermissionsNew(in.Permissions)
+	if in.RoleIDs != nil {
+		u.SetRoleIDs(in.RoleIDs)
+	}
+	if in.Permissions != nil {
+		u.SetPermissions(in.Permissions)
 	}
 	if err = a.userSVC.Upsert(r.Context(), u); err != nil {
 		switch {
@@ -240,7 +248,7 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	if action == modeCreate {
 		a.logger.Info().Str("user_id", u.ID()).Str("subject", u.Subject()).Msg("user created")
 		a.hub.Record(event.UserCreated, event.Payload{ID: u.ID(), Name: u.Name(), By: by})
-		a.hub.Notify(htmx.UserUpdate)
+		a.hub.Notify(event.RefreshUsers)
 		htmx.Redirect(w, routepath.PageUsers)
 		response.NoContent(w, r)
 		return
@@ -249,12 +257,16 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	a.hub.Record(event.UserUpdated, event.Payload{
 		ID: u.ID(), Name: u.Name(), By: by,
 	})
-	htmx.Trigger(w, htmx.UserUpdate)
-	a.hub.Notify(htmx.UserUpdate)
+	htmx.Trigger(w, event.RefreshUsers)
+	a.hub.Notify(event.RefreshUsers)
 	response.NoContent(w, r)
 }
 
 func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
+	if actor := a.identity(r); actor != nil && actor.UserID == id {
+		response.BadRequestMsg(w, r, mode, "You cannot delete your own account.")
+		return
+	}
 	var name string
 	if u, err := a.userSVC.Get(r.Context(), id); err == nil {
 		name = u.Name()
@@ -270,12 +282,16 @@ func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	a.hub.Record(event.UserDeleted, event.Payload{
 		ID: id, Name: name, By: a.actor(r),
 	})
-	a.hub.Notify(htmx.UserUpdate)
+	a.hub.Notify(event.RefreshUsers)
 	htmx.Redirect(w, routepath.PageUsers)
 	response.NoContent(w, r)
 }
 
 func (a *API) userSetStatus(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, userID string, status userStatusMode) {
+	if actor := a.identity(r); status == userDisable && actor != nil && actor.UserID == userID {
+		response.BadRequestMsg(w, r, mode, "You cannot disable your own account.")
+		return
+	}
 	u, err := a.userSVC.Get(r.Context(), userID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
@@ -306,8 +322,8 @@ func (a *API) userSetStatus(w http.ResponseWriter, r *http.Request, mode httpctx
 	a.hub.Record(event.UserStatusChanged, event.Payload{
 		ID: u.ID(), Name: u.Name(), By: a.actor(r), Detail: detail,
 	})
-	htmx.Trigger(w, htmx.UserUpdate)
-	a.hub.Notify(htmx.UserUpdate)
+	htmx.Trigger(w, event.RefreshUsers)
+	a.hub.Notify(event.RefreshUsers)
 	response.NoContent(w, r)
 }
 
@@ -347,8 +363,8 @@ func (a *API) userSetPassword(w http.ResponseWriter, r *http.Request, mode httpc
 	a.hub.Record(event.UserPasswordChanged, event.Payload{
 		ID: userID, Name: userName, By: a.actor(r),
 	})
-	htmx.Trigger(w, htmx.UserUpdate)
-	a.hub.Notify(htmx.UserUpdate)
+	htmx.Trigger(w, event.RefreshUsers)
+	a.hub.Notify(event.RefreshUsers)
 	response.NoContent(w, r)
 }
 
@@ -364,7 +380,7 @@ func (a *API) userRevokeSession(w http.ResponseWriter, r *http.Request, mode htt
 	}
 
 	a.logger.Info().Str("session_id", id).Msg("session revoked")
-	htmx.Trigger(w, htmx.SessionUpdate)
-	a.hub.Notify(htmx.SessionUpdate)
+	htmx.Trigger(w, event.RefreshSessions)
+	a.hub.Notify(event.RefreshSessions)
 	response.NoContent(w, r)
 }
