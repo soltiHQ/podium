@@ -168,7 +168,8 @@ When the user table is empty, the first start creates the administrator
   has no YAML key, so a config file cannot carry it. It must pass the password
   policy (12 characters at least, 72 bytes at most); a value that breaks it fails
   startup with an error that names the variable and not the value. It is never
-  written to a file or a log.
+  written to a file or a log. When podium stores it, a `bootstrap-admin-password`
+  file left by an earlier generated seed is removed and its path logged.
 - Without it podium generates a password and writes it, on one line with mode
   0600, to `bootstrap-admin-password` in the data directory of the selected
   backend: `cluster.standalone.data_dir` (default `data/podium`), or

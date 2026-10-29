@@ -150,10 +150,15 @@ func msToDuration(ms int) time.Duration {
 }
 
 // bootstrapOptions tells bootstrap where this node keeps its state, which is
-// where a generated administrator password goes, and which password the
-// operator chose.
+// where a generated administrator password goes: a file in the data directory,
+// or the log when the state is explicitly ephemeral. It also passes the
+// password the operator chose.
 func bootstrapOptions(cfg config.Config) bootstrap.Options {
-	return bootstrap.Options{DataDir: cfg.Cluster.DataDir(), AdminPassword: cfg.BootstrapAdminPassword}
+	return bootstrap.Options{
+		DataDir:       cfg.Cluster.DataDir(),
+		Ephemeral:     cfg.Cluster.Ephemeral(),
+		AdminPassword: cfg.BootstrapAdminPassword,
+	}
 }
 
 // readyForBootstrap distinguishes leader election from applied-state readiness.

@@ -104,7 +104,7 @@ func TestBootstrapSeedsOnceAndRepairsPartialFirstStart(t *testing.T) {
 	if err := users.Upsert(ctx, u); err != nil {
 		t.Fatal(err)
 	}
-	if err := Run(ctx, logger, Options{cost: bcrypt.MinCost}, roles, users, creds); err != nil {
+	if err := Run(ctx, logger, Options{Ephemeral: true, cost: bcrypt.MinCost}, roles, users, creds); err != nil {
 		t.Fatal(err)
 	}
 	cred, err := store.GetCredentialByUserAndAuth(ctx, adminUserID, enum.Password)
@@ -125,7 +125,7 @@ func TestBootstrapSeedsOnceAndRepairsPartialFirstStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Run(ctx, logger, Options{cost: bcrypt.MinCost}, roles, users, creds); err != nil {
+	if err := Run(ctx, logger, Options{Ephemeral: true, cost: bcrypt.MinCost}, roles, users, creds); err != nil {
 		t.Fatal(err)
 	}
 	roleAfter, err := roles.Get(ctx, enum.RoleAdminID)
@@ -396,20 +396,23 @@ func TestBootstrapUsesEnvPassword(t *testing.T) {
 
 // The log names where a password is, never what it is: the file of a generated
 // password on a persistent node, and the variable of one from the environment.
+// A data directory wins over the ephemeral flag.
 func TestBootstrapNeverLogsPersistentPassword(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		persistent bool
-		env        string
+		name      string
+		dir       bool
+		ephemeral bool
+		env       string
 	}{
-		{"generated", true, ""},
-		{"from the environment", true, "operator-chosen-password"},
-		{"from the environment, ephemeral", false, "operator-chosen-password"},
+		{"generated", true, false, ""},
+		{"from the environment", true, false, "operator-chosen-password"},
+		{"from the environment, ephemeral", false, true, "operator-chosen-password"},
+		{"generated, with a data directory and the ephemeral flag", true, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, dir := newFixture(), t.TempDir()
-			opts := Options{AdminPassword: tc.env}
-			if tc.persistent {
+			opts := Options{AdminPassword: tc.env, Ephemeral: tc.ephemeral}
+			if tc.dir {
 				opts.DataDir = dir
 			}
 			for i := 0; i < 2; i++ {
@@ -437,7 +440,7 @@ func TestBootstrapNeverLogsPersistentPassword(t *testing.T) {
 func TestBootstrapEphemeralLogsPasswordOnce(t *testing.T) {
 	f := newFixture()
 	for i := 0; i < 2; i++ {
-		if err := f.run(Options{}); err != nil {
+		if err := f.run(Options{Ephemeral: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -524,6 +527,10 @@ func TestBootstrapIgnoresEnvPasswordWhenUsersExist(t *testing.T) {
 			if tc.password != "" && passwordWorks(t, f.store, tc.password) {
 				t.Fatal("the ignored password was set")
 			}
+			// The file is the only copy of the stored password: it is not stale.
+			if got := filePassword(t, dir); got != generated {
+				t.Fatal("the password file changed")
+			}
 		})
 	}
 }
@@ -557,7 +564,7 @@ func TestBuiltinRolesReconciled(t *testing.T) {
 	stored(enum.RoleSpecReaderID, "specReader", enum.SpecsGet)
 	stored("custom", "Custom", enum.AgentsEdit)
 
-	if err := f.run(Options{}); err != nil {
+	if err := f.run(Options{Ephemeral: true}); err != nil {
 		t.Fatal(err)
 	}
 	for _, br := range enum.BuiltinRoles {
@@ -610,7 +617,8 @@ func (failingTx) WithTx(context.Context, func(storage.Storage) error) error { re
 
 // A first start that stops after it created user-admin, before the password is
 // stored, must not leave the next start without an administrator to log in as:
-// the failed start takes back its file, and the next one finishes the seed.
+// the next start finishes the seed, and its file replaces the one of the failed
+// start, whose password was never stored.
 func TestBootstrapFinishesAFirstStartThatStoppedHalfway(t *testing.T) {
 	ctx := context.Background()
 	f, dir := newFixture(), t.TempDir()
@@ -626,14 +634,23 @@ func TestBootstrapFinishesAFirstStartThatStoppedHalfway(t *testing.T) {
 	if _, err = f.store.GetCredentialByUserAndAuth(ctx, adminUserID, enum.Password); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("a password was stored: %v", err)
 	}
-	if got := names(t, dir); len(got) != 0 {
-		t.Fatalf("the failed start left %q, a password that was never stored", got)
-	}
+	// The failed start keeps its file: the write might have taken effect.
+	leftover := filePassword(t, dir)
 
 	if err = f.run(Options{DataDir: dir}); err != nil {
 		t.Fatal(err)
 	}
-	login(t, f.store, filePassword(t, dir))
+	password := filePassword(t, dir)
+	if password == leftover {
+		t.Fatal("the second start kept the file of the failed one")
+	}
+	login(t, f.store, password)
+	if passwordWorks(t, f.store, leftover) {
+		t.Fatal("the password of the failed start was stored")
+	}
+	if got := names(t, dir); !slices.Equal(got, []string{PasswordFile}) {
+		t.Fatalf("data directory holds %q, want only the password file", got)
+	}
 	finished, err := f.store.GetUser(ctx, adminUserID)
 	if err != nil {
 		t.Fatal(err)
@@ -641,6 +658,44 @@ func TestBootstrapFinishesAFirstStartThatStoppedHalfway(t *testing.T) {
 	if !finished.CreatedAt().Equal(created.CreatedAt()) {
 		t.Fatal("the second start created user-admin again")
 	}
+}
+
+// commitThenFail runs the transaction and then reports a failure, as a raft
+// apply does that loses leadership after its entry committed: the write took
+// effect and the caller cannot tell.
+type commitThenFail struct{ storage.Storage }
+
+var errUncertain = errors.New("outcome of the write is unknown")
+
+func (c commitThenFail) WithTx(ctx context.Context, fn func(storage.Storage) error) error {
+	if err := c.Storage.WithTx(ctx, fn); err != nil {
+		return err
+	}
+	return errUncertain
+}
+
+// A write can fail after it took effect. The password is then stored, and the
+// file is the only readable copy of it, so a failed start keeps the file and the
+// next start leaves it alone.
+func TestBootstrapKeepsPasswordFileWhenWriteOutcomeIsUncertain(t *testing.T) {
+	f, dir := newFixture(), t.TempDir()
+	uncertain := credential.New(commitThenFail{f.store}, f.logger)
+	err := Run(context.Background(), f.logger, Options{DataDir: dir, cost: bcrypt.MinCost}, f.roles, f.users, uncertain)
+	if !errors.Is(err, errUncertain) {
+		t.Fatalf("start: %v, want the uncertain write", err)
+	}
+	password := filePassword(t, dir)
+	if !passwordWorks(t, f.store, password) {
+		t.Fatal("the password in the file is not the stored one")
+	}
+
+	if err = f.run(Options{DataDir: dir}); err != nil {
+		t.Fatal(err)
+	}
+	if got := filePassword(t, dir); got != password {
+		t.Fatal("the restart replaced the only copy of the stored password")
+	}
+	login(t, f.store, password)
 }
 
 // The password is written down before it is stored, so a start cannot end with
@@ -674,5 +729,187 @@ func TestBootstrapStoresNoPasswordItCannotWriteDown(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// user-admin without a password is finished only when it is the only user. With
+// other users the system is established: bootstrap mints no password for it and
+// writes no file, wherever user-admin sits in the user list (newest first).
+func TestBootstrapLeavesAdminWithoutPasswordAloneWhenOtherUsersExist(t *testing.T) {
+	for _, tc := range []struct {
+		name, password string
+		adminFirst     bool
+		warnings       int
+	}{
+		{"admin listed first", "", true, 0},
+		{"admin listed last", "", false, 0},
+		{"admin listed first, variable set", "operator-chosen-password", true, 1},
+		{"admin listed last, variable set", "operator-chosen-password", false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f, dir := newFixture(), t.TempDir()
+			if err := reconcileRoles(ctx, f.logger, f.roles); err != nil {
+				t.Fatal(err)
+			}
+			// The newest user is listed first.
+			adminCreated, opsCreated := time.Now(), time.Now().Add(-time.Hour)
+			if !tc.adminFirst {
+				adminCreated, opsCreated = opsCreated, adminCreated
+			}
+			for _, spec := range []struct {
+				id, subject string
+				created     time.Time
+			}{{adminUserID, adminSubject, adminCreated}, {"ops", "ops", opsCreated}} {
+				u, err := model.NewUser(spec.id, spec.subject)
+				if err != nil {
+					t.Fatal(err)
+				}
+				u.SetRoleIDs([]string{enum.RoleAdminID})
+				u.SetCreatedAt(spec.created)
+				if err = f.users.Upsert(ctx, u); err != nil {
+					t.Fatal(err)
+				}
+			}
+			listed, err := f.users.List(ctx, user.ListQuery{Limit: 2})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first := listed.Items[0].ID() == adminUserID; first != tc.adminFirst {
+				t.Fatalf("the user list starts with %s, the test wants user-admin first: %v", listed.Items[0].ID(), tc.adminFirst)
+			}
+
+			if err = f.run(Options{DataDir: dir, AdminPassword: tc.password}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = f.store.GetCredentialByUserAndAuth(ctx, adminUserID, enum.Password); !errors.Is(err, storage.ErrNotFound) {
+				t.Fatalf("user-admin got a password: %v", err)
+			}
+			if got := names(t, dir); len(got) != 0 {
+				t.Fatalf("data directory holds %q, want nothing", got)
+			}
+			if got := f.ignoredWarnings(t); got != tc.warnings {
+				t.Fatalf("%d warnings about %s, want %d", got, AdminPasswordEnv, tc.warnings)
+			}
+		})
+	}
+}
+
+// A password from the variable makes the file of an earlier generated seed
+// stale. Bootstrap removes it and logs its path, once the new password is
+// stored and not before.
+func TestBootstrapRemovesStalePasswordFileWhenEnvPasswordIsStored(t *testing.T) {
+	const stale, password = "password-of-an-earlier-generated-seed", "operator-chosen-password"
+	staleFile := func(t *testing.T, dir string) string {
+		t.Helper()
+		path := filepath.Join(dir, PasswordFile)
+		if err := os.WriteFile(path, []byte(stale+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	// mentions counts the log entries that name path.
+	mentions := func(f *fixture, t *testing.T, path string) (n int) {
+		t.Helper()
+		for _, e := range f.entries(t) {
+			if e.Path == path {
+				n++
+			}
+		}
+		return n
+	}
+
+	t.Run("password stored", func(t *testing.T) {
+		f, dir := newFixture(), t.TempDir()
+		path := staleFile(t, dir)
+		if err := f.run(Options{DataDir: dir, AdminPassword: password}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("the stale file was kept: %v", err)
+		}
+		if n := mentions(f, t, path); n != 1 {
+			t.Fatalf("%d log entries name the removed file, want 1:\n%s", n, f.logs)
+		}
+		if strings.Contains(f.logs.String(), stale) {
+			t.Fatal("the log contains the stale password")
+		}
+		login(t, f.store, password)
+	})
+
+	t.Run("storing fails", func(t *testing.T) {
+		f, dir := newFixture(), t.TempDir()
+		path := staleFile(t, dir)
+		broken := credential.New(failingTx{f.store}, f.logger)
+		err := Run(context.Background(), f.logger, Options{DataDir: dir, AdminPassword: password, cost: bcrypt.MinCost}, f.roles, f.users, broken)
+		if !errors.Is(err, errStore) {
+			t.Fatalf("start: %v, want the store failure", err)
+		}
+		if got, err := os.ReadFile(path); err != nil || strings.TrimSpace(string(got)) != stale {
+			t.Fatalf("the stale file did not survive a failed store: %q, %v", got, err)
+		}
+	})
+
+	t.Run("removal fails", func(t *testing.T) {
+		f, dir := newFixture(), t.TempDir()
+		// A directory that is not empty stands in for a file that cannot be removed.
+		path := filepath.Join(dir, PasswordFile)
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "keep"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.run(Options{DataDir: dir, AdminPassword: password}); err != nil {
+			t.Fatalf("a stale file that stays failed a start that stored its password: %v", err)
+		}
+		warned := 0
+		for _, e := range f.entries(t) {
+			if e.Path == path && e.Level == "warn" {
+				warned++
+			}
+		}
+		if warned != 1 {
+			t.Fatalf("%d warnings name the file, want 1:\n%s", warned, f.logs)
+		}
+		login(t, f.store, password)
+	})
+}
+
+// Bootstrap writes a generated password down or, when told the state is
+// ephemeral, logs it. With neither a data directory nor the flag it refuses to
+// seed, whatever the password: nothing is stored and no password is logged.
+func TestBootstrapRefusesToSeedWithoutDataDirOrEphemeral(t *testing.T) {
+	for _, tc := range []struct{ name, password string }{
+		{"generated password", ""},
+		{"password from the environment", "operator-chosen-password"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture()
+			err := f.run(Options{AdminPassword: tc.password})
+			if !errors.Is(err, ErrNoDataDir) {
+				t.Fatalf("got %v, want ErrNoDataDir", err)
+			}
+			for _, e := range f.entries(t) {
+				if e.Password != "" {
+					t.Fatalf("a password was logged: %+v", e)
+				}
+			}
+			if tc.password != "" && strings.Contains(f.logs.String(), tc.password) {
+				t.Fatal("the log contains the password from the environment")
+			}
+			if _, err = f.store.GetUser(context.Background(), adminUserID); !errors.Is(err, storage.ErrNotFound) {
+				t.Fatalf("user-admin was created: %v", err)
+			}
+		})
+	}
+
+	// Nothing to seed needs no place for a password.
+	f := newFixture()
+	if err := f.run(Options{Ephemeral: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.run(Options{}); err != nil {
+		t.Fatalf("a restart without anything to seed failed: %v", err)
 	}
 }

@@ -77,14 +77,21 @@ func (c Config) Validate() error {
 // DataDir returns the data directory of the selected backend: Standalone.DataDir,
 // or Raft.DataDir in raft mode. Ephemeral standalone state has none.
 func (c Config) DataDir() string {
+	if c.Ephemeral() {
+		return ""
+	}
 	switch c.Backend {
 	case "", BackendStandalone:
-		if c.Standalone.Ephemeral {
-			return ""
-		}
 		return c.Standalone.DataDir
 	case BackendRaft:
 		return c.Raft.DataDir
 	}
 	return ""
+}
+
+// Ephemeral reports whether the selected backend keeps its state in memory only,
+// which only standalone with Standalone.Ephemeral does.
+func (c Config) Ephemeral() bool {
+	standalone := c.Backend == "" || c.Backend == BackendStandalone
+	return standalone && c.Standalone.Ephemeral
 }

@@ -18,14 +18,16 @@ reaches the administrator on upgrade.
 `user-admin` (subject `admin`, administrator role) is seeded only when:
 
 - the user table is empty, or
-- `user-admin` exists without a password credential. This is what a first start
-  that stopped halfway leaves behind; the next start finishes it and keeps the
-  user it finds.
+- `user-admin` is the only user and has no password credential. This is what a
+  first start that stopped halfway leaves behind; the next start finishes it and
+  keeps the user it finds.
 
-With any other user table bootstrap touches no user and no credential. An
-administrator the operator deleted stays deleted, and profile fields, disabled
-state, role assignments and passwords survive every restart. Storage errors abort
-bootstrap; they never delete, reset or replace existing state.
+With any other user table bootstrap touches no user and no credential, not even a
+`user-admin` without a password next to other users: that is an established
+system with a hand-edited database, and bootstrap does not mint a password for
+it. An administrator the operator deleted stays deleted, and profile fields,
+disabled state, role assignments and passwords survive every restart. Storage
+errors abort bootstrap; they never delete, reset or replace existing state.
 
 ### Initial password
 
@@ -39,6 +41,10 @@ In order:
      shows the value, and nothing is seeded.
    - It is never written to a file or a log. The log only says that the password
      was set from the variable.
+   - A `bootstrap-admin-password` file that an earlier generated seed left in the
+     data directory no longer matches the stored password. Bootstrap removes it
+     once the new password is stored, never before, and logs the path. A file that
+     cannot be removed only warns.
    - Once users exist the variable is ignored. One WARN says so, without the
      value, on every start, even for a value the policy would have refused. Remove
      it from the environment after the first start.
@@ -52,15 +58,24 @@ In order:
      never half written and a stale one from an earlier install is replaced whole.
      The log names only the path: `bootstrap: admin password generated: read it
      from the file, log in and change it`, with `login` and `path`.
-   - **Ephemeral mode** (`cluster.standalone.ephemeral: true`, no data directory):
-     the password is logged once, at WARN, as `ephemeral mode: admin password
+   - **Ephemeral mode** (`Options.Ephemeral`, which the app sets from
+     `cluster.standalone.ephemeral: true`; there is no data directory): the
+     password is logged once, at WARN, as `ephemeral mode: admin password
      generated: change it after first login`, with the `password` field. No other
      mode ever logs a password.
+   - **Neither**: bootstrap does not guess ephemeral mode from an empty data
+     directory. With no data directory and no `Ephemeral` flag a seed fails with
+     `ErrNoDataDir` before anything is stored, and nothing is logged. A data
+     directory wins when both are given.
 
 The file is written before the password is stored. A start that stops in between
-leaves a file nobody needs, never a stored password nobody can read: the next
-start finds no password and seeds it again. A failed start removes its file. A
-restart does not touch an existing file; delete it once the password is changed.
+leaves a file nobody needs, never a stored password nobody can read. A start that
+fails while storing keeps its file too: a write can fail after it took effect (a
+raft apply that loses leadership once its entry committed, a failed fsync), and
+then the file is the only readable copy of the stored password. If nothing was
+stored, the next start seeds again and replaces the file whole; if the password
+was stored, the next start leaves the file alone. A restart never touches an
+existing file; delete it once the password is changed.
 
 In raft mode the leader seeds, so the file sits in the raft `data_dir` of the node
 that led at first boot. The other replicas do not have it.
@@ -70,11 +85,14 @@ that led at first boot. The other replicas do not have it.
 `bootstrap_test.go` covers:
 
 - the password file: mode, login with its contents, no rewrite on restart,
-  replacement of a stale file, no stored password without a written file;
-- a deleted `user-admin` that stays deleted, and the first start that stopped
-  halfway;
-- the password variable: use, policy violation, the ignored-variable WARN;
-- no password in the log, persistent or from the environment, and the ephemeral
-  log line;
+  replacement of a stale file, no stored password without a written file, and the
+  file kept after a failed or uncertain write;
+- a deleted `user-admin` that stays deleted, the first start that stopped
+  halfway, and `user-admin` without a password next to other users, which is left
+  alone wherever it sits in the user list;
+- the password variable: use, policy violation, the ignored-variable WARN, and the
+  removal of a stale password file only after the new password is stored;
+- no password in the log, persistent or from the environment, the ephemeral log
+  line, and the refusal to seed without a data directory or the ephemeral flag;
 - the reconciliation of built-in roles, and the earlier checks of an existing
   operator-managed administrator and a canceled startup.

@@ -30,11 +30,20 @@ const (
 	PasswordFile = "bootstrap-admin-password"
 )
 
+// ErrNoDataDir is returned when the administrator has to be seeded and [Options]
+// names neither a data directory nor ephemeral state: a generated password would
+// have nowhere to go, and bootstrap never falls back to the log.
+var ErrNoDataDir = errors.New("bootstrap: no data directory and the state is not ephemeral")
+
 // Options says where a generated administrator password goes and which password to use instead.
 type Options struct {
-	// DataDir receives the file with a generated administrator password. Empty means the
-	// state is ephemeral and the password is logged instead.
+	// DataDir receives the file with a generated administrator password.
 	DataDir string
+	// Ephemeral says the state lives in memory only, so there is no data directory:
+	// a generated password is logged, once, instead of written down. Nothing else
+	// ever logs a password. With neither DataDir nor Ephemeral a seed fails with
+	// [ErrNoDataDir]; when both are set, DataDir wins.
+	Ephemeral bool
 	// AdminPassword is the initial administrator password, from [AdminPasswordEnv].
 	// Empty means bootstrap generates one.
 	AdminPassword string
@@ -45,9 +54,9 @@ type Options struct {
 
 // Run reconciles the built-in roles with their code definitions and seeds the
 // administrator. User-admin and its password are seeded when the user table is
-// empty, its password alone when user-admin has none (a first start that stopped
-// halfway). Any other user table is left alone, so a deleted user-admin stays
-// deleted.
+// empty, its password alone when user-admin is the only user and has none (a
+// first start that stopped halfway). Any other user table is left alone, so a
+// deleted user-admin stays deleted.
 func Run(ctx context.Context, logger zerolog.Logger, opts Options, roleSVC *role.Service, userSVC *user.Service, credSVC *credential.Service) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -112,7 +121,8 @@ const (
 	seedNone adminSeed = iota
 	// seedUser: the user table is empty, create user-admin and its password.
 	seedUser
-	// seedPassword: user-admin has no password, a first start stopped after creating it.
+	// seedPassword: user-admin is the only user and has no password, a first start
+	// stopped after creating it.
 	seedPassword
 )
 
@@ -128,13 +138,22 @@ func seedAdmin(ctx context.Context, logger zerolog.Logger, opts Options, userSVC
 		return nil
 	}
 
+	// Fail closed: without a data directory only a node that says its state is
+	// ephemeral may go on, and never by guessing from an empty path.
+	if opts.DataDir == "" && !opts.Ephemeral {
+		return ErrNoDataDir
+	}
+
 	password, generated, err := initialPassword(opts)
 	if err != nil {
 		return err
 	}
 	// The generated password is written down before it is stored. A start that
 	// stops in between leaves a file nobody needs, never a stored password
-	// nobody can read: the next start finds no password and seeds it again.
+	// nobody can read. A start that fails while storing keeps its file too: the
+	// write may have taken effect (raft can report a lost leadership after the
+	// entry committed, and a failed fsync leaves the outcome open), and then the
+	// file is the only readable copy. The next seed replaces it whole.
 	var path string
 	if generated && opts.DataDir != "" {
 		if path, err = writePasswordFile(opts.DataDir, password); err != nil {
@@ -142,38 +161,55 @@ func seedAdmin(ctx context.Context, logger zerolog.Logger, opts Options, userSVC
 		}
 	}
 	if err = storeAdmin(ctx, logger, opts, seed, password, userSVC, credSVC); err != nil {
-		if path != "" {
-			_ = os.Remove(path) // it holds a password that was never stored
-		}
 		return err
 	}
 
+	// The password is logged only on the ephemeral branch; a state that fits none
+	// of the branches logs nothing.
 	switch {
 	case !generated:
 		logger.Info().Str("login", adminSubject).Msg("bootstrap: admin password set from " + AdminPasswordEnv)
+		removeStalePasswordFile(logger, opts.DataDir)
 	case path != "":
 		logger.Warn().Str("login", adminSubject).Str("path", path).Msg("bootstrap: admin password generated: read it from the file, log in and change it")
-	default:
+	case opts.Ephemeral:
 		logger.Warn().Str("login", adminSubject).Str("password", password).Msg("ephemeral mode: admin password generated: change it after first login")
 	}
 	return nil
 }
 
+// removeStalePasswordFile removes the password file an earlier generated seed
+// left in dir: the password just stored does not match it. The password is
+// stored by now, so a file that cannot be removed only warns.
+func removeStalePasswordFile(logger zerolog.Logger, dir string) {
+	if dir == "" {
+		return
+	}
+	path := filepath.Join(dir, PasswordFile)
+	switch err := os.Remove(path); {
+	case err == nil:
+		logger.Info().Str("path", path).Msg("bootstrap: stale admin password file removed: the password comes from " + AdminPasswordEnv)
+	case !errors.Is(err, os.ErrNotExist):
+		logger.Warn().Err(err).Str("path", path).Msg("bootstrap: remove stale admin password file")
+	}
+}
+
 // adminSeedNeeded decides what seeding the administrator takes. Restart must
-// preserve operator-managed identities and credentials: user-admin is created
-// only on an empty user table, so an administrator the operator deleted does
-// not come back, and a password is set only when user-admin has none.
+// preserve operator-managed identities and credentials, so a seed is due only on
+// an empty user table, or when user-admin is the only user and has no password:
+// that is all a first start that stopped halfway leaves behind. An administrator
+// the operator deleted does not come back, and an established system (any other
+// user) is never given a new password, however its user-admin looks.
 func adminSeedNeeded(ctx context.Context, userSVC *user.Service, credSVC *credential.Service) (adminSeed, error) {
-	_, err := userSVC.Get(ctx, adminUserID)
-	switch {
-	case errors.Is(err, storage.ErrNotFound):
-		page, err := userSVC.List(ctx, user.ListQuery{Limit: 1})
-		if err != nil || len(page.Items) > 0 {
-			return seedNone, err
-		}
-		return seedUser, nil
-	case err != nil:
+	page, err := userSVC.List(ctx, user.ListQuery{Limit: 2})
+	if err != nil {
 		return seedNone, err
+	}
+	switch {
+	case len(page.Items) == 0:
+		return seedUser, nil
+	case len(page.Items) > 1 || page.Items[0] == nil || page.Items[0].ID() != adminUserID:
+		return seedNone, nil
 	}
 
 	creds, err := credSVC.ListByUser(ctx, credential.ListByUserQuery{UserID: adminUserID})

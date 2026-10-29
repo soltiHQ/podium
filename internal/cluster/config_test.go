@@ -78,3 +78,34 @@ func TestDataDirIsThatOfTheSelectedBackend(t *testing.T) {
 		})
 	}
 }
+
+func TestEphemeralIsAStandaloneOption(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*cluster.Config)
+		want   bool
+	}{
+		{"durable standalone", func(*cluster.Config) {}, false},
+		{"ephemeral standalone", func(c *cluster.Config) { c.Standalone.Ephemeral = true }, true},
+		{"ephemeral with an unset backend", func(c *cluster.Config) {
+			c.Backend = ""
+			c.Standalone.Ephemeral = true
+		}, true},
+		{"raft ignores the flag", func(c *cluster.Config) {
+			c.Backend = cluster.BackendRaft
+			c.Standalone.Ephemeral = true
+		}, false},
+		{"unknown backend", func(c *cluster.Config) {
+			c.Backend = "other"
+			c.Standalone.Ephemeral = true
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := cluster.DefaultConfig()
+			tc.mutate(&cfg)
+			if got := cfg.Ephemeral(); got != tc.want {
+				t.Fatalf("Ephemeral() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

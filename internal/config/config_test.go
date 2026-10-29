@@ -169,7 +169,8 @@ func TestLoadRejectsMalformedCORSOrigins(t *testing.T) {
 // file cannot carry it.
 func TestLoadBootstrapAdminPasswordIsEnvOnly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	body := "bootstrap_admin_password: from-yaml-file\nbootstrap:\n  admin_password: from-yaml-file\n"
+	// bootstrapadminpassword is the key yaml.v3 derives when the field has no tag.
+	body := "bootstrapadminpassword: from-yaml-file\nbootstrap_admin_password: from-yaml-file\nbootstrap:\n  admin_password: from-yaml-file\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

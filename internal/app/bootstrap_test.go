@@ -16,16 +16,27 @@ import (
 )
 
 // Bootstrap writes the generated password where the selected backend keeps its
-// state, and gets the password the operator chose.
+// state, logs it only when that state is explicitly ephemeral, and gets the
+// password the operator chose. A backend that is neither stays closed: no data
+// directory and no ephemeral flag.
 func TestBootstrapOptionsFollowTheSelectedBackend(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		mutate  func(*config.Config)
-		dataDir string
+		name      string
+		mutate    func(*config.Config)
+		dataDir   string
+		ephemeral bool
 	}{
-		{"standalone", func(*config.Config) {}, "/data/standalone"},
-		{"ephemeral standalone", func(c *config.Config) { c.Cluster.Standalone.Ephemeral = true }, ""},
-		{"raft", func(c *config.Config) { c.Cluster.Backend = cluster.BackendRaft }, "/data/raft"},
+		{"standalone", func(*config.Config) {}, "/data/standalone", false},
+		{"ephemeral standalone", func(c *config.Config) { c.Cluster.Standalone.Ephemeral = true }, "", true},
+		{"raft", func(c *config.Config) { c.Cluster.Backend = cluster.BackendRaft }, "/data/raft", false},
+		{"raft ignores the standalone flag", func(c *config.Config) {
+			c.Cluster.Backend = cluster.BackendRaft
+			c.Cluster.Standalone.Ephemeral = true
+		}, "/data/raft", false},
+		{"unknown backend", func(c *config.Config) {
+			c.Cluster.Backend = "other"
+			c.Cluster.Standalone.Ephemeral = true
+		}, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.Default()
@@ -33,7 +44,7 @@ func TestBootstrapOptionsFollowTheSelectedBackend(t *testing.T) {
 			cfg.Cluster.Raft.DataDir = "/data/raft"
 			cfg.BootstrapAdminPassword = "operator-chosen-password"
 			tc.mutate(&cfg)
-			want := bootstrap.Options{DataDir: tc.dataDir, AdminPassword: "operator-chosen-password"}
+			want := bootstrap.Options{DataDir: tc.dataDir, Ephemeral: tc.ephemeral, AdminPassword: "operator-chosen-password"}
 			if got := bootstrapOptions(cfg); got != want {
 				t.Fatalf("bootstrapOptions = %+v, want %+v", got, want)
 			}
