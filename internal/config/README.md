@@ -74,8 +74,10 @@ trusted_proxies:   # env SOLTI_TRUSTED_PROXIES=10.0.0.1,10.1.0.0/16
   - 10.1.0.0/16
 ```
 
-Entries are IP addresses or CIDR prefixes; anything else fails configuration
-loading. The headers count only when the TCP peer is in the list:
+Entries are IP addresses or CIDR prefixes, trimmed of spaces, so
+`SOLTI_TRUSTED_PROXIES="10.0.0.1, 10.0.0.2"` works; anything else, an empty
+entry included, fails configuration loading. The headers count only when the
+TCP peer is in the list:
 
 - `X-Forwarded-For`: all header lines are joined in order and walked from the
   right. Trusted entries are skipped; the first untrusted entry is the client.
@@ -97,22 +99,27 @@ gRPC discovery ignores this setting and always uses the peer address.
 ## Rate limiting
 
 `auth.rate_attempts` (default 5) and `auth.rate_window` (default 1m; env
-`SOLTI_AUTH_RATE_ATTEMPTS`, `SOLTI_AUTH_RATE_WINDOW`) configure every failure
-limiter: `rate_attempts` failures, each within `rate_window` of the previous
-one, block a key for `rate_window`. Each surface has its own in-memory limiter
-of at most 100 000 keys; past that, the least recently updated key is evicted.
+`SOLTI_AUTH_RATE_ATTEMPTS`, `SOLTI_AUTH_RATE_WINDOW`) configure both failure
+limiters, one for login and one shared by HTTP and gRPC discovery:
+`rate_attempts` failures, each within `rate_window` of the previous one, block a
+key for `rate_window`. Each limiter keeps at most 100 000 keys in memory; past
+that, the least recently updated key is evicted.
 
-| Surface               | Counted per            | Counts                                           | Blocked answer        |
-|-----------------------|------------------------|--------------------------------------------------|-----------------------|
-| Login (`POST /login`) | account, and client IP | failed logins; a success resets the account only | 429                   |
-| Main HTTP listener    | client IP              | 401 responses only                               | 429 for every request |
-| HTTP discovery        | client IP + agent ID   | agent token failures                             | 429                   |
-| gRPC discovery        | peer IP + agent ID     | agent token failures                             | `ResourceExhausted`   |
+| Surface                 | Counted per                  | Counts                                                                | Blocked answer            |
+|-------------------------|------------------------------|-----------------------------------------------------------------------|---------------------------|
+| Login (`POST /login`)   | account, and client IP       | failed logins and logins in flight; a success resets the account only | 429                       |
+| HTTP and gRPC discovery | client IP + agent ID, shared | agent token failures                                                  | 429 / `ResourceExhausted` |
 
-A client IP is counted by its /64 prefix for IPv6; IPv4-mapped IPv6 addresses
-count as IPv4. Nothing resets a client IP key, and the User-Agent plays no
-part. Agents behind one egress IP never block each other. The `rate_limited`
-dashboard event is recorded once, when a login key becomes blocked.
+A login attempt reserves a slot on both of its keys before the password check,
+so a burst of parallel attempts gets at most `rate_attempts` password checks per
+key. A client IP is counted by its /64 prefix for IPv6; IPv4-mapped IPv6
+addresses count as IPv4. Nothing resets a client IP key, and the User-Agent
+plays no part. Agents behind one egress IP never block each other. The
+`rate_limited` dashboard event is recorded once, when a login key becomes
+blocked.
+
+The main UI and API listener has no limit on failed authentication: its tokens
+and session IDs cannot be guessed, and passwords go through the login limiter.
 
 ## Observed run history
 

@@ -30,6 +30,9 @@ func New(authSvc *kit.Auth, store storage.Storage, logger zerolog.Logger) *Servi
 	if store == nil {
 		panic("access.Service: nil storage")
 	}
+	if authSvc.Limiter == nil {
+		panic("access.Service: nil login limiter")
+	}
 	return &Service{
 		logger: logger.With().Str("service", "access").Logger(),
 		auth:   authSvc,
@@ -39,10 +42,13 @@ func New(authSvc *kit.Auth, store storage.Storage, logger zerolog.Logger) *Servi
 
 // Login authenticates a user and returns issued tokens and identity.
 //
-// Failed attempts count against the account and against the client IP; an attempt
-// is refused with ErrRateLimited while either is blocked. The failure that blocks
-// one of them comes back joined with ErrRateLimitReached. A successful login resets
-// the account only, never the client IP.
+// Before the password check, the attempt reserves a slot on its account key
+// and on its client IP key, so attempts in flight count like failures: an
+// attempt is refused with ErrRateLimited while, for either key, failures plus
+// attempts in flight reach the limit. A failed check records a failure on
+// both keys; the failure that blocks one of them comes back joined with
+// ErrRateLimitReached. A successful login resets the account only, never the
+// client IP.
 func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identity, LoginResult, error) {
 	if req.Subject == "" || req.Password == "" {
 		return nil, LoginResult{}, iauth.ErrInvalidRequest
@@ -50,35 +56,23 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identi
 
 	s.logger.Debug().Str("subject", req.Subject).Msg("login attempt")
 
-	var (
-		now     = s.auth.Clock.Now()
-		limiter = s.auth.Limiter
-		account = ratelimit.AccountKey(req.Subject)
-		client  = ratelimit.LoginIPKey(req.ClientIP)
-	)
-	if limiter != nil {
-		if err := limiter.Check(account, now); err != nil {
-			return nil, LoginResult{}, err
-		}
-		if err := limiter.Check(client, now); err != nil {
-			return nil, LoginResult{}, err
-		}
+	account := ratelimit.AccountKey(req.Subject)
+	attempt, err := s.auth.Limiter.Reserve(s.auth.Clock.Now(), account, ratelimit.LoginIPKey(req.ClientIP))
+	if err != nil {
+		return nil, LoginResult{}, err
 	}
+	// Frees the slots if Session.Login panics; a no-op once the attempt has ended.
+	defer attempt.Release()
 
 	pair, id, err := s.auth.Session.Login(ctx, enum.Password, req.Subject, req.Password)
 	if err != nil {
-		if limiter != nil {
-			accountBlocked := limiter.RecordFailure(account, now)
-			clientBlocked := limiter.RecordFailure(client, now)
-			if accountBlocked || clientBlocked {
-				err = errors.Join(err, iauth.ErrRateLimitReached)
-			}
+		if attempt.Fail(s.auth.Clock.Now()) {
+			err = errors.Join(err, iauth.ErrRateLimitReached)
 		}
 		return nil, LoginResult{}, err
 	}
-	if limiter != nil {
-		limiter.Reset(account)
-	}
+	attempt.Release()
+	s.auth.Limiter.Reset(account)
 	s.logger.Info().Str("subject", req.Subject).Str("user_id", id.UserID).Msg("login success")
 	return id, LoginResult{
 		AccessToken:  pair.AccessToken,

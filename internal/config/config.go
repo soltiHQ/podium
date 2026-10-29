@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/kelseyhightower/envconfig"
 	"gopkg.in/yaml.v3"
@@ -147,6 +148,10 @@ func Load() (Config, error) {
 	}
 	if err := envconfig.Process(envPrefix, &cfg); err != nil {
 		return Config{}, fmt.Errorf("config: env: %w", err)
+	}
+	// The env value is split on commas only, so "10.0.0.1, 10.0.0.2" leaves a space.
+	for i, proxy := range cfg.TrustedProxies {
+		cfg.TrustedProxies[i] = strings.TrimSpace(proxy)
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("config: %w", err)

@@ -47,18 +47,6 @@ func TestLimiter_BlockAfterThreshold(t *testing.T) {
 	}
 }
 
-func TestLimiter_CheckReturnsErrorWhenBlocked(t *testing.T) {
-	now := time.Now()
-	l := New(Config{MaxAttempts: 1, BlockWindow: time.Minute})
-
-	l.RecordFailure("k", now)
-
-	err := l.Check("k", now)
-	if !errors.Is(err, auth.ErrRateLimited) {
-		t.Fatalf("expected ErrRateLimited, got %v", err)
-	}
-}
-
 func TestLimiter_BlockExpires(t *testing.T) {
 	start := time.Now()
 	l := New(Config{MaxAttempts: 1, BlockWindow: time.Minute})
@@ -152,23 +140,29 @@ func TestLoginLimiterBounded(t *testing.T) {
 	now := time.Now()
 	l := New(Config{MaxAttempts: 5, BlockWindow: time.Hour})
 
+	// The oldest key has an attempt in flight, which is never evicted.
+	held, err := l.Reserve(now, "held")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Release()
 	l.RecordFailure("first", now)
 	l.RecordFailure("second", now)
-	for i := range limit - 2 {
+	for i := range limit - 3 {
 		l.RecordFailure("filler-"+strconv.Itoa(i), now)
 	}
-	l.RecordFailure("first", now) // "second" is now the least recently updated key
+	l.RecordFailure("first", now) // "second" is now the least recently updated idle key
 	l.RecordFailure("overflow", now)
 
 	if n := len(l.entries); n > limit {
 		t.Fatalf("limiter holds %d keys, want at most %d", n, limit)
 	}
 	if _, ok := l.entries["second"]; ok {
-		t.Fatal("the least recently updated key was not evicted")
+		t.Fatal("the least recently updated idle key was not evicted")
 	}
-	for _, key := range []string{"first", "overflow"} {
+	for _, key := range []string{"held", "first", "overflow"} {
 		if _, ok := l.entries[key]; !ok {
-			t.Fatalf("recently updated key %q was evicted", key)
+			t.Fatalf("key %q was evicted", key)
 		}
 	}
 }
@@ -219,5 +213,119 @@ func TestFailuresCountWithinWindowOfTheLastOne(t *testing.T) {
 	}
 	if _, ok := l.entries["spaced"]; ok {
 		t.Fatal("expected the entry to be removed a window after its last failure")
+	}
+}
+
+func TestReserveCountsAttemptsInFlight(t *testing.T) {
+	now := time.Now()
+	l := New(Config{MaxAttempts: 3, Window: time.Minute, BlockWindow: time.Minute})
+
+	var held []*Attempt
+	for i := range 3 {
+		a, err := l.Reserve(now, "k")
+		if err != nil {
+			t.Fatalf("attempt %d: %v", i+1, err)
+		}
+		held = append(held, a)
+	}
+	if _, err := l.Reserve(now, "k"); !errors.Is(err, auth.ErrRateLimited) {
+		t.Fatalf("fourth attempt in flight: %v, want ErrRateLimited", err)
+	}
+
+	held[0].Release()
+	held[0].Release() // ending an attempt twice frees one slot only
+	a, err := l.Reserve(now, "k")
+	if err != nil {
+		t.Fatalf("attempt after a release: %v", err)
+	}
+	held[0] = a
+	if _, err := l.Reserve(now, "k"); !errors.Is(err, auth.ErrRateLimited) {
+		t.Fatalf("attempt over the limit after a release: %v, want ErrRateLimited", err)
+	}
+
+	for i, want := range []bool{false, false, true} {
+		if got := held[i].Fail(now); got != want {
+			t.Fatalf("failure %d: Fail = %v, want %v", i+1, got, want)
+		}
+	}
+	if !l.Blocked("k", now) {
+		t.Fatal("three failed attempts did not block the key")
+	}
+	if _, err := l.Reserve(now, "k"); !errors.Is(err, auth.ErrRateLimited) {
+		t.Fatalf("attempt on a blocked key: %v, want ErrRateLimited", err)
+	}
+}
+
+func TestReserveIsAllOrNothing(t *testing.T) {
+	now := time.Now()
+	l := New(Config{MaxAttempts: 2, Window: time.Minute, BlockWindow: time.Minute})
+	l.RecordFailure("blocked", now)
+	l.RecordFailure("blocked", now)
+
+	if _, err := l.Reserve(now, "free", "blocked"); !errors.Is(err, auth.ErrRateLimited) {
+		t.Fatalf("attempt with one blocked key: %v, want ErrRateLimited", err)
+	}
+	// The refused attempt took nothing from the free key.
+	for i := range 2 {
+		if _, err := l.Reserve(now, "free"); err != nil {
+			t.Fatalf("slot %d of the free key: %v", i+1, err)
+		}
+	}
+}
+
+func TestAttemptInFlightSurvivesExpiry(t *testing.T) {
+	start := time.Now()
+	l := New(Config{MaxAttempts: 2, Window: time.Minute, BlockWindow: time.Hour})
+
+	slow, err := l.Reserve(start, "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := start.Add(10 * time.Minute)
+	if l.Blocked("k", later) {
+		t.Fatal("an attempt in flight blocked the key")
+	}
+	if _, ok := l.entries["k"]; !ok {
+		t.Fatal("expiry dropped a key with an attempt in flight")
+	}
+	other, err := l.Reserve(later, "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Reserve(later, "k"); !errors.Is(err, auth.ErrRateLimited) {
+		t.Fatalf("third attempt while two are in flight: %v, want ErrRateLimited", err)
+	}
+
+	// A failure older than the window does not add up with a later one.
+	if slow.Fail(later) {
+		t.Fatal("first failure blocked the key")
+	}
+	if other.Fail(later.Add(2 * time.Minute)) {
+		t.Fatal("a failure older than the window counted toward the block")
+	}
+}
+
+func TestResetKeepsAttemptsInFlight(t *testing.T) {
+	now := time.Now()
+	l := New(Config{MaxAttempts: 2, Window: time.Minute, BlockWindow: time.Minute})
+
+	slow, err := l.Reserve(now, "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.RecordFailure("k", now)
+	if _, err := l.Reserve(now, "k"); !errors.Is(err, auth.ErrRateLimited) {
+		t.Fatalf("attempt with one failure and one in flight: %v, want ErrRateLimited", err)
+	}
+
+	l.Reset("k") // clears the failure, not the attempt in flight
+	if _, err := l.Reserve(now, "k"); err != nil {
+		t.Fatalf("attempt after the reset: %v", err)
+	}
+	if _, err := l.Reserve(now, "k"); !errors.Is(err, auth.ErrRateLimited) {
+		t.Fatalf("third attempt while two are in flight: %v, want ErrRateLimited", err)
+	}
+	if slow.Fail(now) {
+		t.Fatal("one failure after the reset blocked the key")
 	}
 }

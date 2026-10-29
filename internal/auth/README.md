@@ -111,14 +111,17 @@ auth/
 | Error masking        | generic errors hide which field failed                   |
 
 ## Login rate limiting
-`access.Service.Login` checks two keys of `kit.Auth.Limiter` before authenticating:
-`login:acct:<subject>` (trimmed and lower-cased like user storage) and `login:ip:<client IP>`
+Before authenticating, `access.Service.Login` reserves one slot on two keys of `kit.Auth.Limiter` at once
+(`Limiter.Reserve`): `login:acct:<subject>` (trimmed and lower-cased like user storage) and `login:ip:<client IP>`
 (IPv6 counted by its /64, IPv4-mapped addresses unmapped).
 
-- An attempt is refused with `ErrRateLimited` (HTTP 429) while either key is blocked; refused attempts count nothing.
-- A failed login records a failure on both keys. `auth.rate_attempts` failures, each within `auth.rate_window`
-  of the previous one, block a key for `auth.rate_window`.
+- An attempt is refused with `ErrRateLimited` (HTTP 429) while, for either key, failures plus attempts in flight
+  reach `auth.rate_attempts`; a refused attempt reserves nothing. A burst of parallel attempts therefore gets at
+  most `auth.rate_attempts` password checks per key.
+- A failed check turns the slot into a failure on both keys (`Attempt.Fail`). `auth.rate_attempts` failures, each
+  within `auth.rate_window` of the previous one, block a key for `auth.rate_window`.
 - The failure that blocks a key returns its usual error joined with `ErrRateLimitReached`;
   the UI answers it like any failed login and records one `rate_limited` event.
-- A successful login resets the account key only. Nothing resets a client IP key.
-- The User-Agent plays no part. The limiter keeps at most 100 000 keys and evicts the least recently updated one.
+- A successful login releases the slots (`Attempt.Release`) and resets the account key only. Nothing resets a client IP key.
+- The User-Agent plays no part. The limiter keeps at most 100 000 keys and evicts the least recently updated one;
+  a key with an attempt in flight is neither evicted nor forgotten.

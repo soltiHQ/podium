@@ -17,7 +17,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/test/bufconn"
 
 	discoverv1 "github.com/soltiHQ/control-plane/api/gen/solti/discover/v1"
 	"github.com/soltiHQ/control-plane/internal/auth"
@@ -67,20 +66,56 @@ func TestNewWarnsWhenAgentAuthDisabled(t *testing.T) {
 	}
 }
 
-// serveDiscovery serves srv on an in-memory listener and returns a client of it.
+// serveDiscovery serves srv on a loopback port and returns a client of it.
+// The server sees the client as 127.0.0.1.
 func serveDiscovery(t *testing.T, srv *grpc.Server) discoverv1.DiscoverServiceClient {
 	t.Helper()
-	lis := bufconn.Listen(1 << 20)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
-	conn, err := grpc.NewClient("passthrough:///discovery",
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return lis.DialContext(ctx) }),
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("passthrough:///"+lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	return discoverv1.NewDiscoverServiceClient(conn)
+}
+
+// discoveryClients syncs agents through both discovery listeners, as wired by
+// buildDiscoveryListeners from the default config, always as the client 127.0.0.1.
+type discoveryClients struct {
+	http http.Handler
+	grpc discoverv1.DiscoverServiceClient
+}
+
+func newDiscoveryClients(t *testing.T) discoveryClients {
+	t.Helper()
+	logger := zerolog.Nop()
+	hub := event.NewHub(logger)
+	t.Cleanup(hub.Close)
+	h, srv := buildDiscoveryListeners(logger, agent.New(inmemory.New(), logger), hub, standalone.NewLeadership(), config.Default(), nil, nil)
+	return discoveryClients{http: h, grpc: serveDiscovery(t, srv)}
+}
+
+func (c discoveryClients) syncHTTP(id, token string) int {
+	body := `{"id":"` + id + `","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/sync", strings.NewReader(body))
+	r.RemoteAddr = "127.0.0.1:40000"
+	r.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	c.http.ServeHTTP(w, r)
+	return w.Code
+}
+
+func (c discoveryClients) syncGRPC(id, token string) error {
+	ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer "+token)
+	_, err := c.grpc.Sync(ctx, &discoverv1.SyncRequest{
+		Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1,
+	})
+	return err
 }
 
 // Discovery messages over the HTTP sync body limit never reach the handler.
@@ -112,63 +147,68 @@ func TestGRPCDiscoveryRejectsOversizedMessage(t *testing.T) {
 // The discovery listeners have no per-IP limit: agents behind one egress IP
 // are blocked one by one, never together.
 func TestDiscoveryListenersBlockOnlyTheFailingAgent(t *testing.T) {
-	ctx := context.Background()
-	logger := zerolog.Nop()
-	svc := agent.New(inmemory.New(), logger)
-	hub := event.NewHub(logger)
-	defer hub.Close()
-
 	t.Run("http", func(t *testing.T) {
-		h := buildDiscoveryHandler(logger, svc, hub, standalone.NewLeadership(), 0, kit.NewLimiter(auth.Config{}), nil, true, false)
-		sync := func(id, token string) int {
-			body := `{"id":"` + id + `","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
-			r := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/sync", strings.NewReader(body))
-			r.Header.Set("Authorization", "Bearer "+token)
-			w := httptest.NewRecorder()
-			h.ServeHTTP(w, r)
-			return w.Code
-		}
-		for _, id := range []string{"http-a", "http-b"} {
-			if code := sync(id, "token-"+id); code != http.StatusOK {
+		c := newDiscoveryClients(t)
+		for _, id := range []string{"agent-a", "agent-b"} {
+			if code := c.syncHTTP(id, "token-"+id); code != http.StatusOK {
 				t.Fatalf("enroll %s: HTTP %d", id, code)
 			}
 		}
 		for i := range 5 {
-			if code := sync("http-a", "stale-token"); code != http.StatusUnauthorized {
+			if code := c.syncHTTP("agent-a", "stale-token"); code != http.StatusUnauthorized {
 				t.Fatalf("bad token %d: HTTP %d, want 401", i+1, code)
 			}
 		}
-		if code := sync("http-b", "token-http-b"); code != http.StatusOK {
-			t.Fatalf("http-b behind the same IP: HTTP %d, want 200", code)
+		if code := c.syncHTTP("agent-b", "token-agent-b"); code != http.StatusOK {
+			t.Fatalf("agent-b behind the same IP: HTTP %d, want 200", code)
 		}
-		if code := sync("http-a", "token-http-a"); code != http.StatusTooManyRequests {
-			t.Fatalf("http-a after five failures: HTTP %d, want 429", code)
+		if code := c.syncHTTP("agent-a", "token-agent-a"); code != http.StatusTooManyRequests {
+			t.Fatalf("agent-a after five failures: HTTP %d, want 429", code)
 		}
 	})
 
 	t.Run("grpc", func(t *testing.T) {
-		client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), nil, true))
-		sync := func(id, token string) error {
-			_, err := client.Sync(metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token), &discoverv1.SyncRequest{
-				Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1,
-			})
-			return err
-		}
-		for _, id := range []string{"grpc-a", "grpc-b"} {
-			if err := sync(id, "token-"+id); err != nil {
+		c := newDiscoveryClients(t)
+		for _, id := range []string{"agent-a", "agent-b"} {
+			if err := c.syncGRPC(id, "token-"+id); err != nil {
 				t.Fatalf("enroll %s: %v", id, err)
 			}
 		}
 		for i := range 5 {
-			if err := sync("grpc-a", "stale-token"); status.Code(err) != codes.Unauthenticated {
+			if err := c.syncGRPC("agent-a", "stale-token"); status.Code(err) != codes.Unauthenticated {
 				t.Fatalf("bad token %d: %v, want Unauthenticated", i+1, err)
 			}
 		}
-		if err := sync("grpc-b", "token-grpc-b"); err != nil {
-			t.Fatalf("grpc-b behind the same peer: %v", err)
+		if err := c.syncGRPC("agent-b", "token-agent-b"); err != nil {
+			t.Fatalf("agent-b behind the same peer: %v", err)
 		}
-		if err := sync("grpc-a", "token-grpc-a"); status.Code(err) != codes.ResourceExhausted {
-			t.Fatalf("grpc-a after five failures: %v, want ResourceExhausted", err)
+		if err := c.syncGRPC("agent-a", "token-agent-a"); status.Code(err) != codes.ResourceExhausted {
+			t.Fatalf("agent-a after five failures: %v, want ResourceExhausted", err)
 		}
 	})
+}
+
+// HTTP and gRPC discovery count token failures in one budget per (client IP,
+// agent ID): failures over one transport count toward the other.
+func TestDiscoveryTransportsShareTheFailureBudget(t *testing.T) {
+	c := newDiscoveryClients(t)
+	if err := c.syncGRPC("agent-a", "token-agent-a"); err != nil {
+		t.Fatalf("enroll agent-a: %v", err)
+	}
+	for i := range 3 {
+		if code := c.syncHTTP("agent-a", "stale-token"); code != http.StatusUnauthorized {
+			t.Fatalf("bad token %d over HTTP: HTTP %d, want 401", i+1, code)
+		}
+	}
+	for i := range 2 {
+		if err := c.syncGRPC("agent-a", "stale-token"); status.Code(err) != codes.Unauthenticated {
+			t.Fatalf("bad token %d over gRPC: %v, want Unauthenticated", i+1, err)
+		}
+	}
+	if err := c.syncGRPC("agent-a", "token-agent-a"); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("gRPC after three HTTP and two gRPC failures: %v, want ResourceExhausted", err)
+	}
+	if code := c.syncHTTP("agent-a", "token-agent-a"); code != http.StatusTooManyRequests {
+		t.Fatalf("HTTP after the shared budget ran out: HTTP %d, want 429", code)
+	}
 }

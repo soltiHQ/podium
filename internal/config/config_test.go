@@ -21,7 +21,9 @@ func TestLoadTrustedProxies(t *testing.T) {
 		{name: "default", want: nil},
 		{name: "yaml", path: yamlPath, want: []string{"10.0.0.1", "2001:db8::/32"}},
 		{name: "env is comma-separated", env: "10.0.0.1,192.168.0.0/16", want: []string{"10.0.0.1", "192.168.0.0/16"}},
+		{name: "env entries are trimmed", env: "10.0.0.1, 10.0.0.2", want: []string{"10.0.0.1", "10.0.0.2"}},
 		{name: "invalid entry", env: "10.0.0.1,proxy.example.com", errorPath: "config.trusted_proxies"},
+		{name: "empty entry", env: "10.0.0.1, ", errorPath: "config.trusted_proxies"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("CONFIG_PATH", tc.path)

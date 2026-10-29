@@ -16,11 +16,6 @@ func LoginIPKey(ip string) string {
 	return "login:ip:" + network(ip)
 }
 
-// IPKey is the key of a client IP on the main HTTP listener: "ip:<network>".
-func IPKey(ip string) string {
-	return "ip:" + network(ip)
-}
-
 // AgentKey is the discovery key of an agent ID synced from a client IP: "agent:<id>@<network>".
 func AgentKey(ip, agentID string) string {
 	return "agent:" + agentID + "@" + network(ip)

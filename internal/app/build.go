@@ -185,7 +185,9 @@ func waitForLeader(ctx context.Context, l cluster.Leadership) bool {
 }
 
 // buildMainHandler wires the UI and API listener. resolver gives client IPs to
-// its own failure limiter, the login limiter and the stream limiter.
+// the login limiter and the stream limiter. The listener has no limit on failed
+// authentication: its tokens and session IDs cannot be guessed, and passwords
+// go through the login limiter.
 func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership, resolver *clientip.Resolver) (http.Handler, *loghub.Hub) {
 	var (
 		logHub        = buildLogHub(logger, svc.agent, proxyPool, cfg.Streams)
@@ -214,10 +216,18 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 		ForwardPort: addrPort(cfg.HTTP.Addr),
 		TargetTLS:   cfg.TLS.Server.Enabled(),
 	})(h)
-	h = middleware.RateLimit(kit.NewLimiter(cfg.Auth), resolver)(h)
 	h = middleware.CORS(cfg.CORS)(h)
 	h = middleware.Recovery(logger)(h)
 	return h, logHub
+}
+
+// buildDiscoveryListeners wires the HTTP and gRPC discovery listeners around one
+// failure limiter: both count agent token failures per (client IP, agent ID), so
+// an agent has one budget whichever transport it uses.
+func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, cfg config.Config, resolver *clientip.Resolver, serverTLS *tls.Config) (http.Handler, *grpc.Server) {
+	limiter := kit.NewLimiter(cfg.Auth)
+	return buildDiscoveryHandler(logger, agentSVC, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), limiter, resolver, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled()),
+		buildGRPCServer(logger, agentSVC, eventHub, leadership, limiter, serverTLS, cfg.AgentAuth.Require)
 }
 
 // buildDiscoveryHandler wires the HTTP discovery listener. It has no per-IP

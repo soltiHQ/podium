@@ -72,14 +72,14 @@ only the negotiated `Responder` is stored in context.
 - `IP(r)` - the TCP peer; when the peer is a trusted proxy, the right-most `X-Forwarded-For` entry that is not itself trusted.
 - `HTTPS(r)` - direct TLS, or `X-Forwarded-Proto: https` from a trusted proxy.
 
-RFC 7239 `Forwarded` is not supported. The login limiter, `middleware.RateLimit`, `middleware.StreamLimit` and HTTP discovery take the client IP from the resolver.
+RFC 7239 `Forwarded` is not supported. The login limiter, `middleware.StreamLimit` and HTTP discovery take the client IP from the resolver.
 gRPC requests carry no forwarding headers: gRPC discovery uses the peer address.
 
 ## Rate limits
 
-- `middleware.RateLimit` (main listener only) counts 401 responses per client IP; other statuses neither count nor reset. A blocked IP gets 429 for every request.
-- Discovery has no per-IP limit. Both Sync handlers count agent token failures per (client IP, agent ID), so one agent with a stale token never blocks the other agents behind its egress IP:
-  HTTP answers 429, gRPC `ResourceExhausted`.
+- The main listener has no limit on failed authentication: its tokens and session IDs cannot be guessed, and passwords go through the login limiter (`internal/auth`).
+- Discovery has no per-IP limit. Both Sync handlers count agent token failures per (client IP, agent ID) in one shared limiter, so a failure over HTTP counts toward gRPC and back,
+  and one agent with a stale token never blocks the other agents behind its egress IP. HTTP answers 429, gRPC `ResourceExhausted`.
 - `middleware.StreamLimit` caps concurrent streams per client IP.
 
 ## Error model (shared)

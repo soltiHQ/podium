@@ -2,10 +2,23 @@ package middleware
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 )
+
+// serve sends GET path from the TCP peer remoteAddr; forwardedFor, when set, is the X-Forwarded-For header.
+func serve(h http.Handler, path, remoteAddr, forwardedFor string) int {
+	r := httptest.NewRequest(http.MethodGet, path, nil)
+	r.RemoteAddr = remoteAddr
+	if forwardedFor != "" {
+		r.Header.Set("X-Forwarded-For", forwardedFor)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w.Code
+}
 
 func TestStreamLimitKeysByResolvedClientIP(t *testing.T) {
 	resolver, err := clientip.New([]string{"10.0.0.1"})

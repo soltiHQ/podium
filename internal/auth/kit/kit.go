@@ -27,8 +27,8 @@ type Auth struct {
 	// Clock used by token issuance and verification.
 	Clock token.Clock
 
-	// Limiter counts failed logins per account and per client IP.
-	// The other surfaces get their own instances from [NewLimiter].
+	// Limiter counts failed logins, and logins in flight, per account and
+	// per client IP. Discovery gets its own instance from [NewLimiter].
 	Limiter *ratelimit.Limiter
 
 	// Session provides login, refresh, and revoke operations.

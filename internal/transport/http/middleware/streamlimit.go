@@ -58,7 +58,7 @@ func (l *StreamLimiter) Release(ip string) {
 }
 
 // StreamLimit wraps a streaming handler with a per-IP concurrency cap.
-// Use on long-lived endpoints (SSE log tail, watches) - for short request/response RPCs the failure-based [RateLimit] middleware fits better.
+// Use on long-lived endpoints (SSE log tail, watches).
 func StreamLimit(limiter *StreamLimiter) func(http.Handler) http.Handler {
 	if limiter == nil {
 		return func(next http.Handler) http.Handler { return next }
