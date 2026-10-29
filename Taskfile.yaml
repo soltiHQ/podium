@@ -8,8 +8,6 @@ vars:
 includes:
   golang:
     taskfile: https://raw.githubusercontent.com/soltiHQ/actions/main/taskfiles/go/Taskfile.yml
-    vars:
-      image_patch: "-1"
   helpers:
     taskfile: https://raw.githubusercontent.com/soltiHQ/actions/main/taskfiles/helpers/Taskfile.yml
 

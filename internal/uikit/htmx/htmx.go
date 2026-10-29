@@ -48,8 +48,8 @@ type Config struct {
 //		startup (1 goroutine) │ serving (N goroutines)
 //		 Configure(cfg)    ───┤── Get*Refresh(cfg) ──► read
 //		   write           ───┤── Get*Refresh(cfg) ──► read
-//		      ▲               │          ▲
-//		  only here           │     reads only
+//		      ▲                          ▲
+//		  only here                 reads only
 var cfg = defaultConfig()
 
 func defaultConfig() Config {
