@@ -1,17 +1,12 @@
 package policy
 
-import (
-	"github.com/soltiHQ/control-plane/domain/enum"
-	"github.com/soltiHQ/control-plane/internal/auth/identity"
-)
+import "github.com/soltiHQ/control-plane/internal/auth/identity"
 
 // UserDetail is a UI-oriented policy for the user detail page.
 //
 // It controls edit, role-management, delete and session actions on the profile view.
 // Self-targeting guards prevent a user from deleting or demoting themselves:
 // CanEditRoles and CanDelete are forced to be false when IsSelf is true.
-// Another user's actions mirror the API's target ceiling: the viewer must hold
-// every permission of that user.
 type UserDetail struct {
 	IsSelf            bool
 	CanEdit           bool
@@ -20,9 +15,10 @@ type UserDetail struct {
 	CanRevokeSessions bool
 }
 
-// BuildUserDetail derives UI action flags from the authenticated identity and
-// the target user's effective permissions.
-func BuildUserDetail(id *identity.Identity, targetUserID string, targetPerms map[enum.Permission]struct{}) UserDetail {
+// BuildUserDetail derives UI action flags from the authenticated identity.
+// manageable is the API's target-ceiling decision for this viewer and user
+// (user.Service.CanManage); it is always true for the viewer's own account.
+func BuildUserDetail(id *identity.Identity, targetUserID string, manageable bool) UserDetail {
 	if id == nil {
 		return UserDetail{}
 	}
@@ -31,12 +27,11 @@ func BuildUserDetail(id *identity.Identity, targetUserID string, targetPerms map
 		perms = permSet(id)
 		self  = id.UserID == targetUserID
 	)
-	manage := self || covers(perms, targetPerms)
 	return UserDetail{
 		IsSelf:            self,
-		CanEdit:           hasAny(perms, usersEdit) && manage,
-		CanEditRoles:      hasAny(perms, usersEdit) && manage && !self,
-		CanDelete:         hasAny(perms, usersDelete) && manage && !self,
-		CanRevokeSessions: hasAny(perms, usersEdit) && manage,
+		CanEdit:           hasAny(perms, usersEdit) && manageable,
+		CanEditRoles:      hasAny(perms, usersEdit) && manageable && !self,
+		CanDelete:         hasAny(perms, usersDelete) && manageable && !self,
+		CanRevokeSessions: hasAny(perms, usersEdit) && manageable,
 	}
 }

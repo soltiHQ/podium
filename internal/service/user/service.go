@@ -7,7 +7,6 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain"
-	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/service"
@@ -59,9 +58,18 @@ func (s *Service) GetBySubject(ctx context.Context, subject string) (*model.User
 	return s.store.GetUserBySubject(ctx, subject)
 }
 
-// EffectivePermissions returns the union of u's role and direct permissions.
-func (s *Service) EffectivePermissions(ctx context.Context, u *model.User) (map[enum.Permission]struct{}, error) {
-	return EffectivePermissions(ctx, s.store, u)
+// CanManage reports whether actor may act on target under the target ceiling
+// (CheckTarget). It reads outside a transaction, so it only decides what the
+// UI offers; the mutations check again inside their own transaction.
+func (s *Service) CanManage(ctx context.Context, actor *identity.Identity, target *model.User) (bool, error) {
+	switch err := CheckTarget(ctx, s.store, actor, target); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrPermissionCeiling):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 // Delete removes a user on behalf of actor, cascading sessions → verifiers →

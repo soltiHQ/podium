@@ -144,14 +144,16 @@ func (a *API) Routes(mux *http.ServeMux, auth route.BaseMW, _ route.PermMW, comm
 	route.HandleFunc(mux, routepath.ApiRoles, a.Roles, append(common, auth)...)
 }
 
-// Permissions handles GET /api/v1/permissions.
+// Permissions handles GET /api/v1/permissions: the permissions the caller may
+// grant, which feed the user edit form.
 func (a *API) Permissions(w http.ResponseWriter, r *http.Request) {
 	route.Resource(w, r, "",
 		route.Endpoint{Method: http.MethodGet, Perm: enum.UsersEdit, Fn: a.permissionsList},
 	)
 }
 
-// Roles handles GET /api/v1/roles.
+// Roles handles GET /api/v1/roles: the roles the caller may grant, which feed
+// the user edit form.
 func (a *API) Roles(w http.ResponseWriter, r *http.Request) {
 	route.Resource(w, r, "",
 		route.Endpoint{Method: http.MethodGet, Perm: enum.UsersEdit, Fn: a.rolesList},
@@ -159,11 +161,15 @@ func (a *API) Roles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) permissionsList(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
-	perms := a.accessSVC.GetPermissions()
-
-	items := make([]string, 0, len(perms))
+	var (
+		viewer = a.identity(r)
+		perms  = a.accessSVC.GetPermissions()
+		items  = make([]string, 0, len(perms))
+	)
 	for _, p := range perms {
-		items = append(items, wire.PermissionToREST(p))
+		if user.CanGrant(viewer, p) {
+			items = append(items, wire.PermissionToREST(p))
+		}
 	}
 	response.OK(w, r, mode, &responder.View{
 		Data: restv1.ListPermissionsResponse{Items: items},
@@ -178,7 +184,13 @@ func (a *API) rolesList(w http.ResponseWriter, r *http.Request, mode httpctx.Ren
 		return
 	}
 
-	items := mapSlice(roles, wire.RoleToREST)
+	viewer := a.identity(r)
+	items := make([]restv1.Role, 0, len(roles))
+	for _, role := range roles {
+		if role != nil && user.CanGrant(viewer, role.PermissionsAll()...) {
+			items = append(items, wire.RoleToREST(role))
+		}
+	}
 	response.OK(w, r, mode, &responder.View{
 		Data: restv1.ListRolesResponse{Items: items},
 	})

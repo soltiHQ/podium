@@ -3,6 +3,8 @@ package user
 import (
 	"context"
 	"errors"
+	"maps"
+	"slices"
 
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
@@ -23,7 +25,8 @@ var (
 
 // EffectivePermissions returns the union of u's role and direct permissions.
 // It uses the resolver that authorizes requests, so a ceiling and the
-// permissions a request runs with always agree.
+// permissions a request runs with always agree. Stored strings outside
+// enum.All are kept; the ceilings ignore them (see CanGrant).
 func EffectivePermissions(ctx context.Context, tx storage.Storage, u *model.User) (map[enum.Permission]struct{}, error) {
 	perms, err := rbac.NewResolver(tx).ResolveUserPermissions(ctx, u)
 	if err != nil {
@@ -51,8 +54,23 @@ func CheckTarget(ctx context.Context, tx storage.Storage, actor *identity.Identi
 	return checkGrant(ctx, tx, actor, target)
 }
 
-// checkGrant returns ErrPermissionCeiling unless actor holds every effective
-// permission of u.
+// CanGrant reports whether actor may give a user every permission in perms.
+// A string outside enum.All is not a permission: it grants nothing, so it
+// never blocks the actor.
+func CanGrant(actor *identity.Identity, perms ...enum.Permission) bool {
+	if actor == nil {
+		return false
+	}
+	for _, p := range perms {
+		if p.Known() && !actor.HasPermission(p) {
+			return false
+		}
+	}
+	return true
+}
+
+// checkGrant returns ErrPermissionCeiling unless actor may grant every
+// effective permission of u.
 func checkGrant(ctx context.Context, tx storage.Storage, actor *identity.Identity, u *model.User) error {
 	if actor == nil {
 		return ErrPermissionCeiling
@@ -61,10 +79,8 @@ func checkGrant(ctx context.Context, tx storage.Storage, actor *identity.Identit
 	if err != nil {
 		return err
 	}
-	for p := range perms {
-		if !actor.HasPermission(p) {
-			return ErrPermissionCeiling
-		}
+	if !CanGrant(actor, slices.Collect(maps.Keys(perms))...) {
+		return ErrPermissionCeiling
 	}
 	return nil
 }

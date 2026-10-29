@@ -19,16 +19,18 @@ Each `Build*` function takes an `identity.Identity` and returns a struct of bool
 identity.Identity
        │
        ▼
-  BuildNav(id)                                    → Nav          (sidebar: ShowUsers, ShowAgents, CanAddUser…)
-  BuildUserDetail(id, targetUserID, targetPerms)  → UserDetail   (detail page: CanEdit, CanEditRoles, CanDelete,
-                                                                   CanRevokeSessions + IsSelf guard and target ceiling)
-  BuildAgentDetail(id)                            → AgentDetail  (detail page: CanEditLabels…)
-  BuildSpecDetail(id)                             → SpecDetail   (detail page: CanEdit, CanDelete, CanDeploy…)
-  BuildDashboard(id)                              → Dashboard    (issue list: CanDismiss(kind))
+  BuildNav(id)                                   → Nav          (sidebar: ShowUsers, ShowAgents, CanAddUser…)
+  BuildUserDetail(id, targetUserID, manageable)  → UserDetail   (detail page: CanEdit, CanEditRoles, CanDelete,
+                                                                  CanRevokeSessions + IsSelf guard and target ceiling)
+  BuildAgentDetail(id)                           → AgentDetail  (detail page: CanEditLabels…)
+  BuildSpecDetail(id)                            → SpecDetail   (detail page: CanEdit, CanDelete, CanDeploy…)
+  BuildDashboard(id)                             → Dashboard    (issue list: CanDismiss(kind))
 ```
 
-The flags mirror the API rules: another user's actions need every permission that user holds, spec delete needs
-`taskspecs:delete`, and an issue is dismissed with the edit permission of its subject.
+The flags mirror the API rules: another user's actions need every permission that user holds (`manageable` is the
+user service's own decision), spec delete needs `taskspecs:delete`, and an issue is dismissed with the edit permission
+of its subject. The user edit form's role and permission options come from the API, which lists only what the viewer
+may grant.
 
 ## routepath
 All URL constants in one place — pages (`Page*`) and API endpoints (`Api*`).

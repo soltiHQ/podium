@@ -315,3 +315,76 @@ func TestLastAdminKeepsEveryPermission(t *testing.T) {
 		})
 	}
 }
+
+// A string outside enum.All grants nothing, so it neither shields the user
+// who holds it nor stops an actor from granting a role that carries it.
+func TestUnknownPermissionsNeitherBlockNorGrant(t *testing.T) {
+	svc, st := fixture(t, nil)
+	ctx := context.Background()
+	editor := actor("editor", userEditorPerms...)
+
+	legacy, err := model.NewUser("legacy", "legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.SetPermissions([]string{string(enum.UsersGet), "legacy:perm"})
+	if err := st.UpsertUser(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckTarget(ctx, st, editor, stored(t, st, "legacy")); err != nil {
+		t.Fatalf("manage a user with an unknown permission = %v, want nil", err)
+	}
+	cleaned := stored(t, st, "legacy")
+	cleaned.SetPermissions([]string{string(enum.UsersGet)})
+	if err := svc.Update(ctx, editor, cleaned); err != nil {
+		t.Fatalf("remove the unknown permission = %v, want nil", err)
+	}
+	if got := stored(t, st, "legacy").PermissionsAll(); !slices.Equal(got, []enum.Permission{enum.UsersGet}) {
+		t.Fatalf("permissions after cleanup %v, want [users:get]", got)
+	}
+	if _, err := svc.SetDisabled(ctx, editor, "legacy", true); err != nil {
+		t.Fatalf("disable = %v, want nil", err)
+	}
+
+	role, err := model.NewRole("legacy-role", "legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []enum.Permission{enum.UsersGet, "legacy:perm"} {
+		if err := role.PermissionAdd(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.UpsertRole(ctx, role); err != nil {
+		t.Fatal(err)
+	}
+	u, err := model.NewUser("assigned", "assigned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.SetRoleIDs([]string{"legacy-role"})
+	if err := svc.Create(ctx, editor, u); err != nil {
+		t.Fatalf("grant a role carrying an unknown permission = %v, want nil", err)
+	}
+}
+
+func TestCanGrantSkipsOnlyUnknownPermissions(t *testing.T) {
+	editor := actor("editor", userEditorPerms...)
+	for _, tc := range []struct {
+		actor *identity.Identity
+		perms []enum.Permission
+		want  bool
+	}{
+		{editor, nil, true},
+		{editor, []enum.Permission{enum.UsersGet, enum.UsersEdit}, true},
+		{editor, []enum.Permission{"legacy:perm", enum.UsersGet}, true},
+		{editor, []enum.Permission{"legacy:perm", enum.AgentsGet}, false},
+		{editor, []enum.Permission{enum.UsersGet, enum.UsersDelete}, false},
+		{actor("odd", "legacy:perm"), []enum.Permission{enum.AgentsGet}, false},
+		{nil, nil, false},
+	} {
+		if got := CanGrant(tc.actor, tc.perms...); got != tc.want {
+			t.Errorf("CanGrant(%v, %v) = %v, want %v", tc.actor, tc.perms, got, tc.want)
+		}
+	}
+}

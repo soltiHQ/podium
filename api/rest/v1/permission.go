@@ -1,6 +1,6 @@
 package restv1
 
-// ListPermissionsResponse is the full list of available permissions (bounded; not paginated).
+// ListPermissionsResponse lists the permissions the caller may grant (bounded; not paginated).
 type ListPermissionsResponse struct {
 	Items []string `json:"items"`
 }

@@ -75,6 +75,7 @@ registered routes: every new `/api/v1` route needs a row there.
 The user, credential and session services enforce these inside the transaction of the mutation:
 
 - **Grant ceiling.** Create and update may give a user, directly or through roles, only permissions the caller holds → 403.
+  A permission name outside `enum.All` in the request → 400; one already stored grants nothing and never blocks the caller.
 - **Target ceiling.** Update, disable, enable, delete, password and session revoke on another user need every permission of that user → 403.
   On yourself the self rules apply instead: no change of your own roles or permissions, no self delete or disable → 400.
 - **Last admin.** A delete, disable or role/permission change that would leave no enabled user holding every permission → 409.
@@ -120,11 +121,11 @@ Every event kind maps to a subject (`event.SubjectOf`):
 | unknown | `issue_closed` (it can name any subject) and unknown kinds                 | all three   | all three    |
 
 ### Other
-| Method | Path                    | Permission                                                     |
-|--------|-------------------------|----------------------------------------------------------------|
-| GET    | `/api/v1/permissions`   | `UsersEdit`                                                    |
-| GET    | `/api/v1/roles`         | `UsersEdit`                                                    |
-| GET    | `/api/v1/events/stream` | (any authed); registered by `app`, sends refresh triggers only |
+| Method | Path                    | Permission                                                           |
+|--------|-------------------------|----------------------------------------------------------------------|
+| GET    | `/api/v1/permissions`   | `UsersEdit`; lists only the permissions the caller holds             |
+| GET    | `/api/v1/roles`         | `UsersEdit`; lists only the roles whose permissions the caller holds |
+| GET    | `/api/v1/events/stream` | (any authed); registered by `app`, sends refresh triggers only       |
 
 ## Discovery endpoint
 | Transport | Method             | Path / RPC                     |

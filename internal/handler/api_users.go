@@ -134,7 +134,7 @@ func (a *API) usersDetails(w http.ResponseWriter, r *http.Request, mode httpctx.
 		return
 	}
 
-	perms, err := a.userSVC.EffectivePermissions(r.Context(), u)
+	manageable, err := a.userSVC.CanManage(r.Context(), a.identity(r), u)
 	if err != nil {
 		a.logger.Error().Err(err).Str("user_id", id).Msg("user permissions failed")
 		response.Unavailable(w, r, mode)
@@ -144,7 +144,7 @@ func (a *API) usersDetails(w http.ResponseWriter, r *http.Request, mode httpctx.
 	apiUser := wire.UserToREST(u)
 	response.OK(w, r, mode, &responder.View{
 		Data:      apiUser,
-		Component: contentUser.Detail(apiUser, policy.BuildUserDetail(a.identity(r), id, perms)),
+		Component: contentUser.Detail(apiUser, policy.BuildUserDetail(a.identity(r), id, manageable)),
 	})
 }
 
@@ -155,16 +155,18 @@ func (a *API) usersSessions(w http.ResponseWriter, r *http.Request, mode httpctx
 		response.Unavailable(w, r, mode)
 		return
 	}
-	var perms map[enum.Permission]struct{}
-	if u, err := a.userSVC.Get(r.Context(), id); err == nil {
-		perms, err = a.userSVC.EffectivePermissions(r.Context(), u)
-		if err != nil {
-			a.logger.Error().Err(err).Str("user_id", id).Msg("user permissions failed")
-			response.Unavailable(w, r, mode)
-			return
-		}
-	} else if !errors.Is(err, storage.ErrNotFound) {
+	target, err := a.userSVC.Get(r.Context(), id)
+	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		a.logger.Error().Err(err).Str("user_id", id).Msg("user get failed")
+		response.Unavailable(w, r, mode)
+		return
+	}
+	if err != nil {
+		target = nil // sessions left by a deleted user have no owner to protect
+	}
+	manageable, err := a.userSVC.CanManage(r.Context(), a.identity(r), target)
+	if err != nil {
+		a.logger.Error().Err(err).Str("user_id", id).Msg("user permissions failed")
 		response.Unavailable(w, r, mode)
 		return
 	}
@@ -180,7 +182,7 @@ func (a *API) usersSessions(w http.ResponseWriter, r *http.Request, mode httpctx
 	})
 	response.OK(w, r, mode, &responder.View{
 		Data:      restv1.ListSessionsResponse{Items: items},
-		Component: contentUser.Sessions(items, policy.BuildUserDetail(a.identity(r), id, perms)),
+		Component: contentUser.Sessions(items, policy.BuildUserDetail(a.identity(r), id, manageable)),
 	})
 }
 
@@ -195,6 +197,12 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	if action == modeCreate && (in.RoleIDs != nil || in.Permissions != nil) {
 		if actor == nil || !actor.HasPermission(enum.UsersEdit) {
 			response.Forbidden(w, r, mode)
+			return
+		}
+	}
+	for _, p := range in.Permissions {
+		if p != "" && !enum.Permission(p).Known() {
+			response.BadRequestMsg(w, r, mode, "Unknown permission.")
 			return
 		}
 	}

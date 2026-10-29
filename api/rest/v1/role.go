@@ -6,7 +6,7 @@ type Role struct {
 	Name string `json:"name"`
 }
 
-// ListRolesResponse is the full list of roles (bounded; not paginated).
+// ListRolesResponse lists the roles the caller may grant (bounded; not paginated).
 type ListRolesResponse struct {
 	Items []Role `json:"items"`
 }

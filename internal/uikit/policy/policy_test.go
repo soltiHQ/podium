@@ -47,23 +47,15 @@ func TestBuildNav(t *testing.T) {
 	})
 }
 
-func set(perms ...enum.Permission) map[enum.Permission]struct{} {
-	m := make(map[enum.Permission]struct{}, len(perms))
-	for _, p := range perms {
-		m[p] = struct{}{}
-	}
-	return m
-}
-
 func TestBuildUserDetail(t *testing.T) {
 	t.Run("nil identity is all-false", func(t *testing.T) {
-		if got := BuildUserDetail(nil, "target", nil); got != (UserDetail{}) {
+		if got := BuildUserDetail(nil, "target", true); got != (UserDetail{}) {
 			t.Fatalf("BuildUserDetail(nil) = %+v, want zero", got)
 		}
 	})
 
 	t.Run("other user within the ceiling: actions follow permissions", func(t *testing.T) {
-		got := BuildUserDetail(id("admin", usersEdit, usersDelete), "victim", set(usersEdit))
+		got := BuildUserDetail(id("admin", usersEdit, usersDelete), "victim", true)
 		want := UserDetail{IsSelf: false, CanEdit: true, CanEditRoles: true, CanDelete: true, CanRevokeSessions: true}
 		if got != want {
 			t.Fatalf("BuildUserDetail(other) = %+v, want %+v", got, want)
@@ -71,14 +63,13 @@ func TestBuildUserDetail(t *testing.T) {
 	})
 
 	t.Run("other user above the ceiling: no actions", func(t *testing.T) {
-		got := BuildUserDetail(id("manager", usersEdit, usersDelete), "admin", set(usersEdit, agentsGet))
-		if got != (UserDetail{}) {
+		if got := BuildUserDetail(id("manager", usersEdit, usersDelete), "admin", false); got != (UserDetail{}) {
 			t.Fatalf("BuildUserDetail(stronger user) = %+v, want zero", got)
 		}
 	})
 
 	t.Run("self-guard: cannot delete or change own roles even with permission", func(t *testing.T) {
-		got := BuildUserDetail(id("me", usersEdit, usersDelete), "me", set(usersEdit, usersDelete))
+		got := BuildUserDetail(id("me", usersEdit, usersDelete), "me", true)
 		want := UserDetail{
 			IsSelf:            true,
 			CanEdit:           true,  // editing own profile is allowed
@@ -92,7 +83,7 @@ func TestBuildUserDetail(t *testing.T) {
 	})
 
 	t.Run("without users:edit nothing is editable", func(t *testing.T) {
-		if got := BuildUserDetail(id("viewer", usersGet), "other", nil); got != (UserDetail{}) {
+		if got := BuildUserDetail(id("viewer", usersGet), "other", true); got != (UserDetail{}) {
 			t.Fatalf("BuildUserDetail(viewer) = %+v, want zero", got)
 		}
 	})

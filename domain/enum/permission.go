@@ -1,7 +1,15 @@
 package enum
 
+import "slices"
+
 // Permission defines a stable identifier of an allowed action.
 type Permission string
+
+// Known reports whether p is a declared permission, i.e. listed in All.
+// Stored strings outside All grant nothing.
+func (p Permission) Known() bool {
+	return slices.Contains(All, p)
+}
 
 const (
 	AgentsGet  Permission = "agents:get"

@@ -2,15 +2,20 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"html"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
+	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
 	"github.com/soltiHQ/control-plane/domain/enum"
+	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/credentials"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/event"
@@ -245,5 +250,125 @@ func TestUserDetailShowsOnlyActionsWithinViewerCeiling(t *testing.T) {
 	viewer := f.user(t, "viewer", enum.RoleUserReaderID)
 	if sessions := f.render(t, "/api/v1/users/reader/sessions", viewer); strings.Contains(sessions, "/revoke") {
 		t.Error("sessions offer revoke to a viewer without users:edit")
+	}
+}
+
+// Permission names were not validated before, and a name can leave enum.All
+// later. Such a string grants nothing, so it must not shield its holder.
+func TestUnknownPermissionsDoNotLockUsersOut(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	admin := f.user(t, "admin", enum.RoleAdminID)
+	legacy, err := model.NewUser("legacy", "legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.SetPermissions([]string{string(enum.AgentsGet), "legacy:perm"})
+	if err := f.store.UpsertUser(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	f.session(t, "legacy-session", "legacy")
+
+	page := f.render(t, "/api/v1/users/legacy", admin)
+	for _, action := range []string{"/api/v1/users/legacy/disable", "/api/v1/users/legacy/password", "Edit user", "Delete user"} {
+		if !strings.Contains(page, action) {
+			t.Errorf("legacy user detail hides %q from an Admin", action)
+		}
+	}
+	for _, tc := range []struct{ method, target, body string }{
+		{http.MethodPut, "/api/v1/users/legacy", `{"name":"Legacy"}`},
+		{http.MethodPost, "/api/v1/users/legacy/disable", ""},
+		{http.MethodPost, "/api/v1/users/legacy/enable", ""},
+		{http.MethodPost, "/api/v1/session/legacy-session/revoke", ""},
+		{http.MethodPut, "/api/v1/users/legacy", `{"permissions":["agents:get"]}`},
+	} {
+		if w := f.do(tc.method, tc.target, tc.body, admin); w.Code != http.StatusNoContent {
+			t.Fatalf("%s %s: %d %s, want 204", tc.method, tc.target, w.Code, w.Body.String())
+		}
+	}
+	u, err := f.store.GetUser(ctx, "legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := u.PermissionsAll(); !slices.Equal(got, []enum.Permission{enum.AgentsGet}) || u.Name() != "Legacy" || u.Disabled() {
+		t.Fatalf("legacy user after cleanup: permissions %v name %q disabled %v", got, u.Name(), u.Disabled())
+	}
+	if w := f.do(http.MethodDelete, "/api/v1/users/legacy", "", admin); w.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d %s, want 204", w.Code, w.Body.String())
+	}
+}
+
+func TestUnknownPermissionInputIsBadRequest(t *testing.T) {
+	f := newAPIFixture(t)
+	ctx := context.Background()
+	admin := f.user(t, "admin", enum.RoleAdminID)
+	f.user(t, "reader", enum.RoleUserReaderID)
+	if w := f.do(http.MethodPost, "/api/v1/users", `{"subject":"newcomer","permissions":["users:get","legacy:perm"]}`, admin); w.Code != http.StatusBadRequest {
+		t.Fatalf("create with an unknown permission: %d %s, want 400", w.Code, w.Body.String())
+	}
+	if _, err := f.store.GetUserBySubject(ctx, "newcomer"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("refused create stored the user: %v", err)
+	}
+	if w := f.do(http.MethodPut, "/api/v1/users/reader", `{"permissions":["legacy:perm"]}`, admin); w.Code != http.StatusBadRequest {
+		t.Fatalf("update with an unknown permission: %d %s, want 400", w.Code, w.Body.String())
+	}
+	if u, err := f.store.GetUser(ctx, "reader"); err != nil || len(u.PermissionsAll()) != 0 {
+		t.Fatalf("refused update changed the user: %v", err)
+	}
+}
+
+// The edit modal loads its role and permission options from the API; they
+// must hold only what the viewer may grant.
+func TestUserEditModalOffersOnlyGrantableAccess(t *testing.T) {
+	f := newAPIFixture(t)
+	f.user(t, "reader", enum.RoleUserReaderID)
+	editor := f.user(t, "editor", enum.RoleUserEditorID)
+	admin := f.user(t, "admin", enum.RoleAdminID)
+
+	var endpoints []string
+	page := html.UnescapeString(f.render(t, "/api/v1/users/reader", editor))
+	for _, m := range regexp.MustCompile(`fetch\("([^"]+)"\)\.then`).FindAllStringSubmatch(page, -1) {
+		endpoints = append(endpoints, m[1])
+	}
+	slices.Sort(endpoints)
+	if want := []string{"/api/v1/permissions", "/api/v1/roles"}; !slices.Equal(endpoints, want) {
+		t.Fatalf("edit modal loads options from %v, want %v", endpoints, want)
+	}
+	get := func(endpoint string, viewer *identity.Identity, body any) {
+		t.Helper()
+		w := f.do(http.MethodGet, endpoint, "", viewer)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET %s: %d %s", endpoint, w.Code, w.Body.String())
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		viewer             *identity.Identity
+		roles, permissions []string
+	}{
+		{editor, []string{"012", "013"}, []string{"users:add", "users:edit", "users:get"}},
+		{admin, []string{"001", "002", "003", "011", "012", "013", "021", "022", "023", "031", "032"}, []string{
+			"agents:edit", "agents:get", "taskspecs:add", "taskspecs:delete", "taskspecs:deploy", "taskspecs:edit",
+			"taskspecs:get", "users:add", "users:delete", "users:edit", "users:get",
+		}},
+	} {
+		var roles restv1.ListRolesResponse
+		get("/api/v1/roles", tc.viewer, &roles)
+		var roleIDs []string
+		for _, r := range roles.Items {
+			roleIDs = append(roleIDs, r.ID)
+		}
+		slices.Sort(roleIDs)
+		if !slices.Equal(roleIDs, tc.roles) {
+			t.Errorf("%s: role options %v, want %v", tc.viewer.UserID, roleIDs, tc.roles)
+		}
+		var perms restv1.ListPermissionsResponse
+		get("/api/v1/permissions", tc.viewer, &perms)
+		slices.Sort(perms.Items)
+		if !slices.Equal(perms.Items, tc.permissions) {
+			t.Errorf("%s: permission options %v, want %v", tc.viewer.UserID, perms.Items, tc.permissions)
+		}
 	}
 }
