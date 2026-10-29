@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -22,33 +23,46 @@ const (
 	agentHeartbeatMaxSeconds   = 3600
 )
 
-// agentIDPattern is the SDK AgentId charset with a letter or digit first.
-var agentIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+// agentIDPattern is the SDK AgentId charset.
+var agentIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
-// ValidateAgentID accepts 1-128 bytes matching ^[A-Za-z0-9][A-Za-z0-9._-]*$.
+// ValidateAgentID applies the SDK AgentId rule: 1-128 bytes of [A-Za-z0-9._-],
+// other than "." and "..".
 func ValidateAgentID(id string) error {
 	switch {
 	case id == "":
 		return fmt.Errorf("%w: %w", domain.ErrInvalidArgument, domain.ErrEmptyID)
 	case len(id) > agentIDMaxBytes:
 		return fmt.Errorf("%w: agent id exceeds %d bytes", domain.ErrInvalidArgument, agentIDMaxBytes)
+	case id == "." || id == "..":
+		return fmt.Errorf("%w: agent id cannot be \".\" or \"..\"", domain.ErrInvalidArgument)
 	case !agentIDPattern.MatchString(id):
-		return fmt.Errorf("%w: agent id must start with a letter or digit and contain only [A-Za-z0-9._-]", domain.ErrInvalidArgument)
+		return fmt.Errorf("%w: agent id may contain only [A-Za-z0-9._-]", domain.ErrInvalidArgument)
 	}
 	return nil
 }
 
 // ValidateAgentEndpoint accepts the address forms the proxy can call:
 //   - HTTP: an absolute http or https URL with a host, an optional port
-//     1-65535 and an empty or "/" path; no userinfo, query or fragment.
+//     1-65535 and an optional reverse-proxy base path; no userinfo, query or
+//     fragment. A base path is absolute, has no empty, "." or ".." segments
+//     and at most one trailing "/". It must not need percent-encoding:
+//     encoded bytes such as %2F or %2E are rejected rather than decoded,
+//     because a proxy in front of the agent may decode them differently.
 //   - gRPC: "host:port" with a port 1-65535 and an optional trailing "/".
 //     The "http://" and "https://" prefixes that the proxy strips before
 //     dialing are accepted too; they do not select TLS.
 func ValidateAgentEndpoint(endpoint string, t enum.EndpointType) error {
 	switch t {
 	case enum.EndpointHTTP:
-		_, err := parseAgentURL(endpoint)
-		return err
+		u, err := parseAgentURL(endpoint)
+		if err != nil {
+			return err
+		}
+		if !validBasePath(u) {
+			return invalidEndpoint(`base path must be absolute, without empty, "." or ".." segments or percent-encoding`)
+		}
+		return nil
 	case enum.EndpointGRPC:
 		target := endpoint
 		if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
@@ -57,6 +71,9 @@ func ValidateAgentEndpoint(endpoint string, t enum.EndpointType) error {
 		u, err := parseAgentURL(target)
 		if err != nil {
 			return err
+		}
+		if u.Path != "" && u.Path != "/" {
+			return invalidEndpoint("must not contain a path")
 		}
 		if u.Port() == "" {
 			return invalidEndpoint("requires a port")
@@ -67,7 +84,21 @@ func ValidateAgentEndpoint(endpoint string, t enum.EndpointType) error {
 	}
 }
 
-// parseAgentURL parses endpoint under the HTTP endpoint rules.
+// validBasePath reports whether u's path is empty, "/", or a clean absolute
+// path with at most one trailing "/" and nothing that needs percent-encoding.
+func validBasePath(u *url.URL) bool {
+	if u.Path == "" || u.Path == "/" {
+		return true
+	}
+	if strings.Contains(u.EscapedPath(), "%") {
+		return false
+	}
+	trimmed := strings.TrimSuffix(u.Path, "/")
+	return trimmed != "/" && path.Clean(trimmed) == trimmed
+}
+
+// parseAgentURL parses endpoint under the scheme, credential and host:port
+// rules shared by both endpoint types. Path rules are per endpoint type.
 func parseAgentURL(endpoint string) (*url.URL, error) {
 	// A bare "?" or "#" parses to an empty query or fragment; check the raw delimiters.
 	if strings.ContainsAny(endpoint, "?#") {
@@ -81,8 +112,6 @@ func parseAgentURL(endpoint string) (*url.URL, error) {
 		return nil, invalidEndpoint("must use http or https")
 	case u.User != nil:
 		return nil, invalidEndpoint("must not contain credentials")
-	case u.Path != "" && u.Path != "/":
-		return nil, invalidEndpoint("must not contain a path")
 	}
 	host := u.Host
 	if strings.LastIndexByte(host, ':') > strings.LastIndexByte(host, ']') {

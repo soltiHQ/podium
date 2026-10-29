@@ -10,13 +10,14 @@ import (
 	"github.com/soltiHQ/control-plane/domain/enum"
 )
 
+// The rule is the SDK AgentId rule (solti-model validate_identity).
 func TestValidateAgentIDRejectsUnsafeCharacters(t *testing.T) {
-	for _, id := range []string{`x'"`, "a/b", "", strings.Repeat("a", 129), "agent with space", "-agent", "..", "agent\n"} {
+	for _, id := range []string{`x'"`, "a/b", `a\b`, "", strings.Repeat("a", 129), "agent with space", ".", "..", "agent\n", "é"} {
 		if err := ValidateAgentID(id); !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("ValidateAgentID(%q) = %v, want ErrInvalidArgument", id, err)
 		}
 	}
-	for _, id := range []string{"local-http-agent", "550e8400-e29b-41d4-a716-446655440000", "node-1.example.com", "worker_pod-7b9f4", strings.Repeat("a", 128)} {
+	for _, id := range []string{"local-http-agent", "550e8400-e29b-41d4-a716-446655440000", "node-1.example.com", "worker_pod-7b9f4", strings.Repeat("a", 128), "_agent", "-agent", ".agent", "..x"} {
 		if err := ValidateAgentID(id); err != nil {
 			t.Errorf("ValidateAgentID(%q) = %v, want nil", id, err)
 		}
@@ -48,6 +49,20 @@ func TestValidateAgentEndpointAcceptsSDKForms(t *testing.T) {
 	}
 }
 
+// Reverse-proxy base paths the SDK documents for advertised HTTP agent URLs.
+func TestValidateAgentEndpointAcceptsBasePath(t *testing.T) {
+	for _, endpoint := range []string{
+		"http://h:1/admin",
+		"https://gw.example.com/agents/a1",
+		"https://gw.example.com/agents/a1/",
+		"http://10.0.0.5:8085/solti/node-1.example.com_x",
+	} {
+		if err := ValidateAgentEndpoint(endpoint, enum.EndpointHTTP); err != nil {
+			t.Errorf("ValidateAgentEndpoint(%q, http) = %v, want nil", endpoint, err)
+		}
+	}
+}
+
 func TestValidateAgentEndpointRejectsUnsafeForms(t *testing.T) {
 	for _, tc := range []struct {
 		endpoint string
@@ -61,7 +76,17 @@ func TestValidateAgentEndpointRejectsUnsafeForms(t *testing.T) {
 		{"http://:80", enum.EndpointHTTP},
 		{"", enum.EndpointHTTP},
 		{"h:1", enum.EndpointHTTP},
-		{"http://h:1/admin", enum.EndpointHTTP},
+		{"http://h:1/agents/../admin", enum.EndpointHTTP},
+		{"http://h:1/agents/./a1", enum.EndpointHTTP},
+		{"http://h:1/agents/..", enum.EndpointHTTP},
+		{"http://h:1//admin", enum.EndpointHTTP},
+		{"http://h:1/agents//a1", enum.EndpointHTTP},
+		{"http://h:1/agents/a1//", enum.EndpointHTTP},
+		{"http://h:1//", enum.EndpointHTTP},
+		{"http://h:1/%2e%2e/admin", enum.EndpointHTTP},
+		{"http://h:1/agents%2Fa1", enum.EndpointHTTP},
+		{"http://h:1/agents%20a1", enum.EndpointHTTP},
+		{"http://h:1/agents a1", enum.EndpointHTTP},
 		{"http://h:1?", enum.EndpointHTTP},
 		{"http://h:1#", enum.EndpointHTTP},
 		{"http://h:0", enum.EndpointHTTP},

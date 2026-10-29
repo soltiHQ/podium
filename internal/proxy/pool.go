@@ -178,8 +178,10 @@ func (p *Pool) grpcConn(endpoint string) (*grpc.ClientConn, error) {
 	if conn, ok = p.grpcConns[target]; ok {
 		return conn, nil
 	}
+	// The explicit scheme keeps grpc-go's default DNS resolver for every
+	// host: a bare "unix:1" would otherwise select the unix socket resolver.
 	conn, err := grpc.NewClient(
-		target,
+		"dns:///"+target,
 		grpc.WithTransportCredentials(p.grpcCreds),
 		// Align with solti-api's MAX_REQUEST_BYTES so a 5 MiB script body
 		// (base64 → ~7 MiB on the wire) goes through cleanly. Without this

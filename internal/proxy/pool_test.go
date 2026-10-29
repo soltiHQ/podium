@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -116,6 +117,72 @@ func TestPoolRejectsInvalidStoredEndpoint(t *testing.T) {
 		if _, err := pool.Get(tc.endpoint, tc.kind, enum.APIVersionV1, ""); !errors.Is(err, ErrBadEndpointURL) || !errors.Is(err, domain.ErrInvalidArgument) {
 			t.Errorf("Get(%q, %s) = %v, want ErrBadEndpointURL wrapping ErrInvalidArgument", tc.endpoint, tc.kind, err)
 		}
+	}
+}
+
+// An advertised base path is joined to the task API path without "//".
+func TestHTTPProxyJoinsBasePath(t *testing.T) {
+	paths := make(chan string, 1)
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths <- r.URL.Path
+		if strings.HasSuffix(r.URL.Path, "/tasks") {
+			_, _ = fmt.Fprint(w, `{"metadata":{},"items":[]}`)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"metadata":{"name":"task","uid":"u"}}`)
+	}))
+	defer agent.Close()
+	pool := NewPool(nil, true)
+	defer func() { _ = pool.Close() }()
+	for _, endpoint := range []string{agent.URL + "/agents/a1", agent.URL + "/agents/a1/"} {
+		p, err := pool.Get(endpoint, enum.EndpointHTTP, enum.APIVersionV1, "")
+		if err != nil {
+			t.Fatalf("Get(%q): %v", endpoint, err)
+		}
+		if _, err := p.GetTask(context.Background(), "task"); err != nil {
+			t.Fatal(err)
+		}
+		if got := <-paths; got != "/agents/a1/apis/solti.io/v1/tasks/task" {
+			t.Fatalf("%s: GetTask requested %q", endpoint, got)
+		}
+		if _, err := p.ListTasks(context.Background(), TaskFilter{}); err != nil {
+			t.Fatal(err)
+		}
+		if got := <-paths; got != "/agents/a1/apis/solti.io/v1/tasks" {
+			t.Fatalf("%s: ListTasks requested %q", endpoint, got)
+		}
+	}
+}
+
+// "unix:1" is the host "unix" on port 1. grpc-go's resolver registry would
+// otherwise read it as the unix socket ./1.
+func TestPoolDoesNotDialGRPCEndpointAsUnixSocket(t *testing.T) {
+	t.Chdir(t.TempDir())
+	lis, err := net.Listen("unix", "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := make(chan string, 1)
+	socketServer := grpc.NewServer()
+	taskv1.RegisterTaskServiceServer(socketServer, &authRecordingServer{got: called})
+	go func() { _ = socketServer.Serve(lis) }()
+	defer socketServer.Stop()
+	pool := NewPool(nil, true)
+	defer func() { _ = pool.Close() }()
+	p, err := pool.Get("unix:1", enum.EndpointGRPC, enum.APIVersionV1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = p.GetTask(ctx, "task")
+	select {
+	case <-called:
+		t.Fatal("gRPC endpoint unix:1 was dialed as the unix socket ./1")
+	default:
+	}
+	if err == nil {
+		t.Fatal("GetTask to the unresolvable host unix:1 succeeded")
 	}
 }
 
