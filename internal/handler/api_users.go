@@ -134,10 +134,17 @@ func (a *API) usersDetails(w http.ResponseWriter, r *http.Request, mode httpctx.
 		return
 	}
 
+	perms, err := a.userSVC.EffectivePermissions(r.Context(), u)
+	if err != nil {
+		a.logger.Error().Err(err).Str("user_id", id).Msg("user permissions failed")
+		response.Unavailable(w, r, mode)
+		return
+	}
+
 	apiUser := wire.UserToREST(u)
 	response.OK(w, r, mode, &responder.View{
 		Data:      apiUser,
-		Component: contentUser.Detail(apiUser, policy.BuildUserDetail(a.identity(r), id)),
+		Component: contentUser.Detail(apiUser, policy.BuildUserDetail(a.identity(r), id, perms)),
 	})
 }
 
@@ -145,6 +152,19 @@ func (a *API) usersSessions(w http.ResponseWriter, r *http.Request, mode httpctx
 	res, err := a.sessionSVC.ListByUser(r.Context(), session.ListByUserQuery{UserID: id})
 	if err != nil {
 		a.logger.Error().Err(err).Str("user_id", id).Msg("user sessions list failed")
+		response.Unavailable(w, r, mode)
+		return
+	}
+	var perms map[enum.Permission]struct{}
+	if u, err := a.userSVC.Get(r.Context(), id); err == nil {
+		perms, err = a.userSVC.EffectivePermissions(r.Context(), u)
+		if err != nil {
+			a.logger.Error().Err(err).Str("user_id", id).Msg("user permissions failed")
+			response.Unavailable(w, r, mode)
+			return
+		}
+	} else if !errors.Is(err, storage.ErrNotFound) {
+		a.logger.Error().Err(err).Str("user_id", id).Msg("user get failed")
 		response.Unavailable(w, r, mode)
 		return
 	}
@@ -160,7 +180,7 @@ func (a *API) usersSessions(w http.ResponseWriter, r *http.Request, mode httpctx
 	})
 	response.OK(w, r, mode, &responder.View{
 		Data:      restv1.ListSessionsResponse{Items: items},
-		Component: contentUser.Sessions(items),
+		Component: contentUser.Sessions(items, policy.BuildUserDetail(a.identity(r), id, perms)),
 	})
 }
 
@@ -171,8 +191,8 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 
+	actor := a.identity(r)
 	if action == modeCreate && (in.RoleIDs != nil || in.Permissions != nil) {
-		actor := a.identity(r)
 		if actor == nil || !actor.HasPermission(enum.UsersEdit) {
 			response.Forbidden(w, r, mode)
 			return
@@ -219,7 +239,7 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	if in.Subject != "" {
 		u.SetSubject(in.Subject)
 	}
-	if action == modeUpdate && a.identity(r) != nil && a.identity(r).UserID == id && (in.RoleIDs != nil || in.Permissions != nil) {
+	if action == modeUpdate && actor != nil && actor.UserID == id && (in.RoleIDs != nil || in.Permissions != nil) {
 		response.BadRequestMsg(w, r, mode, "You cannot change your own roles or permissions.")
 		return
 	}
@@ -229,7 +249,15 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	if in.Permissions != nil {
 		u.SetPermissions(in.Permissions)
 	}
-	if err = a.userSVC.Upsert(r.Context(), u); err != nil {
+	if action == modeCreate {
+		err = a.userSVC.Create(r.Context(), actor, u)
+	} else {
+		err = a.userSVC.Update(r.Context(), actor, u)
+	}
+	if err != nil {
+		if writeUserAccessError(w, r, mode, err) {
+			return
+		}
 		switch {
 		case errors.Is(err, domain.ErrInvalidSubject):
 			response.BadRequestMsg(w, r, mode, "subject is required")
@@ -263,7 +291,8 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 }
 
 func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
-	if actor := a.identity(r); actor != nil && actor.UserID == id {
+	actor := a.identity(r)
+	if actor != nil && actor.UserID == id {
 		response.BadRequestMsg(w, r, mode, "You cannot delete your own account.")
 		return
 	}
@@ -272,8 +301,11 @@ func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		name = u.Name()
 	}
 
-	err := a.userSVC.Delete(r.Context(), id)
+	err := a.userSVC.Delete(r.Context(), actor, id)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
+		if writeUserAccessError(w, r, mode, err) {
+			return
+		}
 		a.logger.Error().Err(err).Str("user_id", id).Msg("user delete failed")
 		response.Unavailable(w, r, mode)
 		return
@@ -288,28 +320,20 @@ func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 }
 
 func (a *API) userSetStatus(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, userID string, status userStatusMode) {
-	if actor := a.identity(r); status == userDisable && actor != nil && actor.UserID == userID {
+	actor := a.identity(r)
+	if status == userDisable && actor != nil && actor.UserID == userID {
 		response.BadRequestMsg(w, r, mode, "You cannot disable your own account.")
 		return
 	}
-	u, err := a.userSVC.Get(r.Context(), userID)
+	u, err := a.userSVC.SetDisabled(r.Context(), actor, userID, status == userDisable)
 	if err != nil {
+		if writeUserAccessError(w, r, mode, err) {
+			return
+		}
 		if errors.Is(err, storage.ErrNotFound) {
 			response.NotFound(w, r, mode)
 			return
 		}
-		a.logger.Error().Err(err).Str("user_id", userID).Msg("user get failed")
-		response.Unavailable(w, r, mode)
-		return
-	}
-
-	if status == userActive {
-		u.Enable()
-	} else {
-		u.Disable()
-	}
-
-	if err = a.userSVC.Upsert(r.Context(), u); err != nil {
 		a.logger.Error().Err(err).Str("user_id", userID).Msg("user status update failed")
 		response.Unavailable(w, r, mode)
 		return
@@ -338,11 +362,14 @@ func (a *API) userSetPassword(w http.ResponseWriter, r *http.Request, mode httpc
 		return
 	}
 
-	err = a.credentialSVC.SetPassword(r.Context(), credential.SetPasswordRequest{
+	err = a.credentialSVC.SetPasswordAs(r.Context(), a.identity(r), credential.SetPasswordRequest{
 		UserID:   userID,
 		Password: in.Password,
 	})
 	if err != nil {
+		if writeUserAccessError(w, r, mode, err) {
+			return
+		}
 		switch {
 		case errors.Is(err, storage.ErrNotFound):
 			response.NotFound(w, r, mode)
@@ -371,9 +398,13 @@ func (a *API) userSetPassword(w http.ResponseWriter, r *http.Request, mode httpc
 func (a *API) userRevokeSession(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	err := a.sessionSVC.Revoke(
 		r.Context(),
+		a.identity(r),
 		session.RevokeRequest{ID: id, At: time.Now()},
 	)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
+		if writeUserAccessError(w, r, mode, err) {
+			return
+		}
 		a.logger.Error().Err(err).Str("session_id", id).Msg("session revoke failed")
 		response.Unavailable(w, r, mode)
 		return
@@ -383,4 +414,18 @@ func (a *API) userRevokeSession(w http.ResponseWriter, r *http.Request, mode htt
 	htmx.Trigger(w, event.RefreshSessions)
 	a.hub.Notify(event.RefreshSessions)
 	response.NoContent(w, r)
+}
+
+// writeUserAccessError answers the user-management ceiling and last-admin
+// errors and reports whether err was one of them.
+func writeUserAccessError(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, err error) bool {
+	switch {
+	case errors.Is(err, user.ErrPermissionCeiling):
+		response.Forbidden(w, r, mode)
+	case errors.Is(err, user.ErrLastAdmin):
+		response.Conflict(w, r, mode, "At least one enabled user must keep all permissions.")
+	default:
+		return false
+	}
+	return true
 }

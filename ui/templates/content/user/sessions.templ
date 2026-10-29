@@ -5,6 +5,7 @@ import (
 	"time"
 
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
+	"github.com/soltiHQ/control-plane/internal/uikit/policy"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 	"github.com/soltiHQ/control-plane/internal/uikit/timeformat"
 	"github.com/soltiHQ/control-plane/ui/templates/asset"
@@ -17,7 +18,7 @@ import (
 )
 
 // Sessions renders the active sessions card for a user.
-templ Sessions(items []restv1.Session) {
+templ Sessions(items []restv1.Session, p policy.UserDetail) {
 	@card.Card("") {
 		@card.CardHeader() {
 			<h2 class={ visual.SectionLabel + " select-none" }>
@@ -36,7 +37,7 @@ templ Sessions(items []restv1.Session) {
 			} else {
 				<div class={ list.StripedClass }>
 					for _, s := range items {
-						@sessionRow(s)
+						@sessionRow(s, p.CanRevokeSessions)
 					}
 				</div>
 			}
@@ -45,7 +46,7 @@ templ Sessions(items []restv1.Session) {
 }
 
 // sessionRow renders a single session entry using row.Detail.
-templ sessionRow(s restv1.Session) {
+templ sessionRow(s restv1.Session, canRevoke bool) {
 	{{
 		expired := !s.ExpiresAt.IsZero() && s.ExpiresAt.Before(time.Now())
 		dimmed := s.Revoked || expired
@@ -60,13 +61,15 @@ templ sessionRow(s restv1.Session) {
 
 	@row.Detail(dotColor, s.AuthKind, subtitle, s.ID, dimmed) {
 		if !s.Revoked && !expired {
-			<div class="shrink-0">
-				<form hx-post={ routepath.ApiUserRevokeSession(s.ID) } hx-swap="none">
-					@button.Button("", "submit", false, button.VariantDanger, false) {
-						@asset.Icon("revoke")
-					}
-				</form>
-			</div>
+			if canRevoke {
+				<div class="shrink-0">
+					<form hx-post={ routepath.ApiUserRevokeSession(s.ID) } hx-swap="none">
+						@button.Button("", "submit", false, button.VariantDanger, false) {
+							@asset.Icon("revoke")
+						}
+					</form>
+				</div>
+			}
 		} else {
 			<span class="text-xs text-muted italic">
 				if s.Revoked {

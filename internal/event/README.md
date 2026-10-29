@@ -5,7 +5,7 @@ Handlers and runners record domain events and push real-time UI notifications th
 ## Package map
 ```text
 event/
-├── event.go   Payload, Record, event kind constants, IsIssueKind()
+├── event.go   Payload, Record, event kind constants, IsIssueKind(), SubjectOf()
 ├── hub.go     Hub — fan-out to SSE clients, dual ring buffers (events + issues)
 ├── ring.go    Ring[T] — generic thread-safe capped ring buffer
 └── sse.go     Hub.SSEHandler() — text/event-stream HTTP endpoint

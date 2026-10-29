@@ -13,7 +13,7 @@ service/
 ├── role/             role CRUD
 ├── session/          session retrieval, revocation, bulk deletion
 ├── spec/             spec CRUD, deployment (rollout fan-out), rollout queries
-└── user/             user CRUD, cascading deletion, role validation
+└── user/             user CRUD, cascading deletion, role validation, permission ceilings, last admin
 ```
 
 ## Service anatomy

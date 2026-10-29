@@ -22,6 +22,7 @@ const (
 	specsAdd    = enum.SpecsAdd
 	specsEdit   = enum.SpecsEdit
 	specsDeploy = enum.SpecsDeploy
+	specsDelete = enum.SpecsDelete
 )
 
 func permSet(id *identity.Identity) map[enum.Permission]struct{} {
@@ -39,4 +40,14 @@ func hasAny(set map[enum.Permission]struct{}, wants ...enum.Permission) bool {
 		}
 	}
 	return false
+}
+
+// covers reports whether set holds every permission in want.
+func covers(set, want map[enum.Permission]struct{}) bool {
+	for p := range want {
+		if _, ok := set[p]; !ok {
+			return false
+		}
+	}
+	return true
 }

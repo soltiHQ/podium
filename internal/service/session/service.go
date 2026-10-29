@@ -8,18 +8,20 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/model"
 
+	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/service"
+	"github.com/soltiHQ/control-plane/internal/service/user"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
 // Service implements session-related use-cases on top of storage contracts.
 type Service struct {
 	logger zerolog.Logger
-	store  storage.SessionStore
+	store  storage.Storage
 }
 
 // New creates a new sessions service.
-func New(store storage.SessionStore, logger zerolog.Logger) *Service {
+func New(store storage.Storage, logger zerolog.Logger) *Service {
 	if store == nil {
 		panic("session.Service: store is nil")
 	}
@@ -82,8 +84,10 @@ func (s *Service) DeleteByUser(ctx context.Context, req DeleteByUserRequest) err
 	return nil
 }
 
-// Revoke marks a session as revoked (idempotent).
-func (s *Service) Revoke(ctx context.Context, req RevokeRequest) error {
+// Revoke marks a session as revoked (idempotent) on behalf of actor.
+// Revoking another user's session requires actor to hold every permission
+// of the session's owner (user.ErrPermissionCeiling).
+func (s *Service) Revoke(ctx context.Context, actor *identity.Identity, req RevokeRequest) error {
 	if req.ID == "" {
 		return storage.ErrInvalidArgument
 	}
@@ -93,7 +97,23 @@ func (s *Service) Revoke(ctx context.Context, req RevokeRequest) error {
 		at = time.Now()
 	}
 
-	err := s.store.RevokeSession(ctx, req.ID, at)
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		sess, err := tx.GetSession(ctx, req.ID)
+		if err != nil {
+			return err
+		}
+		owner, err := tx.GetUser(ctx, sess.UserID())
+		switch {
+		case errors.Is(err, storage.ErrNotFound):
+			owner = nil
+		case err != nil:
+			return err
+		}
+		if err = user.CheckTarget(ctx, tx, actor, owner); err != nil {
+			return err
+		}
+		return tx.RevokeSession(ctx, req.ID, at)
+	})
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
 		return err
 	}

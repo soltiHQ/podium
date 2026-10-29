@@ -50,54 +50,81 @@ API checks permissions **inside** handler methods (per-action granularity).
 UI checks permissions **at registration** (per-route granularity).
 
 ## API endpoints
+`TestRoutePermissionMatrix` (`route_permissions_test.go`) holds this table as code and checks it against the
+registered routes: every new `/api/v1` route needs a row there.
 
 ### Users `/api/v1/users`
-| Method | Path                          | Permission    |
-|--------|-------------------------------|---------------|
-| GET    | `/api/v1/users`               | `UsersGet`    |
-| POST   | `/api/v1/users`               | `UsersAdd`    |
-| GET    | `/api/v1/users/{id}`          | `UsersGet`    |
-| PUT    | `/api/v1/users/{id}`          | `UsersEdit`   |
-| DELETE | `/api/v1/users/{id}`          | `UsersDelete` |
-| GET    | `/api/v1/users/{id}/sessions` | `UsersGet`    |
-| POST   | `/api/v1/users/{id}/disable`  | `UsersEdit`   |
-| POST   | `/api/v1/users/{id}/enable`   | `UsersEdit`   |
-| POST   | `/api/v1/users/{id}/password` | `UsersEdit`   |
+| Method | Path                          | Permission                                               |
+|--------|-------------------------------|----------------------------------------------------------|
+| GET    | `/api/v1/users`               | `UsersGet`                                               |
+| POST   | `/api/v1/users`               | `UsersAdd`; also `UsersEdit` to set roles or permissions |
+| GET    | `/api/v1/users/{id}`          | `UsersGet`                                               |
+| PUT    | `/api/v1/users/{id}`          | `UsersEdit`                                              |
+| DELETE | `/api/v1/users/{id}`          | `UsersDelete`                                            |
+| GET    | `/api/v1/users/{id}/sessions` | `UsersGet`                                               |
+| POST   | `/api/v1/users/{id}/disable`  | `UsersEdit`                                              |
+| POST   | `/api/v1/users/{id}/enable`   | `UsersEdit`                                              |
+| POST   | `/api/v1/users/{id}/password` | `UsersEdit`                                              |
 
-### Sessions `/api/v1/sessions`
-| Method | Path                                 | Permission    |
-|--------|--------------------------------------|---------------|
-| POST   | `/api/v1/sessions/{id}/revoke`       | `UsersEdit`   |
+### Sessions `/api/v1/session`
+| Method | Path                          | Permission  |
+|--------|-------------------------------|-------------|
+| POST   | `/api/v1/session/{id}/revoke` | `UsersEdit` |
+
+### User-management ceilings
+The user, credential and session services enforce these inside the transaction of the mutation:
+
+- **Grant ceiling.** Create and update may give a user, directly or through roles, only permissions the caller holds → 403.
+- **Target ceiling.** Update, disable, enable, delete, password and session revoke on another user need every permission of that user → 403.
+  On yourself the self rules apply instead: no change of your own roles or permissions, no self delete or disable → 400.
+- **Last admin.** A delete, disable or role/permission change that would leave no enabled user holding every permission → 409.
 
 ### Agents `/api/v1/agents`
-| Method | Path                          | Permission    |
-|--------|-------------------------------|---------------|
-| GET    | `/api/v1/agents`              | `AgentsGet`   |
-| GET    | `/api/v1/agents/{id}`         | `AgentsGet`   |
-| PUT    | `/api/v1/agents/{id}/labels`  | `AgentsEdit`  |
-| GET    | `/api/v1/agents/{id}/tasks`   | `AgentsGet`   |
+| Method | Path                                             | Permission   |
+|--------|--------------------------------------------------|--------------|
+| GET    | `/api/v1/agents`                                 | `AgentsGet`  |
+| GET    | `/api/v1/agents/{id}`                            | `AgentsGet`  |
+| PUT    | `/api/v1/agents/{id}/labels`                     | `AgentsEdit` |
+| GET    | `/api/v1/agents/{id}/tasks`                      | `AgentsGet`  |
+| GET    | `/api/v1/agents/{id}/tasks/{taskID}`             | `AgentsGet`  |
+| POST   | `/api/v1/agents/{id}/tasks/{taskID}/cancel`      | `AgentsEdit` |
+| GET    | `/api/v1/agents/{id}/tasks/{taskID}/logs/stream` | `AgentsGet`  |
+| GET    | `/api/v1/history`                                | `AgentsGet`  |
 
 ### Specs `/api/v1/specs`
-| Method | Path                         | Permission    |
-|--------|------------------------------|---------------|
-| GET    | `/api/v1/specs`              | `SpecsGet`    |
-| POST   | `/api/v1/specs`              | `SpecsAdd`    |
-| GET    | `/api/v1/specs/{id}`         | `SpecsGet`    |
-| PUT    | `/api/v1/specs/{id}`         | `SpecsEdit`   |
-| DELETE | `/api/v1/specs/{id}`         | `SpecsEdit`   |
-| POST   | `/api/v1/specs/{id}/deploy`  | `SpecsDeploy` |
-| GET    | `/api/v1/specs/{id}/sync`    | `SpecsGet`    |
+| Method | Path                           | Permission               |
+|--------|--------------------------------|--------------------------|
+| GET    | `/api/v1/specs`                | `SpecsGet`               |
+| POST   | `/api/v1/specs`                | `SpecsAdd`               |
+| GET    | `/api/v1/specs/{id}`           | `SpecsGet`               |
+| PUT    | `/api/v1/specs/{id}`           | `SpecsEdit`              |
+| DELETE | `/api/v1/specs/{id}`           | `SpecsDelete`            |
+| DELETE | `/api/v1/specs/{id}/force`     | `SpecsDelete`            |
+| POST   | `/api/v1/specs/{id}/deploy`    | `SpecsDeploy`            |
+| GET    | `/api/v1/specs/{id}/sync`      | `SpecsGet`               |
+| GET    | `/api/v1/specs/{id}/placement` | `SpecsGet` + `AgentsGet` |
 
 ### Dashboard `/api/v1/dashboard`
-| Method | Path                  | Permission    |
-|--------|-----------------------|---------------|
-| GET    | `/api/v1/dashboard`   | (any authed)  |
+| Method | Path                       | Permission                                                            |
+|--------|----------------------------|-----------------------------------------------------------------------|
+| GET    | `/api/v1/dashboard`        | (any authed); each issue and activity entry needs its read permission |
+| DELETE | `/api/v1/dashboard/issues` | the edit permission of the issue's subject                            |
+
+Every event kind maps to a subject (`event.SubjectOf`):
+
+| Subject | Event kinds                                                                | Read        | Dismiss      |
+|---------|----------------------------------------------------------------------------|-------------|--------------|
+| agent   | `agent_connected`, `agent_inactive`, `agent_disconnected`, `agent_deleted` | `AgentsGet` | `AgentsEdit` |
+| spec    | `spec_created`, `spec_updated`, `spec_deployed`, `sync_failed`             | `SpecsGet`  | `SpecsEdit`  |
+| user    | `user_*`, `session_created`, `rate_limited`                                | `UsersGet`  | `UsersEdit`  |
+| unknown | `issue_closed` (it can name any subject) and unknown kinds                 | all three   | all three    |
 
 ### Other
-| Method | Path                  | Permission    |
-|--------|-----------------------|---------------|
-| GET    | `/api/v1/permissions` | `UsersEdit`   |
-| GET    | `/api/v1/roles`       | `UsersEdit`   |
+| Method | Path                    | Permission                                                     |
+|--------|-------------------------|----------------------------------------------------------------|
+| GET    | `/api/v1/permissions`   | `UsersEdit`                                                    |
+| GET    | `/api/v1/roles`         | `UsersEdit`                                                    |
+| GET    | `/api/v1/events/stream` | (any authed); registered by `app`, sends refresh triggers only |
 
 ## Discovery endpoint
 | Transport | Method             | Path / RPC                     |
@@ -117,8 +144,10 @@ Both parse the agent heartbeat payload, call `model.NewAgentFrom{Sync,Proto}`, t
 | `/users/info/{id}`  | `UI.UserDetail`  | yes  | `UsersGet`  |
 | `/agents`           | `UI.Agents`      | yes  | —           |
 | `/agents/info/{id}` | `UI.AgentDetail` | yes  | `AgentsGet` |
+| `/history`          | `UI.History`     | yes  | `AgentsGet` |
 | `/specs`            | `UI.Specs`       | yes  | `SpecsGet`  |
 | `/specs/new`        | `UI.SpecNew`     | yes  | `SpecsAdd`  |
+| `/specs/edit/{id}`  | `UI.SpecEdit`    | yes  | `SpecsEdit` |
 | `/specs/info/{id}`  | `UI.SpecDetail`  | yes  | `SpecsGet`  |
 
 ## Response pattern
