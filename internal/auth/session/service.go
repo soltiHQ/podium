@@ -201,10 +201,12 @@ func (s *Service) Login(ctx context.Context, authKind enum.Auth, subject, secret
 //
 // Errors:
 //   - auth.ErrInvalidRequest for invalid wiring.
-//   - auth.ErrInvalidRefresh for malformed input or failed validation (no detail leakage).
+//   - auth.ErrInvalidRefresh for malformed input or failed validation, including
+//     a session or user that is not found or a disabled user (no detail leakage).
 //   - auth.ErrRevoked when the session is revoked.
-//   - auth.ErrUnauthorized when RBAC denies access (no effective permissions or resolver error).
-//   - Propagates storage and issuer errors from dependencies where applicable.
+//   - auth.ErrUnauthorized when the user has no effective permissions.
+//   - Storage, RBAC resolver and issuer errors as they are: a failed lookup is
+//     not a verdict on the refresh token.
 func (s *Service) Refresh(ctx context.Context, sessionID, refreshRaw string) (*TokenPair, *identity.Identity, error) {
 	if err := s.ensureReady(); err != nil {
 		return nil, nil, err
@@ -214,7 +216,7 @@ func (s *Service) Refresh(ctx context.Context, sessionID, refreshRaw string) (*T
 	}
 	sess, err := s.store.GetSession(ctx, sessionID)
 	if err != nil {
-		return nil, nil, auth.ErrInvalidRefresh
+		return nil, nil, missingAs(err, auth.ErrInvalidRefresh)
 	}
 	if sess.Revoked() {
 		return nil, nil, auth.ErrRevoked
@@ -227,13 +229,19 @@ func (s *Service) Refresh(ctx context.Context, sessionID, refreshRaw string) (*T
 		return nil, nil, auth.ErrInvalidRefresh
 	}
 	user, err := s.store.GetUser(ctx, sess.UserID())
-	if err != nil || user.Disabled() {
+	if err != nil {
+		return nil, nil, missingAs(err, auth.ErrInvalidRefresh)
+	}
+	if user.Disabled() {
 		return nil, nil, auth.ErrInvalidRefresh
 	}
 	// The RBAC resolver uses the outer store. Resolve before admission, then
 	// revalidate the session and user immediately before signing/rotation.
 	perms, err := s.rbac.ResolveUserPermissions(ctx, user)
-	if err != nil || len(perms) == 0 {
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(perms) == 0 {
 		return nil, nil, auth.ErrUnauthorized
 	}
 	outRefresh := refreshRaw
@@ -253,7 +261,7 @@ func (s *Service) Refresh(ctx context.Context, sessionID, refreshRaw string) (*T
 	issueCurrent := func(tx storage.Storage) error {
 		current, err := tx.GetSession(ctx, sessionID)
 		if err != nil {
-			return auth.ErrInvalidRefresh
+			return missingAs(err, auth.ErrInvalidRefresh)
 		}
 		if current.Revoked() {
 			return auth.ErrRevoked
@@ -268,7 +276,10 @@ func (s *Service) Refresh(ctx context.Context, sessionID, refreshRaw string) (*T
 			return auth.ErrInvalidRefresh
 		}
 		currentUser, err := tx.GetUser(ctx, current.UserID())
-		if err != nil || currentUser.Disabled() {
+		if err != nil {
+			return missingAs(err, auth.ErrInvalidRefresh)
+		}
+		if currentUser.Disabled() {
 			return auth.ErrInvalidRefresh
 		}
 		var rotation storage.ClockedSessionRotation
@@ -310,6 +321,15 @@ func (s *Service) Refresh(ctx context.Context, sessionID, refreshRaw string) (*T
 		return nil, nil, err
 	}
 	return pair, id, nil
+}
+
+// missingAs returns verdict when a lookup found nothing or was given an
+// invalid ID, and any other storage error, such as an outage, as it is.
+func missingAs(err, verdict error) error {
+	if errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrInvalidArgument) {
+		return verdict
+	}
+	return err
 }
 
 // Revoke revokes a session by ID.

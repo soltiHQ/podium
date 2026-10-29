@@ -18,7 +18,8 @@ import (
 )
 
 // Auth returns middleware that verifies the access token and stores the identity in context.
-// A browser whose access token is missing or expired is refreshed from its cookies. secure
+// A browser whose access token is missing or expired is refreshed from its cookies. Missing
+// or rejected credentials answer 401, credentials that could not be checked 503. secure
 // decides whether the auth cookies Auth sets or clears carry the Secure attribute.
 func Auth(verifier token.Verifier, sessionSvc *session.Service, secure func(*http.Request) bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -56,10 +57,16 @@ func OptionalAuth(verifier token.Verifier, sessionSvc *session.Service, secure f
 	}
 }
 
-// authenticate returns the identity of r: from its bearer token or access
-// cookie, or else from a refresh with its cookies. It returns neither identity
-// nor error when r has no valid credentials, and an error only when they could
-// not be checked. The cookies of a revoked or invalid session are cleared.
+// authenticate returns the identity of r, from its bearer token or access
+// cookie, or else, for a browser, from a refresh with its refresh and session
+// cookies. There are three outcomes:
+//
+//   - valid credentials: the identity;
+//   - no usable credentials (missing, malformed, expired, revoked or unknown,
+//     or a user without permissions): neither identity nor error. A rejected
+//     access cookie clears the auth cookies; a rejected refresh writes none;
+//   - credentials that could not be checked, such as during a storage outage
+//     in the access check or the refresh: the error. No cookie is written.
 func authenticate(w http.ResponseWriter, r *http.Request, verifier token.Verifier, sessionSvc *session.Service, secure func(*http.Request) bool) (*identity.Identity, error) {
 	raw, fromHeader := extractBearer(r)
 	if raw != "" {
@@ -69,7 +76,7 @@ func authenticate(w http.ResponseWriter, r *http.Request, verifier token.Verifie
 			switch {
 			case err == nil:
 				return id, nil
-			case errors.Is(err, auth.ErrRevoked), errors.Is(err, auth.ErrInvalidToken), errors.Is(err, auth.ErrUnauthorized):
+			case rejected(err):
 				if !fromHeader {
 					httpcookie.DeleteAuth(w, secure(r))
 				}
@@ -83,10 +90,21 @@ func authenticate(w http.ResponseWriter, r *http.Request, verifier token.Verifie
 		return nil, nil
 	}
 	id, err := tryRefresh(w, r, sessionSvc, secure)
-	if err != nil {
+	switch {
+	case err == nil:
+		return id, nil
+	case rejected(err):
 		return nil, nil
+	default:
+		return nil, err
 	}
-	return id, nil
+}
+
+// rejected reports whether err is the session service's verdict on the
+// credentials, not a failure to check them.
+func rejected(err error) bool {
+	return errors.Is(err, auth.ErrInvalidRefresh) || errors.Is(err, auth.ErrRevoked) ||
+		errors.Is(err, auth.ErrInvalidToken) || errors.Is(err, auth.ErrUnauthorized)
 }
 
 // RequirePermission returns middleware that checks identity for a specific permission.

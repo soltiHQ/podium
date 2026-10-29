@@ -1,12 +1,12 @@
 package password
 
 import (
+	"bytes"
 	"context"
 	"errors"
-	"math"
+	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -18,7 +18,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
 
-// testCost keeps bcrypt fast where a test does not measure time.
+// testCost keeps bcrypt fast in tests.
 const testCost = 4
 
 type badKindReq struct{}
@@ -348,11 +348,10 @@ func TestProvider_Authenticate_RejectsPasswordOverBcryptLimit(t *testing.T) {
 	}
 }
 
-// A login that fails before any stored hash is checked still pays for one
-// bcrypt compare at the provider's cost, so it takes as long as a wrong
-// password and does not tell which subjects exist or are disabled.
-func TestProvider_FailuresTakeAsLongAsAWrongPassword(t *testing.T) {
-	const cost = 8
+// A login that fails before a stored hash is checked still runs one bcrypt
+// compare, against the dummy hash, so it costs as much as a wrong password and
+// does not tell which subjects exist or are disabled.
+func TestProvider_FailuresCompareAgainstTheDummyHash(t *testing.T) {
 	ctx := context.Background()
 	store := inmemory.New()
 	for _, u := range []struct {
@@ -361,8 +360,8 @@ func TestProvider_FailuresTakeAsLongAsAWrongPassword(t *testing.T) {
 	}{{"user-alice", "alice", false}, {"user-bob", "bob", true}, {"user-carol", "carol", false}, {"user-dave", "dave", false}} {
 		mustUpsertUser(t, ctx, store, mustUser(t, u.id, u.subject, u.disabled))
 	}
-	storePassword(t, store, "user-alice", "alice-password", cost)
-	storePassword(t, store, "user-bob", "bob-password", cost)
+	storePassword(t, store, "user-alice", "alice-password", testCost)
+	storePassword(t, store, "user-bob", "bob-password", testCost)
 	// carol has no credential; dave has a credential without a verifier.
 	cred, err := credentials.NewPasswordCredential("cred-user-dave", "user-dave")
 	if err != nil {
@@ -371,45 +370,61 @@ func TestProvider_FailuresTakeAsLongAsAWrongPassword(t *testing.T) {
 	if err := store.UpsertCredential(ctx, cred); err != nil {
 		t.Fatal(err)
 	}
-	p := newProvider(store, cost)
-
-	// fastest returns the quickest of three failed logins, which filters out
-	// scheduling noise.
-	fastest := func(subject, password string) time.Duration {
-		t.Helper()
-		best := time.Duration(math.MaxInt64)
-		for range 3 {
-			start := time.Now()
-			if _, err := p.Authenticate(ctx, Request{Subject: subject, Password: password}); !errors.Is(err, auth.ErrInvalidCredentials) {
-				t.Fatalf("login as %s: %v, want ErrInvalidCredentials", subject, err)
-			}
-			best = min(best, time.Since(start))
-		}
-		return best
+	p := newProvider(store, testCost)
+	dummy, err := p.dummyHash()
+	if err != nil {
+		t.Fatal(err)
 	}
-	fastest("nobody", "warm-up-password") // the first one generates the dummy hash
-	wrong := fastest("alice", "wrong-password")
-	for _, tc := range []struct{ name, subject, password string }{
-		{"unknown subject", "nobody", "wrong-password"},
-		{"disabled subject with its password", "bob", "bob-password"},
-		{"no credential", "carol", "wrong-password"},
-		{"no verifier", "dave", "wrong-password"},
-		{"password over 72 bytes", "alice", strings.Repeat("p", 73)},
+	var compared []string
+	p.compare = func(hash, password []byte) error {
+		if !bytes.Equal(hash, dummy) {
+			t.Errorf("compared against %q, want the dummy hash", hash)
+		}
+		compared = append(compared, string(password))
+		return bcrypt.ErrMismatchedHashAndPassword
+	}
+
+	for _, tc := range []struct {
+		name, subject, password string
+		dummy                   bool
+	}{
+		{"unknown subject", "nobody", "some-password", true},
+		{"disabled subject with its password", "bob", "bob-password", true},
+		{"no credential", "carol", "some-password", true},
+		{"no verifier", "dave", "some-password", true},
+		{"password over 72 bytes", "alice", strings.Repeat("p", 73), true},
+		{"wrong password, checked against the stored hash", "alice", "wrong-password", false},
 	} {
-		if got := fastest(tc.subject, tc.password); got < wrong/2 {
-			t.Errorf("%s: %v, want about %v like a wrong password", tc.name, got, wrong)
+		compared = nil
+		if _, err := p.Authenticate(ctx, Request{Subject: tc.subject, Password: tc.password}); !errors.Is(err, auth.ErrInvalidCredentials) {
+			t.Fatalf("%s: %v, want ErrInvalidCredentials", tc.name, err)
+		}
+		var want []string
+		if tc.dummy {
+			want = []string{tc.password}
+		}
+		if !slices.Equal(compared, want) {
+			t.Errorf("%s: dummy compares of %q, want %q", tc.name, compared, want)
 		}
 	}
 }
 
-// New generates its dummy hash at the cost new passwords are stored with, so
-// a failure without a stored hash costs as much as a real check.
-func TestNewHashesTheDummyAtTheStoredCost(t *testing.T) {
-	hash, err := New(inmemory.New()).dummyHash()
+// New compares with bcrypt itself, against a dummy hash at the cost new
+// passwords are stored with, so the dummy compare costs as much as a real one.
+func TestNewComparesWithBcryptAtTheStoredCost(t *testing.T) {
+	p := New(inmemory.New())
+	hash, err := p.dummyHash()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cost, err := bcrypt.Cost(hash); err != nil || cost != credentials.DefaultBcryptCost {
 		t.Fatalf("dummy hash cost %d (%v), want %d", cost, err, credentials.DefaultBcryptCost)
+	}
+	own, err := bcrypt.GenerateFromPassword([]byte("own-password"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.compare(own, []byte("own-password")) != nil || p.compare(own, []byte("other-password")) == nil {
+		t.Fatal("the provider's compare does not behave like bcrypt.CompareHashAndPassword")
 	}
 }

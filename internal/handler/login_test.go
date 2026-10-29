@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -33,11 +34,20 @@ const (
 // the user alice. The login limiter has the default configuration: five
 // failures block.
 type loginFixture struct {
-	ui  *UI
-	hub *event.Hub
+	ui    *UI
+	hub   *event.Hub
+	store *inmemory.Store
+	logs  *bytes.Buffer // the UI handler's log
 }
 
 func newLoginFixture(t *testing.T) *loginFixture {
+	t.Helper()
+	return newLoginFixtureWith(t, auth.Config{})
+}
+
+// newLoginFixtureWith is newLoginFixture with cfg for the auth stack; the JWT
+// secret is filled in.
+func newLoginFixtureWith(t *testing.T, cfg auth.Config) *loginFixture {
 	t.Helper()
 	ctx := context.Background()
 	logger := zerolog.Nop()
@@ -50,14 +60,22 @@ func newLoginFixture(t *testing.T) *loginFixture {
 	if err := store.UpsertUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
-	if err := credential.New(store, logger).SetPassword(ctx, credential.SetPasswordRequest{UserID: u.ID(), Password: loginPassword, Cost: 4}); err != nil {
+	f := &loginFixture{store: store, logs: &bytes.Buffer{}}
+	f.setPassword(t, loginPassword)
+	f.hub = event.NewHub(logger)
+	t.Cleanup(f.hub.Close)
+	cfg.JWTSecret = strings.Repeat("k", auth.MinJWTSecretLen)
+	authModel := kit.New(store, cfg)
+	f.ui = NewUI(zerolog.New(f.logs), access.New(authModel, store, logger), spec.New(store, logger), f.hub, nil, func(*http.Request) bool { return false })
+	return f
+}
+
+// setPassword gives alice the password.
+func (f *loginFixture) setPassword(t *testing.T, password string) {
+	t.Helper()
+	if err := credential.New(f.store, zerolog.Nop()).SetPassword(context.Background(), credential.SetPasswordRequest{UserID: "user-alice", Password: password, Cost: 4}); err != nil {
 		t.Fatal(err)
 	}
-	hub := event.NewHub(logger)
-	t.Cleanup(hub.Close)
-	authModel := kit.New(store, auth.Config{JWTSecret: strings.Repeat("k", auth.MinJWTSecretLen)})
-	ui := NewUI(logger, access.New(authModel, store, logger), spec.New(store, logger), hub, nil, func(*http.Request) bool { return false })
-	return &loginFixture{ui: ui, hub: hub}
 }
 
 // post submits the login form from the TCP peer remoteAddr.
@@ -172,7 +190,8 @@ func TestSuccessfulLoginResetsOnlyTheAccount(t *testing.T) {
 	}
 }
 
-// The subject is normalized the way user storage normalizes it.
+// The subject is normalized the way user storage normalizes it, and the log
+// names the account as stored.
 func TestLoginNormalizesSubject(t *testing.T) {
 	f := newLoginFixture(t)
 	if w := f.login(" Alice ", loginPassword, loginIP); w.Code != http.StatusFound {
@@ -186,6 +205,41 @@ func TestLoginNormalizesSubject(t *testing.T) {
 	}
 	if len(sessions) != 1 || sessions[0].Payload.ID != "user-alice" {
 		t.Fatalf("session_created events %+v, want one for user-alice", sessions)
+	}
+	if logs := f.logs.String(); !strings.Contains(logs, `"subject":"alice"`) || strings.Contains(logs, "Alice") {
+		t.Fatalf("login log does not name the account as alice:\n%s", logs)
+	}
+}
+
+// However the subject is typed, the rate_limited event names the account the
+// way it is stored, so its issue groups and dismisses as one.
+func TestRateLimitedEventNamesTheAccount(t *testing.T) {
+	f := newLoginFixture(t)
+	for i, subject := range []string{" Alice ", "ALICE", "alice ", "aLiCe", "Alice"} {
+		if w := f.login(subject, "wrong-password", fmt.Sprintf("198.51.100.%d:40000", i+1)); w.Code != http.StatusSeeOther {
+			t.Fatalf("failure %d as %q: HTTP %d, want 303", i+1, subject, w.Code)
+		}
+	}
+	events := f.rateLimitedEvents()
+	if len(events) != 1 || events[0].Payload.ID != "alice" || events[0].Payload.Name != "alice" {
+		t.Fatalf("rate_limited events %+v, want one naming alice", events)
+	}
+}
+
+// A password over the 72 bytes bcrypt reads is a wrong password even when its
+// first 72 bytes are right: the login fails like any other and counts toward
+// the limit.
+func TestLoginPasswordOverBcryptLimitCountsAsFailure(t *testing.T) {
+	f := newLoginFixtureWith(t, auth.Config{RateAttempts: 2})
+	password := strings.Repeat("p", 72)
+	f.setPassword(t, password)
+	for i := range 2 {
+		if w := f.login(loginSubject, password+"x", loginIP); w.Code != http.StatusSeeOther {
+			t.Fatalf("73-byte password, attempt %d: HTTP %d, want 303", i+1, w.Code)
+		}
+	}
+	if w := f.login(loginSubject, password, loginIP); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("right password after two failures: HTTP %d, want 429", w.Code)
 	}
 }
 

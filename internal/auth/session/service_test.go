@@ -465,6 +465,57 @@ func TestService_Refresh_DisabledUser(t *testing.T) {
 	}
 }
 
+// failingReads fails the nth GetSession and the nth GetUser call, counted
+// from 1, with storage.ErrUnavailable; 0 never fails.
+type failingReads struct {
+	storage.Storage
+	failSession, failUser int
+	sessions, users       int
+}
+
+func (s *failingReads) GetSession(ctx context.Context, id string) (*model.Session, error) {
+	s.sessions++
+	if s.sessions == s.failSession {
+		return nil, storage.ErrUnavailable
+	}
+	return s.Storage.GetSession(ctx, id)
+}
+
+func (s *failingReads) GetUser(ctx context.Context, id string) (*model.User, error) {
+	s.users++
+	if s.users == s.failUser {
+		return nil, storage.ErrUnavailable
+	}
+	return s.Storage.GetUser(ctx, id)
+}
+
+// Refresh answers a session or user that is gone, expired or revoked with an
+// auth error, but returns a storage failure as it is, so that callers never
+// take an outage for a refresh token that is no good.
+func TestService_Refresh_ReturnsStorageErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		failSession, failUser int
+		rbacErr, want         error
+	}{
+		{"no failure", 0, 0, nil, nil},
+		{"session lookup", 1, 0, nil, storage.ErrUnavailable},
+		{"user lookup", 0, 1, nil, storage.ErrUnavailable},
+		{"permission lookup", 0, 0, storage.ErrUnavailable, storage.ErrUnavailable},
+		{"session recheck", 2, 0, nil, storage.ErrUnavailable},
+		{"user recheck", 0, 2, nil, storage.ErrUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, original, raw, clock := refreshFixture(t)
+			reads := &failingReads{Storage: st, failSession: tc.failSession, failUser: tc.failUser}
+			svc := newService(t, reads, clock, &fakeIssuer{}, &fakeRBAC{perms: []enum.Permission{enum.SpecsGet}, err: tc.rbacErr}, false)
+			if _, _, err := svc.Refresh(context.Background(), original.ID(), raw); !errors.Is(err, tc.want) {
+				t.Fatalf("Refresh: %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestService_Revoke(t *testing.T) {
 	ctx := context.Background()
 	st := inmemory.New()

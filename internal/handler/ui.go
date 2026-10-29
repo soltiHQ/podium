@@ -9,6 +9,7 @@ import (
 	"github.com/a-h/templ"
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
+	"github.com/soltiHQ/control-plane/domain/model"
 	wire "github.com/soltiHQ/control-plane/domain/wire"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
@@ -147,10 +148,12 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 		Password: password,
 		ClientIP: u.resolver.IP(r),
 	})
+	// Logs and events name the account as stored, however the subject was typed.
+	account := model.NormalizeSubject(subject)
 	if errors.Is(err, auth.ErrRateLimitReached) {
 		// Recorded once per block; the refused attempts that follow record nothing.
 		u.hub.Record(event.RateLimited, event.Payload{
-			ID: subject, Name: subject, By: "auth",
+			ID: account, Name: account, By: "auth",
 		})
 	}
 	if err != nil {
@@ -164,13 +167,13 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, routepath.PageLogin+"?error=Invalid+username+or+password&redirect="+url.QueryEscape(redirect), http.StatusSeeOther)
 			return
 		default:
-			u.logger.Error().Err(err).Str("subject", subject).Msg("login error")
+			u.logger.Error().Err(err).Str("subject", account).Msg("login error")
 			http.Redirect(w, r, routepath.PageLogin+"?error=Something+went+wrong", http.StatusFound)
 			return
 		}
 	}
 
-	u.logger.Info().Str("subject", subject).Msg("login success")
+	u.logger.Info().Str("subject", account).Msg("login success")
 	u.hub.Record(event.SessionCreated, event.Payload{
 		ID: id.UserID, Name: id.Name, By: "auth",
 	})

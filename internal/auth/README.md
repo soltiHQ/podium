@@ -60,6 +60,9 @@ access.Service.Login → model.NormalizeSubject → Limiter.Reserve(account, cli
     ├─ rotate refresh token (if enabled)
     └─ issue new access token
 ```
+A session or user that is gone, expired, revoked or disabled is an auth error (`ErrInvalidRefresh`, `ErrRevoked`); a
+failed lookup (storage or RBAC) is returned as it is, so `middleware.Auth` answers 503, not 401, and logout does not
+clear the cookies of a session it could not check.
 
 ## Dependency graph
 ```text

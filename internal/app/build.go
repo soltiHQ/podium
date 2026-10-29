@@ -215,7 +215,7 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 	route.HandleFunc(mux, routepath.ApiEventStream, eventHub.SSEHandler(), ridMW, logMW, authMW, middleware.StreamLimit(streamLimit))
 
 	var h http.Handler = mux
-	h = middleware.CrossOrigin(cfg.CORS)(h)
+	h = middleware.CrossOrigin(cfg.CORS, logger)(h)
 	h = middleware.Negotiate(responder.NewJSON(), responder.NewHTML())(h)
 	h = middleware.Leader(leadership, middleware.LeaderOptions{
 		ForwardPort: addrPort(cfg.HTTP.Addr),

@@ -29,17 +29,25 @@ transport/
 
 ### HTTP
 
+Main listener (`app.buildMainHandler`), outermost first:
+
 ```text
   Browser / API client
         │
         ▼
-  RequestID   ── installs request id + error slot (outermost, owns the slot)
-   Logger     ── reads the slot back after the handler returns
-    Negotiate ── picks the Responder (JSON vs HTML), stores it in ctx
-     CrossOrigin ── refuses cross-origin browser mutations: 403 through that Responder
-     
-  Auth / OptionalAuth / RequirePermission (per route)
-    handler/api.go | ui.go
+  Recovery       ── turns a panic into 503
+   CORS          ── answers preflights, adds the CORS headers
+    Leader       ── raft only: forwards writes to the leader
+     Negotiate   ── picks the Responder (JSON vs HTML), stores it in ctx
+      CrossOrigin ── refuses cross-origin browser mutations: 403 through that Responder.
+                     It runs before any route, so a refusal gets no request id and no
+                     access-log line; CrossOrigin logs it at WARN instead.
+       mux
+        │  per route:
+  RequestID      ── installs request id + error slot (API routes and the event stream only)
+   Logger        ── reads the slot back after the handler returns (same routes)
+    Auth / OptionalAuth / RequirePermission
+     handler/api.go | ui.go
         ├─ success → response.OK(w, r, mode, &View{Data: dto, Component: tmpl})
         │              └─ Responder from ctx → JSON (json.Marshal + sec headers)
         │                                    or HTML (templ.Render + CSP)

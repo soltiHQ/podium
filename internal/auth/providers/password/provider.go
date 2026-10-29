@@ -20,6 +20,9 @@ type Provider struct {
 	// dummyHash returns the bcrypt hash a login checks its password against
 	// when there is no stored hash to check. It is generated on first use.
 	dummyHash func() ([]byte, error)
+	// compare runs that check: bcrypt.CompareHashAndPassword, which tests
+	// replace to observe it.
+	compare func(hash, password []byte) error
 }
 
 // New creates a new password provider. Its dummy hash has
@@ -35,6 +38,7 @@ func newProvider(store storage.Storage, cost int) *Provider {
 		dummyHash: sync.OnceValues(func() ([]byte, error) {
 			return bcrypt.GenerateFromPassword([]byte("no stored password to check"), cost)
 		}),
+		compare: bcrypt.CompareHashAndPassword,
 	}
 }
 
@@ -116,7 +120,7 @@ func (p *Provider) Authenticate(ctx context.Context, req providers.Request) (*pr
 // hash is checked takes as long as one with a wrong password.
 func (p *Provider) invalid(password string) error {
 	if hash, err := p.dummyHash(); err == nil {
-		_ = bcrypt.CompareHashAndPassword(hash, []byte(password))
+		_ = p.compare(hash, []byte(password))
 	}
 	return auth.ErrInvalidCredentials
 }

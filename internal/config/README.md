@@ -115,8 +115,10 @@ another origin (Go's `http.CrossOriginProtection`) with 403
 `same-origin` or `none`, or, from a browser that does not send that header, one
 whose `Origin` does not match `Host`. GET, HEAD and OPTIONS always pass, as do
 clients that send neither header (scripts, agents). Behind a proxy that
-rewrites `Host`, such old browsers are refused. The discovery listener has no
-such check.
+rewrites `Host`, such old browsers are refused. The check runs before any
+route, so a refusal gets no request ID or access-log line; it is logged at WARN
+with the method, path, `Sec-Fetch-Site` and `Origin`. The discovery listener
+has no such check.
 
 `cors.allow_origins` is empty by default: no other origin gets CORS access.
 

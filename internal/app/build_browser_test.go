@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +19,9 @@ import (
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
+	"github.com/soltiHQ/control-plane/internal/auth/identity"
+	"github.com/soltiHQ/control-plane/internal/auth/token"
+	"github.com/soltiHQ/control-plane/internal/auth/token/jwt"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -220,6 +224,20 @@ func TestCrossOriginMutationRejected(t *testing.T) {
 				t.Fatalf("refusal %q (%v), want the message %q", w.Body.String(), err, "Cross-origin request blocked.")
 			}
 		})
+	}
+	// Refusals happen before any route, so CrossOrigin itself logs them.
+	refusals := 0
+	for _, line := range strings.Split(strings.TrimSpace(f.logs.String()), "\n") {
+		var entry struct {
+			Level   string `json:"level"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal([]byte(line), &entry) == nil && entry.Level == "warn" && entry.Message == "cross-origin request blocked" {
+			refusals++
+		}
+	}
+	if refusals != 5 {
+		t.Errorf("%d refusals logged at WARN, want 5:\n%s", refusals, f.logs.String())
 	}
 	ctx := context.Background()
 	if _, err := f.store.GetUserBySubject(ctx, "mallory"); !errors.Is(err, storage.ErrNotFound) {
@@ -459,5 +477,81 @@ func TestLogoutRevokeFailureKeepsSession(t *testing.T) {
 	}
 	if w := f.serve(browserRequest(http.MethodGet, "/api/v1/users", "", "", alice)); w.Code != http.StatusOK {
 		t.Fatalf("after the failed logout: HTTP %d, want 200 (still signed in)", w.Code)
+	}
+}
+
+// sessionOutage is a store whose session reads fail while down is set.
+type sessionOutage struct {
+	storage.Storage
+	down atomic.Bool
+}
+
+func (s *sessionOutage) GetSession(ctx context.Context, id string) (*model.Session, error) {
+	if s.down.Load() {
+		return nil, storage.ErrUnavailable
+	}
+	return s.Storage.GetSession(ctx, id)
+}
+
+// expiredAccessToken is an access token for the session the cookies name that
+// expired a minute ago, beyond the verifier's clock-skew allowance.
+func expiredAccessToken(t *testing.T, cookies []*http.Cookie) string {
+	t.Helper()
+	cfg := config.Default().Auth.WithDefaults()
+	now := time.Now()
+	raw, err := jwt.NewHSIssuer([]byte(mainHandlerSecret), token.RealClock()).Issue(context.Background(), &identity.Identity{
+		IssuedAt: now.Add(-20 * time.Minute), NotBefore: now.Add(-20 * time.Minute), ExpiresAt: now.Add(-time.Minute),
+		Issuer: cfg.Issuer, Audience: []string{cfg.Audience},
+		Subject: "alice", UserID: "user-alice", TokenID: "expired-token", SessionID: cookieValue(cookies, httpcookie.NameSessionID),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// While the store cannot tell whether a session is valid, logout must not
+// pretend it worked: 503, no cookie written, and the session lives on. That
+// holds for a valid access token, whose session check fails, and for an
+// expired one, whose refresh fails. Other requests get 503 too, not 401.
+func TestLogoutDuringStoreOutageKeepsSession(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		expired bool
+	}{{"access token", false}, {"expired access token", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var outage *sessionOutage
+			f := newBrowserFixture(t, config.Default(), func(s storage.Storage) storage.Storage {
+				outage = &sessionOutage{Storage: s}
+				return outage
+			})
+			alice := f.login(t, "alice")
+			cookies := alice
+			if tc.expired {
+				cookies = append(without(alice, httpcookie.NameAccessToken), &http.Cookie{Name: httpcookie.NameAccessToken, Value: expiredAccessToken(t, alice)})
+			}
+
+			outage.down.Store(true)
+			for _, r := range []*http.Request{
+				browserRequest(http.MethodPost, "/logout", formType, "", cookies),
+				browserRequest(http.MethodGet, "/api/v1/users", "", "", cookies),
+			} {
+				w := f.serve(r)
+				if w.Code != http.StatusServiceUnavailable {
+					t.Fatalf("%s %s during the outage: HTTP %d, want 503", r.Method, r.URL.Path, w.Code)
+				}
+				if written := w.Result().Cookies(); len(written) != 0 {
+					t.Fatalf("%s %s during the outage wrote cookies %v", r.Method, r.URL.Path, written)
+				}
+			}
+			outage.down.Store(false)
+
+			if f.session(t, alice).Revoked() {
+				t.Fatal("session revoked during the outage")
+			}
+			if w := f.serve(browserRequest(http.MethodGet, "/api/v1/users", "", "", alice)); w.Code != http.StatusOK {
+				t.Fatalf("after the outage: HTTP %d, want 200 (still signed in)", w.Code)
+			}
+		})
 	}
 }
