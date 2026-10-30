@@ -13,9 +13,10 @@ import (
 
 // Placement renders the shared Deploy planner's observation of the saved spec.
 // Eligibility is routing compatibility, not an execution or health guarantee.
-// data-plan-token holds the plan token that the Deploy dialog sends as If-Match.
+// data-plan-token holds the plan token that the Deploy dialog sends as If-Match;
+// x-init copies it onto the panel's container (see keepPlanTokenExpr).
 templ Placement(plan restv1.SpecPlacement) {
-	<section class="placement-preview space-y-3" aria-label="Placement preview" data-plan-token={ plan.PlanToken }>
+	<section class="placement-preview space-y-3" aria-label="Placement preview" data-plan-token={ plan.PlanToken } x-init={ keepPlanTokenExpr() }>
 		@card.Card("") {
 			@card.CardBody() {
 				<div class="flex items-center justify-between gap-3 flex-wrap">

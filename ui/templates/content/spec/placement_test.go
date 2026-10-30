@@ -54,14 +54,24 @@ func TestPlacementEscapesDiscoveryLabelsAndNames(t *testing.T) {
 	}
 }
 
-// The Deploy dialog keeps the token of the plan the panel shows when it opens
-// and sends it as If-Match; the token reaches it only through the DOM.
-func TestDeployConfirmSendsShownPlanTokenAsIfMatch(t *testing.T) {
+// A rendered panel copies its token onto its container, so a failed refresh,
+// which replaces only the container's children, keeps the last shown token.
+func TestPlacementPanelKeepsItsTokenOnTheContainer(t *testing.T) {
 	panel := renderPlacement(t, restv1.SpecPlacement{SpecID: "s", PlanToken: hostile})
 	if got := attrValue(t, panel, "data-plan-token"); got != hostile {
 		t.Fatalf("panel token %q, want %q", got, hostile)
 	}
+	if got := attrValue(t, panel, "x-init"); got != `$el.closest("#spec-placement")?.setAttribute('data-plan-token', $el.dataset.planToken)` {
+		t.Fatalf("panel does not keep its token on the container: %s", got)
+	}
+	if PlacementPanelID != "spec-placement" {
+		t.Fatalf("container ID %q", PlacementPanelID)
+	}
+}
 
+// The Deploy dialog keeps the token the container holds when it opens and sends
+// it as If-Match; the token reaches it only through the DOM.
+func TestDeployConfirmSendsShownPlanTokenAsIfMatch(t *testing.T) {
 	detail := render(t, Detail(restv1.RolloutSpec{Spec: restv1.Spec{ID: "s", Name: "Saved"}}, policy.SpecDetail{CanDeploy: true, CanDelete: true}))
 	forms := regexp.MustCompile(`<form [^>]*>`).FindAllString(detail, -1)
 	var deploy, other []string
@@ -75,7 +85,7 @@ func TestDeployConfirmSendsShownPlanTokenAsIfMatch(t *testing.T) {
 	if len(deploy) != 1 || len(other) == 0 {
 		t.Fatalf("want one deploy form and the delete form, got %q", forms)
 	}
-	if got := attrValue(t, deploy[0], "x-effect"); got != "show && (planToken = document.querySelector('[data-plan-token]')?.dataset.planToken ?? '')" {
+	if got := attrValue(t, deploy[0], "x-effect"); got != `show && (planToken = document.getElementById("spec-placement")?.dataset.planToken ?? '')` {
 		t.Errorf("deploy dialog does not keep the shown token when it opens: %s", got)
 	}
 	if got := attrValue(t, deploy[0], "x-on:htmx:config-request"); got != "planToken && ($event.detail.headers['If-Match'] = JSON.stringify(planToken))" {

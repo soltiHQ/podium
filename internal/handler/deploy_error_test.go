@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -150,15 +149,15 @@ func (f *deployFixture) etag(t *testing.T) string {
 	return w.Header().Get("ETag")
 }
 
-// deploy posts Deploy as the confirmation dialog does, with ifMatch as the
-// If-Match header unless it is empty.
-func (f *deployFixture) deploy(t *testing.T, ifMatch string) *httptest.ResponseRecorder {
+// deploy posts Deploy as the confirmation dialog does, with an If-Match header
+// for each given value; none sends no header.
+func (f *deployFixture) deploy(t *testing.T, ifMatch ...string) *httptest.ResponseRecorder {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/specs/saved/deploy", nil)
 	r.Header.Set("HX-Request", "true")
 	r.Header.Set("Accept", "application/json")
-	if ifMatch != "" {
-		r.Header.Set("If-Match", ifMatch)
+	for _, v := range ifMatch {
+		r.Header.Add("If-Match", v)
 	}
 	r = r.WithContext(transportctx.WithIdentity(r.Context(), f.actor))
 	w := httptest.NewRecorder()
@@ -181,12 +180,15 @@ func (f *deployFixture) rolloutAgents(t *testing.T) []string {
 }
 
 func TestDeployWithoutIfMatchKeepsWorking(t *testing.T) {
-	for _, ifMatch := range []string{"", "*"} {
-		t.Run("If-Match "+strconv.Quote(ifMatch), func(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ifMatch []string
+	}{{"no If-Match", nil}, {"If-Match *", []string{"*"}}} {
+		t.Run(tc.name, func(t *testing.T) {
 			f := newDeployFixture(t)
 			// Without a precondition Deploy takes the placement as it is now.
 			f.agent(t, "agent-b")
-			if w := f.deploy(t, ifMatch); w.Code != http.StatusNoContent {
+			if w := f.deploy(t, tc.ifMatch...); w.Code != http.StatusNoContent {
 				t.Fatalf("deploy: %d %s", w.Code, w.Body.String())
 			}
 			if got := f.rolloutAgents(t); !slices.Equal(got, []string{"agent-a", "agent-b"}) {
@@ -209,11 +211,12 @@ func TestDeployIfMatchMismatchIs412(t *testing.T) {
 	}
 
 	// Every tag that does not name the current plan is refused. A weak tag never
-	// matches (If-Match compares strongly) and an empty one names no plan.
-	for _, ifMatch := range []string{stale, strings.Trim(stale, `"`), `""`, "W/" + current} {
+	// matches (If-Match compares strongly); an empty tag and a blank header name
+	// no plan.
+	for _, ifMatch := range []string{stale, strings.Trim(stale, `"`), `""`, "", " ", "W/" + current} {
 		w := f.deploy(t, ifMatch)
 		if w.Code != http.StatusPreconditionFailed {
-			t.Fatalf("If-Match %s: %d %s", ifMatch, w.Code, w.Body.String())
+			t.Fatalf("If-Match %q: %d %s", ifMatch, w.Code, w.Body.String())
 		}
 		var body struct {
 			Code    int    `json:"code"`
@@ -223,14 +226,14 @@ func TestDeployIfMatchMismatchIs412(t *testing.T) {
 			t.Fatal(err)
 		}
 		if body.Code != http.StatusPreconditionFailed || body.Message != "Placement changed since it was previewed. Review it again." {
-			t.Fatalf("If-Match %s: body %+v", ifMatch, body)
+			t.Fatalf("If-Match %q: body %+v", ifMatch, body)
 		}
 		// The page refreshes the placement panel so the operator reviews the new plan.
 		if w.Header().Get("HX-Trigger") != event.RefreshSpecs || w.Header().Get("HX-Redirect") != "" {
-			t.Fatalf("If-Match %s: HX-Trigger %q HX-Redirect %q", ifMatch, w.Header().Get("HX-Trigger"), w.Header().Get("HX-Redirect"))
+			t.Fatalf("If-Match %q: HX-Trigger %q HX-Redirect %q", ifMatch, w.Header().Get("HX-Trigger"), w.Header().Get("HX-Redirect"))
 		}
 		if got := f.rolloutAgents(t); len(got) != 0 || len(f.hub.RecentEvents(10)) != 0 {
-			t.Fatalf("If-Match %s: refused deploy wrote rollouts %v or events", ifMatch, got)
+			t.Fatalf("If-Match %q: refused deploy wrote rollouts %v or events", ifMatch, got)
 		}
 	}
 
@@ -242,10 +245,10 @@ func TestDeployIfMatchMismatchIs412(t *testing.T) {
 			ifMatch = strings.Trim(ifMatch, `"`)
 		}
 		if w := f.deploy(t, ifMatch); w.Code != http.StatusNoContent {
-			t.Fatalf("If-Match %s: %d %s", ifMatch, w.Code, w.Body.String())
+			t.Fatalf("If-Match %q: %d %s", ifMatch, w.Code, w.Body.String())
 		}
 		if got := f.rolloutAgents(t); !slices.Equal(got, []string{"agent-a", "agent-b"}) {
-			t.Fatalf("If-Match %s: rollouts for %v", ifMatch, got)
+			t.Fatalf("If-Match %q: rollouts for %v", ifMatch, got)
 		}
 	}
 }

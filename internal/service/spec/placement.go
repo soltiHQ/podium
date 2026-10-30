@@ -90,21 +90,24 @@ const (
 	deployUninstall deployAction = "uninstall"
 )
 
-// deployStep is one agent of a plan: whether Deploy targets it, the runner the
-// plan selects for it and the action on its rollout (nil for an install).
+// deployStep is one agent of a plan: whether Deploy targets it, whether a target
+// exists in discovery and is eligible, the runner the plan selects for it and
+// the action on its rollout (nil for an install).
 type deployStep struct {
 	agentID  string
 	targeted bool
+	exists   bool
+	eligible bool
 	runner   string
 	action   deployAction
 	rollout  *model.Rollout
 }
 
 // deploySteps maps a plan onto the spec's existing rollouts, sorted by agent ID.
-// Deploy executes these steps and the plan token covers them, so preview and
-// Deploy derive each agent's action from the same rollout rows in one place.
-// An action depends only on whether a rollout exists: sync progress (status,
-// task ID, observed generation) changes neither the action nor the token.
+// Deploy executes these steps and the plan token covers their targets, so
+// preview and Deploy derive each agent's action from the same rollout rows in
+// one place. An action depends only on whether a rollout exists: sync progress
+// (status, task ID, observed generation) changes neither the action nor the token.
 func deploySteps(plan *model.PlacementPlan, rollouts []*model.Rollout) []deployStep {
 	existing := make(map[string]*model.Rollout, len(rollouts))
 	for _, r := range rollouts {
@@ -114,7 +117,10 @@ func deploySteps(plan *model.PlacementPlan, rollouts []*model.Rollout) []deployS
 	}
 	steps := make([]deployStep, 0, len(plan.Targets)+len(existing))
 	for _, target := range plan.Targets {
-		step := deployStep{agentID: target.AgentID, targeted: true, runner: target.SelectedRunner, action: deployInstall}
+		step := deployStep{
+			agentID: target.AgentID, targeted: true, exists: target.Exists, eligible: target.Eligible,
+			runner: target.SelectedRunner, action: deployInstall,
+		}
 		if r, ok := existing[target.AgentID]; ok {
 			step.action, step.rollout = deployUpdate, r
 			delete(existing, target.AgentID)
@@ -129,22 +135,32 @@ func deploySteps(plan *model.PlacementPlan, rollouts []*model.Rollout) []deployS
 }
 
 // planToken is the lowercase hex of the first 16 bytes of SHA-256 over the spec
-// ID, version and generation and, for each step in agent ID order, the agent ID,
-// whether Deploy targets it, the runner and the action. Strings are length
-// prefixed, so two different plans never share an encoding. CheckedAt and the
-// heartbeat observations (status, last seen, heartbeat due) are left out: a
-// heartbeat alone never changes the token.
+// ID, version and generation and, for each target in agent ID order, the agent
+// ID, whether it exists and is eligible, the runner and the action. Strings are
+// length prefixed, so two different plans never share an encoding.
+//
+// Steps that only uninstall are left out: the target set already changes when
+// an agent leaves the plan, and the sync runner deleting such a rollout once its
+// uninstall completes must not ask for a new review. CheckedAt and the heartbeat
+// observations (status, last seen, heartbeat due) are left out too: a heartbeat
+// alone never changes the token.
 func planToken(plan *model.PlacementPlan, steps []deployStep) string {
 	b := appendTokenString(nil, plan.SpecID)
 	b = binary.AppendVarint(b, int64(plan.SpecVersion))
 	b = binary.AppendVarint(b, int64(plan.Generation))
 	for _, step := range steps {
-		b = appendTokenString(b, step.agentID)
-		targeted := byte(0)
-		if step.targeted {
-			targeted = 1
+		if !step.targeted {
+			continue
 		}
-		b = append(b, targeted)
+		b = appendTokenString(b, step.agentID)
+		var flags byte
+		if step.exists {
+			flags |= 1
+		}
+		if step.eligible {
+			flags |= 2
+		}
+		b = append(b, flags)
 		b = appendTokenString(b, step.runner)
 		b = appendTokenString(b, string(step.action))
 	}

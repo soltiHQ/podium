@@ -30,15 +30,22 @@ func (a *API) specPlacement(w http.ResponseWriter, r *http.Request, mode httpctx
 }
 
 // planTokenFromIfMatch returns the plan token a Deploy request names in
-// If-Match: one strong entity tag, its quotes stripped. An absent header and
-// "*" give "", so Deploy runs without the placement check, as before. An empty
-// tag ("") keeps its quotes: it names no plan, so Deploy refuses it.
+// If-Match: one strong entity tag, its quotes stripped. Only an absent header
+// and "*" give "", so Deploy runs without the placement check, as before. A
+// blank value and an empty tag name no plan: both come back as the two quote
+// characters, which match no token (tokens are hex), so Deploy refuses them.
 func planTokenFromIfMatch(r *http.Request) string {
-	tag := strings.TrimSpace(r.Header.Get("If-Match"))
-	if tag == "*" {
+	values := r.Header.Values("If-Match")
+	if len(values) == 0 {
 		return ""
 	}
-	if len(tag) > 2 && tag[0] == '"' && tag[len(tag)-1] == '"' {
+	tag := strings.TrimSpace(values[0])
+	switch {
+	case tag == "*":
+		return ""
+	case tag == "":
+		return `""`
+	case len(tag) > 2 && tag[0] == '"' && tag[len(tag)-1] == '"':
 		return tag[1 : len(tag)-1]
 	}
 	return tag

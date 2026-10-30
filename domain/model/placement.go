@@ -9,9 +9,9 @@ type PlacementPlan struct {
 	SpecVersion int
 	Generation  int
 	// Token identifies what Deploy would do with this plan: the spec revision
-	// and, per agent, whether it is a target, its selected runner and the action
-	// on its rollout. CheckedAt and heartbeat observations do not change it.
-	// Deploy refuses a token that no longer matches.
+	// and, per target, whether it exists and is eligible, its selected runner
+	// and the action on its rollout. CheckedAt and heartbeat observations do not
+	// change it. Deploy refuses a token that no longer matches.
 	Token             string
 	CheckedAt         time.Time
 	DeployAllowed     bool

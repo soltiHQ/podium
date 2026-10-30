@@ -512,6 +512,36 @@ func TestPlanTokenIgnoresSyncProgress(t *testing.T) {
 	}
 }
 
+// The sync runner deletes a rollout once its uninstall completes. Only targets
+// enter the token, so that deletion never asks for a new review.
+func TestPlanTokenIgnoresCompletedUninstall(t *testing.T) {
+	svc, store, ts := mkTokenFixture(t)
+	ctx := context.Background()
+	addMatchingAgent(t, store, "agent-c")
+	if err := svc.Deploy(ctx, ts.ID(), ""); err != nil {
+		t.Fatal(err)
+	}
+	changeAgent(t, store, "agent-c", func(a *model.Agent) { a.LabelAdd("env", "dev") })
+	if err := svc.Deploy(ctx, ts.ID(), ""); err != nil {
+		t.Fatal(err)
+	}
+	r, err := store.GetRollout(ctx, model.RolloutID(ts.ID(), "agent-c"))
+	if err != nil || r.Intent() != enum.RolloutIntentUninstall {
+		t.Fatalf("fixture: agent-c rollout %v (%v), want a queued uninstall", r, err)
+	}
+
+	token := previewToken(t, svc, ts.ID())
+	if err = store.DeleteRollout(ctx, r.ID()); err != nil {
+		t.Fatal(err)
+	}
+	if got := previewToken(t, svc, ts.ID()); got != token {
+		t.Fatalf("a completed uninstall changed the token: %s → %s", token, got)
+	}
+	if err = svc.Deploy(ctx, ts.ID(), token); err != nil {
+		t.Fatalf("Deploy after a completed uninstall: %v", err)
+	}
+}
+
 func TestPlanTokenChangesWithTargets(t *testing.T) {
 	svc, store, ts := mkTokenFixture(t)
 	first := previewToken(t, svc, ts.ID())
@@ -535,30 +565,62 @@ func TestPlanTokenChangesWithTargets(t *testing.T) {
 	}
 }
 
-// Each change below leaves the number of targets alone, so only the field it
-// moves can change the token.
-func TestPlanTokenCoversSpecAgentRunnerAndAction(t *testing.T) {
+// wasmOnly is runner inventory that cannot run the fixture's Subprocess workload.
+var wasmOnly = []model.RunnerCapability{{Name: "wasm", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Wasm"}}}}
+
+// addMissingTarget adds an explicit target that discovery does not know.
+func addMissingTarget(t *testing.T, svc *Service, _ *inmemory.Store, ts *model.Spec) {
+	t.Helper()
+	ts.SetTargets([]string{"agent-x"})
+	if err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Each change moves one input of the token and leaves the others alone, so only
+// that input can change the token.
+func TestPlanTokenCoversEveryInput(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		change func(t *testing.T, svc *Service, store *inmemory.Store, ts *model.Spec)
+		name           string
+		before, change func(t *testing.T, svc *Service, store *inmemory.Store, ts *model.Spec)
 	}{
-		{"another agent matches instead", func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
+		{name: "another agent matches instead", change: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
 			changeAgent(t, store, "agent-a", func(a *model.Agent) { a.LabelAdd("env", "dev") })
 			addMatchingAgent(t, store, "agent-b")
 		}},
-		{"the agent advertises another first runner", func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
+		{name: "the agent advertises another first runner", change: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
 			changeAgent(t, store, "agent-a", func(a *model.Agent) {
 				a.SetCapabilities(append([]model.RunnerCapability{{Name: "first", Workloads: a.Capabilities()[0].Workloads}}, a.Capabilities()...))
 			})
 		}},
-		{"another deploy created the rollout", func(t *testing.T, svc *Service, _ *inmemory.Store, ts *model.Spec) {
+		{name: "another deploy created the rollout", change: func(t *testing.T, svc *Service, _ *inmemory.Store, ts *model.Spec) {
 			if err := svc.Deploy(context.Background(), ts.ID(), ""); err != nil {
 				t.Fatal(err)
 			}
 		}},
+		// Missing and then registered without a compatible runner: only Exists moves.
+		{name: "a missing target registers", before: addMissingTarget, change: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
+			a, err := model.NewAgent("agent-x", "name-agent-x", "http://agent-x")
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.SetCapabilities(wasmOnly)
+			if err = store.UpsertAgent(context.Background(), a); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		// Unknown inventory, then a runner for another workload: only Eligible moves.
+		{name: "a target stops supporting the workload", before: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
+			changeAgent(t, store, "agent-a", func(a *model.Agent) { a.SetCapabilities(nil) })
+		}, change: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
+			changeAgent(t, store, "agent-a", func(a *model.Agent) { a.SetCapabilities(wasmOnly) })
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, store, ts := mkTokenFixture(t)
+			if tc.before != nil {
+				tc.before(t, svc, store, ts)
+			}
 			before := previewToken(t, svc, ts.ID())
 			tc.change(t, svc, store, ts)
 			if after := previewToken(t, svc, ts.ID()); after == before {
@@ -582,15 +644,25 @@ func TestPlanTokenCoversSpecAgentRunnerAndAction(t *testing.T) {
 
 func TestDeployRefusesChangedPlacement(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		change func(t *testing.T, svc *Service, store *inmemory.Store, ts *model.Spec)
+		name           string
+		before, change func(t *testing.T, svc *Service, store *inmemory.Store, ts *model.Spec)
 	}{
-		{"a matching agent joins", func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
+		{name: "a matching agent joins", change: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
 			addMatchingAgent(t, store, "agent-b")
 		}},
-		{"the spec is edited", func(t *testing.T, svc *Service, _ *inmemory.Store, ts *model.Spec) {
+		{name: "the spec is edited", change: func(t *testing.T, svc *Service, _ *inmemory.Store, ts *model.Spec) {
 			ts.SetTimeoutMs(60_000)
 			if err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		// The preview showed the deployment blocked by a missing target.
+		{name: "a missing target registers", before: addMissingTarget, change: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
+			a, err := model.NewAgent("agent-x", "name-agent-x", "http://agent-x")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = store.UpsertAgent(context.Background(), a); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -609,6 +681,9 @@ func TestDeployRefusesChangedPlacement(t *testing.T) {
 				t.Fatal(err)
 			}
 			synced, _ := store.GetRollout(ctx, r.ID())
+			if tc.before != nil {
+				tc.before(t, svc, store, ts)
+			}
 
 			token := previewToken(t, svc, ts.ID())
 			tc.change(t, svc, store, ts)

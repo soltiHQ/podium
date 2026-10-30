@@ -51,8 +51,8 @@ func (e *UnsupportedTargetsError) Error() string {
 func (e *UnsupportedTargetsError) Unwrap() error { return storage.ErrInvalidArgument }
 
 // ErrPlacementChanged is returned by Deploy when the caller's plan token no
-// longer matches the plan recomputed inside the transaction: the spec, the
-// matching agents or a selected runner changed since the preview, or a rollout
-// of the spec was created or removed. Deploy writes nothing; the caller
-// previews again.
+// longer matches the plan recomputed inside the transaction: since the preview
+// the spec was saved, the set of targets changed, a target was registered or
+// changed eligibility or selected runner, or another deploy created rollouts.
+// Deploy writes nothing; the caller previews again.
 var ErrPlacementChanged = errors.New("placement changed since preview")
