@@ -278,6 +278,7 @@ writes` is a read while another goroutine commits one-agent updates back to back
   session with the overlay and before the log, to 9.4 ms (5.8 MB allocated), the
   mean of one operation, median of 5 runs. `ListPage` reads as it did: 0.70 ms
   and 0.21 MiB in this session.
+  The history counters took that pass on from there: see History retention.
 - bbolt keeps an entry in the leaf at the end of the log and rewrites that leaf
   on each append until a split moves the entry off, about four entries later. So
   the few commits after a large transaction, such as the 4.3 MiB seed of the
@@ -288,8 +289,10 @@ writes` is a read while another goroutine commits one-agent updates back to back
 The scans run at 5 000 agents, except `labels1000`, which has 1 000, and the
 history prune, which runs on a store of history rows alone. A prune finds
 nothing to remove, a tick finds nothing due and a preview writes nothing, so
-what they cost is the scan. In `LifecycleTick`, `stale10pct` means that 10% of
-the agents are past their staleness deadline. In `PlacementPreview`, `labels` is
+what they cost is the scan. The two `HistoryPrune` rows are the prune as it
+was when it scanned the archive to decide; it no longer does (see History
+retention). In `LifecycleTick`, `stale10pct` means that 10% of the agents are
+past their staleness deadline. In `PlacementPreview`, `labels` is
 a spec that selects every agent by label and `explicit20` one that lists 20
 agents by ID. Each time is the mean of one operation, taken as the median of 10
 runs.
@@ -330,6 +333,34 @@ runs of `-benchtime=1s`. Its "before" and "after" are two versions of `List`: th
 first cloned every agent to return 100 of them, the second sorts the stored values
 and clones the page only. A page is still one scan and sort of the matches, and so
 is each page of a paged scan.
+
+### History retention
+
+The history service keeps counters of its archive, its rows, their bytes and the
+capture time of the oldest, so a retention pass that finds nothing due reads and
+writes nothing. The benchmarks are `HistoryPrune/10000/{durable,raft}/{idle,due}`
+in the history package's `bench_test.go`: `idle` is a pass over 10 000 rows
+within every limit, and `due` adds 100 rows that fall past retention before each
+pass, which removes them in one transaction. "Before" is the pass that scanned
+the archive to decide, "after" the pass that consults the counters, both in the
+same session on the same machine. Each cell is the time and the memory allocated
+by one operation, the median of 5 runs of `-benchtime=1s`.
+
+| benchmark | before | after |
+| -- | -- | -- |
+| HistoryPrune/10000/durable/idle | 2.21 ms / 2.6 MiB | 11 ns / 0 B |
+| HistoryPrune/10000/raft/idle | 2.22 ms / 2.6 MiB | 12 ns / 0 B |
+| HistoryPrune/10000/durable/due | 7.6 ms / 5.5 MiB | 5.7 ms / 2.8 MiB |
+| HistoryPrune/10000/raft/due | 9.7 ms / 6.0 MiB | 8.1 ms / 3.2 MiB |
+
+- A due pass scans and sorts the archive once, in its transaction. Before, it
+  did so twice, once to decide and once in the transaction.
+- The counters are counted by one scan, when the service first decides, and
+  again after a failed transaction, which may still have landed, and each time
+  the node takes leadership, since another node may have written meanwhile.
+  Between those, a capture scans only if it crosses a limit.
+- The durable `due` pass took 9.4 ms in the session of the first table above and
+  7.6 ms in this one, so read a factor against its own "before".
 
 ### Conditions
 

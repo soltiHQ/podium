@@ -97,10 +97,11 @@ const dueRows = 100
 // BenchmarkHistoryPrune is the retention pass of the collector, on each backend:
 //
 //   - idle: the history is within every limit, so nothing is due and nothing may
-//     be written. Prune returns before it opens a transaction.
-//   - due: before each pass, with the timer stopped, dueRows rows past retention
-//     join the history. Each pass removes them in a transaction that scans the
-//     whole history.
+//     be read or written. Prune answers from its counters, without a scan or a
+//     transaction.
+//   - due: before each pass, with the timer stopped, dueRows rows join the history
+//     and the clock moves past their retention. Each pass removes them in a
+//     transaction that scans the whole history.
 func BenchmarkHistoryPrune(b *testing.B) {
 	for _, rows := range []int{1000, 10000} {
 		b.Run(strconv.Itoa(rows), func(b *testing.B) {
@@ -115,11 +116,15 @@ func BenchmarkHistoryPrune(b *testing.B) {
 }
 
 // benchPrune times Prune over a history of rows rows within every limit, to which
-// due rows past retention are added before each pass. Each pass must remove them.
+// due rows are added before each pass. Each pass must remove them.
+//
+// The limits are pinned, so that the age of the due rows is all that makes them
+// due: the history sits exactly at its row limit, and the due rows add to it only
+// until the pass.
 func benchPrune(b *testing.B, open func(*testing.B) storage.Storage, rows, due int) {
 	ctx := context.Background()
 	store := benchStore(b, open, storagetest.Fixture{HistoryRows: rows})
-	cfg := DefaultConfig()
+	cfg := Config{Retention: 7 * 24 * time.Hour, MaxRecords: rows + due, MaxBytes: 1 << 40}
 	svc, err := New(store, cfg)
 	if err != nil {
 		b.Fatal(err)
@@ -128,14 +133,21 @@ func benchPrune(b *testing.B, open func(*testing.B) storage.Storage, rows, due i
 	// retention window, whatever the wall clock says.
 	now := storagetest.Epoch.Add(time.Duration(rows)*time.Second + time.Hour)
 	svc.now = func() time.Time { return now }
+	// The first decision reads the whole history to count it. A collector does that
+	// once each time it takes leadership, so it stays out of the timed passes.
+	if _, err := svc.Prune(ctx); err != nil {
+		b.Fatal(err)
+	}
 	b.ReportAllocs()
 	pass := 0
 	for b.Loop() {
 		if due > 0 {
 			b.StopTimer()
-			if err := addExpired(ctx, store, now.Add(-cfg.Retention), pass, due); err != nil {
+			if err := addDue(ctx, svc, now.Add(-cfg.Retention), pass, due); err != nil {
 				b.Fatal(err)
 			}
+			// The clock moves past the retention of the rows just added.
+			now = now.Add(time.Second)
 			pass++
 			b.StartTimer()
 		}
@@ -149,30 +161,30 @@ func benchPrune(b *testing.B, open func(*testing.B) storage.Storage, rows, due i
 	}
 }
 
-// addExpired writes n rows captured before expiredBefore, so that the next Prune
-// removes them. pass gives each call rows of new identities.
-func addExpired(ctx context.Context, s storage.Storage, expiredBefore time.Time, pass, n int) error {
-	return s.WithTx(ctx, func(tx storage.Storage) error {
-		for i := range n {
-			code := int32(0)
-			e, err := model.NewExecutionRecord(model.ExecutionRecordParams{
-				AgentID:    storagetest.AgentID(i),
-				AgentName:  "edge",
-				TaskName:   "job-00",
-				TaskUID:    fmt.Sprintf("expired-%d-%d", pass, i),
-				Generation: 1,
-				Attempt:    1,
-				Status:     "succeeded",
-				ExitCode:   &code,
-				CapturedAt: expiredBefore.Add(-time.Duration(n-i) * time.Second),
-			})
-			if err != nil {
-				return err
-			}
-			if err = tx.UpsertExecution(ctx, e); err != nil {
-				return err
-			}
+// addDue captures n rows through the service, so that its counters know of them,
+// a millisecond apart from just inside retention, which opens at from: a clock
+// that moves on by a second leaves them all past it. pass gives each call rows of
+// new identities.
+func addDue(ctx context.Context, svc *Service, from time.Time, pass, n int) error {
+	records := make([]*model.ExecutionRecord, n)
+	for i := range n {
+		code := int32(0)
+		e, err := model.NewExecutionRecord(model.ExecutionRecordParams{
+			AgentID:    storagetest.AgentID(i),
+			AgentName:  "edge",
+			TaskName:   "job-00",
+			TaskUID:    fmt.Sprintf("due-%d-%d", pass, i),
+			Generation: 1,
+			Attempt:    1,
+			Status:     "succeeded",
+			ExitCode:   &code,
+			CapturedAt: from.Add(time.Duration(i+1) * time.Millisecond),
+		})
+		if err != nil {
+			return err
 		}
-		return nil
-	})
+		records[i] = e
+	}
+	_, err := svc.commit(ctx, records, CaptureResult{})
+	return err
 }

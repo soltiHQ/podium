@@ -330,6 +330,11 @@ above their supported bounds fail configuration loading. `max_bytes` measures
 conservative retained-record payload, not database/RSS size. Captures are best
 effort and bound each task buffer to 8 MiB in addition to page/time limits.
 
+Retention is enforced from counters of the archive's rows, bytes and oldest
+capture time, not by reading the archive: the collector scans it only when a
+limit is crossed. A node that takes leadership counts it again once, since
+another node may have written to it. A row ages from the time it was captured.
+
 ## Agent lifecycle
 
 ```yaml

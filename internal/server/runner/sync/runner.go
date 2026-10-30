@@ -89,6 +89,8 @@ func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.P
 		history: history,
 	}
 	r.Runner = base.New(cfg.Name, cfg.TickInterval, leadership, logger, r.tick)
+	// It writes history too, when it captures a task before it deletes it.
+	r.OnLeader(history.Resume)
 	return r, nil
 }
 

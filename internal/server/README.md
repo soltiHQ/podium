@@ -76,6 +76,12 @@ Both follow the same pattern:
 3. `Stop` closes a signal channel; safe for multiple calls
 4. `tick()` lists entities, filters actionable ones, applies transitions
 
+A tick runner is built on `runner/base`, which ticks only while this replica
+leads. `base.Runner.OnLeader(fn)` registers a function to run each time the
+replica takes leadership, before the first tick of that term. The sync runner and
+the history collector use it to tell the history service that another replica
+may have written history in the meantime.
+
 ### Lifecycle runner
 Each tick takes the agents whose next-heartbeat deadline has passed (or was
 never set) and moves them along `active → inactive → disconnected → deleted`

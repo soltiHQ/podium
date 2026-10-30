@@ -61,6 +61,8 @@ func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.P
 	}
 	r := &Runner{cfg: cfg.WithDefaults(), logger: logger.With().Str("runner", "history").Logger(), store: store, pool: pool, svc: svc, work: map[string]*agentWork{}, progress: map[string]*runProgress{}}
 	r.Runner = base.New("history", r.cfg.TickInterval, leadership, logger, r.tick)
+	// Another node may have written history while this one did not lead.
+	r.OnLeader(svc.Resume)
 	return r, nil
 }
 

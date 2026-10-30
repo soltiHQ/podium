@@ -27,6 +27,7 @@ type Runner struct {
 	leadership cluster.Leadership
 	tick       TickFunc
 	logger     zerolog.Logger
+	onLeader   func()
 
 	stop     chan struct{} // closed by Stop to request exit
 	done     chan struct{} // closed when Start's loop has fully returned
@@ -58,6 +59,11 @@ func New(name string, interval time.Duration, leadership cluster.Leadership, log
 // Name returns the runner name.
 func (r *Runner) Name() string { return r.name }
 
+// OnLeader sets fn to run each time this replica takes leadership, before the
+// first tick of that term. A runner whose bookkeeping may have gone stale while
+// another replica led renews it there. It must be called before Start.
+func (r *Runner) OnLeader(fn func()) { r.onLeader = fn }
+
 // Start runs the leader-gated tick loop until Stop is called or ctx is canceled.
 func (r *Runner) Start(ctx context.Context) error {
 	if !r.started.CompareAndSwap(false, true) {
@@ -81,6 +87,9 @@ func (r *Runner) Start(ctx context.Context) error {
 		ticker := time.NewTicker(r.interval)
 		defer ticker.Stop()
 		r.logger.Info().Msg("runner acquired leadership")
+		if r.onLeader != nil {
+			r.onLeader()
+		}
 		for {
 			select {
 			case <-ticker.C:
