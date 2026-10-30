@@ -50,7 +50,7 @@ All errors are compatible with `errors.Is()`.
 ```text
   caller                          storage
   ──────                          ───────
-  ListAgents(filter, ListOptions{   ──→  snapshot + sort by (UpdatedAt DESC, ID ASC)
+  ListAgents(filter, ListOptions{   ──→  snapshot + sort by (CreatedAt DESC, ID ASC)
       Limit:  50,                        slice [cursor … cursor+limit]
       Cursor: "…",                       encode last item as NextCursor
   })                               ◀──  ListResult{ Items, NextCursor }
@@ -59,13 +59,13 @@ All errors are compatible with `errors.Is()`.
   next page: ListOptions{ Cursor: result.NextCursor }
 ```
 
-- **Ordering**: `(UpdatedAt DESC, ID ASC)` — deterministic, no gaps or duplicates
+- **Ordering**: `(CreatedAt DESC, ID ASC)` — deterministic, no gaps or duplicates
 - **Cursor**: opaque base64 JSON token, backend-validated
 - **Limits**: 1 .. 500 (default 100)
 
 ## Scanning
 `AllAgents`, `AllRollouts`, `AllSpecs` and `AllExecutions` return every row a filter matches.
-Draining a listing makes an in-process backend scan, clone and sort its whole store again for
+Draining a listing makes an in-process backend scan and sort its whole store again for
 every page of 500, so a backend that holds its rows in process implements the optional `Scanner`
 interface, and the helpers use it:
 ```text
@@ -112,11 +112,11 @@ Thread-safe CRUD for any `domain.Entity[T]`:
   Update(id, fn(T) T)      load clone → apply fn → store (under lock)
   Get(id)        → clone   retrieve by ID
   GetMany(ids)   → clones  batch get, preserve order
-  List(pred, opts) → page  snapshot → sort → cursor → slice
+  List(pred, opts) → page  match → sort → cursor → clone the page
   All(pred, less) → clones every match in one pass, sorted once (nil less = listing order)
   Delete(id)               remove by ID
 ```
 
 - Entities are **cloned** on writing and on read — no shared mutable state
 - Long scans check `ctx.Done()` every 1000 iterations
-- `List` releases the read lock before sorting (snapshot isolation)
+- `List` sorts the stored values and clones only the page it returns, all under one read lock

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -277,6 +278,63 @@ func TestGenericStore_List_Filtering(t *testing.T) {
 	}
 	if len(res.Items) != 1 || res.Items[0].ID() != "b" {
 		t.Fatalf("unexpected filtered result: %+v", res.Items)
+	}
+}
+
+func TestGenericStore_List_ReturnsClones(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s := NewGenericStore[*testEntity]()
+
+	ids := []string{"a", "b", "c", "d", "e"}
+	for i, id := range ids {
+		if err := s.Upsert(ctx, newTestEntity(id, time.Unix(int64(100+i), 0).UTC())); err != nil {
+			t.Fatalf("Upsert(%s) err=%v", id, err)
+		}
+	}
+	want := make(map[string]*testEntity, len(ids))
+	for _, id := range ids {
+		e, err := s.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get(%s) err=%v", id, err)
+		}
+		want[id] = e
+	}
+
+	// A first page, a page found by its cursor and a filtered page must all be clones.
+	first, err := s.List(ctx, nil, storage.ListOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("List(first) err=%v", err)
+	}
+	second, err := s.List(ctx, nil, storage.ListOptions{Limit: 2, Cursor: first.NextCursor})
+	if err != nil {
+		t.Fatalf("List(second) err=%v", err)
+	}
+	bAndD := func(e *testEntity) bool { return e.ID() == "b" || e.ID() == "d" }
+	filtered, err := s.List(ctx, bAndD, storage.ListOptions{})
+	if err != nil {
+		t.Fatalf("List(filtered) err=%v", err)
+	}
+
+	for _, page := range [][]*testEntity{first.Items, second.Items, filtered.Items} {
+		if len(page) == 0 {
+			t.Fatalf("empty page: the test proves nothing")
+		}
+		for _, e := range page {
+			e.payload["k"] = "mutated"
+			e.updatedAt = time.Unix(1, 0).UTC()
+		}
+	}
+
+	for _, id := range ids {
+		got, err := s.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get(%s) err=%v", id, err)
+		}
+		if !reflect.DeepEqual(got, want[id]) {
+			t.Fatalf("a change to %q as List returned it reached the store: %+v, want %+v", id, got, want[id])
+		}
 	}
 }
 

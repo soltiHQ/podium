@@ -182,7 +182,9 @@ func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts
 		return &storage.ListResult[T]{Items: []T{}, NextCursor: ""}, nil
 	}
 
-	snapshot := make([]T, 0, len(s.data))
+	// The matches are the stored values themselves, sorted and searched under the
+	// read lock; only the page is cloned.
+	matches := make([]T, 0, len(s.data))
 	i := 0
 	for _, entity := range s.data {
 		if i%1000 == 0 {
@@ -196,38 +198,45 @@ func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts
 		i++
 
 		if predicate == nil || predicate(entity) {
-			snapshot = append(snapshot, entity.Clone())
+			matches = append(matches, entity)
 		}
 	}
-	s.mu.RUnlock()
 
-	if len(snapshot) == 0 {
+	if len(matches) == 0 {
+		s.mu.RUnlock()
 		return &storage.ListResult[T]{Items: []T{}, NextCursor: ""}, nil
 	}
 
-	sort.Slice(snapshot, func(i, j int) bool { return listLess(snapshot[i], snapshot[j]) })
+	sort.Slice(matches, func(i, j int) bool { return listLess(matches[i], matches[j]) })
 
 	start := 0
 	if opts.Cursor != "" {
-		start, err = findCursorPosition(ctx, snapshot, cur)
+		start, err = findCursorPosition(ctx, matches, cur)
 		if err != nil {
+			s.mu.RUnlock()
 			return nil, err
 		}
 	}
 
-	if start >= len(snapshot) {
+	if start >= len(matches) {
+		s.mu.RUnlock()
 		return &storage.ListResult[T]{Items: []T{}, NextCursor: ""}, nil
 	}
 
 	end := start + limit
-	if end > len(snapshot) {
-		end = len(snapshot)
+	if end > len(matches) {
+		end = len(matches)
 	}
 
-	page := snapshot[start:end]
+	page := make([]T, 0, end-start)
+	for _, entity := range matches[start:end] {
+		page = append(page, entity.Clone())
+	}
+	more := end < len(matches)
+	s.mu.RUnlock()
 
 	var nextCursor string
-	if end < len(snapshot) {
+	if more {
 		last := page[len(page)-1]
 		nextCursor, err = encodeCursor(cursor{
 			CreatedAtUnixNano: last.CreatedAt().UnixNano(),
@@ -245,8 +254,7 @@ func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts
 }
 
 // All returns clones of the entities pred accepts, in one pass. Draining List
-// page by page scans, clones and sorts the store again for every page; All does
-// each once.
+// page by page scans and sorts the matches again for every page; All does each once.
 //
 //   - A nil pred accepts every entity; otherwise pred runs once per entity, under the read lock.
 //   - The result is sorted once by less. A nil less is the order List uses (CreatedAt DESC, ID ASC),

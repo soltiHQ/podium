@@ -171,3 +171,22 @@ func BenchmarkReadDuringWrite(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkListPage is the first page of an agent listing, as the API and the UI
+// ask for it, over a fleet of 5 000: the store has to find the 100 agents of the
+// page among all of them.
+func BenchmarkListPage(b *testing.B) {
+	const agents, limit = 5000, 100
+	s := benchStore(b, agents)
+	ctx := context.Background()
+	b.ReportAllocs()
+	for b.Loop() {
+		page, err := s.ListAgents(ctx, nil, storage.ListOptions{Limit: limit})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(page.Items) != limit || page.NextCursor == "" {
+			b.Fatalf("first page of %d agents has %d items and cursor %q, want %d and a cursor", agents, len(page.Items), page.NextCursor, limit)
+		}
+	}
+}
