@@ -95,11 +95,18 @@ carry the inspected task UID so reconnection cannot silently switch to a
 same-name replacement. Modal identifiers are encoded as lowercase UTF-8 hex so
 HTML attribute normalization preserves case-sensitive UID identity.
 
-The log and event streams are Server-Sent Events. Each clears the write
-deadline of its connection, so `http.write_timeout` does not end a stream, and
-writes the comment `: keepalive` after 15 seconds without output, which
-`EventSource` ignores. A reverse proxy in front of podium must keep its read
-timeout above 15 seconds (nginx `proxy_read_timeout` defaults to 60).
+The log and event streams are Server-Sent Events. `http.write_timeout` does
+not end a stream: before each write the stream gives it 30 seconds instead, so
+a client that stops reading is dropped after 30 seconds. Each stream writes the
+comment `: keepalive` after 15 seconds without output, which `EventSource`
+ignores, and re-checks access every 15 seconds, whether it wrote or not: the
+session must still be live and the user enabled, and the log stream also needs
+AgentsGet. A failed re-check, or one that cannot be made, ends the stream, and
+`EventSource` reconnects through authentication, which answers 401 or 403. A
+revoked session, a disabled user or a lost AgentsGet thus stops log output
+within 15 seconds. A reverse proxy in front of podium must keep its read
+timeout above 15 seconds (nginx `proxy_read_timeout` defaults to 60); both
+streams send `X-Accel-Buffering: no`, so nginx does not buffer them.
 
 Execution history shows partial capture from periodic agent polling. It can
 miss attempts removed between polls and is bounded by retention policy. Each

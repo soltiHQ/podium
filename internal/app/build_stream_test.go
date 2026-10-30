@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
 	"github.com/soltiHQ/control-plane/internal/auth/token/jwt"
@@ -20,6 +22,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"github.com/soltiHQ/control-plane/internal/transportctx"
 )
 
 // Exercise the composition root, including persisted-session authorization and
@@ -196,4 +199,47 @@ func TestAuthenticatedEventAndTaskLogStreamsShareLimitAndRelease(t *testing.T) {
 	fifth.cancel()
 	_ = fifth.response.Body.Close()
 	t.Log("shared cap2, authenticated/permission ordering, mixed events+logs, backing cancellation, and release/reopen verified")
+}
+
+// The task log stream re-checks AgentsGet, like its route; the event stream
+// re-checks authentication only, like its route.
+func TestStreamChecksMatchTheirRoutes(t *testing.T) {
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.Auth.JWTSecret = strings.Repeat("stream-test-only-secret", 2)
+	store := inmemory.New()
+	authModel := kit.New(store, cfg.Auth)
+	viewer, err := model.NewUser("viewer", "viewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewer.Enable()
+	viewer.SetPermissions([]string{string(enum.SpecsGet)})
+	if err = store.UpsertUser(ctx, viewer); err != nil {
+		t.Fatal(err)
+	}
+	session, err := model.NewSession("viewer-session", "viewer", "credential", enum.Password, make([]byte, 32), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.CreateSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r = r.WithContext(transportctx.WithIdentity(r.Context(), &identity.Identity{UserID: "viewer", SessionID: "viewer-session"}))
+
+	logs, events := streamChecks(authModel, zerolog.Nop())
+	if err = events(r); err != nil {
+		t.Fatalf("event stream re-check without AgentsGet: %v, want access", err)
+	}
+	if err = logs(r); !errors.Is(err, auth.ErrUnauthorized) {
+		t.Fatalf("log stream re-check without AgentsGet: %v, want %v", err, auth.ErrUnauthorized)
+	}
+	viewer.SetPermissions([]string{string(enum.SpecsGet), string(enum.AgentsGet)})
+	if err = store.UpsertUser(ctx, viewer); err != nil {
+		t.Fatal(err)
+	}
+	if err = logs(r); err != nil {
+		t.Fatalf("log stream re-check with AgentsGet: %v, want access", err)
+	}
 }

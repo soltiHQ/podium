@@ -132,7 +132,9 @@ func (a *API) agentPatchLabels(w http.ResponseWriter, r *http.Request, mode http
 // streamKeepalive is how long the log stream may stay silent before it writes
 // an SSE comment. A reverse proxy closes a connection it sees no bytes on
 // (nginx proxy_read_timeout defaults to 60s); EventSource ignores comments.
-// It must be positive; tests shorten it.
+// It is also how often the stream re-checks access, and half the time a write
+// may take. It must be positive; tests shorten it.
+// The event stream keeps its own copy: internal/event streamKeepalive.
 var streamKeepalive = 15 * time.Second
 
 // sseKeepalive is the comment a silent log stream writes.
@@ -144,9 +146,13 @@ const sseKeepalive = ": keepalive\n\n"
 // are watching; slow readers receive a synthetic Lagged envelope and
 // keep going instead of dragging the rest down.
 //
-// The stream clears the write deadline of its connection, so the server's
-// write timeout does not end it, and writes a keepalive comment after
-// streamKeepalive without output.
+// Before every write the stream sets the write deadline of its connection to
+// 2×streamKeepalive ahead: the server's write timeout does not end it, but a
+// client that stops reading is dropped. It writes a keepalive comment after
+// streamKeepalive without output and, every streamKeepalive whether it wrote
+// or not, re-checks the viewer's access with logAccess (the session, the user
+// and AgentsGet, like the route): a failed check, or one that cannot be made,
+// ends the stream, and EventSource reconnects through authentication.
 //
 // Frame format: `data: <protojson-StreamTaskLogsResponse>\n\n`.
 func (a *API) AgentTaskLogsStream(w http.ResponseWriter, r *http.Request) {
@@ -159,14 +165,22 @@ func (a *API) AgentTaskLogsStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A writer that cannot clear the deadline is refused: the server would cut
+	var (
+		keepalive = streamKeepalive
+		rc        = http.NewResponseController(w)
+	)
+	// deadline gives the next write 2×keepalive: a write at least every
+	// keepalive keeps a reading client connected.
+	deadline := func() error { return rc.SetWriteDeadline(time.Now().Add(2 * keepalive)) }
+
+	// A writer whose deadline cannot be set is refused: the server would cut
 	// the stream at its write timeout. Refusing comes before the subscription,
 	// which may open a connection to the agent.
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil {
+	if err := deadline(); err != nil {
 		a.logger.Error().Err(err).
 			Str("agent_id", agentID).
 			Str("task_id", taskID).
-			Msg("agent task logs: cannot disable write deadline")
+			Msg("agent task logs: cannot set write deadline")
 		response.Internal(w, r, mode)
 		return
 	}
@@ -185,6 +199,9 @@ func (a *API) AgentTaskLogsStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
+	if deadline() != nil {
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	if flusher != nil {
@@ -193,15 +210,28 @@ func (a *API) AgentTaskLogsStream(w http.ResponseWriter, r *http.Request) {
 
 	var (
 		marshaler = protojson.MarshalOptions{EmitUnpopulated: true}
-		keepalive = streamKeepalive
 		idle      = time.NewTicker(keepalive)
+		recheck   = time.NewTicker(keepalive)
 	)
 	defer idle.Stop()
+	defer recheck.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-recheck.C:
+			if err := a.logAccess(r); err != nil {
+				a.logger.Debug().Err(err).
+					Str("agent_id", agentID).
+					Str("task_id", taskID).
+					Msg("agent task logs: access lost, stream ended")
+				return
+			}
+			continue
 		case <-idle.C:
+			if deadline() != nil {
+				return
+			}
 			if _, err := io.WriteString(w, sseKeepalive); err != nil {
 				return
 			}
@@ -212,6 +242,9 @@ func (a *API) AgentTaskLogsStream(w http.ResponseWriter, r *http.Request) {
 			payload, err := marshaler.Marshal(ev)
 			if err != nil {
 				continue
+			}
+			if deadline() != nil {
+				return
 			}
 			if _, err := w.Write([]byte("data: ")); err != nil {
 				return

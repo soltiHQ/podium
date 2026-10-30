@@ -207,17 +207,18 @@ func waitForLeader(ctx context.Context, l cluster.Leadership) bool {
 // login limiter. Cross-origin browser mutations are refused before any route.
 func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership, resolver *clientip.Resolver) (http.Handler, *loghub.Hub) {
 	var (
-		secure        = cookieSecure(cfg.Auth.CookieSecure, resolver)
-		logHub        = buildLogHub(logger, svc.agent, proxyPool, cfg.Streams)
-		streamLimit   = middleware.NewStreamLimiter(cfg.Streams.MaxPerIP, resolver)
-		apiHandler    = handler.NewAPI(logger, svc.user, svc.access, svc.session, svc.credential, svc.agent, svc.spec, svc.history, proxyPool, eventHub, logHub, streamLimit)
-		authMW        = middleware.Auth(authModel.Verifier, authModel.Session, secure, logger)
-		optAuthMW     = middleware.OptionalAuth(authModel.Verifier, authModel.Session, secure, logger)
-		uiHandler     = handler.NewUI(logger, svc.access, svc.spec, eventHub, resolver, secure)
-		staticHandler = handler.NewStatic(logger)
-		logMW         = middleware.Logger(logger)
-		ridMW         = middleware.RequestID()
-		mux           = http.NewServeMux()
+		secure                 = cookieSecure(cfg.Auth.CookieSecure, resolver)
+		logHub                 = buildLogHub(logger, svc.agent, proxyPool, cfg.Streams)
+		streamLimit            = middleware.NewStreamLimiter(cfg.Streams.MaxPerIP, resolver)
+		logAccess, eventAccess = streamChecks(authModel, logger)
+		apiHandler             = handler.NewAPI(logger, svc.user, svc.access, svc.session, svc.credential, svc.agent, svc.spec, svc.history, proxyPool, eventHub, logHub, streamLimit, logAccess)
+		authMW                 = middleware.Auth(authModel.Verifier, authModel.Session, secure, logger)
+		optAuthMW              = middleware.OptionalAuth(authModel.Verifier, authModel.Session, secure, logger)
+		uiHandler              = handler.NewUI(logger, svc.access, svc.spec, eventHub, resolver, secure)
+		staticHandler          = handler.NewStatic(logger)
+		logMW                  = middleware.Logger(logger)
+		ridMW                  = middleware.RequestID()
+		mux                    = http.NewServeMux()
 
 		permMW = route.PermMW(func(p enum.Permission) route.BaseMW {
 			return middleware.RequirePermission(p)
@@ -227,7 +228,7 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 	uiHandler.Routes(mux, authMW, optAuthMW, permMW)
 	staticHandler.Routes(mux)
 
-	route.HandleFunc(mux, routepath.ApiEventStream, eventHub.SSEHandler(), ridMW, logMW, authMW, middleware.StreamLimit(streamLimit))
+	route.HandleFunc(mux, routepath.ApiEventStream, eventHub.SSEHandler(eventAccess), ridMW, logMW, authMW, middleware.StreamLimit(streamLimit))
 
 	var h http.Handler = mux
 	h = middleware.CrossOrigin(cfg.CORS, logger)(h)
@@ -239,6 +240,14 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 	h = middleware.CORS(cfg.CORS)(h)
 	h = middleware.Recovery(logger)(h)
 	return h, logHub
+}
+
+// streamChecks returns the access re-checks of the two long-lived streams, built
+// on the session service Auth uses: the task log stream needs AgentsGet, like
+// its route; the event stream needs authentication only, like its route. Each
+// stream runs its check every keepalive interval and ends when it fails.
+func streamChecks(authModel *kit.Auth, logger zerolog.Logger) (logs, events func(*http.Request) error) {
+	return middleware.Recheck(authModel.Session, enum.AgentsGet, logger), middleware.Recheck(authModel.Session, "", logger)
 }
 
 // cookieSecure decides whether the auth and device cookies of a response carry
