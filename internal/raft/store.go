@@ -13,6 +13,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/domain/wire"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/storage/overlay"
 )
 
 // Compile-time check.
@@ -32,10 +33,10 @@ const applyTimeout = 5 * time.Second
 // Write flow:
 //
 //   - Every single mutation method builds a 1-op Command and submits it.
-//   - WithTx collects ops via a recording txView, then submits them as one
-//     multi-op Command for atomic replication. fn's reads are served from
-//     the inner store plus an in-memory overlay so within-fn read-your-writes
-//     works as expected.
+//   - WithTx runs fn on an overlay.Tx over the inner store, which records
+//     each write as an op, then submits the ops as one multi-op Command for
+//     atomic replication. fn reads its own writes everywhere: point reads,
+//     index lookups, listings and scans.
 //
 // The inner store must be the plain inmemory one and MUST be the same store
 // the FSM applies against. Otherwise leader and followers diverge.
@@ -257,25 +258,7 @@ func (s *Store) RotateRefreshAt(ctx context.Context, sessionID string, newHash [
 	if sessionID == "" || len(newHash) == 0 || newExpiresAt.IsZero() {
 		return storage.ErrInvalidArgument
 	}
-	return s.applyOp(sessionRefreshOp(sessionID, newHash, newExpiresAt, updatedAt))
-}
-
-// sessionRefreshOp records presence separately from the Unix nanosecond value:
-// nil is the historical preserve-UpdatedAt operation; pointer-to-zero is epoch.
-func sessionRefreshOp(sessionID string, newHash []byte, newExpiresAt, updatedAt time.Time) *raftv1.Op {
-	var updatedAtNs *int64
-	if !updatedAt.IsZero() {
-		ns := updatedAt.UnixNano()
-		updatedAtNs = &ns
-	}
-	return &raftv1.Op{Op: &raftv1.Op_SessionRotateRefresh{
-		SessionRotateRefresh: &raftv1.SessionRotateRefreshMsg{
-			Id:          sessionID,
-			RefreshHash: append([]byte(nil), newHash...),
-			ExpiresAtNs: newExpiresAt.UnixNano(),
-			UpdatedAtNs: updatedAtNs,
-		},
-	}}
+	return s.applyOp(overlay.RotateRefreshOp(sessionID, newHash, newExpiresAt, updatedAt))
 }
 
 func (s *Store) RevokeSession(ctx context.Context, sessionID string, revokedAt time.Time) error {
@@ -360,15 +343,15 @@ func (s *Store) BuildSpecFilter(c storage.SpecQueryCriteria) storage.SpecFilter 
 
 // === WithTx — recording batch ===
 
-// WithTx runs fn against a recording view that captures every mutation as
-// a proto Op. At end of fn the captured ops are submitted to Raft as one
-// Command and applied atomically on every replica.
+// WithTx runs fn on an overlay.Tx that records every mutation as a proto Op.
+// At end of fn the recorded ops are submitted to Raft as one Command and
+// applied atomically on every replica; a transaction that recorded none
+// submits nothing.
 //
-// fn's reads within the tx see:
-//  1. Values written earlier in the same fn (the overlay), then
-//  2. The inner store (followers won't have them, but we are running on the
-//     leader where the inner store is the up-to-date one thanks to previous
-//     FSM applies).
+// fn's reads within the tx see its own writes over the inner store. While this
+// node leads, the inner store does not move under fn: every write of this Store
+// holds txMu, and fn runs after the FSM has applied every committed command. A
+// node that loses leadership while fn runs fails the submission.
 //
 // Contract: only leader can run WithTx. If Raft.State() != Leader the tx is
 // rejected before fn executes.
@@ -391,15 +374,15 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx storage.Storage) error) e
 	if err := awaitApplied(ctx, s.raft); err != nil {
 		return err
 	}
-	view := newTxView(s.inner)
-	if err := fn(view); err != nil {
+	tx := overlay.New(s.inner)
+	if err := fn(tx); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if len(view.ops) == 0 {
+	if tx.Empty() {
 		return nil
 	}
-	return s.apply(view.ops)
+	return s.apply(tx.Ops())
 }

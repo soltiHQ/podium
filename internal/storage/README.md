@@ -11,12 +11,17 @@ storage/
 ├── pagination.go   ListResult[T], ListOptions, limits
 ├── filter.go       backend-agnostic filter markers (AgentFilter, RolloutFilter …)
 │
-└── inmemory/
-    ├── storage.go   Store — aggregates GenericStore instances, implements Storage
-    ├── generic.go   GenericStore[T] — thread-safe CRUD for any domain.Entity[T]
-    ├── scan.go      Scanner for Store and for its transaction handle
-    ├── filter.go    concrete filters with builder API (ByLabel, ByStatus, Query …)
-    └── cursor.go    opaque base64 cursor encoding / decoding
+├── inmemory/
+│   ├── storage.go   Store — aggregates GenericStore instances, implements Storage
+│   ├── generic.go   GenericStore[T] — thread-safe CRUD for any domain.Entity[T]
+│   ├── scan.go      Scanner for Store and for its transaction handle
+│   ├── filter.go    concrete filters with builder API (ByLabel, ByStatus, Query …)
+│   └── cursor.go    opaque base64 cursor encoding / decoding
+│
+└── overlay/
+    ├── overlay.go   Tx — a transaction over an unchanging base: reads its own writes, records them as ops
+    ├── apply.go     ApplyOps — applies recorded ops to a store, as the Raft state machine does
+    └── agent.go …   the Storage methods of Tx, one file per entity group
 ```
 
 ## Store interfaces
@@ -77,11 +82,30 @@ interface, and the helpers use it:
 - A scan returns what `CollectPages` returns: the same rows, in the listing order, as clones the caller owns
 - The filter runs once per row, not once per row per page
 - The rows are one consistent state, not one state per page
-- `inmemory.Store` and its transaction handle, `durable.Store` and `raft.Store` are Scanners; the
-  view that `raft.Store.WithTx` hands out is not, and is paged. A wrapper that embeds
+- `inmemory.Store` and its transaction handle, `durable.Store`, `raft.Store` and the `overlay.Tx`
+  that `raft.Store.WithTx` hands out are Scanners. A wrapper that embeds
   `storage.Storage` hides the interface and gets the paged path too: forward the four `Scan*`
   methods to keep the single pass
 - A page asked for with `Limit` and `Cursor`, as the API and the UI do, is unchanged
+
+## Transaction overlay
+`overlay.Tx` holds a transaction in memory over a base store that does not change while it runs.
+`raft.Store.WithTx` runs its callback on one and replicates what it recorded:
+```text
+  tx := overlay.New(base)      writes land in tx; every read of tx sees them over the base
+  tx.UpsertAgent(ctx, a)       checked as the state machine will apply it, recorded as a SOLTI-CMD op
+  tx.Ops(), tx.Empty()         the recorded ops in write order; nothing to commit when empty
+  overlay.ApplyOps(ctx, s, …)  applies the ops to s, as the Raft state machine does on commit
+```
+
+- Point reads, index lookups, listings and scans merge the base with the transaction's writes. A
+  page of a listing is cut from one scan of the base merged with those writes, so each page clones
+  every match where the in-memory store clones the page alone; users and roles, which have no
+  scan, drain the base's listing instead. Nothing rebuilds a store
+- A write the state machine would refuse fails in the transaction and records nothing. Deleting a
+  row the transaction does not see gives `ErrNotFound`, as the stores do
+- A bulk delete removes the rows it matches when it is called, the transaction's own included,
+  and not the rows written after it
 
 ## Filter pattern
 Filters are **backend-specific**. The storage package declares empty marker interfaces (`AgentFilter`, `RolloutFilter` …).  

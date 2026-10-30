@@ -86,9 +86,7 @@ func checkGrant(ctx context.Context, tx storage.Storage, actor *identity.Identit
 }
 
 // keepAdmin returns ErrLastAdmin when changing before into after (nil: deleted)
-// takes away the last enabled user holding every permission. Call it before
-// the transaction writes: a raft transaction's listings do not show its own
-// pending writes.
+// takes away the last enabled user holding every permission.
 func keepAdmin(ctx context.Context, tx storage.Storage, before, after *model.User) error {
 	if was, err := isAdmin(ctx, tx, before); err != nil || !was {
 		return err

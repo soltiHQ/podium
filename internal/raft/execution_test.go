@@ -12,6 +12,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"github.com/soltiHQ/control-plane/internal/storage/overlay"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
@@ -64,7 +65,7 @@ func TestArchiveTransactionOverlaySupportsAtomicPruning(t *testing.T) {
 	if err := inner.UpsertExecution(ctx, first); err != nil {
 		t.Fatal(err)
 	}
-	view := newTxView(inner)
+	view := overlay.New(inner)
 	if err := view.UpsertExecution(ctx, second); err != nil {
 		t.Fatal(err)
 	}

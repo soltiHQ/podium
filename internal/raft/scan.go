@@ -10,9 +10,8 @@ import (
 var _ storage.Scanner = (*Store)(nil)
 
 // Scans read the local state, as every read of a Raft Store does, and take the
-// single pass of the inner store when it is a Scanner. The view WithTx hands out
-// is not a Scanner: its listings bypass its own writes except for executions, and
-// a scan through it pages as before.
+// single pass of the inner store when it is a Scanner. The overlay.Tx WithTx hands
+// out is a Scanner too: its scans make that pass and add the transaction's writes.
 
 func (s *Store) ScanAgents(ctx context.Context, filter storage.AgentFilter) ([]*model.Agent, error) {
 	return storage.AllAgents(ctx, s.inner, filter)

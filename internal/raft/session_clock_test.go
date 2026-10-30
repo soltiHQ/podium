@@ -15,6 +15,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/wire"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"github.com/soltiHQ/control-plane/internal/storage/overlay"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -221,7 +222,7 @@ func TestSessionTxReadOwnMutations(t *testing.T) {
 	if err := inner.CreateSession(ctx, original); err != nil {
 		t.Fatal(err)
 	}
-	view := newTxView(inner)
+	view := overlay.New(inner)
 	at := time.Unix(0, 0).UTC()
 	newExpiry := original.ExpiresAt().Add(time.Hour)
 	if err := view.RotateRefreshAt(ctx, original.ID(), []byte("overlay-rotation"), newExpiry, at); err != nil {
@@ -234,7 +235,7 @@ func TestSessionTxReadOwnMutations(t *testing.T) {
 	if !bytes.Equal(rotated.RefreshHash(), []byte("overlay-rotation")) || !rotated.ExpiresAt().Equal(newExpiry) || !rotated.UpdatedAt().Equal(at) {
 		t.Fatal("rotation missing from transaction read")
 	}
-	if view.ops[0].GetSessionRotateRefresh().UpdatedAtNs == nil || view.ops[0].GetSessionRotateRefresh().GetUpdatedAtNs() != 0 {
+	if view.Ops()[0].GetSessionRotateRefresh().UpdatedAtNs == nil || view.Ops()[0].GetSessionRotateRefresh().GetUpdatedAtNs() != 0 {
 		t.Fatal("explicit epoch omitted from recorded command")
 	}
 	rotated.SetUpdatedAt(at.Add(time.Hour))
@@ -269,7 +270,7 @@ func TestSessionTxReadOwnMutations(t *testing.T) {
 	}
 	// The exact recorded operations produce the same state as the read overlay.
 	f := NewFSM(inner, nil)
-	data, err := encodeCommand(view.ops)
+	data, err := encodeCommand(view.Ops())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +291,7 @@ func TestSessionTxRejectedMutationsRecordNoOperations(t *testing.T) {
 	if err := inner.CreateSession(ctx, original); err != nil {
 		t.Fatal(err)
 	}
-	view := newTxView(inner)
+	view := overlay.New(inner)
 	tests := []struct {
 		name string
 		call func() error
@@ -307,8 +308,12 @@ func TestSessionTxRejectedMutationsRecordNoOperations(t *testing.T) {
 			if err := tc.call(); !errors.Is(err, tc.want) {
 				t.Fatalf("got %v want %v", err, tc.want)
 			}
-			if len(view.ops) != 0 || len(view.sessions) != 0 {
-				t.Fatal("rejected mutation recorded an operation or overlay")
+			if !view.Empty() {
+				t.Fatal("rejected mutation recorded an operation")
+			}
+			got, err := view.GetSession(ctx, original.ID())
+			if err != nil || !proto.Equal(wire.SessionToProto(original), wire.SessionToProto(got)) {
+				t.Fatal("rejected mutation changed the session the transaction reads", err)
 			}
 		})
 	}
