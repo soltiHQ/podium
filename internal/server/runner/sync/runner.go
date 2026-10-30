@@ -43,12 +43,10 @@ type Runner struct {
 
 	// clock replaces time.Now in tests; nil means time.Now.
 	clock func() time.Time
-	// backoffs holds back the calls to agents that left calls unanswered, and
-	// observeFrom is, for each agent, the rollout its next observations start
-	// at. Both live in memory only and are used by the tick goroutine only,
-	// before the workers start and after they are done.
-	backoffs    map[string]agentBackoff
-	observeFrom map[string]string
+	// backoffs holds back the calls to agents that left calls unanswered. It
+	// lives in memory only and is used by the tick goroutine only, before the
+	// workers start and after they are done.
+	backoffs map[string]agentBackoff
 }
 
 // agentBackoff holds back the calls to one agent.
@@ -149,17 +147,17 @@ type agentTurn struct {
 	rollouts []string  // in turn order, see planTurns
 	calls    int       // index of the first rollout that may need a call
 	observe  int       // index of the first observation; len(rollouts) if none
-	next     int       // index of the first rollout the worker did not attempt
 	answered bool      // the agent answered a call
 	silentAt time.Time // when a call went unanswered; zero if none did
 }
 
 // reconcileRollouts dispatches every due rollout by intent, one worker per agent.
-// A worker takes its agent's rollouts in turn order, each within its own
+// A worker takes its agent's rollouts in turn order, each call within its own
 // PushTimeout, starts no call once the turn has used PushTimeout of wall time,
 // and stops at the first call the agent leaves unanswered. The agent's calls
 // then back off until the backoff passes or the agent row shows a reconnect;
-// uninstalls that need no call go on regardless.
+// uninstalls that need no call go on regardless. The observations, which come
+// last in the turn, are one listing of the agent's tasks: see observeAgent.
 func (r *Runner) reconcileRollouts(ctx context.Context) {
 	items, err := storage.AllRollouts(ctx, r.store, nil)
 	if err != nil {
@@ -215,11 +213,6 @@ func (r *Runner) forgetAgents(ctx context.Context, listed map[string]bool, now t
 			delete(r.backoffs, agentID)
 		}
 	}
-	for agentID := range r.observeFrom {
-		if !listed[agentID] {
-			delete(r.observeFrom, agentID)
-		}
-	}
 }
 
 // reconnected reports whether the agent row shows a reconnect since b started.
@@ -233,8 +226,8 @@ func (r *Runner) reconnected(ctx context.Context, agentID string, b agentBackoff
 // stage order of their first rollout, and orders each turn: the uninstalls that
 // need no call, in listing order; then the pushes by LastPushedAt, which only
 // MarkFailed sets (rollouts that never failed first, then the oldest failure);
-// then the observations, by rollout ID from where the agent's last turn
-// stopped, so that every one gets its turn while a turn has time for only some.
+// then the observations. A synced rollout without a task has nothing to look
+// up: it is left out, and an agent with nothing else is not called.
 func (r *Runner) planTurns(due []*model.Rollout) []*agentTurn {
 	slices.SortStableFunc(due, func(a, b *model.Rollout) int { return cmp.Compare(stage(a), stage(b)) })
 	var (
@@ -242,6 +235,9 @@ func (r *Runner) planTurns(due []*model.Rollout) []*agentTurn {
 		byStage = make(map[string]*[3][]*model.Rollout)
 	)
 	for _, ss := range due {
+		if stage(ss) == stageObserve && ss.ActualTaskID() == "" {
+			continue
+		}
 		stages, ok := byStage[ss.AgentID()]
 		if !ok {
 			stages = new([3][]*model.Rollout)
@@ -260,11 +256,6 @@ func (r *Runner) planTurns(due []*model.Rollout) []*agentTurn {
 			observe = stages[stageObserve]
 		)
 		slices.SortStableFunc(push, func(a, b *model.Rollout) int { return a.LastPushedAt().Compare(b.LastPushedAt()) })
-		slices.SortFunc(observe, func(a, b *model.Rollout) int { return cmp.Compare(a.ID(), b.ID()) })
-		if from := r.observeFrom[agentID]; from != "" {
-			i, _ := slices.BinarySearchFunc(observe, from, func(ss *model.Rollout, id string) int { return cmp.Compare(ss.ID(), id) })
-			observe = slices.Concat(observe[i:], observe[:i])
-		}
 		turn := &agentTurn{agentID: agentID, calls: len(local), observe: len(local) + len(push)}
 		for _, ss := range slices.Concat(local, push, observe) {
 			turn.rollouts = append(turn.rollouts, ss.ID())
@@ -277,21 +268,24 @@ func (r *Runner) planTurns(due []*model.Rollout) []*agentTurn {
 // reconcileAgent works through one agent's turn. Once the turn has used
 // PushTimeout of wall time it starts no more calls: the rest waits for the next
 // tick and records nothing. The first call the agent leaves unanswered ends the
-// turn too: every rollout after that one needs the agent.
+// turn too: every rollout after that one needs the agent. The observations, last
+// in the turn, are one listing of the agent's tasks, which ends the turn.
 func (r *Runner) reconcileAgent(ctx context.Context, turn *agentTurn) {
 	start := r.now()
 	for i, rolloutID := range turn.rollouts {
-		turn.next = i
 		if ctx.Err() != nil {
 			return
 		}
 		if i >= turn.calls && r.now().Sub(start) >= r.cfg.PushTimeout {
 			return
 		}
+		if i == turn.observe {
+			r.observeAgent(ctx, turn, start)
+			return
+		}
 		pushCtx, cancel := context.WithTimeout(ctx, r.cfg.PushTimeout)
 		result := r.reconcile(pushCtx, rolloutID)
 		cancel()
-		turn.next = i + 1
 		if ctx.Err() != nil {
 			return // a cancelled tick says nothing about the agent
 		}
@@ -305,24 +299,11 @@ func (r *Runner) reconcileAgent(ctx context.Context, turn *agentTurn) {
 	}
 }
 
-// noteAgent updates the agent's observation cursor and backoff after its turn.
-// The next observations start at the first one the turn did not attempt. An
-// answered call clears the backoff. A call left unanswered holds the agent's
-// calls back for backoff(n), n being the unanswered calls since the agent last
-// answered, and records the agent row as the backoff starts.
+// noteAgent updates the agent's backoff after its turn. An answered call clears
+// the backoff. A call left unanswered holds the agent's calls back for
+// backoff(n), n being the unanswered calls since the agent last answered, and
+// records the agent row as the backoff starts.
 func (r *Runner) noteAgent(ctx context.Context, turn *agentTurn) {
-	if turn.observe < len(turn.rollouts) {
-		switch {
-		case turn.next >= len(turn.rollouts):
-			delete(r.observeFrom, turn.agentID)
-		case turn.next >= turn.observe:
-			if r.observeFrom == nil {
-				r.observeFrom = make(map[string]string)
-			}
-			r.observeFrom[turn.agentID] = turn.rollouts[turn.next]
-		}
-	}
-
 	switch {
 	case !turn.silentAt.IsZero():
 		failures := 1
@@ -372,6 +353,8 @@ func retryDue(r *model.Rollout, now time.Time, cfg Config) bool {
 }
 
 // reconcile loads the rollout fresh (to pick up any changes since tick started) and dispatches by intent.
+// Observations are not reconciled one by one, see observeAgent: a rollout that
+// turned into one since the tick started waits for the next tick.
 func (r *Runner) reconcile(ctx context.Context, rolloutID string) outcome {
 	ss, err := r.store.GetRollout(ctx, rolloutID)
 	if err != nil {
@@ -384,8 +367,6 @@ func (r *Runner) reconcile(ctx context.Context, rolloutID string) outcome {
 		return r.reconcileUninstall(ctx, ss)
 	case enum.RolloutIntentInstall, enum.RolloutIntentUpdate:
 		return r.reconcileSubmit(ctx, ss)
-	case enum.RolloutIntentNoop:
-		return r.observe(ctx, ss)
 	}
 	return noCall
 }
@@ -689,28 +670,103 @@ func unreachable(ctx context.Context, err error) bool {
 	return errors.As(err, &netErr)
 }
 
-// observe detects lost agent state after restart, without rotating terminal tasks
-// that still exist. Recovery reuses the stable manifest name and current intent.
-// An unanswered call records nothing on the rollout.
-func (r *Runner) observe(ctx context.Context, attempted *model.Rollout) outcome {
-	if attempted.ActualTaskID() == "" {
-		return noCall
-	}
-	ag, err := r.store.GetAgent(ctx, attempted.AgentID())
+// observeAgent detects lost agent state after restart, without rotating terminal
+// tasks that still exist: it lists the agent's tasks once, and queues each
+// synced rollout of the turn whose task is not among them for a reinstall.
+// Recovery reuses the stable manifest name and current intent. An agent whose
+// row, credential or endpoint cannot be resolved is not called, and an
+// incomplete listing records nothing on the rollouts, see listTasks.
+func (r *Runner) observeAgent(ctx context.Context, turn *agentTurn, start time.Time) {
+	ag, err := r.store.GetAgent(ctx, turn.agentID)
 	if err != nil {
-		return noCall
+		return
 	}
 	token, err := r.agentToken(ctx, ag.ID())
 	if err != nil {
-		return noCall
+		return
 	}
 	ap, err := r.pool.Get(ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
 	if err != nil {
-		return noCall
+		return
 	}
-	_, err = ap.GetTask(ctx, attempted.ActualTaskID())
-	if !isNotFound(err) {
-		return called(ctx, err)
+	tasks, listed := r.listTasks(ctx, ap, turn, start)
+	if !listed {
+		return
+	}
+	for _, rolloutID := range turn.rollouts[turn.observe:] {
+		if ctx.Err() != nil {
+			return
+		}
+		r.recoverMissing(ctx, rolloutID, tasks)
+	}
+}
+
+// taskListLimit is the page size of the listing: the most an agent serves.
+const taskListLimit = 1000
+
+// listTasks lists every task of the turn's agent, a page of taskListLimit at a
+// time and with no filter, so that a task is there whatever its phase, as it was
+// to GetTask. Each page is a call of its own, within PushTimeout; a page after
+// the first starts only while the turn is within its budget. Only a listing that
+// reaches the last page is complete. One that stops short reports false, and no
+// task may be judged missing by it: the budget is used, a page fails, the agent
+// repeats a cursor or the tick is cancelled. A page answers or goes unanswered
+// as any call does, an error status included: the turn notes it.
+func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agentTurn, start time.Time) (map[string]struct{}, bool) {
+	var (
+		tasks  = make(map[string]struct{})
+		cursor string
+	)
+	for page := 1; ; page++ {
+		callCtx, cancel := context.WithTimeout(ctx, r.cfg.PushTimeout)
+		resp, err := ap.ListTasks(callCtx, proxy.TaskFilter{Limit: taskListLimit, Cursor: cursor})
+		result := called(callCtx, err)
+		cancel()
+		if ctx.Err() != nil {
+			return nil, false // a cancelled tick says nothing about the agent
+		}
+		switch result {
+		case answered:
+			turn.answered = true
+		case unanswered:
+			turn.silentAt = r.now()
+			return nil, false
+		}
+		if err != nil {
+			r.logger.Warn().Err(err).Str("agent_id", turn.agentID).Int("page", page).Msg("observe: list tasks failed; no rollout judged missing")
+			return nil, false
+		}
+		for _, task := range resp.Tasks {
+			tasks[task.ID] = struct{}{}
+		}
+		switch {
+		case resp.NextCursor == "":
+			return tasks, true
+		case resp.NextCursor == cursor:
+			r.logger.Warn().Str("agent_id", turn.agentID).Int("page", page).Msg("observe: agent repeated a list cursor; no rollout judged missing")
+			return nil, false
+		case r.now().Sub(start) >= r.cfg.PushTimeout:
+			return nil, false
+		}
+		cursor = resp.NextCursor
+	}
+}
+
+// recoverMissing queues the rollout for a reinstall if its task is not among the
+// tasks of its agent's complete listing. It loads the rollout fresh, as the
+// listing may have taken long: one that is no longer a synced rollout with a
+// task is left alone.
+func (r *Runner) recoverMissing(ctx context.Context, rolloutID string, tasks map[string]struct{}) {
+	attempted, err := r.store.GetRollout(ctx, rolloutID)
+	if err != nil {
+		r.logger.Warn().Err(err).Str("rid", rolloutID).Msg("observe: load rollout failed")
+		return
+	}
+	if attempted.Intent() != enum.RolloutIntentNoop || attempted.ActualTaskID() == "" {
+		return
+	}
+	if _, ok := tasks[attempted.ActualTaskID()]; ok {
+		return
 	}
 	writeCtx, cancel := writeContext(ctx)
 	defer cancel()
@@ -738,7 +794,6 @@ func (r *Runner) observe(ctx context.Context, attempted *model.Rollout) outcome 
 	if changed {
 		r.hub.Notify(event.RefreshSpecs)
 	}
-	return answered
 }
 
 // captureBeforeDelete records only already terminal observations. It neither

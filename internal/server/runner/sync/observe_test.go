@@ -1,0 +1,319 @@
+package sync
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"slices"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/rs/zerolog"
+
+	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
+	"github.com/soltiHQ/control-plane/domain/enum"
+	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/proxy"
+	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/transport/errkind"
+)
+
+// unchanged reports whether the stored rollout is still the one that was seeded.
+func unchanged(t *testing.T, s storage.Storage, seeded *model.Rollout) bool {
+	t.Helper()
+	after, err := s.GetRollout(context.Background(), seeded.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return after.UpdatedAt().Equal(seeded.UpdatedAt()) && after.Intent() == seeded.Intent() && after.ActualTaskID() == seeded.ActualTaskID()
+}
+
+// requeued reports whether the stored rollout is queued for a reinstall.
+func requeued(t *testing.T, s storage.Storage, seeded *model.Rollout) bool {
+	t.Helper()
+	after, err := s.GetRollout(context.Background(), seeded.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return after.Intent() == enum.RolloutIntentInstall && after.Status() == enum.SyncStatusPending && after.ActualTaskID() == ""
+}
+
+// holdN makes the agent hold n tasks, task-0000 on.
+func holdN(fp *fakeProxy, n int) {
+	for i := range n {
+		fp.hold(fmt.Sprintf("task-%04d", i))
+	}
+}
+
+// Observing costs one list per agent per tick, however many rollouts the agent
+// has, and no GetTask. The list has no filter: a task is there whatever its
+// phase, as it was to GetTask.
+func TestObserveListsOncePerAgent(t *testing.T) {
+	big, small := &fakeProxy{}, &fakeProxy{}
+	r, s, _ := newFakeRunner(t, &fakeProxy{})
+	r.pool = &fakePool{agents: map[string]proxy.AgentProxy{"http://agent-a": big, "http://agent-b": small}}
+	bigRollouts := seedRollouts(t, s, "agent-a", 50, enum.RolloutIntentNoop)
+	smallRollouts := seedRollouts(t, s, "agent-b", 3, enum.RolloutIntentNoop)
+	big.hold(taskIDs(bigRollouts)...)
+	small.hold(taskIDs(smallRollouts)...)
+
+	r.tick(context.Background())
+
+	for _, tc := range []struct {
+		name     string
+		agent    *fakeProxy
+		rollouts []*model.Rollout
+	}{
+		{"agent-a", big, bigRollouts},
+		{"agent-b", small, smallRollouts},
+	} {
+		if len(tc.agent.lists) != 1 || len(tc.agent.gets) != 0 {
+			t.Fatalf("%s got %d lists and %d gets for %d rollouts, want 1 and 0", tc.name, len(tc.agent.lists), len(tc.agent.gets), len(tc.rollouts))
+		}
+		if want := (proxy.TaskFilter{Limit: 1000}); tc.agent.lists[0] != want {
+			t.Fatalf("%s listed with %+v, want %+v", tc.name, tc.agent.lists[0], want)
+		}
+		for _, ro := range tc.rollouts {
+			if !unchanged(t, s, ro) {
+				t.Fatalf("rollout %s changed though its agent holds its task", ro.ID())
+			}
+		}
+	}
+}
+
+// An agent with more tasks than a page holds is listed to the end, a page at a
+// time, each from the cursor of the one before. Its tasks on every page are
+// there; the one it lost is not.
+func TestObservePaginates(t *testing.T) {
+	fp := &fakeProxy{}
+	r, s, _ := newFakeRunner(t, fp)
+	holdN(fp, 2300)
+	var kept []*model.Rollout
+	for _, task := range []string{"task-0000", "task-1500", "task-2299"} { // one on each page
+		kept = append(kept, seedRollout(t, s, "sp-"+task, "agent-a", enum.RolloutIntentNoop, task))
+	}
+	lost := seedRollout(t, s, "sp-lost", "agent-a", enum.RolloutIntentNoop, "task-lost")
+
+	r.tick(context.Background())
+
+	want := []proxy.TaskFilter{{Limit: 1000}, {Limit: 1000, Cursor: "task-0999"}, {Limit: 1000, Cursor: "task-1999"}}
+	if !slices.Equal(fp.lists, want) {
+		t.Fatalf("agent listed with %+v, want %+v", fp.lists, want)
+	}
+	for _, ro := range kept {
+		if !unchanged(t, s, ro) {
+			t.Fatalf("rollout %s changed though its agent holds its task", ro.ID())
+		}
+	}
+	if !requeued(t, s, lost) {
+		t.Fatal("the task missing from the whole listing was not queued for a reinstall")
+	}
+}
+
+// A listing that stops short says nothing about the tasks it did not reach.
+// Whatever stops it, the budget, a failed page, a cursor that loops or a
+// cancelled tick, no rollout is judged missing: not the task on a page it never
+// got, nor the one the agent lost.
+func TestIncompleteListMarksNothingMissing(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		pages    int           // list calls before the listing stops
+		advance  time.Duration // moves the clock on each page
+		failAt   int           // the page that fails with err
+		err      error
+		repeat   bool // every page names the same next cursor
+		cancelAt int  // the page during which the tick is cancelled
+		warns    int  // warnings logged
+	}{
+		{name: "the budget is used", pages: 1, advance: defaultPushTimeout},
+		{name: "a page is answered with an error", pages: 2, failAt: 2, err: httpAnswer(proxy.ErrListTasks, 500, errkind.Internal), warns: 1},
+		{name: "a page is unanswered", pages: 2, failAt: 2, err: noAnswer(proxy.ErrListTasks)},
+		{name: "the cursor repeats", pages: 2, repeat: true, warns: 1},
+		{name: "the tick is cancelled", pages: 1, cancelAt: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			clock := &testClock{now: time.Now()}
+			fp := &fakeProxy{}
+			r, s, _ := newFakeRunner(t, fp)
+			var logs bytes.Buffer
+			r.logger = zerolog.New(&logs)
+			r.clock = clock.Now
+			holdN(fp, 2300)
+			fp.onList = func(_ context.Context, page *proxyv1.ListTasksResponse) error {
+				call := len(fp.lists)
+				clock.advance(tc.advance)
+				if call == tc.cancelAt {
+					cancel()
+				}
+				if tc.repeat {
+					page.NextCursor = "stuck"
+				}
+				if call == tc.failAt {
+					return tc.err
+				}
+				return nil
+			}
+			rollouts := []*model.Rollout{
+				seedRollout(t, s, "sp-first", "agent-a", enum.RolloutIntentNoop, "task-0000"),
+				seedRollout(t, s, "sp-last", "agent-a", enum.RolloutIntentNoop, "task-2299"),
+				seedRollout(t, s, "sp-lost", "agent-a", enum.RolloutIntentNoop, "task-lost"),
+			}
+
+			r.tick(ctx)
+
+			if len(fp.lists) != tc.pages {
+				t.Fatalf("agent got %d list calls, want %d", len(fp.lists), tc.pages)
+			}
+			for _, ro := range rollouts {
+				if !unchanged(t, s, ro) {
+					t.Fatalf("rollout %s changed on an incomplete listing", ro.ID())
+				}
+			}
+			if warns := strings.Count(logs.String(), `"level":"warn"`); warns != tc.warns {
+				t.Fatalf("logged %d warnings, want %d: %s", warns, tc.warns, logs.String())
+			}
+		})
+	}
+}
+
+// A listing that fails is sorted as a GetTask that failed was: an agent that
+// gave no answer backs off, one that answered, whatever the status, does not.
+// A 404 on the listing is such an answer, not a lost task: only a task missing
+// from a complete listing is queued for a reinstall.
+func TestListErrorsKeepTheObservationClasses(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		unanswered bool // the agent backs off
+		requeued   bool // the rollout of the task the agent lost is queued for a reinstall
+	}{
+		{"listed, a task is missing", nil, false, true},
+		{"no response", agentErr{errkind.Internal, fmt.Errorf("%w: %w: EOF", proxy.ErrListTasks, proxy.ErrRequest)}, true, false},
+		{"deadline exceeded", agentErr{errkind.DeadlineExceeded, fmt.Errorf("%w: rpc error: code = DeadlineExceeded", proxy.ErrListTasks)}, true, false},
+		{"context deadline exceeded", agentErr{errkind.Internal, fmt.Errorf("%w: %w", proxy.ErrListTasks, context.DeadlineExceeded)}, true, false},
+		{"net.Error: connection refused", fmt.Errorf("%w: %w", proxy.ErrListTasks, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}), true, false},
+		{"net.Error: connection reset mid-body", fmt.Errorf("%w: %w: %w", proxy.ErrListTasks, proxy.ErrDecode, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}), true, false},
+		{"answered 503", httpAnswer(proxy.ErrListTasks, 503, errkind.Unavailable), false, false},
+		{"answered 500", httpAnswer(proxy.ErrListTasks, 500, errkind.Internal), false, false},
+		{"answered 404", httpAnswer(proxy.ErrListTasks, 404, errkind.NotFound), false, false},
+		{"answered grpc resource exhausted", agentErr{errkind.Unavailable, fmt.Errorf("%w: rpc error: code = ResourceExhausted desc = message larger than max", proxy.ErrListTasks)}, false, false},
+		{"answer malformed", agentErr{errkind.Internal, fmt.Errorf("%w: %w: unexpected end of JSON input", proxy.ErrListTasks, proxy.ErrDecode)}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := &fakeProxy{listErr: tc.err}
+			r, s, _ := newFakeRunner(t, fp)
+			kept := seedRollout(t, s, "sp-kept", "agent-a", enum.RolloutIntentNoop, "task-kept")
+			lost := seedRollout(t, s, "sp-lost", "agent-a", enum.RolloutIntentNoop, "task-lost")
+			fp.hold("task-kept")
+
+			r.tick(context.Background())
+
+			if len(fp.lists) != 1 {
+				t.Fatalf("agent got %d list calls, want 1: a failed page ends the listing", len(fp.lists))
+			}
+			b, backedOff := r.backoffs["agent-a"]
+			if backedOff != tc.unanswered || (backedOff && b.failures != 1) {
+				t.Fatalf("backoff %+v (set %v), want set %v with one failure", b, backedOff, tc.unanswered)
+			}
+			if !unchanged(t, s, kept) {
+				t.Fatal("rollout of a task the agent holds changed")
+			}
+			if got := requeued(t, s, lost); got != tc.requeued {
+				t.Fatalf("lost task requeued = %v, want %v", got, tc.requeued)
+			}
+			if !tc.requeued && !unchanged(t, s, lost) {
+				t.Fatal("rollout changed on a failed listing")
+			}
+		})
+	}
+}
+
+// A rollout that changes while its agent is being listed is left as the change
+// made it, though the listing lacks its task: the new intent decides what
+// happens to the task, and a rollout deleted meanwhile does not come back.
+func TestObserveLeavesRolloutsChangedDuringTheListing(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*model.Rollout) // nil: the rollout is deleted
+		intent enum.RolloutIntent
+	}{
+		{"uninstall requested", func(ro *model.Rollout) { ro.SetIntent(enum.RolloutIntentUninstall); ro.MarkPending(1) }, enum.RolloutIntentUninstall},
+		{"deployed again", func(ro *model.Rollout) { ro.SetIntent(enum.RolloutIntentUpdate); ro.MarkPending(2) }, enum.RolloutIntentUpdate},
+		{"deleted", nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			fp := &fakeProxy{}
+			r, s, _ := newFakeRunner(t, fp)
+			ro := seedRollout(t, s, "sp-lost", "agent-a", enum.RolloutIntentNoop, "task-lost")
+			fp.onList = func(context.Context, *proxyv1.ListTasksResponse) error {
+				if tc.change == nil {
+					return s.DeleteRollout(ctx, ro.ID())
+				}
+				current, err := s.GetRollout(ctx, ro.ID())
+				if err != nil {
+					return err
+				}
+				tc.change(current)
+				return s.UpsertRollout(ctx, current)
+			}
+
+			r.tick(ctx)
+
+			after, err := s.GetRollout(ctx, ro.ID())
+			switch {
+			case tc.change == nil && !errors.Is(err, storage.ErrNotFound):
+				t.Fatalf("rollout deleted during the listing came back: %v", err)
+			case tc.change != nil && (err != nil || after.Intent() != tc.intent || after.ActualTaskID() != "task-lost"):
+				t.Fatalf("rollout changed during the listing was rewritten: err=%v intent=%s task=%q", err, after.Intent(), after.ActualTaskID())
+			}
+		})
+	}
+}
+
+// A synced rollout without a task has nothing to look up: its agent gets no call.
+func TestObserveWithoutATaskMakesNoCall(t *testing.T) {
+	fp := &fakeProxy{}
+	r, s, _ := newFakeRunner(t, fp)
+	ro := seedRollout(t, s, "sp-bare", "agent-a", enum.RolloutIntentNoop, "")
+
+	r.tick(context.Background())
+
+	if len(fp.lists) != 0 {
+		t.Fatalf("agent got %d list calls, want none", len(fp.lists))
+	}
+	if !unchanged(t, s, ro) {
+		t.Fatal("rollout without a task changed")
+	}
+}
+
+// The budget is the turn's, and pushes come first in it: when they use it up,
+// the agent is not listed that tick.
+func TestPushesThatUseTheBudgetLeaveNoTimeToObserve(t *testing.T) {
+	clock := &testClock{now: time.Now()}
+	fp := &fakeProxy{applyResp: []string{"task-new"}}
+	r, s, _ := newFakeRunner(t, fp)
+	r.clock = clock.Now
+	fp.onApply = func() { clock.advance(r.cfg.PushTimeout) }
+	synced := seedRollout(t, s, "sp-synced", "agent-a", enum.RolloutIntentNoop, "task-synced")
+	pending := seedRollout(t, s, "sp-pending", "agent-a", enum.RolloutIntentInstall, "")
+
+	r.tick(context.Background())
+
+	if len(fp.applies) != 1 || len(fp.lists) != 0 {
+		t.Fatalf("applies=%d lists=%d, want 1 and 0: the push used the turn's budget", len(fp.applies), len(fp.lists))
+	}
+	after, err := s.GetRollout(context.Background(), pending.ID())
+	if err != nil || after.Status() != enum.SyncStatusSynced {
+		t.Fatalf("pending rollout not completed (err=%v)", err)
+	}
+	if !unchanged(t, s, synced) {
+		t.Fatal("synced rollout changed though its agent was not listed")
+	}
+}

@@ -1,9 +1,13 @@
 package sync
 
 import (
+	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -39,16 +43,59 @@ type fakeProxy struct {
 	deleteErr    []error
 	gets         []string
 	listTaskRuns []string
-	listCalls    int
+	lists        []proxy.TaskFilter  // one per ListTasks call
+	tasks        map[string]struct{} // the tasks the agent holds, see hold
+	listErr      error               // fails every ListTasks call, after onList ran
 	onApply      func()
 	onDelete     func()
-	onGet        func()
-	getErr       error
+	onList       func(ctx context.Context, page *proxyv1.ListTasksResponse) error
 }
 
-func (f *fakeProxy) ListTasks(ctx context.Context, _ proxy.TaskFilter) (*proxyv1.ListTasksResponse, error) {
-	f.listCalls++
-	return &proxyv1.ListTasksResponse{}, nil
+// hold makes the agent hold the tasks. ApplyTask does it for the task it
+// returns, and DeleteTask undoes it.
+func (f *fakeProxy) hold(names ...string) {
+	if f.tasks == nil {
+		f.tasks = make(map[string]struct{}, len(names))
+	}
+	for _, name := range names {
+		f.tasks[name] = struct{}{}
+	}
+}
+
+// ListTasks pages through the held tasks in name order, as an agent does: a
+// limit of 0 means 100, 1000 is the most, and the cursor is the last name of the
+// previous page. onList sees each page before the caller does: it may change the
+// page or fail the call.
+func (f *fakeProxy) ListTasks(ctx context.Context, filter proxy.TaskFilter) (*proxyv1.ListTasksResponse, error) {
+	f.lists = append(f.lists, filter)
+	if filter.Limit < 0 || filter.Limit > 1000 {
+		return nil, fmt.Errorf("%w: limit must be 0..1000", proxy.ErrListTasks)
+	}
+	limit := cmp.Or(filter.Limit, 100)
+	names := slices.Sorted(maps.Keys(f.tasks))
+	from, found := slices.BinarySearch(names, filter.Cursor)
+	if found {
+		from++
+	}
+	rest := names[from:]
+	page := &proxyv1.ListTasksResponse{Tasks: make([]proxyv1.Task, 0, min(limit, len(rest)))}
+	for _, name := range rest[:min(limit, len(rest))] {
+		page.Tasks = append(page.Tasks, proxyv1.Task{ID: name, UID: "uid-" + name})
+	}
+	page.Total = len(page.Tasks)
+	if len(rest) > limit {
+		remaining := uint64(len(rest) - limit)
+		page.NextCursor, page.RemainingCount = rest[limit-1], &remaining
+	}
+	if f.onList != nil {
+		if err := f.onList(ctx, page); err != nil {
+			return nil, err
+		}
+	}
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return page, nil
 }
 
 func (f *fakeProxy) ApplyTask(ctx context.Context, sub proxy.TaskSubmission) (string, error) {
@@ -66,6 +113,9 @@ func (f *fakeProxy) ApplyTask(ctx context.Context, sub proxy.TaskSubmission) (st
 		err = f.applyErr[0]
 		f.applyErr = f.applyErr[1:]
 	}
+	if err == nil && id != "" {
+		f.hold(id)
+	}
 	return id, err
 }
 
@@ -79,15 +129,13 @@ func (f *fakeProxy) DeleteTask(ctx context.Context, id string) error {
 		f.deleteErr = f.deleteErr[1:]
 		return err
 	}
+	delete(f.tasks, id)
 	return nil
 }
 
 func (f *fakeProxy) GetTask(ctx context.Context, id string) (*proxyv1.GetTaskResponse, error) {
 	f.gets = append(f.gets, id)
-	if f.onGet != nil {
-		f.onGet()
-	}
-	return &proxyv1.GetTaskResponse{}, f.getErr
+	return &proxyv1.GetTaskResponse{}, nil
 }
 
 func (f *fakeProxy) ListTaskRuns(ctx context.Context, id string) (*proxyv1.ListTaskRunsResponse, error) {

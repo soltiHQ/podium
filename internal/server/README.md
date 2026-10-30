@@ -121,8 +121,9 @@ by how long they have been silent. `hb` is the heartbeat the agent reported, or
 
 ### Sync runner
 Each tick reconciles the due rollouts: install, update, uninstall, or an
-observation that checks an installed task still exists on its agent. Failing
-work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s, 40s, …):
+observation that checks the tasks installed on an agent still exist there.
+Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
+40s, …):
 
 | Backoff | n counts                                       | Until it passes           |
 |---------|------------------------------------------------|---------------------------|
@@ -147,16 +148,25 @@ work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s, 40s, …):
   `push_timeout` (15s): first the uninstalls of tasks the agent never got
   (they need no call and run even while the agent backs off), then pushes,
   ordered by last failure (rollouts that never failed first, then the oldest
-  failure), then observations, so an observation never holds back a push.
+  failure), then the observation, so an observation never holds back a push.
 - **A turn gets `push_timeout` of wall time.** Once an agent's turn in a tick
   has used `push_timeout`, it starts no more calls. The call under way
   finishes, so an agent that answers slowly, but within `push_timeout`, holds
   a tick for about one `push_timeout` plus one call, however many rollouts it
   has. What is left waits for the next tick and records nothing.
-  Observations go on where the agent's last turn stopped, so every synced
-  rollout is observed in turn.
+- **One listing observes all of an agent's rollouts.** The observation is a
+  listing of the agent's tasks, with no filter and 1000 to a page, instead of a
+  call per rollout. Each page is a call like any other and starts only while
+  the turn is within its budget. A synced rollout whose task is missing from
+  the listing is queued for a reinstall, but only a complete listing shows a
+  task missing. If the budget runs out, a page fails, or the agent returns
+  the same cursor twice in a row, no rollout is judged and none is touched; an
+  answered failure and a repeated cursor are logged as warnings. The next tick
+  lists again from the first page, as a cursor holds only within a tick, so an
+  agent that cannot be listed within one turn is not observed. A synced
+  rollout without a task makes no call.
 - **An unanswered call ends the agent's turn.** A failed push records its
-  failure on the rollout; a failed observation records nothing and only backs
+  failure on the rollout; an unanswered listing records nothing and only backs
   the agent off. The agent's other rollouts wait, untouched. An answer,
   whatever its status, does not end the turn. Nor does a refused gRPC
   connection: gRPC reports it as `Unavailable`, which agents also answer with.
