@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -50,6 +51,43 @@ func TestPlacementEscapesDiscoveryLabelsAndNames(t *testing.T) {
 	}
 	if got := placementLabels(map[string]string{"z": "2", "a": "1"}); got != "a=1, z=2" {
 		t.Fatal(got)
+	}
+}
+
+// The Deploy dialog keeps the token of the plan the panel shows when it opens
+// and sends it as If-Match; the token reaches it only through the DOM.
+func TestDeployConfirmSendsShownPlanTokenAsIfMatch(t *testing.T) {
+	panel := renderPlacement(t, restv1.SpecPlacement{SpecID: "s", PlanToken: hostile})
+	if got := attrValue(t, panel, "data-plan-token"); got != hostile {
+		t.Fatalf("panel token %q, want %q", got, hostile)
+	}
+
+	detail := render(t, Detail(restv1.RolloutSpec{Spec: restv1.Spec{ID: "s", Name: "Saved"}}, policy.SpecDetail{CanDeploy: true, CanDelete: true}))
+	forms := regexp.MustCompile(`<form [^>]*>`).FindAllString(detail, -1)
+	var deploy, other []string
+	for _, form := range forms {
+		if strings.Contains(form, `hx-post="/api/v1/specs/s/deploy"`) {
+			deploy = append(deploy, form)
+		} else {
+			other = append(other, form)
+		}
+	}
+	if len(deploy) != 1 || len(other) == 0 {
+		t.Fatalf("want one deploy form and the delete form, got %q", forms)
+	}
+	if got := attrValue(t, deploy[0], "x-effect"); got != "show && (planToken = document.querySelector('[data-plan-token]')?.dataset.planToken ?? '')" {
+		t.Errorf("deploy dialog does not keep the shown token when it opens: %s", got)
+	}
+	if got := attrValue(t, deploy[0], "x-on:htmx:config-request"); got != "planToken && ($event.detail.headers['If-Match'] = JSON.stringify(planToken))" {
+		t.Errorf("deploy request does not send the token as If-Match: %s", got)
+	}
+	if got := attrValue(t, deploy[0], "x-data"); got != "{ planToken: '' }" {
+		t.Errorf("deploy form state: %s", got)
+	}
+	for _, form := range other {
+		if strings.Contains(form, "If-Match") || strings.Contains(form, "planToken") {
+			t.Errorf("If-Match wiring leaked into another confirmation: %s", form)
+		}
 	}
 }
 

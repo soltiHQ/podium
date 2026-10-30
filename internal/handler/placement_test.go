@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -59,5 +61,43 @@ func TestPlacementRequiresBothReadPermissionsAndNeverCreatesRollouts(t *testing.
 	current, err := st.GetSpec(context.Background(), "saved")
 	if err != nil || current.Version() != ts.Version() || current.Generation() != ts.Generation() {
 		t.Fatal("preview mutated spec")
+	}
+}
+
+func TestPlacementETagIsThePlanToken(t *testing.T) {
+	f := newDeployFixture(t)
+	preview := func(htmx bool) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/specs/saved/placement", nil)
+		if htmx {
+			r.Header.Set("HX-Request", "true")
+		}
+		r = r.WithContext(transportctx.WithIdentity(r.Context(), f.actor))
+		w := httptest.NewRecorder()
+		f.handler.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("placement: %d %s", w.Code, w.Body.String())
+		}
+		return w
+	}
+
+	w := preview(false)
+	var plan restv1.SpecPlacement
+	if err := json.Unmarshal(w.Body.Bytes(), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(plan.PlanToken) {
+		t.Fatalf("plan_token %q is not 16 bytes of lowercase hex", plan.PlanToken)
+	}
+	if got := w.Header().Get("ETag"); got != `"`+plan.PlanToken+`"` {
+		t.Fatalf("ETag %s, want the quoted plan_token %s", got, plan.PlanToken)
+	}
+
+	// The panel the UI swaps in carries the same token for the Deploy dialog.
+	w = preview(true)
+	if got := w.Header().Get("ETag"); got != `"`+plan.PlanToken+`"` {
+		t.Fatalf("panel ETag %s, want %s", got, plan.PlanToken)
+	}
+	if !strings.Contains(w.Body.String(), `data-plan-token="`+plan.PlanToken+`"`) {
+		t.Fatalf("panel misses the plan token: %s", w.Body.String())
 	}
 }

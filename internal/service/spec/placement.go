@@ -2,6 +2,9 @@ package spec
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"sort"
 	"time"
@@ -13,7 +16,8 @@ import (
 
 // PreviewPlacement evaluates a saved specification without mutating storage or
 // contacting agents. Deploy computes the same plan inside its write transaction.
-// Inventory can change after preview; CheckedAt/version identify its observation.
+// Inventory can change after preview: Deploy refuses the plan's Token once it no
+// longer matches. CheckedAt identifies the observation.
 func (s *Service) PreviewPlacement(ctx context.Context, specID string) (*model.PlacementPlan, error) {
 	if specID == "" {
 		return nil, storage.ErrInvalidArgument
@@ -25,16 +29,20 @@ func (s *Service) PreviewPlacement(ctx context.Context, specID string) (*model.P
 	if err != nil {
 		return nil, err
 	}
-	return loadPlacement(ctx, s.store, ts, time.Now())
+	plan, _, err := loadPlacement(ctx, s.store, ts, time.Now())
+	return plan, err
 }
 
-func loadPlacement(ctx context.Context, store storage.Storage, ts *model.Spec, now time.Time) (*model.PlacementPlan, error) {
+// loadPlacement reads the inventory and the spec's rollouts, and returns the
+// plan with its token and the steps Deploy executes for it. Preview and Deploy
+// both call it, so the same stored state gives them the same token.
+func loadPlacement(ctx context.Context, store storage.Storage, ts *model.Spec, now time.Time) (*model.PlacementPlan, []deployStep, error) {
 	var agents []*model.Agent
 	if len(ts.TargetLabels()) > 0 {
 		var err error
 		agents, err = storage.AllAgents(ctx, store, nil)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	} else {
 		seen := make(map[string]bool)
@@ -48,15 +56,105 @@ func loadPlacement(ctx context.Context, store storage.Storage, ts *model.Spec, n
 				continue
 			}
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			agents = append(agents, a)
 		}
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	rollouts, err := storage.AllRollouts(ctx, store, store.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: ts.ID()}))
+	if err != nil {
+		return nil, nil, err
 	}
-	return buildPlacement(ts, agents, now)
+	if err = ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	plan, err := buildPlacement(ts, agents, now)
+	if err != nil {
+		return nil, nil, err
+	}
+	steps := deploySteps(plan, rollouts)
+	plan.Token = planToken(plan, steps)
+	return plan, steps, nil
+}
+
+// deployAction is what Deploy does with one agent's rollout of the spec.
+type deployAction string
+
+const (
+	// deployInstall creates the rollout of a target that has none.
+	deployInstall deployAction = "install"
+	// deployUpdate brings a target's rollout to the spec generation. It writes
+	// nothing when the rollout is already synced at that generation.
+	deployUpdate deployAction = "update"
+	// deployUninstall queues the removal of a rollout whose agent is no longer a target.
+	deployUninstall deployAction = "uninstall"
+)
+
+// deployStep is one agent of a plan: whether Deploy targets it, the runner the
+// plan selects for it and the action on its rollout (nil for an install).
+type deployStep struct {
+	agentID  string
+	targeted bool
+	runner   string
+	action   deployAction
+	rollout  *model.Rollout
+}
+
+// deploySteps maps a plan onto the spec's existing rollouts, sorted by agent ID.
+// Deploy executes these steps and the plan token covers them, so preview and
+// Deploy derive each agent's action from the same rollout rows in one place.
+// An action depends only on whether a rollout exists: sync progress (status,
+// task ID, observed generation) changes neither the action nor the token.
+func deploySteps(plan *model.PlacementPlan, rollouts []*model.Rollout) []deployStep {
+	existing := make(map[string]*model.Rollout, len(rollouts))
+	for _, r := range rollouts {
+		if r != nil {
+			existing[r.AgentID()] = r
+		}
+	}
+	steps := make([]deployStep, 0, len(plan.Targets)+len(existing))
+	for _, target := range plan.Targets {
+		step := deployStep{agentID: target.AgentID, targeted: true, runner: target.SelectedRunner, action: deployInstall}
+		if r, ok := existing[target.AgentID]; ok {
+			step.action, step.rollout = deployUpdate, r
+			delete(existing, target.AgentID)
+		}
+		steps = append(steps, step)
+	}
+	for agentID, r := range existing {
+		steps = append(steps, deployStep{agentID: agentID, action: deployUninstall, rollout: r})
+	}
+	sort.Slice(steps, func(i, j int) bool { return steps[i].agentID < steps[j].agentID })
+	return steps
+}
+
+// planToken is the lowercase hex of the first 16 bytes of SHA-256 over the spec
+// ID, version and generation and, for each step in agent ID order, the agent ID,
+// whether Deploy targets it, the runner and the action. Strings are length
+// prefixed, so two different plans never share an encoding. CheckedAt and the
+// heartbeat observations (status, last seen, heartbeat due) are left out: a
+// heartbeat alone never changes the token.
+func planToken(plan *model.PlacementPlan, steps []deployStep) string {
+	b := appendTokenString(nil, plan.SpecID)
+	b = binary.AppendVarint(b, int64(plan.SpecVersion))
+	b = binary.AppendVarint(b, int64(plan.Generation))
+	for _, step := range steps {
+		b = appendTokenString(b, step.agentID)
+		targeted := byte(0)
+		if step.targeted {
+			targeted = 1
+		}
+		b = append(b, targeted)
+		b = appendTokenString(b, step.runner)
+		b = appendTokenString(b, string(step.action))
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:16])
+}
+
+func appendTokenString(b []byte, s string) []byte {
+	b = binary.AppendUvarint(b, uint64(len(s)))
+	return append(b, s...)
 }
 
 // buildPlacement is the single pure policy for preview and actual deployment.

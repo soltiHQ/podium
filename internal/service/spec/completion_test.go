@@ -19,7 +19,7 @@ func TestDeployAndDeleteAll503Targets(t *testing.T) {
 		targets[i] = fmt.Sprintf("a-%04d", i)
 	}
 	ts := mkSpec(t, svc, s, "many", targets)
-	if err := svc.Deploy(ctx, ts.ID()); err != nil {
+	if err := svc.Deploy(ctx, ts.ID(), ""); err != nil {
 		t.Fatal(err)
 	}
 	all, err := svc.RolloutsBySpec(ctx, ts.ID())
@@ -54,7 +54,7 @@ func TestLabelSelectorsUnionExplicitAndAllLabels(t *testing.T) {
 	}
 	ts.SetTargetLabels(map[string]string{"env": "prod", "team": "ops"})
 	_ = svc.Upsert(ctx, ts, 0)
-	if err := svc.Deploy(ctx, ts.ID()); err != nil {
+	if err := svc.Deploy(ctx, ts.ID(), ""); err != nil {
 		t.Fatal(err)
 	}
 	all, _ := svc.RolloutsBySpec(ctx, ts.ID())
@@ -64,7 +64,7 @@ func TestLabelSelectorsUnionExplicitAndAllLabels(t *testing.T) {
 	ts.SetTargets(nil)
 	ts.SetTargetLabels(nil)
 	_ = svc.Upsert(ctx, ts, 0)
-	_ = svc.Deploy(ctx, ts.ID())
+	_ = svc.Deploy(ctx, ts.ID(), "")
 	all, _ = svc.RolloutsBySpec(ctx, ts.ID())
 	for _, ro := range all {
 		if ro.Intent() != enum.RolloutIntentUninstall {
@@ -94,7 +94,7 @@ func TestUpsertUsesStoredCountersAndGenerationForDeploy(t *testing.T) {
 	if ts.Version() != 2 || ts.Generation() != 1 {
 		t.Fatal("client counters trusted")
 	}
-	_ = svc.Deploy(ctx, ts.ID())
+	_ = svc.Deploy(ctx, ts.ID(), "")
 	all, _ := svc.RolloutsBySpec(ctx, ts.ID())
 	if all[0].DesiredGeneration() != 1 {
 		t.Fatal("deployment used edit counter instead of runtime generation")
@@ -108,7 +108,7 @@ func TestDeployRejectsIncompatibleAdvertisedRunner(t *testing.T) {
 	ag, _ := s.GetAgent(ctx, "a")
 	ag.SetCapabilities([]model.RunnerCapability{{Name: "wasm", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Wasm"}}}})
 	_ = s.UpsertAgent(ctx, ag)
-	err := svc.Deploy(ctx, ts.ID())
+	err := svc.Deploy(ctx, ts.ID(), "")
 	var unsupported *UnsupportedTargetsError
 	if !errors.As(err, &unsupported) {
 		t.Fatalf("incompatible advertised runner accepted: %v", err)
@@ -117,13 +117,13 @@ func TestDeployRejectsIncompatibleAdvertisedRunner(t *testing.T) {
 	_ = s.UpsertAgent(ctx, ag)
 	ts.SetRunnerLabels(map[string]string{"zone": "b"})
 	_ = svc.Upsert(ctx, ts, 0)
-	err = svc.Deploy(ctx, ts.ID())
+	err = svc.Deploy(ctx, ts.ID(), "")
 	if !errors.As(err, &unsupported) {
 		t.Fatal("runner selector ignored")
 	}
 	ts.SetRunnerLabels(map[string]string{"zone": "a"})
 	_ = svc.Upsert(ctx, ts, 0)
-	if err = svc.Deploy(ctx, ts.ID()); err != nil {
+	if err = svc.Deploy(ctx, ts.ID(), ""); err != nil {
 		t.Fatal(err)
 	}
 }

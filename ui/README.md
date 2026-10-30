@@ -38,7 +38,8 @@ color, radius and elevation tokens live in `static/css/app.css` and
 - `internal/handler/api_spec_placement.go`: read-only saved-spec placement from the
   same planner used by Deploy. Both SpecsGet and AgentsGet are required. It
   exposes ordered runner compatibility and stored heartbeat observations; the
-  plan is advisory and Deploy evaluates the current inventory again.
+  plan is advisory and Deploy evaluates the current inventory again. Its plan
+  token lets Deploy refuse a placement that changed since the preview.
 - `internal/handler/api_history.go`: stored terminal observations independent of
   live agent/spec existence. AgentsGet protects both API and page. Exact agent,
   spec, task name, UID and terminal-result filters use opaque continuations;
@@ -70,6 +71,18 @@ A fetch that sends a JSON body declares `Content-Type: application/json`: the
 API answers any other body type with 415. The server refuses mutations from
 another origin with 403, and logout is a POST form in the navigation bar.
 HTMX confirmation dialogs close after success and retain errors after failure.
+
+The placement panel carries its plan token in `data-plan-token` (see
+`internal/handler`, "Specs"). When the Deploy dialog opens, it keeps the token
+of the plan the panel shows and sends it as `If-Match`. A placement that
+changed in the meantime (a spec save, an agent that starts or stops matching,
+another selected runner, rollouts created or removed) is refused with 412
+`Placement changed since it was previewed. Review it again.` and nothing is
+written: the message stays in the dialog and the page refreshes the panel.
+The panel also refreshes while the dialog is open, so closing the dialog shows
+the new plan, and opening it again takes the new token. Heartbeats and the sync
+state of rollouts do not change the token. Without the panel (no AgentsGet, or
+a failed load) the dialog sends no `If-Match` and Deploy runs unchecked.
 
 The task list passes exact slot filters to the agent before pagination and uses
 opaque continuation cursors. Run history is bounded by the agent's history

@@ -2,10 +2,13 @@ package restv1
 
 // SpecPlacement is the current saved-spec routing plan. Deploy re-evaluates the
 // inventory; accepted desired state does not prove reconciliation or execution.
+// PlanToken is also the response ETag: Deploy given it as If-Match refuses
+// (412) a placement that changed since this preview.
 type SpecPlacement struct {
 	SpecID            string            `json:"spec_id"`
 	SpecVersion       int               `json:"spec_version"`
 	Generation        int               `json:"generation"`
+	PlanToken         string            `json:"plan_token"`
 	CheckedAt         string            `json:"checked_at"`
 	DeployAllowed     bool              `json:"deploy_allowed"`
 	NoTargets         bool              `json:"no_targets"`

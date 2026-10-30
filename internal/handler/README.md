@@ -111,6 +111,20 @@ The user, credential and session services enforce these inside the transaction o
 | GET    | `/api/v1/specs/{id}/sync`      | `SpecsGet`               |
 | GET    | `/api/v1/specs/{id}/placement` | `SpecsGet` + `AgentsGet` |
 
+The placement answers its plan token twice: as `plan_token` and as `ETag: "<token>"`. The token is the lowercase hex
+of the first 16 bytes of SHA-256 over the spec ID, version and generation and, sorted by agent ID, each agent's ID,
+whether Deploy targets it, the runner it would use and the action on its rollout: `install` (no rollout yet), `update`
+(the rollout exists; Deploy brings it to the current generation) or `uninstall` (the agent is no longer a target). It
+is computed, never stored, and leaves out `checked_at`, heartbeat observations and the sync state of rollouts (status,
+task, observed generation), so a heartbeat or a sync never changes it. A spec save does, through the version, even
+when generation stays, and so does a rollout created or removed: by a deploy, or by the sync runner once an
+uninstall completes.
+
+Deploy takes the token as `If-Match`, one strong entity tag with or without its quotes. When the plan recomputed in
+the deploy transaction has another token, Deploy writes nothing and answers 412 `Placement changed since it was
+previewed. Review it again.`. Without `If-Match`, or with `*`, Deploy deploys the current placement unchecked, as
+before, so API clients that never preview keep working.
+
 ### Dashboard `/api/v1/dashboard`
 | Method | Path                       | Permission                                                            |
 |--------|----------------------------|-----------------------------------------------------------------------|
