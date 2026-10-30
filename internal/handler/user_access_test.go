@@ -125,22 +125,22 @@ func TestUserEditorCannotResetAdminPassword(t *testing.T) {
 // so every mutation of an Admin exceeds its ceiling.
 func TestTargetCeilingCoversEveryUserMutation(t *testing.T) {
 	ctx := context.Background()
-	for _, tc := range []struct{ method, target, body string }{
-		{http.MethodPut, "/api/v1/users/admin", `{"name":"Renamed"}`},
-		{http.MethodPut, "/api/v1/users/admin", `{"role_ids":["013"]}`},
-		{http.MethodPost, "/api/v1/users/admin/disable", ""},
-		{http.MethodPost, "/api/v1/users/admin/enable", ""},
-		{http.MethodDelete, "/api/v1/users/admin", ""},
-		{http.MethodPost, "/api/v1/users/admin/password", `{"password":"chosen-by-the-actor"}`},
-		{http.MethodPost, "/api/v1/session/admin-session/revoke", ""},
+	for _, tc := range []struct{ name, method, target, body string }{
+		{"rename", http.MethodPut, "/api/v1/users/admin", `{"name":"Renamed"}`},
+		{"demote", http.MethodPut, "/api/v1/users/admin", `{"role_ids":["` + enum.RoleUserReaderID + `"]}`},
+		{"disable", http.MethodPost, "/api/v1/users/admin/disable", ""},
+		{"enable", http.MethodPost, "/api/v1/users/admin/enable", ""},
+		{"delete", http.MethodDelete, "/api/v1/users/admin", ""},
+		{"set password", http.MethodPost, "/api/v1/users/admin/password", `{"password":"chosen-by-the-actor"}`},
+		{"revoke session", http.MethodPost, "/api/v1/session/admin-session/revoke", ""},
 	} {
-		t.Run(tc.method+" "+tc.target, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			f := newAPIFixture(t)
 			f.user(t, "admin", enum.RoleAdminID)
 			f.session(t, "admin-session", "admin")
 			actor := f.user(t, "user-manager", enum.RoleUserAdminID)
 			if w := f.do(tc.method, tc.target, tc.body, actor); w.Code != http.StatusForbidden {
-				t.Fatalf("%d %s, want 403", w.Code, w.Body.String())
+				t.Fatalf("%s %s: %d %s, want 403", tc.method, tc.target, w.Code, w.Body.String())
 			}
 			admin, err := f.store.GetUser(ctx, "admin")
 			if err != nil {
@@ -432,7 +432,7 @@ func TestUserUpdateAppliesOnlyWhatTheBodySets(t *testing.T) {
 		{"empty strings", `{"name":"","email":"","subject":""}`, http.StatusNoContent, func(*profile) {}},
 		{"email", `{"email":" New@Example.com "}`, http.StatusNoContent, func(p *profile) { p.email = "new@example.com" }},
 		{"subject", `{"subject":" New.Subject "}`, http.StatusNoContent, func(p *profile) { p.subject = "new.subject" }},
-		{"roles", `{"role_ids":["012"]}`, http.StatusNoContent, func(p *profile) { p.roles = []string{enum.RoleUserEditorID} }},
+		{"roles", `{"role_ids":["` + enum.RoleUserEditorID + `"]}`, http.StatusNoContent, func(p *profile) { p.roles = []string{enum.RoleUserEditorID} }},
 		{"empty roles", `{"role_ids":[]}`, http.StatusNoContent, func(p *profile) { p.roles = nil }},
 		{"empty permissions", `{"permissions":[]}`, http.StatusNoContent, func(p *profile) { p.perms = nil }},
 		{"null lists", `{"role_ids":null,"permissions":null}`, http.StatusNoContent, func(*profile) {}},

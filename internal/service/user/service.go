@@ -178,13 +178,14 @@ func (s *Service) Create(ctx context.Context, actor *identity.Identity, u *model
 }
 
 // Update applies patch to the stored user id on behalf of actor and returns the
-// stored result. The patch is applied to the user the transaction reads, so a
-// disable, role or permission change that committed since the request was
-// authorized is kept: only the fields the patch sets change. Another user may
-// be updated only when actor holds all of that user's permissions, the result
-// may hold only permissions actor holds (ErrPermissionCeiling), and an enabled
-// user with every permission must remain (ErrLastAdmin). A missing user is
-// storage.ErrNotFound.
+// stored result. Only the fields the patch sets change, and the patch is applied
+// to the user the transaction reads: a disable that committed since the request
+// was authorized is always kept, and so is a role or permission change unless
+// the patch sets RoleIDs or Permissions, whose list replaces the stored one.
+// Another user may be updated only when actor holds all of that user's
+// permissions, the result may hold only permissions actor holds
+// (ErrPermissionCeiling), and an enabled user with every permission must remain
+// (ErrLastAdmin). A missing user is storage.ErrNotFound.
 func (s *Service) Update(ctx context.Context, actor *identity.Identity, id string, patch UpdatePatch) (*model.User, error) {
 	if id == "" {
 		return nil, storage.ErrInvalidArgument

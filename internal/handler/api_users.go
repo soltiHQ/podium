@@ -243,7 +243,9 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 			return
 		}
 		// The service reads the user inside its transaction and applies the
-		// patch there, so a change committed meanwhile is not overwritten.
+		// patch there, so a change to a field the patch does not set is not
+		// overwritten. A role_ids or permissions list the body sets still
+		// replaces the stored one.
 		u, err = a.userSVC.Update(r.Context(), actor, id, userPatch(in))
 	default:
 		response.BadRequest(w, r, mode)
