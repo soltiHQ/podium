@@ -21,6 +21,7 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 
 	discoverv1 "github.com/soltiHQ/control-plane/api/gen/solti/discover/v1"
+	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
@@ -760,6 +761,92 @@ func TestEnrollRequiresDerivedTokenWhenSecretSet(t *testing.T) {
 				t.Fatalf("agent-2 after five refusals: %s, want refused", got)
 			}
 			assertNotRegistered(t, svc, "agent-2")
+		})
+	}
+}
+
+// Lifecycle deletes an agent's row but keeps its credential, so with an
+// enrollment secret set an agent that lifecycle deleted is still a known ID: it
+// syncs again with its stored token, here one it enrolled before the secret was
+// set, and comes back. The token derived from the secret is refused for it: a
+// known ID is checked against its stored token, not derived again.
+func TestDeletedAgentSyncsAgainWithItsStoredToken(t *testing.T) {
+	const (
+		secret  = "0123456789abcdef0123456789abcdef"
+		derived = "ee91297d059304dd88e1c5650d195795e3fa9c921c419a61aced53e41a3c0058" // HMAC-SHA256(secret, "agent-1"), hex
+		stored  = "token-enrolled-before-the-secret"
+	)
+	for _, transport := range []struct {
+		name string
+		sync func(svc *agent.Service, hub *event.Hub) func(token string) syncOutcome
+	}{
+		{"http", func(svc *agent.Service, hub *event.Hub) func(string) syncOutcome {
+			h := NewHTTPDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), nil, true)
+			body := `{"id":"agent-1","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
+			return func(token string) syncOutcome {
+				switch code := syncHTTP(h, body, token).Code; code {
+				case http.StatusOK:
+					return synced
+				case http.StatusUnauthorized:
+					return unauthenticated
+				default:
+					return syncOutcome(fmt.Sprintf("HTTP %d", code))
+				}
+			}
+		}},
+		{"grpc", func(svc *agent.Service, hub *event.Hub) func(string) syncOutcome {
+			g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), true)
+			return func(token string) syncOutcome {
+				ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
+				_, err := g.Sync(ctx, &discoverv1.SyncRequest{Id: "agent-1", Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})
+				switch grpcstatus.Code(err) {
+				case codes.OK:
+					return synced
+				case codes.Unauthenticated:
+					return unauthenticated
+				default:
+					return syncOutcome(err.Error())
+				}
+			}
+		}},
+	} {
+		t.Run(transport.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := inmemory.New()
+			svc := agent.New(store, zerolog.Nop(), agent.WithEnrollSecret(secret))
+			hub := event.NewHub(zerolog.Nop())
+			defer hub.Close()
+			cred, err := model.NewAgentCredential("agent-1", stored)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = store.UpsertAgentCredential(ctx, cred); err != nil {
+				t.Fatal(err)
+			}
+			ag, err := model.NewAgent("agent-1", "agent-1", "http://10.0.0.5:8085")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = store.UpsertAgent(ctx, ag); err != nil {
+				t.Fatal(err)
+			}
+			if err = store.DeleteAgent(ctx, "agent-1"); err != nil { // what lifecycle deletion does
+				t.Fatal(err)
+			}
+			sync := transport.sync(svc, hub)
+
+			if got := sync(derived); got != unauthenticated {
+				t.Fatalf("deleted agent-1 with the derived token: %s, want unauthenticated", got)
+			}
+			if got := sync(stored); got != synced {
+				t.Fatalf("deleted agent-1 with its stored token: %s, want synced", got)
+			}
+			if _, err = svc.Get(ctx, "agent-1"); err != nil {
+				t.Fatalf("agent-1 did not come back: %v", err)
+			}
+			if token, err := svc.AgentToken(ctx, "agent-1"); err != nil || token != stored {
+				t.Fatalf("stored token of agent-1: %q %v, want the one it enrolled with", token, err)
+			}
 		})
 	}
 }

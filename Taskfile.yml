@@ -76,6 +76,11 @@ tasks:
 
   ci/ui/test:
     desc: Run the UI node tests (ui/tests/*.test.cjs)
+    preconditions:
+      # Node runs 0 tests and exits 0 for a glob that matches nothing, so a
+      # moved or renamed test file would pass CI without a test.
+      - sh: 'for f in ui/tests/*.test.cjs; do test -f "$f" && exit 0; done; exit 1'
+        msg: 'no UI tests: ui/tests/*.test.cjs matches no file'
     cmds:
       - task: node:exec
         vars:

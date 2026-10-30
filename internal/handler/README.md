@@ -131,8 +131,10 @@ whether it exists in discovery and is eligible, the runner Deploy would use and 
 (no rollout yet) or `update` (the rollout exists; Deploy brings it to the current generation). Agents that keep only
 a rollout to uninstall are not part of it: an agent that leaves the targets already changes it. It is computed, never
 stored, and leaves out `checked_at`, heartbeat observations and the sync state of rollouts (status, task, observed
-generation), so neither a heartbeat, a sync nor a completed uninstall changes it. A spec save does, through the
-version, even when generation stays, and so does another deploy that created rollouts.
+generation), so neither a heartbeat nor a sync changes it. Nor does a completed uninstall, for an agent that is no
+longer targeted. An agent targeted again before its uninstall completes (its labels restored, say) is an `update`
+step until the uninstall drops its rollout, then an `install` step: that completion changes the token, one 412. A spec
+save changes it, through the version, even when generation stays, and so does another deploy that created rollouts.
 
 Deploy takes the token as `If-Match`, read as RFC 9110 lists over every `If-Match` header: strong entity tags, each
 with or without its quotes. When the plan recomputed in the deploy transaction has a token that no listed strong tag

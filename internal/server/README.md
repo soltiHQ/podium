@@ -98,14 +98,20 @@ by how long they have been silent. `hb` is the heartbeat the agent reported, or
   already `disconnected` stays so during the grace, and only a sync makes an
   agent `active` again. No event is recorded when the status does not change;
   each change records `agent_inactive`, `agent_disconnected` or `agent_deleted`.
-- **Deletion forgets labels.** Deleting an agent drops its row, and with it the
-  labels operators set on it. An agent that syncs again later is created anew,
-  without them. `delete_after` is a floor: no agent is deleted sooner, whatever
-  `delete_multiplier` says. A reported heartbeat is capped at 1h, so with the
-  defaults (multiplier 10, `delete_after` 24h) the multiplier threshold is at
-  most 10h and never beats the floor. It wins only with a `default_heartbeat`
-  above 2.4h (for agents that report none), or a `delete_multiplier` above 24
-  at the 1h cap.
+- **Deletion drops the row only.** Deleting an agent drops its row, and with
+  it the labels operators set on it; its rollouts and its credential stay.
+  Until the agent syncs again, each of its pushes fails with `agent not found`
+  until `max_retries`, and its synced rollouts are skipped: no call goes out,
+  so its backoff does not change. When it syncs again, its stored token still
+  authenticates it, and it is created anew, without labels: the next Deploy
+  of a spec that targets it by labels turns its rollout into an uninstall,
+  unless the labels are restored first.
+- **`delete_after` is a floor.** No agent is deleted sooner, whatever
+  `delete_multiplier` says. Discovery refuses a reported heartbeat above 3600s
+  (1h), so with the defaults (multiplier 10, `delete_after` 24h) the multiplier
+  threshold is at most 10h and never beats the floor. It wins only with a
+  `default_heartbeat` above 2.4h (for agents that report none), or a
+  `delete_multiplier` above 24 at a 1h heartbeat.
 
 ### Sync runner
 Each tick reconciles the due rollouts: install, update, uninstall, or an

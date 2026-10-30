@@ -224,6 +224,10 @@ func TestDeleteAfterIsAFloor(t *testing.T) {
 		{"6h heartbeat, past 60h is deleted", Config{}, 6 * time.Hour, 60*time.Hour + time.Second, 0, true},
 		{"delete_after 48h, 25h is kept", Config{DeleteAfter: 48 * time.Hour}, 30 * time.Second, 25 * time.Hour, enum.AgentStatusDisconnected, false},
 		{"delete_after 48h, past 48h is deleted", Config{DeleteAfter: 48 * time.Hour}, 30 * time.Second, 48*time.Hour + time.Second, 0, true},
+		// No reported heartbeat: default_heartbeat stands in, 6h here, so deleted past max(24h, 60h). Without
+		// it every threshold would be zero, and 31h would be past the 24h floor.
+		{"no heartbeat, default 6h, 31h is disconnected", Config{DefaultHeartbeat: 6 * time.Hour}, 0, 31 * time.Hour, enum.AgentStatusDisconnected, false},
+		{"no heartbeat, default 6h, past 60h is deleted", Config{DefaultHeartbeat: 6 * time.Hour}, 0, 60*time.Hour + time.Second, 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, tc.cfg)
@@ -231,6 +235,39 @@ func TestDeleteAfterIsAFloor(t *testing.T) {
 			f.r.tick(context.Background())
 			f.expect(t, "after a tick", tc.status, tc.gone)
 		})
+	}
+}
+
+// Deleting an agent drops its row only: its rollouts and its credential stay,
+// for the sync runner and discovery to meet again (see the sync and discovery
+// tests of a deleted agent).
+func TestDeletionKeepsRolloutsAndCredential(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, Config{})
+	f.put(t, f.now.Add(-25*time.Hour), 30*time.Second, enum.AgentStatusDisconnected)
+	ro, err := model.NewRollout("spec-1", "a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.store.UpsertRollout(ctx, ro); err != nil {
+		t.Fatal(err)
+	}
+	cred, err := model.NewAgentCredential("a", "stored-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.store.UpsertAgentCredential(ctx, cred); err != nil {
+		t.Fatal(err)
+	}
+
+	f.r.tick(ctx)
+
+	f.expect(t, "after a tick", 0, true)
+	if _, err = f.store.GetRollout(ctx, ro.ID()); err != nil {
+		t.Fatalf("rollout of the deleted agent: %v, want it kept", err)
+	}
+	if got, err := f.store.GetAgentCredential(ctx, "a"); err != nil || got.Token() != "stored-token" {
+		t.Fatalf("credential of the deleted agent: %v, want it kept", err)
 	}
 }
 

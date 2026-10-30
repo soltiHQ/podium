@@ -327,11 +327,17 @@ lifecycle:
 larger of `delete_after` and `delete_multiplier` × its heartbeat, and never
 sooner. Silence counts from the later of the agent's last sync and the control
 plane's start, so after a restart every agent that has not synced yet gets the
-full thresholds to sync again before its status changes. Deleting an agent also
-forgets the labels operators set on it: the same agent syncing again later
-comes back without them. Zero or negative values inherit the defaults shown;
-`delete_after` is also read from `SOLTI_LIFECYCLE_DELETEAFTER`. See
-`internal/server/README.md` for the states and the restart grace.
+full thresholds to sync again before its status changes. Zero or negative
+values inherit the defaults shown; `delete_after` is also read from
+`SOLTI_LIFECYCLE_DELETEAFTER`. See `internal/server/README.md` for the states
+and the restart grace.
+
+Deleting an agent drops its row and the labels operators set on it. Its
+rollouts and its credential stay: until the agent syncs again, its pushes fail
+with `agent not found` until `max_retries`, and its synced rollouts are
+skipped. When it syncs again, with its stored token, it comes back without
+labels, so the next Deploy of a spec that targets it by labels turns its
+rollout into an uninstall unless the labels are restored first.
 
 ## Rollout sync
 

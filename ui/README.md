@@ -83,10 +83,12 @@ rollouts created by another deploy) is refused with 412 `Placement changed
 since it was previewed. Review it again.` and nothing is written: the message
 stays in the dialog and the page refreshes the panel. The panel also
 refreshes while the dialog is open, so closing the dialog shows the new plan,
-and opening it again takes the new token. Heartbeats, the sync state of
-rollouts and completed uninstalls do not change the token. Deploy runs
-unchecked, without `If-Match`, in two cases only: without AgentsGet (no panel)
-and before the panel has loaded once.
+and opening it again takes the new token. Heartbeats and the sync state of
+rollouts do not change the token, and neither does a completed uninstall of an
+agent that is no longer targeted. An agent targeted again before its uninstall
+completes moves from update to install when the uninstall completes, which
+changes the token: one 412. Deploy runs unchecked, without `If-Match`, in two
+cases only: without AgentsGet (no panel) and before the panel has loaded once.
 
 The task list passes exact slot filters to the agent before pagination and uses
 opaque continuation cursors. Run history is bounded by the agent's history
@@ -126,7 +128,8 @@ go test ./internal/auth/... ./internal/handler ./internal/transport/http/middlew
 
 `task ci/ui/test` runs every `ui/tests/*.test.cjs` with Node's built-in test
 runner in the Node container pinned in `Taskfile.yml`, so it needs Docker but no
-local Node. The `ui` job of the PR workflow runs the same task.
+local Node. It fails when no file matches: Node would pass with no test. The
+`ui` job of the PR workflow runs the same task.
 
 `task generate` runs `go tool templ generate`, so the generator is always the
 templ version pinned in `go.mod`. `task assets` downloads Alpine and HTMX and
