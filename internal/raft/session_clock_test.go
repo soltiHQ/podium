@@ -33,7 +33,7 @@ func clockSession(t *testing.T) *model.Session {
 
 func clockCommand(t *testing.T, op *raftv1.Op) []byte {
 	t.Helper()
-	data, err := encodeCommand([]*raftv1.Op{op})
+	data, err := overlay.EncodeCommand([]*raftv1.Op{op})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,9 +175,9 @@ func TestFSMSessionClockExplicitReplaySnapshot(t *testing.T) {
 }
 
 func TestFSMSessionClockLegacyReplaySnapshot(t *testing.T) {
-	for _, version := range []byte{2, commandVersion} {
+	for _, version := range []byte{2, overlay.CommandVersion} {
 		for _, unset := range []bool{false, true} {
-			name := map[byte]string{2: "version2", commandVersion: "current"}[version] + map[bool]string{false: "-previous", true: "-unset"}[unset]
+			name := map[byte]string{2: "version2", overlay.CommandVersion: "current"}[version] + map[bool]string{false: "-previous", true: "-unset"}[unset]
 			t.Run(name, func(t *testing.T) {
 				original := clockSession(t)
 				if unset {
@@ -192,10 +192,10 @@ func TestFSMSessionClockLegacyReplaySnapshot(t *testing.T) {
 				seed.ExpiresAtPresent = false
 				seed.RevokedAtPresent = false
 				create := clockCommand(t, &raftv1.Op{Op: &raftv1.Op_SessionCreate{SessionCreate: seed}})
-				create[len(commandMagic)] = version
+				create[len(overlay.CommandMagic)] = version
 				applyClockCommand(t, f, create, 1)
 				mutation := clockCommand(t, &raftv1.Op{Op: &raftv1.Op_SessionRotateRefresh{SessionRotateRefresh: &raftv1.SessionRotateRefreshMsg{Id: original.ID(), RefreshHash: []byte("legacy-rotation"), ExpiresAtNs: original.ExpiresAt().Add(time.Hour).UnixNano()}}})
-				mutation[len(commandMagic)] = version
+				mutation[len(overlay.CommandMagic)] = version
 				applyClockCommand(t, f, mutation, 2)
 				restored, restoredStore, got := restoreSessionClock(t, f, original.ID())
 				if !got.UpdatedAt().Equal(original.UpdatedAt()) {
@@ -270,7 +270,7 @@ func TestSessionTxReadOwnMutations(t *testing.T) {
 	}
 	// The exact recorded operations produce the same state as the read overlay.
 	f := NewFSM(inner, nil)
-	data, err := encodeCommand(view.Ops())
+	data, err := overlay.EncodeCommand(view.Ops())
 	if err != nil {
 		t.Fatal(err)
 	}

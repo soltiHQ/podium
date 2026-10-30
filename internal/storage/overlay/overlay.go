@@ -3,7 +3,8 @@
 // them: point reads, index lookups, listings and scans. Each write is recorded as
 // the SOLTI-CMD operation that makes it, so that a backend which replicates or logs
 // its commits runs the callback of WithTx on a Tx, ships Ops once the callback has
-// succeeded, and applies them to its state with ApplyOps.
+// succeeded, and applies them to its state with ApplyOps. EncodeCommand and
+// DecodeCommand frame the ops as the SOLTI-CMD command it ships.
 package overlay
 
 import (

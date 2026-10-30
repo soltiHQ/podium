@@ -39,7 +39,7 @@ func NewFSM(store storage.Storage, hub *event.Hub) *FSM {
 // Apply decodes the proto Command, runs store ops under one WithTx, and
 // fires event ops on the local hub afterwards.
 func (f *FSM) Apply(l *hraft.Log) any {
-	cmd, err := decodeCommand(l.Data)
+	cmd, err := overlay.DecodeCommand(l.Data)
 	if err != nil {
 		return err
 	}

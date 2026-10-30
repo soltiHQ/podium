@@ -18,6 +18,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/cluster/discovery"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"github.com/soltiHQ/control-plane/internal/storage/overlay"
 	"github.com/soltiHQ/control-plane/internal/storage/snapshot"
 	bolt "go.etcd.io/bbolt"
 	"google.golang.org/protobuf/proto"
@@ -25,7 +26,7 @@ import (
 
 func TestPreflightLogsSupportsCurrentCommandsAndSparseConfiguration(t *testing.T) {
 	logs := hraft.NewInmemStore()
-	data, err := encodeCommand([]*raftv1.Op{{Op: &raftv1.Op_AgentDelete{AgentDelete: "a1"}}})
+	data, err := overlay.EncodeCommand([]*raftv1.Op{{Op: &raftv1.Op_AgentDelete{AgentDelete: "a1"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +47,7 @@ func TestPreflightLogsRejectsLegacyAndMalformedCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := encodeCommand(nil)
+	current, err := overlay.EncodeCommand(nil)
 	if err != nil {
 		t.Fatal(err)
 	}

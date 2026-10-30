@@ -22,6 +22,7 @@ storage/
 └── overlay/
     ├── overlay.go   Tx — a transaction over an unchanging base: reads its own writes, records them as ops
     ├── apply.go     ApplyOps — applies recorded ops to a store, as the Raft state machine does
+    ├── command.go   EncodeCommand / DecodeCommand — the SOLTI-CMD framing of the ops
     └── agent.go …   the Storage methods of Tx, one file per entity group
 ```
 

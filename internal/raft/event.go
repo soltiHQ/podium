@@ -5,6 +5,7 @@ import (
 
 	raftv1 "github.com/soltiHQ/control-plane/api/gen/solti/raft/v1"
 	"github.com/soltiHQ/control-plane/internal/event"
+	"github.com/soltiHQ/control-plane/internal/storage/overlay"
 )
 
 // Compile-time check.
@@ -64,7 +65,7 @@ func (w *EventWriter) DeleteIssues(kind, id string) int {
 // submit encodes and applies a single-op command. Returns error if Raft
 // rejects the submission (non-leader, timeout, quorum loss).
 func (w *EventWriter) submit(op *raftv1.Op) error {
-	data, err := encodeCommand([]*raftv1.Op{op})
+	data, err := overlay.EncodeCommand([]*raftv1.Op{op})
 	if err != nil {
 		return err
 	}

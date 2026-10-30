@@ -60,7 +60,7 @@ func NewStore(inner storage.Storage, r *hraft.Raft) *Store {
 
 // apply submits a Command to Raft, waiting up to applyTimeout for commit.
 func (s *Store) apply(ops []*raftv1.Op) error {
-	data, err := encodeCommand(ops)
+	data, err := overlay.EncodeCommand(ops)
 	if err != nil {
 		return err
 	}
