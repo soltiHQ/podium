@@ -169,7 +169,9 @@ func (s *Service) Upsert(ctx context.Context, m *model.Agent) error {
 		switch {
 		case err == nil:
 			existed = true
-			reconnected = existing.Status() != enum.AgentStatusActive || m.UptimeSeconds() < existing.UptimeSeconds()
+			// m comes from a sync, so it is active: a reconnect is an
+			// existing row that was not, or an uptime that went down.
+			reconnected = m.ReconnectedSince(existing.Status(), existing.UptimeSeconds())
 			m.SetCreatedAt(existing.CreatedAt())
 			for k, v := range existing.LabelsAll() {
 				m.LabelAdd(k, v)

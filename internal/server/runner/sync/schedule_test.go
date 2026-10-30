@@ -279,11 +279,13 @@ func TestUnreachableAgentSkipsRemainingRollouts(t *testing.T) {
 		{"apply got no response", install, agentErr{errkind.Internal, fmt.Errorf("%w: %w: dial tcp 10.0.0.7:8085: connect: connection refused", proxy.ErrApplyTask, proxy.ErrRequest)}, true},
 		{"apply deadline exceeded", install, agentErr{errkind.DeadlineExceeded, fmt.Errorf("%w: rpc error: code = DeadlineExceeded", proxy.ErrApplyTask)}, true},
 		{"apply context deadline exceeded", install, agentErr{errkind.Internal, fmt.Errorf("%w: %w", proxy.ErrApplyTask, context.DeadlineExceeded)}, true},
-		// Neither proxy keeps a *net.OpError in the chain (HTTP flattens it into
-		// ErrRequest, gRPC into a status): these two rows pin the defensive
-		// net.Error fallback. A refused HTTP connection is "apply got no response".
-		{"net.Error fallback: connection refused", install, fmt.Errorf("%w: %w", proxy.ErrApplyTask, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}), true},
-		{"net.Error fallback: connection reset", install, fmt.Errorf("%w: %w", proxy.ErrApplyTask, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}), true},
+		// The net.Error rule. The HTTP proxy wraps a body read error with %w, so a
+		// connection reset in the middle of a response keeps its *net.OpError in
+		// the chain: the reset row. A connection it cannot open is ErrRequest,
+		// "apply got no response"; the refused row pins the rule for a proxy that
+		// keeps the *net.OpError. gRPC reports both as a status.
+		{"net.Error: connection refused", install, fmt.Errorf("%w: %w", proxy.ErrApplyTask, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}), true},
+		{"net.Error: connection reset mid-body", install, fmt.Errorf("%w: %w: %w", proxy.ErrApplyTask, proxy.ErrDecode, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}), true},
 		{"delete got no response", uninstall, agentErr{errkind.Internal, fmt.Errorf("%w: %w: EOF", proxy.ErrDeleteTask, proxy.ErrRequest)}, true},
 		{"observation got no response", observe, agentErr{errkind.Internal, fmt.Errorf("%w: %w: EOF", proxy.ErrGetTask, proxy.ErrRequest)}, true},
 		{"apply answered 503", install, httpAnswer(proxy.ErrApplyTask, 503, errkind.Unavailable), false},

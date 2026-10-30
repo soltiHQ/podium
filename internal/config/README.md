@@ -319,7 +319,7 @@ comes back without them. Zero or negative values inherit the defaults shown;
 ```yaml
 sync:
   tick_interval: 10s
-  push_timeout: 15s    # budget of each rollout's agent calls
+  push_timeout: 15s    # budget of each agent call, and of an agent's turn per tick
   max_concurrency: 4   # agents worked on at once
   max_retries: 5       # failed pushes before a rollout waits for its agent
 ```
@@ -329,5 +329,11 @@ most 5 minutes; after `max_retries` failures it waits until its agent
 reconnects or the spec is deployed again. An agent that leaves a call
 unanswered holds one of the `max_concurrency` slots for one `push_timeout`,
 then gets no call until its own backoff passes: the same schedule, counted in
-unanswered calls and kept in memory. Zero or negative values inherit the
-defaults shown. See `internal/server/README.md` for the scheduling.
+unanswered calls and kept in memory. The backoff ends sooner when the agent row
+shows a reconnect: the agent active again after it was inactive or
+disconnected, or with a lower uptime. An agent that stays active keeps it. Each
+agent's turn in a tick starts calls for one `push_timeout` of wall time at
+most; what is left waits for the next tick, so an agent that answers slowly
+holds a tick for about one `push_timeout`, not one per rollout. Zero or
+negative values inherit the defaults shown. See `internal/server/README.md`
+for the scheduling.

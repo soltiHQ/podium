@@ -43,15 +43,22 @@ type Runner struct {
 
 	// clock replaces time.Now in tests; nil means time.Now.
 	clock func() time.Time
-	// backoffs holds back the calls to agents that left calls unanswered. It
-	// lives in memory only and is used by the tick goroutine only.
-	backoffs map[string]agentBackoff
+	// backoffs holds back the calls to agents that left calls unanswered, and
+	// observeFrom is, for each agent, the rollout its next observations start
+	// at. Both live in memory only and are used by the tick goroutine only,
+	// before the workers start and after they are done.
+	backoffs    map[string]agentBackoff
+	observeFrom map[string]string
 }
 
 // agentBackoff holds back the calls to one agent.
 type agentBackoff struct {
 	failures int       // unanswered calls since the agent last answered
 	until    time.Time // no call to the agent before this
+	// The agent row when the backoff started: a later row that shows a
+	// reconnect (model.Agent.ReconnectedSince) clears the backoff.
+	status enum.AgentStatus
+	uptime int64
 }
 
 // New creates a sync runner.
@@ -137,15 +144,20 @@ func called(ctx context.Context, err error) outcome {
 // agentTurn is one agent's work in a tick, and what its worker learned.
 type agentTurn struct {
 	agentID  string
-	rollouts []string  // in stage order
+	rollouts []string  // in turn order, see planTurns
+	calls    int       // index of the first rollout that may need a call
+	observe  int       // index of the first observation; len(rollouts) if none
+	next     int       // index of the first rollout the worker did not attempt
 	answered bool      // the agent answered a call
 	silentAt time.Time // when a call went unanswered; zero if none did
 }
 
 // reconcileRollouts dispatches every due rollout by intent, one worker per agent.
-// A worker takes its agent's rollouts in stage order, each within its own
-// PushTimeout, and stops at the first call the agent leaves unanswered. The
-// agent's calls then back off; uninstalls that need no call go on regardless.
+// A worker takes its agent's rollouts in turn order, each within its own
+// PushTimeout, starts no call once the turn has used PushTimeout of wall time,
+// and stops at the first call the agent leaves unanswered. The agent's calls
+// then back off until the backoff passes or the agent row shows a reconnect;
+// uninstalls that need no call go on regardless.
 func (r *Runner) reconcileRollouts(ctx context.Context) {
 	items, err := storage.AllRollouts(ctx, r.store, nil)
 	if err != nil {
@@ -155,35 +167,23 @@ func (r *Runner) reconcileRollouts(ctx context.Context) {
 
 	now := r.now()
 	listed := make(map[string]bool)
+	for _, ss := range items {
+		if ss != nil {
+			listed[ss.AgentID()] = true
+		}
+	}
+	r.forgetAgents(ctx, listed, now)
+
 	due := make([]*model.Rollout, 0, len(items))
 	for _, ss := range items {
 		if ss == nil {
 			continue
 		}
-		listed[ss.AgentID()] = true
 		if retryDue(ss, now, r.cfg) && (stage(ss) == stageLocal || !now.Before(r.backoffs[ss.AgentID()].until)) {
 			due = append(due, ss)
 		}
 	}
-	// The backoff of an agent without rollouts holds nothing back.
-	for agentID := range r.backoffs {
-		if !listed[agentID] {
-			delete(r.backoffs, agentID)
-		}
-	}
-	slices.SortStableFunc(due, func(a, b *model.Rollout) int { return cmp.Compare(stage(a), stage(b)) })
-
-	var turns []*agentTurn
-	byAgent := make(map[string]*agentTurn)
-	for _, ss := range due {
-		turn, ok := byAgent[ss.AgentID()]
-		if !ok {
-			turn = &agentTurn{agentID: ss.AgentID()}
-			byAgent[ss.AgentID()] = turn
-			turns = append(turns, turn)
-		}
-		turn.rollouts = append(turn.rollouts, ss.ID())
-	}
+	turns := r.planTurns(due)
 
 	var g errgroup.Group
 	g.SetLimit(r.cfg.MaxConcurrency)
@@ -199,20 +199,97 @@ func (r *Runner) reconcileRollouts(ctx context.Context) {
 	}
 	_ = g.Wait()
 	for _, turn := range turns {
-		r.noteAgent(turn)
+		r.noteAgent(ctx, turn)
 	}
 }
 
-// reconcileAgent works through one agent's turn. The first call the agent leaves
-// unanswered ends it: every rollout after that one needs the agent.
+// forgetAgents drops what the runner keeps in memory about agents without
+// rollouts: their backoff holds nothing back. It also drops the backoff of an
+// agent that is held back while its row shows a reconnect since the backoff
+// started: an agent that came back is called again at once.
+func (r *Runner) forgetAgents(ctx context.Context, listed map[string]bool, now time.Time) {
+	for agentID, b := range r.backoffs {
+		if !listed[agentID] || (now.Before(b.until) && r.reconnected(ctx, agentID, b)) {
+			delete(r.backoffs, agentID)
+		}
+	}
+	for agentID := range r.observeFrom {
+		if !listed[agentID] {
+			delete(r.observeFrom, agentID)
+		}
+	}
+}
+
+// reconnected reports whether the agent row shows a reconnect since b started.
+// A row that cannot be read shows none.
+func (r *Runner) reconnected(ctx context.Context, agentID string, b agentBackoff) bool {
+	ag, err := r.store.GetAgent(ctx, agentID)
+	return err == nil && ag.ReconnectedSince(b.status, b.uptime)
+}
+
+// planTurns groups the due rollouts into one turn per agent, the agents in the
+// stage order of their first rollout, and orders each turn: the uninstalls that
+// need no call, in listing order; then the pushes, least recently attempted
+// first (never attempted, then by LastPushedAt); then the observations, by
+// rollout ID from where the agent's last turn stopped, so that every one gets
+// its turn while a turn has time for only some.
+func (r *Runner) planTurns(due []*model.Rollout) []*agentTurn {
+	slices.SortStableFunc(due, func(a, b *model.Rollout) int { return cmp.Compare(stage(a), stage(b)) })
+	var (
+		agents  []string
+		byStage = make(map[string]*[3][]*model.Rollout)
+	)
+	for _, ss := range due {
+		stages, ok := byStage[ss.AgentID()]
+		if !ok {
+			stages = new([3][]*model.Rollout)
+			byStage[ss.AgentID()] = stages
+			agents = append(agents, ss.AgentID())
+		}
+		stages[stage(ss)] = append(stages[stage(ss)], ss)
+	}
+
+	turns := make([]*agentTurn, 0, len(agents))
+	for _, agentID := range agents {
+		var (
+			stages  = byStage[agentID]
+			local   = stages[stageLocal]
+			push    = stages[stagePush]
+			observe = stages[stageObserve]
+		)
+		slices.SortStableFunc(push, func(a, b *model.Rollout) int { return a.LastPushedAt().Compare(b.LastPushedAt()) })
+		slices.SortFunc(observe, func(a, b *model.Rollout) int { return cmp.Compare(a.ID(), b.ID()) })
+		if from := r.observeFrom[agentID]; from != "" {
+			i, _ := slices.BinarySearchFunc(observe, from, func(ss *model.Rollout, id string) int { return cmp.Compare(ss.ID(), id) })
+			observe = slices.Concat(observe[i:], observe[:i])
+		}
+		turn := &agentTurn{agentID: agentID, calls: len(local), observe: len(local) + len(push)}
+		for _, ss := range slices.Concat(local, push, observe) {
+			turn.rollouts = append(turn.rollouts, ss.ID())
+		}
+		turns = append(turns, turn)
+	}
+	return turns
+}
+
+// reconcileAgent works through one agent's turn. Once the turn has used
+// PushTimeout of wall time it starts no more calls: the rest waits for the next
+// tick and records nothing. The first call the agent leaves unanswered ends the
+// turn too: every rollout after that one needs the agent.
 func (r *Runner) reconcileAgent(ctx context.Context, turn *agentTurn) {
-	for _, rolloutID := range turn.rollouts {
+	start := r.now()
+	for i, rolloutID := range turn.rollouts {
+		turn.next = i
 		if ctx.Err() != nil {
+			return
+		}
+		if i >= turn.calls && r.now().Sub(start) >= r.cfg.PushTimeout {
 			return
 		}
 		pushCtx, cancel := context.WithTimeout(ctx, r.cfg.PushTimeout)
 		result := r.reconcile(pushCtx, rolloutID)
 		cancel()
+		turn.next = i + 1
 		if ctx.Err() != nil {
 			return // a cancelled tick says nothing about the agent
 		}
@@ -226,10 +303,24 @@ func (r *Runner) reconcileAgent(ctx context.Context, turn *agentTurn) {
 	}
 }
 
-// noteAgent updates the agent's backoff after its turn. An answered call clears
-// it. A call left unanswered holds the agent's calls back for backoff(n), n being
-// the unanswered calls since the agent last answered.
-func (r *Runner) noteAgent(turn *agentTurn) {
+// noteAgent updates the agent's observation cursor and backoff after its turn.
+// The next observations start at the first one the turn did not attempt. An
+// answered call clears the backoff. A call left unanswered holds the agent's
+// calls back for backoff(n), n being the unanswered calls since the agent last
+// answered, and records the agent row as the backoff starts.
+func (r *Runner) noteAgent(ctx context.Context, turn *agentTurn) {
+	if turn.observe < len(turn.rollouts) {
+		switch {
+		case turn.next >= len(turn.rollouts):
+			delete(r.observeFrom, turn.agentID)
+		case turn.next >= turn.observe:
+			if r.observeFrom == nil {
+				r.observeFrom = make(map[string]string)
+			}
+			r.observeFrom[turn.agentID] = turn.rollouts[turn.next]
+		}
+	}
+
 	switch {
 	case !turn.silentAt.IsZero():
 		failures := 1
@@ -239,15 +330,32 @@ func (r *Runner) noteAgent(turn *agentTurn) {
 		if r.backoffs == nil {
 			r.backoffs = make(map[string]agentBackoff)
 		}
-		until := turn.silentAt.Add(r.cfg.backoff(failures))
-		r.backoffs[turn.agentID] = agentBackoff{failures: failures, until: until}
+		b := agentBackoff{failures: failures, until: turn.silentAt.Add(r.cfg.backoff(failures))}
+		b.status, b.uptime = r.agentRow(ctx, turn.agentID)
+		r.backoffs[turn.agentID] = b
 		r.logger.Debug().
 			Str("agent_id", turn.agentID).
 			Int("failures", failures).
-			Time("until", until).
+			Time("until", b.until).
 			Msg("agent unreachable; its calls wait for the backoff")
 	case turn.answered:
 		delete(r.backoffs, turn.agentID)
+	}
+}
+
+// agentRow returns the status and uptime of the agent row as a backoff starts.
+// A missing row counts as an agent that is not active, as it does for Upsert,
+// so the agent syncing again is a reconnect. A row that cannot be read counts
+// as active with no uptime, which no later row shows a reconnect against.
+func (r *Runner) agentRow(ctx context.Context, agentID string) (enum.AgentStatus, int64) {
+	ag, err := r.store.GetAgent(ctx, agentID)
+	switch {
+	case err == nil:
+		return ag.Status(), ag.UptimeSeconds()
+	case errors.Is(err, storage.ErrNotFound):
+		return enum.AgentStatusDisconnected, 0
+	default:
+		return enum.AgentStatusActive, 0
 	}
 }
 

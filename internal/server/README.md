@@ -120,16 +120,29 @@ work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s, 40s, …):
 - **Rollout backoff.** It comes from the attempts and the last push stored with
   the rollout. After `max_retries` (5) failures the rollout waits for its agent
   to reconnect or a new Deploy.
-- **Agent backoff.** A call gets no answer when the push timeout passes, the
-  request gets no response, or the connection is refused or reset. Any answer,
-  an error status included, clears the backoff. It lives in memory: a restart
-  clears it, and an agent that comes back waits out what is left of it, at
-  most 5m.
+- **Agent backoff.** A call gets no answer when the push timeout passes or the
+  request gets no response; over HTTP a refused or reset connection counts too
+  (for gRPC see below). Any answer, an error status included, clears the
+  backoff. It lives in memory: a restart clears it. As the backoff starts, the
+  runner notes the agent's status and uptime from its row. A later tick that
+  finds the agent active again after it was not, or with a lower uptime (it
+  restarted), clears the backoff and calls the agent: the reconnect on which
+  a sync also resets the agent's failed rollouts. An agent that stays active
+  keeps its backoff, at most 5m: it may sync and still be unreachable from
+  podium (NAT).
 - **One worker per agent.** At most `max_concurrency` (4) agents are worked on
   at once. An agent's rollouts go one after another, each with its own
   `push_timeout` (15s): first the uninstalls of tasks the agent never got
   (they need no call and run even while the agent backs off), then pushes,
-  then observations, so an observation never holds back a push.
+  least recently attempted first, then observations, so an observation never
+  holds back a push.
+- **A turn gets `push_timeout` of wall time.** Once an agent's turn in a tick
+  has used `push_timeout`, it starts no more calls. The call under way
+  finishes, so an agent that answers slowly, but within `push_timeout`, holds
+  a tick for about one `push_timeout` plus one call, however many rollouts it
+  has. What is left waits for the next tick and records nothing.
+  Observations go on where the agent's last turn stopped, so every synced
+  rollout is observed in turn.
 - **An unanswered call ends the agent's turn.** A failed push records its
   failure on the rollout; a failed observation records nothing and only backs
   the agent off. The agent's other rollouts wait, untouched. An answer,
