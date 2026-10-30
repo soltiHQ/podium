@@ -3,6 +3,7 @@ package durable
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -44,8 +45,13 @@ func TestInsecureAndSymlinkDirectoriesAreRejected(t *testing.T) {
 	}
 }
 
+// A database file that is a symlink is refused as one, and its target is kept.
 func TestSymlinkDatabaseIsRejectedWithoutChangingTarget(t *testing.T) {
-	dir := t.TempDir()
+	// t.TempDir is not private, which Open refuses before it looks at the file.
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	target := filepath.Join(t.TempDir(), "target")
 	data := []byte("retain target")
 	if err := os.WriteFile(target, data, 0o600); err != nil {
@@ -54,9 +60,13 @@ func TestSymlinkDatabaseIsRejectedWithoutChangingTarget(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(dir, FileName)); err != nil {
 		t.Fatal(err)
 	}
-	if s, err := Open(dir); err == nil {
+	s, err := Open(dir)
+	if err == nil {
 		_ = s.Close()
 		t.Fatal("symlink database accepted")
+	}
+	if want := "existing database is not a regular file"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("Open: %v, want the symlink refusal %q", err, want)
 	}
 	after, err := os.ReadFile(target)
 	if err != nil || string(after) != string(data) {
