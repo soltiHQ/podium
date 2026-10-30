@@ -473,17 +473,34 @@ func TestCorruptStateIsRejectedWithoutReset(t *testing.T) {
 	}
 }
 
+// A file that is not a database is refused and kept. A zero-byte one, which a
+// crash during the first start can leave, gets an error that says what to do.
 func TestInvalidExistingFileIsPreserved(t *testing.T) {
-	for _, data := range [][]byte{nil, []byte("not a bbolt database")} {
+	for _, test := range []struct {
+		data []byte
+		want string
+	}{
+		{nil, "is empty and holds no state (a crash while the first start creates it can leave it so): if this deployment never started, move the file aside and start again; otherwise restore a backup"},
+		{[]byte("not a bbolt database"), ""},
+	} {
+		data := test.data
 		t.Run(fmt.Sprintf("size-%d", len(data)), func(t *testing.T) {
-			dir := t.TempDir()
+			// t.TempDir is not private, which Open refuses before it looks at the file.
+			dir := filepath.Join(t.TempDir(), "state")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			path := filepath.Join(dir, FileName)
 			if err := os.WriteFile(path, data, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if restored, err := Open(dir); err == nil {
+			restored, err := Open(dir)
+			if err == nil {
 				_ = restored.Close()
 				t.Fatal("invalid database accepted")
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Open: %v, want an error that says %q", err, test.want)
 			}
 			after, err := os.ReadFile(path)
 			if err != nil {

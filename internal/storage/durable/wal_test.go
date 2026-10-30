@@ -40,6 +40,43 @@ func (s *Store) writeSnapshot(ctx context.Context) error {
 	return s.snapshotLocked()
 }
 
+// failures records what a failure handler hears.
+type failures struct {
+	mu    sync.Mutex
+	heard []error
+}
+
+// handler is the option that sets f's handler.
+func (f *failures) handler() Option {
+	return WithFailureHandler(func(err error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.heard = append(f.heard, err)
+	})
+}
+
+func (f *failures) all() []error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.heard)
+}
+
+// heardOnce fails unless f heard exactly one failure, an ErrInternal whose text
+// holds reason.
+func (f *failures) heardOnce(t *testing.T, reason string) {
+	t.Helper()
+	if heard := f.all(); len(heard) != 1 || !errors.Is(heard[0], storage.ErrInternal) || !strings.Contains(heard[0].Error(), reason) {
+		t.Fatalf("the failure handler heard %v, want one ErrInternal naming %q", heard, reason)
+	}
+}
+
+// snapshotDue reports whether a snapshot is due, as a commit checks it.
+func snapshotDue(s *Store) bool {
+	_ = s.writer.Acquire(context.Background(), 1)
+	defer s.writer.Release(1)
+	return s.due()
+}
+
 // diskLayout is what a closed database file holds: its root buckets, and the meta,
 // snapshot and log of the log layout when it has them.
 type diskLayout struct {
@@ -228,6 +265,128 @@ func TestReadOnlyTxDoesNoIO(t *testing.T) {
 	}
 }
 
+// A context canceled inside the bbolt transaction of a commit rolls it back: the
+// caller gets context.Canceled, nothing is published, the store serves on, and the
+// next write takes the index the canceled one left free.
+func TestCancelInsideCommitChangesNothing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var (
+		armed atomic.Bool
+		heard failures
+	)
+	s, dir := newTestStore(t, heard.handler(), withHooks(hooks{commit: func() {
+		if armed.Load() {
+			cancel()
+		}
+	}}))
+	populate(t, s)
+	before := snapshotBytes(t, s)
+	a, err := model.NewAgent("a2", "agent-a2", "http://a2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	armed.Store(true)
+	if err := s.UpsertAgent(ctx, a); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancel inside the commit: %v, want context.Canceled", err)
+	}
+	armed.Store(false)
+	if !bytes.Equal(before, snapshotBytes(t, s)) {
+		t.Fatal("a rolled back commit was published")
+	}
+	if _, err := s.GetAgent(context.Background(), "a2"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("read after the rollback: %v, want ErrNotFound", err)
+	}
+	if heard := heard.all(); len(heard) != 0 {
+		t.Fatalf("a rolled back commit failed the store: %v", heard)
+	}
+	upsertAgent(t, s, "a3")
+	assertReopen(t, s, dir, snapshotBytes(t, s))
+	if l := readLayout(t, dir); !slices.Equal(l.log, []uint64{1, 2}) {
+		t.Fatalf("log %v, want entries 1 and 2: the rolled back entry took no index", l.log)
+	}
+}
+
+// The failure handler hears a failed commit or snapshot once, with the reason that
+// later calls report, however many of them fail after it.
+func TestFailureHandlerHearsEachFailureOnce(t *testing.T) {
+	ctx := context.Background()
+	for _, test := range []struct {
+		name, reason string
+		fail         func(*Store) error
+	}{
+		{"commit", "durable commit of log entry 2", func(s *Store) error {
+			a, err := model.NewAgent("a2", "agent-a2", "http://a2")
+			if err != nil {
+				return err
+			}
+			return s.UpsertAgent(ctx, a)
+		}},
+		{"snapshot", "durable snapshot at log entry 1", func(s *Store) error { return s.writeSnapshot(ctx) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var heard failures
+			s, _ := newTestStore(t, heard.handler())
+			populate(t, s)
+			// A closed bbolt handle fails the next bbolt transaction.
+			if err := s.db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := test.fail(s); !errors.Is(err, storage.ErrInternal) {
+				t.Fatalf("failed %s: %v, want ErrInternal", test.name, err)
+			}
+			if _, err := s.GetAgent(ctx, "a1"); !errors.Is(err, storage.ErrUnavailable) || !strings.Contains(err.Error(), test.reason) {
+				t.Fatalf("read after a failed %s: %v, want ErrUnavailable naming %q", test.name, err, test.reason)
+			}
+			if err := s.DeleteAgent(ctx, "a1"); !errors.Is(err, storage.ErrUnavailable) {
+				t.Fatalf("write after a failed %s: %v, want ErrUnavailable", test.name, err)
+			}
+			if err := s.writeSnapshot(ctx); !errors.Is(err, storage.ErrUnavailable) {
+				t.Fatalf("snapshot after a failed %s: %v, want ErrUnavailable", test.name, err)
+			}
+			heard.heardOnce(t, test.reason)
+		})
+	}
+}
+
+// A snapshot whose bbolt transaction fails fails the store closed: reads and writes
+// then report the failure.
+func TestFailedSnapshotFailsClosed(t *testing.T) {
+	s, _ := newTestStore(t)
+	populate(t, s)
+	ctx := context.Background()
+	// A closed bbolt handle fails the snapshot's bbolt transaction.
+	if err := s.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.writeSnapshot(ctx); !errors.Is(err, storage.ErrInternal) {
+		t.Fatalf("failed snapshot: %v, want ErrInternal", err)
+	}
+	if _, err := s.GetAgent(ctx, "a1"); !errors.Is(err, storage.ErrUnavailable) || !strings.Contains(err.Error(), "durable snapshot at log entry 1") {
+		t.Fatalf("read after a failed snapshot: %v, want ErrUnavailable naming the snapshot", err)
+	}
+	if err := s.WithTx(ctx, func(storage.Storage) error { return nil }); !errors.Is(err, storage.ErrUnavailable) {
+		t.Fatalf("transaction after a failed snapshot: %v, want ErrUnavailable", err)
+	}
+}
+
+// Below the threshold no snapshot is due, and none is written: with a threshold of
+// 3, two entries stay in the log.
+func TestNoSnapshotBelowThreshold(t *testing.T) {
+	s, dir := newTestStore(t, WithSnapshotThreshold(3))
+	populate(t, s)
+	upsertAgent(t, s, "a2")
+	if snapshotDue(s) {
+		t.Fatal("a snapshot is due after 2 entries of a threshold of 3")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if l := readLayout(t, dir); !bytes.Equal(l.snapshotIndex, uint64Bytes(0)) || !slices.Equal(l.log, []uint64{1, 2}) {
+		t.Fatalf("snapshot index %x, log %v, want no snapshot and entries 1 and 2", l.snapshotIndex, l.log)
+	}
+}
+
 // A commit stalled inside its bbolt transaction, where it syncs, holds back
 // neither a point read nor a scan, and neither sees the stalled write.
 func TestReadsDoNotWaitForFsync(t *testing.T) {
@@ -382,10 +541,11 @@ func TestReadsDoNotWaitForSnapshot(t *testing.T) {
 func TestApplyFailureAfterCommitFailsClosed(t *testing.T) {
 	var (
 		armed atomic.Bool
+		heard failures
 		s     *Store
 	)
 	dir := filepath.Join(t.TempDir(), "state")
-	s, err := Open(dir, withHooks(hooks{committed: func() {
+	s, err := Open(dir, heard.handler(), withHooks(hooks{committed: func() {
 		// Drift between the published state and what the transaction read: the
 		// committed delete of a1 finds no a1 to delete.
 		if armed.Load() {
@@ -409,6 +569,7 @@ func TestApplyFailureAfterCommitFailsClosed(t *testing.T) {
 	if err := s.WithTx(ctx, func(storage.Storage) error { return nil }); !errors.Is(err, storage.ErrUnavailable) {
 		t.Fatalf("transaction after a failed apply: %v, want ErrUnavailable", err)
 	}
+	heard.heardOnce(t, "log entry 2")
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -426,10 +587,14 @@ func TestApplyFailureAfterCommitFailsClosed(t *testing.T) {
 }
 
 // An apply of a committed command that does not return, here because it panics,
-// fails the store closed: a recovered panic leaves nothing half applied in sight.
+// fails the store closed with a failure that names the log entry: a recovered
+// panic leaves nothing half applied in sight.
 func TestApplyPanicFailsClosed(t *testing.T) {
-	var armed atomic.Bool
-	s, _ := newTestStore(t, withHooks(hooks{committed: func() {
+	var (
+		armed atomic.Bool
+		heard failures
+	)
+	s, _ := newTestStore(t, heard.handler(), withHooks(hooks{committed: func() {
 		if armed.Load() {
 			panic("the apply did not finish")
 		}
@@ -445,9 +610,10 @@ func TestApplyPanicFailsClosed(t *testing.T) {
 		}()
 		_ = s.DeleteAgent(ctx, "a1")
 	}()
-	if _, err := s.GetAgent(ctx, "a1"); !errors.Is(err, storage.ErrUnavailable) {
-		t.Fatalf("read after an apply that panicked: %v, want ErrUnavailable", err)
+	if _, err := s.GetAgent(ctx, "a1"); !errors.Is(err, storage.ErrUnavailable) || !strings.Contains(err.Error(), "log entry 2") {
+		t.Fatalf("read after an apply that panicked: %v, want ErrUnavailable naming log entry 2", err)
 	}
+	heard.heardOnce(t, "log entry 2")
 }
 
 // A log entry that does not check out stops Open, which names it and leaves the

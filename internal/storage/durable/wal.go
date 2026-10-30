@@ -50,10 +50,6 @@ const checksumSize = 4
 
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
-// errApplyInterrupted is the failure of a store whose apply of a committed log
-// entry did not return.
-var errApplyInterrupted = fmt.Errorf("%w: durable apply of a committed log entry did not finish", storage.ErrInternal)
-
 func encodeUint64(n uint64) []byte { return binary.BigEndian.AppendUint64(make([]byte, 0, 8), n) }
 
 func decodeUint64(b []byte) (uint64, bool) {
@@ -293,21 +289,41 @@ func (s *Store) commit(ctx context.Context, ops []*raftv1.Op) error {
 	if err != nil {
 		return s.fail(fmt.Errorf("%w: durable apply of committed log entry %d: %v", storage.ErrInternal, index, err))
 	}
+	// The entry is durable whatever ctx says now.
+	return s.apply(context.WithoutCancel(ctx), index, cmd.GetOps(), len(entry))
+}
+
+// apply applies the operations of committed log entry index, size bytes long, to
+// the published state under mu, so readers see all of them or none. An apply that
+// fails, or does not return because it panics, records its failure before mu is
+// released, so nothing half applied is ever read, and fail reports it after.
+func (s *Store) apply(ctx context.Context, index uint64, ops []*raftv1.Op, size int) error {
+	var failure error
+	defer func() {
+		if failure != nil {
+			_ = s.fail(failure)
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// The entry is durable whatever ctx says now, and readers see none of its
-	// operations until all of them are applied. The store counts as failed until
-	// the apply returns, so an apply that panics part way publishes nothing.
-	s.failure = errApplyInterrupted
+	returned := false
+	defer func() {
+		if !returned {
+			failure = fmt.Errorf("%w: durable apply of committed log entry %d did not finish", storage.ErrInternal, index)
+			s.failure = failure
+		}
+	}()
 	if h := s.hooks.committed; h != nil {
 		h()
 	}
-	if err := overlay.ApplyOps(context.WithoutCancel(ctx), s.inner, cmd.GetOps()); err != nil {
-		s.failure = fmt.Errorf("%w: durable apply of committed log entry %d: %v", storage.ErrInternal, index, err)
-		return s.failure
+	err := overlay.ApplyOps(ctx, s.inner, ops)
+	returned = true
+	if err != nil {
+		failure = fmt.Errorf("%w: durable apply of committed log entry %d: %v", storage.ErrInternal, index, err)
+		s.failure = failure
+		return failure
 	}
-	s.failure = nil
-	s.last, s.logBytes = index, s.logBytes+len(entry)
+	s.last, s.logBytes = index, s.logBytes+size
 	return nil
 }
 

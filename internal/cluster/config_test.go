@@ -5,6 +5,7 @@ import (
 
 	"github.com/kelseyhightower/envconfig"
 	"github.com/soltiHQ/control-plane/internal/cluster"
+	"github.com/soltiHQ/control-plane/internal/storage/durable"
 	"gopkg.in/yaml.v3"
 )
 
@@ -81,6 +82,14 @@ func TestStandaloneSnapshotThresholdConfig(t *testing.T) {
 				t.Fatalf("Validate() = %v, want valid %v", err, tc.valid)
 			}
 		})
+	}
+}
+
+// The configuration's default threshold is the one the durable store keeps when
+// it is given none.
+func TestStandaloneSnapshotThresholdDefaultIsTheStores(t *testing.T) {
+	if cluster.DefaultStandaloneSnapshotThreshold != durable.DefaultSnapshotThreshold {
+		t.Fatalf("cluster default %d, durable default %d: they must agree", cluster.DefaultStandaloneSnapshotThreshold, durable.DefaultSnapshotThreshold)
 	}
 }
 

@@ -121,6 +121,20 @@ func TestDurableSnapshotV2UpgradePreservesNineGroups(t *testing.T) {
 	if !proto.Equal(&msg, &got) {
 		t.Fatal("v2 migration changed existing entity fields")
 	}
+	if err := again.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var migrated raftv1.Snapshot
+	if err := proto.Unmarshal(readLayout(t, dir).blob, &migrated); err != nil {
+		t.Fatal(err)
+	}
+	if migrated.GetHeader().GetVersion() != 3 || len(migrated.GetExecutions()) != 0 {
+		t.Fatalf("the snapshot right after the migration is version %d with %d records, want version 3 with none", migrated.GetHeader().GetVersion(), len(migrated.GetExecutions()))
+	}
+	again, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := again.UpsertExecution(ctx, durableArchiveRow(t)); err != nil {
 		t.Fatal(err)
 	}

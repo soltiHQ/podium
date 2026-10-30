@@ -1,6 +1,7 @@
 package durable
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -184,5 +185,44 @@ func TestCloseWaitsForActiveCommitAndIsIdempotent(t *testing.T) {
 	}
 	if _, err := s.GetAgent(context.Background(), "missing"); !errors.Is(err, storage.ErrUnavailable) {
 		t.Fatal("closed store remained readable", err)
+	}
+}
+
+// Close waits for a snapshot the background snapshotter is writing, which then
+// commits whole.
+func TestCloseWaitsForSnapshot(t *testing.T) {
+	var (
+		entered     = make(chan struct{})
+		release     = make(chan struct{})
+		enteredOnce sync.Once
+		releaseOnce sync.Once
+	)
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	s, dir := newTestStore(t, WithSnapshotThreshold(1), withHooks(hooks{snapshot: func(p snapshotPoint) {
+		if p == snapshotWritten {
+			enteredOnce.Do(func() { close(entered) })
+			<-release
+		}
+	}}))
+	populate(t, s)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the commit that crossed the threshold started no snapshot")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close() }()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned during the snapshot: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	unblock()
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+	if l := readLayout(t, dir); !bytes.Equal(l.snapshotIndex, uint64Bytes(1)) || len(l.log) != 0 {
+		t.Fatalf("snapshot index %x, log %v, want the snapshot at entry 1 and no log", l.snapshotIndex, l.log)
 	}
 }

@@ -59,14 +59,18 @@ Callback errors and cancellation observed before the commit change nothing.
 Once bbolt starts the commit, a successful commit wins concurrent cancellation
 and its operations are applied. A commit error publishes nothing and makes the
 store unavailable until restart: a failed sync may leave the disk outcome
-uncertain, so continuing from memory would be unsafe. So does a committed
-command whose apply fails, or does not return because it panics: memory then no
-longer matches the disk, and a failure names the log entry. After any of these,
-reads and writes return `storage.ErrUnavailable` with the reason. Successful writes survive a process
-restart without a shutdown save. Close waits for an active transaction or
-snapshot. A database file lock excludes a concurrent second process; opening
-uses a 250ms lock timeout (plus normal scheduling overhead). The application
-closes the database on shutdown and construction failures.
+uncertain, so continuing from memory would be unsafe. A write whose commit
+returned an error may still be on disk; if it is, it is present after the
+restart. A committed command whose apply fails, or does not return because it
+panics, also makes the store unavailable: memory then no longer matches the
+disk, and the failure names the log entry. After any of these, reads and writes
+return `storage.ErrUnavailable` with the reason, and the store passes the
+reason once, as it fails, to the handler of `WithFailureHandler`; Podium logs it
+at ERROR. Successful writes survive a process restart without a shutdown save.
+Close waits for an active transaction or snapshot. A database file lock
+excludes a concurrent second process; opening uses a 250ms lock timeout (plus
+normal scheduling overhead). The application closes the database on shutdown
+and construction failures.
 
 A snapshot starts once the log holds `cluster.standalone.snapshot_threshold`
 entries (default 4096; env `SOLTI_CLUSTER_STANDALONE_SNAPSHOT_THRESHOLD`; zero
@@ -91,15 +95,21 @@ the old bucket is deleted. A file that fails the checks is left as it was.
 Earlier versions refuse the migrated file ("missing state bucket") without
 changing it, so reverting after the migration needs a backup taken before the
 upgrade. A file bbolt initialized and never committed to, which a crash during
-the first Open leaves, opens as a fresh store; a file without buckets that
-was committed to is refused, and so is a zero-byte file.
+the first Open leaves, opens as a fresh store; a file without buckets that was
+committed to is refused.
+
+A zero-byte `podium.db` holds no state. A crash while the very first Open
+creates the file, before bbolt writes its first pages, can leave one, and Open
+refuses it with an error that says so. If the deployment never started, move the
+file aside, keeping it, and start again; otherwise restore a backup.
 
 Snapshot encoding is shared with Raft to keep the entity schema consistent.
 Decoding rejects invalid entities and duplicate IDs before replacing live state.
 Snapshot writers use version 3, which adds the bounded terminal execution archive.
 Readers accept version 2 losslessly with an empty archive: its nine existing
 entity groups and structured runner capabilities are unchanged. A single-blob
-file of version 2 is migrated to a version-3 snapshot. A version-2 snapshot
+file of version 2 is migrated to a version-3 snapshot
+(`TestDurableSnapshotV2UpgradePreservesNineGroups`). A version-2 snapshot
 containing archive rows is rejected. Legacy version 1 snapshots are rejected
 explicitly rather than decoded with the changed capabilities schema; automatic
 v1 migration is not implemented.
@@ -113,7 +123,9 @@ Neither backend is a substitute for tested backup/restore.
 For a consistent offline backup, stop Podium cleanly and copy `podium.db`; restore
 it to a stopped deployment-owned directory with mode 0600. Do not copy a live
 bbolt file with an ordinary file copy or delete the file to recover a failed
-startup: retain the failing file and restore a verified backup instead.
+startup: retain the failing file and restore a verified backup instead. The one
+case without a backup to restore is a zero-byte file on a deployment that never
+started, above: move it aside and start again.
 
 Raft recovery uses the same version-3 snapshot codec and versioned internal log
 commands. New command writers use `SOLTI-CMD` followed by version byte 3. Readers
@@ -172,12 +184,20 @@ deferred call; the parent then reads the file and reopens it.
   restart, which reads what the disk holds. The tests fail the commit by closing
   the bbolt handle under the store: fault injection on the commit path, not a
   failed sync (`TestRollbackCancellationAndCommitFailure`,
-  `TestDurableExecutionCommitErrorDoesNotPublish`).
+  `TestDurableExecutionCommitErrorDoesNotPublish`). A failed snapshot does the
+  same (`TestFailedSnapshotFailsClosed`), and the failure handler hears either
+  once, with the reason the next calls report
+  (`TestFailureHandlerHearsEachFailureOnce`). A context canceled inside the
+  commit's bbolt transaction rolls it back and leaves the store serving
+  (`TestCancelInsideCommitChangesNothing`).
 - A committed command that fails to apply makes the store unavailable with an
-  error that names its log entry, and a restart applies it. The test removes the
-  row the command deletes between the commit and the apply
-  (`TestApplyFailureAfterCommitFailsClosed`). One whose apply panics leaves the
-  store unavailable once the panic is recovered (`TestApplyPanicFailsClosed`).
+  error that names its log entry. The test removes the row the command deletes
+  between the commit and the apply, so the fault is in memory only, and a
+  restart applies the entry from the disk
+  (`TestApplyFailureAfterCommitFailsClosed`); an entry that the store refuses
+  on its own stops Open instead, below. One whose apply panics leaves the store
+  unavailable once the panic is recovered, with a failure that names the entry
+  (`TestApplyPanicFailsClosed`).
 - Corrupt state stops Open and leaves the file as it was: a snapshot with a bad
   checksum, header, duplicate ID or no blob, a bad format or snapshot index, a
   missing, extra or every bucket deleted (`TestCorruptStateIsRejectedWithoutReset`);
@@ -189,12 +209,16 @@ deferred call; the parent then reads the file and reopens it.
   next to a bucket of the log layout (`TestOpenRejectsCorruptSingleBlobStore`).
 - A file bbolt initialized and never committed to opens as a fresh store
   (`TestOpenTreatsEmptyFileAsFresh`); a zero-byte or non-bbolt file is refused
-  and kept (`TestInvalidExistingFileIsPreserved`).
-- A transaction that records nothing begins no bbolt transaction and writes no
-  page (`TestReadOnlyTxDoesNoIO`). A point read and a scan return, with the state
-  before the commit, while a commit is held inside its bbolt transaction
-  (`TestReadsDoNotWaitForFsync`), and while a snapshot is, which holds back a
-  transaction (`TestReadsDoNotWaitForSnapshot`).
+  and kept, the zero-byte one with an error that says it holds no state and
+  what to do (`TestInvalidExistingFileIsPreserved`).
+- A transaction that records nothing begins no bbolt read transaction, writes no
+  page and leaves the file's bytes as they were (`TestReadOnlyTxDoesNoIO`). A
+  point read and a scan return, with the state before the commit, while a commit
+  is held inside its bbolt transaction (`TestReadsDoNotWaitForFsync`), and while
+  a snapshot is, which holds back a transaction (`TestReadsDoNotWaitForSnapshot`).
+  Below the threshold no snapshot is due or written
+  (`TestNoSnapshotBelowThreshold`). Close waits for a snapshot in progress, which
+  commits whole (`TestCloseWaitsForSnapshot`).
 
 No test models power loss, a failed or lying fsync, a torn write or a full disk.
 That a commit survives power loss whole or not at all rests on bbolt, which syncs

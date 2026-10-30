@@ -49,8 +49,12 @@ type Store struct {
 	db      *bolt.DB
 	closed  bool
 	// failure is why the store stopped serving: a commit, an apply or a snapshot
-	// that failed, after which memory and disk may disagree until Open.
-	failure error
+	// that failed, after which memory and disk may disagree until Open. reported
+	// records that fail passed it to onFailure.
+	failure  error
+	reported bool
+	// onFailure is the failure handler of WithFailureHandler, or nil.
+	onFailure func(error)
 
 	// The log, guarded by writer: the last committed entry, the entry the
 	// snapshot holds the state at, and the bytes of the entries past it.
@@ -67,6 +71,7 @@ type Option func(*options)
 
 type options struct {
 	snapshotThreshold int
+	onFailure         func(error)
 	hooks             hooks
 }
 
@@ -77,14 +82,24 @@ func WithSnapshotThreshold(n int) Option {
 	return func(o *options) { o.snapshotThreshold = n }
 }
 
+// WithFailureHandler sets a function that hears once, as it happens, why the
+// store stopped serving: a failed commit, a committed entry whose apply failed or
+// panicked, or a failed snapshot. It runs on the goroutine that failed, after the
+// store's lock is released, while that transaction or snapshot still holds the
+// writer. So it may call the read methods, which return the failure, and must not
+// call WithTx, a write method or Close, which would wait for that writer.
+func WithFailureHandler(fn func(error)) Option {
+	return func(o *options) { o.onFailure = fn }
+}
+
 // hooks are the seams tests stall the store or end the process at. Production
 // leaves them nil.
 type hooks struct {
 	// commit runs in the bbolt transaction that appends a command, before bbolt
 	// commits it.
 	commit func()
-	// committed runs once a command is committed, under the read lock, before the
-	// store applies it.
+	// committed runs once a command is committed, before the store applies it,
+	// with mu held exclusively: it must not call the store.
 	committed func()
 	// snapshot runs at each point of a snapshot.
 	snapshot func(snapshotPoint)
@@ -127,8 +142,10 @@ func Open(dataDir string, opts ...Option) (*Store, error) {
 	case os.IsNotExist(err):
 	case err != nil:
 		return nil, fmt.Errorf("durable: stat: %w", err)
-	case !info.Mode().IsRegular() || info.Size() == 0:
-		return nil, fmt.Errorf("durable: existing database is not a nonempty regular file")
+	case !info.Mode().IsRegular():
+		return nil, fmt.Errorf("durable: existing database is not a regular file")
+	case info.Size() == 0:
+		return nil, fmt.Errorf("durable: %s is empty and holds no state (a crash while the first start creates it can leave it so): if this deployment never started, move the file aside and start again; otherwise restore a backup", path)
 	case info.Mode().Perm()&0o077 != 0:
 		return nil, fmt.Errorf("durable: existing database must have owner-only permissions")
 	}
@@ -141,6 +158,7 @@ func Open(dataDir string, opts ...Option) (*Store, error) {
 		filters:   inmemory.New(),
 		db:        db,
 		threshold: o.snapshotThreshold,
+		onFailure: o.onFailure,
 		hooks:     o.hooks,
 	}
 	created, err := s.restore()
@@ -240,13 +258,20 @@ func (s *Store) servingLocked() error {
 	return nil
 }
 
-// fail stops the store from serving with err as the reason, and returns err. The
-// first failure is the one kept.
+// fail stops the store from serving with err as the reason, unless a failure is
+// recorded already, and returns err. The first failure is the one kept, and fail
+// passes it to the failure handler once, after it releases mu: a caller must not
+// hold mu, and the handler may read the store.
 func (s *Store) fail(err error) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.failure == nil {
 		s.failure = err
+	}
+	failure, report := s.failure, !s.reported
+	s.reported = true
+	s.mu.Unlock()
+	if report && s.onFailure != nil {
+		s.onFailure(failure)
 	}
 	return err
 }
