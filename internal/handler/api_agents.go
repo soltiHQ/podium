@@ -3,8 +3,10 @@ package handler
 import (
 	"cmp"
 	"errors"
+	"io"
 	"net/http"
 	"slices"
+	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
 
@@ -127,11 +129,24 @@ func (a *API) agentPatchLabels(w http.ResponseWriter, r *http.Request, mode http
 	response.NoContent(w, r)
 }
 
+// streamKeepalive is how long the log stream may stay silent before it writes
+// an SSE comment. A reverse proxy closes a connection it sees no bytes on
+// (nginx proxy_read_timeout defaults to 60s); EventSource ignores comments.
+// It must be positive; tests shorten it.
+var streamKeepalive = 15 * time.Second
+
+// sseKeepalive is the comment a silent log stream writes.
+const sseKeepalive = ": keepalive\n\n"
+
 // AgentTaskLogsStream subscribes to the (agent, task) log fanout hub and
 // relays events as SSE to the UI client. The hub maintains one backing
 // agent connection per (agent, task) regardless of how many UI clients
 // are watching; slow readers receive a synthetic Lagged envelope and
 // keep going instead of dragging the rest down.
+//
+// The stream clears the write deadline of its connection, so the server's
+// write timeout does not end it, and writes a keepalive comment after
+// streamKeepalive without output.
 //
 // Frame format: `data: <protojson-StreamTaskLogsResponse>\n\n`.
 func (a *API) AgentTaskLogsStream(w http.ResponseWriter, r *http.Request) {
@@ -141,6 +156,18 @@ func (a *API) AgentTaskLogsStream(w http.ResponseWriter, r *http.Request) {
 
 	if agentID == "" || taskID == "" {
 		response.BadRequest(w, r, mode)
+		return
+	}
+
+	// A writer that cannot clear the deadline is refused: the server would cut
+	// the stream at its write timeout. Refusing comes before the subscription,
+	// which may open a connection to the agent.
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Time{}); err != nil {
+		a.logger.Error().Err(err).
+			Str("agent_id", agentID).
+			Str("task_id", taskID).
+			Msg("agent task logs: cannot disable write deadline")
+		response.Internal(w, r, mode)
 		return
 	}
 
@@ -164,11 +191,20 @@ func (a *API) AgentTaskLogsStream(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	marshaler := protojson.MarshalOptions{EmitUnpopulated: true}
+	var (
+		marshaler = protojson.MarshalOptions{EmitUnpopulated: true}
+		keepalive = streamKeepalive
+		idle      = time.NewTicker(keepalive)
+	)
+	defer idle.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-idle.C:
+			if _, err := io.WriteString(w, sseKeepalive); err != nil {
+				return
+			}
 		case ev, ok := <-ch:
 			if !ok {
 				return
@@ -186,9 +222,10 @@ func (a *API) AgentTaskLogsStream(w http.ResponseWriter, r *http.Request) {
 			if _, err := w.Write([]byte("\n\n")); err != nil {
 				return
 			}
-			if flusher != nil {
-				flusher.Flush()
-			}
+			idle.Reset(keepalive)
+		}
+		if flusher != nil {
+			flusher.Flush()
 		}
 	}
 }

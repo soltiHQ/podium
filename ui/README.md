@@ -78,6 +78,12 @@ carry the inspected task UID so reconnection cannot silently switch to a
 same-name replacement. Modal identifiers are encoded as lowercase UTF-8 hex so
 HTML attribute normalization preserves case-sensitive UID identity.
 
+The log and event streams are Server-Sent Events. Each clears the write
+deadline of its connection, so `http.write_timeout` does not end a stream, and
+writes the comment `: keepalive` after 15 seconds without output, which
+`EventSource` ignores. A reverse proxy in front of podium must keep its read
+timeout above 15 seconds (nginx `proxy_read_timeout` defaults to 60).
+
 Execution history shows partial capture from periodic agent polling. It can
 miss attempts removed between polls and is bounded by retention policy. Each
 record displays original task UID, SDK generation/attempt, source resource
