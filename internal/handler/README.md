@@ -72,6 +72,10 @@ cross-origin browser mutations with 403 (see `internal/config`, "Browser session
 | POST   | `/api/v1/users/{id}/enable`   | `UsersEdit`                                              |
 | POST   | `/api/v1/users/{id}/password` | `UsersEdit`; 12 to 72 characters, else 400               |
 
+`PUT /api/v1/users/{id}` is a patch. A non-empty `subject`, `name` or `email` and a present `role_ids` or `permissions`
+list (`[]` clears it) replace the stored value; everything else, `disabled` included (see disable and enable), stays as
+the transaction reads it. A disable, demotion or permission change committed meanwhile is kept.
+
 ### Sessions `/api/v1/session`
 | Method | Path                          | Permission  |
 |--------|-------------------------------|-------------|

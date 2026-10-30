@@ -206,61 +206,48 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 			return
 		}
 	}
-	var u *model.User
+	var (
+		u   *model.User
+		uid = id
+	)
 
 	switch action {
 	case modeCreate:
-		x, err := model.NewUser(ksuid.New().String(), in.Subject)
+		u, err = model.NewUser(ksuid.New().String(), in.Subject)
 		if err != nil {
 			response.BadRequestMsg(w, r, mode, "subject is required")
 			return
 		}
-		x.Enable()
-		u = x
+		u.Enable()
+		if in.Name != "" {
+			u.SetName(in.Name)
+		}
+		if in.Email != "" {
+			u.SetEmail(in.Email)
+		}
+		if in.RoleIDs != nil {
+			u.SetRoleIDs(in.RoleIDs)
+		}
+		if in.Permissions != nil {
+			u.SetPermissions(in.Permissions)
+		}
+		uid = u.ID()
+		err = a.userSVC.Create(r.Context(), actor, u)
 	case modeUpdate:
 		if id == "" || (in.ID != "" && in.ID != id) {
 			response.BadRequest(w, r, mode)
 			return
 		}
-		x, err := a.userSVC.Get(r.Context(), id)
-		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
-				response.NotFound(w, r, mode)
-				return
-			}
-			a.logger.Error().Err(err).Str("user_id", id).Msg("user get failed")
-			response.Unavailable(w, r, mode)
+		if actor != nil && actor.UserID == id && (in.RoleIDs != nil || in.Permissions != nil) {
+			response.BadRequestMsg(w, r, mode, "You cannot change your own roles or permissions.")
 			return
 		}
-		u = x
+		// The service reads the user inside its transaction and applies the
+		// patch there, so a change committed meanwhile is not overwritten.
+		u, err = a.userSVC.Update(r.Context(), actor, id, userPatch(in))
 	default:
 		response.BadRequest(w, r, mode)
 		return
-	}
-
-	if in.Name != "" {
-		u.SetName(in.Name)
-	}
-	if in.Email != "" {
-		u.SetEmail(in.Email)
-	}
-	if in.Subject != "" {
-		u.SetSubject(in.Subject)
-	}
-	if action == modeUpdate && actor != nil && actor.UserID == id && (in.RoleIDs != nil || in.Permissions != nil) {
-		response.BadRequestMsg(w, r, mode, "You cannot change your own roles or permissions.")
-		return
-	}
-	if in.RoleIDs != nil {
-		u.SetRoleIDs(in.RoleIDs)
-	}
-	if in.Permissions != nil {
-		u.SetPermissions(in.Permissions)
-	}
-	if action == modeCreate {
-		err = a.userSVC.Create(r.Context(), actor, u)
-	} else {
-		err = a.userSVC.Update(r.Context(), actor, u)
 	}
 	if err != nil {
 		if writeUserAccessError(w, r, mode, err) {
@@ -274,10 +261,10 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		case errors.Is(err, storage.ErrAlreadyExists):
 			response.Conflict(w, r, mode, "user with this subject already exists")
 		case errors.Is(err, storage.ErrNotFound):
-			// The user was deleted after the read above, or a role it names does not exist.
+			// The user does not exist or was deleted meanwhile, or a role it names does not exist.
 			response.NotFound(w, r, mode)
 		default:
-			a.logger.Error().Err(err).Str("user_id", u.ID()).Msg("user upsert failed")
+			a.logger.Error().Err(err).Str("user_id", uid).Msg("user upsert failed")
 			response.Unavailable(w, r, mode)
 		}
 		return
@@ -299,6 +286,28 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	htmx.Trigger(w, event.RefreshUsers)
 	a.hub.Notify(event.RefreshUsers)
 	response.NoContent(w, r)
+}
+
+// userPatch is the change a PUT body asks for: an empty string or a missing
+// list leaves the stored value as it is.
+func userPatch(in restv1.User) user.UpdatePatch {
+	var p user.UpdatePatch
+	if in.Name != "" {
+		p.Name = &in.Name
+	}
+	if in.Email != "" {
+		p.Email = &in.Email
+	}
+	if in.Subject != "" {
+		p.Subject = &in.Subject
+	}
+	if in.RoleIDs != nil {
+		p.RoleIDs = &in.RoleIDs
+	}
+	if in.Permissions != nil {
+		p.Permissions = &in.Permissions
+	}
+	return p
 }
 
 func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
