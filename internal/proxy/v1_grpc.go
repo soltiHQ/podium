@@ -54,7 +54,7 @@ func (p *grpcProxyV1) ListTasks(ctx context.Context, f TaskFilter) (*proxyv1.Lis
 
 	resp, err := client.ListTasks(p.authCtx(ctx), req)
 	if err != nil {
-		return nil, agentError(ErrListTasks, err)
+		return nil, responseError(ErrListTasks, err)
 	}
 
 	tasks := make([]proxyv1.Task, len(resp.GetTasks()))
@@ -100,7 +100,7 @@ func (p *grpcProxyV1) GetTask(ctx context.Context, taskID string) (*proxyv1.GetT
 
 	resp, err := client.GetTask(p.authCtx(ctx), &taskv1.GetTaskRequest{Name: taskID})
 	if err != nil {
-		return nil, agentError(ErrGetTask, err)
+		return nil, responseError(ErrGetTask, err)
 	}
 
 	if resp.GetTask() == nil || resp.GetTask().GetMetadata().GetName() != taskID || resp.GetTask().GetMetadata().GetUid() == "" {

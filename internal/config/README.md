@@ -385,7 +385,8 @@ disconnected, or with a lower uptime. An agent that stays active keeps it. Each
 agent's turn in a tick starts calls for one `push_timeout` of wall time at
 most; what is left waits for the next tick, so an agent that answers slowly
 holds a tick for about one `push_timeout`, not one per rollout. The check that
-an agent still has its tasks is one listing of them, 1000 to a page, and only a
-whole listing counts: an agent that cannot be listed within one `push_timeout`
-is not checked. Zero or negative values inherit the defaults shown. See
-`internal/server/README.md` for the scheduling.
+an agent still has its tasks is one listing of them, up to 1000 to a page (fewer
+when the agent's answer would be too large), and only a whole listing counts:
+an agent that cannot be listed within one `push_timeout` is not checked. Zero or
+negative values inherit the defaults shown. See `internal/server/README.md` for
+the scheduling.

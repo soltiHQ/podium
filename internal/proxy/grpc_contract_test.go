@@ -2,14 +2,19 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 
 	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
+	"github.com/soltiHQ/control-plane/internal/transport/errkind"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 type taskContractServer struct {
@@ -18,6 +23,8 @@ type taskContractServer struct {
 	missingUID bool
 	deleteUID  string
 	logUID     string
+	list       *taskv1.ListTasksResponse // what ListTasks answers, unless listErr is set
+	listErr    error
 }
 
 func (s *taskContractServer) resource() *taskv1.Task {
@@ -36,6 +43,10 @@ func (s *taskContractServer) GetTask(context.Context, *taskv1.GetTaskRequest) (*
 	return &taskv1.GetTaskResponse{Task: s.resource()}, nil
 }
 
+func (s *taskContractServer) ListTasks(context.Context, *taskv1.ListTasksRequest) (*taskv1.ListTasksResponse, error) {
+	return s.list, s.listErr
+}
+
 func (s *taskContractServer) ApplyTask(context.Context, *taskv1.ApplyTaskRequest) (*taskv1.ApplyTaskResponse, error) {
 	return &taskv1.ApplyTaskResponse{Task: s.resource()}, nil
 }
@@ -50,13 +61,14 @@ func (s *taskContractServer) StreamTaskLogs(r *taskv1.StreamTaskLogsRequest, str
 	return stream.Send(&taskv1.StreamTaskLogsResponse{Kind: &taskv1.StreamTaskLogsResponse_RunStarted{RunStarted: &taskv1.RunStarted{Generation: 2, Attempt: 1}}})
 }
 
-func grpcContractProxy(t *testing.T, s *taskContractServer) *grpcProxyV1 {
+func grpcContractProxy(t *testing.T, s *taskContractServer, opts ...grpc.DialOption) *grpcProxyV1 {
 	t.Helper()
 	l := &memoryListener{conns: make(chan net.Conn), done: make(chan struct{})}
 	server := grpc.NewServer()
 	taskv1.RegisterTaskServiceServer(server, s)
 	go func() { _ = server.Serve(l) }()
-	conn, err := grpc.NewClient("passthrough:///test", grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return l.DialContext(ctx) }), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	opts = append([]grpc.DialOption{grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return l.DialContext(ctx) }), grpc.WithTransportCredentials(insecure.NewCredentials())}, opts...)
+	conn, err := grpc.NewClient("passthrough:///test", opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,6 +113,38 @@ func TestGRPCRejectsCounterfeitResourceIdentity(t *testing.T) {
 			m := httpTestManifest(t, "task")
 			if _, err := p.ApplyTask(context.Background(), TaskSubmission{Spec: m}); err == nil {
 				t.Fatalf("counterfeit Apply accepted: %s", tc.name)
+			}
+		})
+	}
+}
+
+// A page the client refuses for its size is tagged, so that a caller can ask for
+// a smaller one. A refusal by the agent is not: ResourceExhausted also carries
+// its quotas. The Kind is Unavailable either way.
+func TestGRPCListTasksTagsAnAnswerOverTheReceiveLimit(t *testing.T) {
+	padding := strings.Repeat("x", 4096)
+	big := &taskv1.Task{Metadata: &taskv1.ObjectMeta{Name: "task", Uid: "u"}, Status: &taskv1.TaskStatus{Error: &padding}}
+	for _, tc := range []struct {
+		name   string
+		server *taskContractServer
+		tagged bool
+	}{
+		{"answer over the receive limit", &taskContractServer{list: &taskv1.ListTasksResponse{Tasks: []*taskv1.Task{big}}}, true},
+		{"quota refused by the agent", &taskContractServer{listErr: status.Error(codes.ResourceExhausted, "retained task limit reached")}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := grpcContractProxy(t, tc.server, grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(1024)))
+
+			_, err := p.ListTasks(context.Background(), TaskFilter{Limit: 1000})
+
+			if !errors.Is(err, ErrListTasks) || status.Code(err) != codes.ResourceExhausted {
+				t.Fatalf("ListTasks = %v (%v), want a list tasks error that is ResourceExhausted", err, status.Code(err))
+			}
+			if got := errors.Is(err, ErrResponseTooLarge); got != tc.tagged {
+				t.Fatalf("ErrResponseTooLarge = %v, want %v: %v", got, tc.tagged, err)
+			}
+			if kind := errkind.Classify(err); kind != errkind.Unavailable {
+				t.Fatalf("kind = %v, want Unavailable: tagging must not change the classification", kind)
 			}
 		})
 	}

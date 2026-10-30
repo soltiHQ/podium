@@ -20,6 +20,12 @@ var (
 	ErrUnexpectedStatus = errors.New("proxy: unexpected status")
 	// ErrDecode indicates the agent's response body could not be decoded.
 	ErrDecode = errors.New("proxy: decode response")
+	// ErrResponseTooLarge indicates the proxy refused the agent's answer for its
+	// size: a body over the 4 MiB it reads from an HTTP agent (an ErrDecode too),
+	// or a message over the receive limit of the gRPC client. A smaller request
+	// may succeed, a list page with a lower limit for one. An agent's own
+	// ResourceExhausted, a quota for one, does not carry it.
+	ErrResponseTooLarge = errors.New("proxy: response too large")
 	// ErrListTasks indicates a ListTasks call failed (HTTP or gRPC).
 	ErrListTasks = errors.New("proxy: list tasks")
 	// ErrUnsupportedAPIVersion indicates the agent reported an unknown API version.

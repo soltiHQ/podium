@@ -155,16 +155,23 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   a tick for about one `push_timeout` plus one call, however many rollouts it
   has. What is left waits for the next tick and records nothing.
 - **One listing observes all of an agent's rollouts.** The observation is a
-  listing of the agent's tasks, with no filter and 1000 to a page, instead of a
-  call per rollout. Each page is a call like any other and starts only while
-  the turn is within its budget. A synced rollout whose task is missing from
-  the listing is queued for a reinstall, but only a complete listing shows a
-  task missing. If the budget runs out, a page fails, or the agent returns
-  the same cursor twice in a row, no rollout is judged and none is touched; an
-  answered failure and a repeated cursor are logged as warnings. The next tick
-  lists again from the first page, as a cursor holds only within a tick, so an
-  agent that cannot be listed within one turn is not observed. A synced
-  rollout without a task makes no call.
+  listing of the agent's tasks, with no filter, instead of a call per rollout.
+  Each page is a call like any other and starts only while the turn is within
+  its budget. A page starts at 1000 tasks. One that the proxy refuses as too
+  large (an answer over 4 MiB) is asked again from the same cursor with half
+  the limit, down to one task, and the smaller limit holds for the rest of the
+  turn; the next turn starts at 1000 again. A synced rollout whose task is
+  missing from the listing is queued for a reinstall, but only a complete
+  listing shows a task missing. If the budget runs out, a page fails (a task
+  too large to list even alone included), or the agent returns the same cursor
+  twice in a row, no rollout is judged and none is touched, and the next tick
+  lists again from the first page, as a cursor holds only within a tick. So
+  every synced rollout of an agent is observed each tick when the agent's task
+  list can be listed within `push_timeout`, and an agent whose list cannot is
+  not observed. The runner logs when an agent's listing turns incomplete, a
+  warning that names the cause (a task too large to list, the budget used, a
+  repeated cursor, a page answered with an error), and when it turns complete
+  again, not on every tick. A synced rollout without a task makes no call.
 - **An unanswered call ends the agent's turn.** A failed push records its
   failure on the rollout; an unanswered listing records nothing and only backs
   the agent off. The agent's other rollouts wait, untouched. An answer,

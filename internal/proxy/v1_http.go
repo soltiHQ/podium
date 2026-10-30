@@ -250,7 +250,7 @@ func (p *httpProxyV1) request(ctx context.Context, method, target string, body [
 		return fmt.Errorf("%w: %w", ErrDecode, err)
 	}
 	if len(data) > maxAgentResponseBytes {
-		return fmt.Errorf("%w: agent response exceeds 4 MiB", ErrDecode)
+		return fmt.Errorf("%w: %w: agent response exceeds 4 MiB", ErrDecode, ErrResponseTooLarge)
 	}
 	if err = json.Unmarshal(data, out); err != nil {
 		return fmt.Errorf("%w: %w", ErrDecode, err)

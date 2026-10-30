@@ -10,8 +10,12 @@
 //     - Update     → ApplyTask(spec)                               → save new TaskId
 //     - Uninstall  → DeleteTask(actualTaskID) (or noop if empty)   → drop rollout
 //     - Noop       → ListTasks (every page, once per agent)        → reinstall what the agent lost
-//     Only a complete listing shows a task missing: if the turn's budget runs out, a page fails or the agent
-//     repeats a cursor, no rollout is judged and the next tick lists again from the first page.
+//     A page starts at 1000 tasks. One that the proxy refuses as too large is asked again from the same cursor
+//     with half the limit, down to one task. Only a complete listing shows a task missing: if the turn's
+//     budget runs out, a task is too large to list even alone, a page fails or the agent repeats a cursor, no
+//     rollout is judged and the next tick lists again from the first page, at 1000. So every synced rollout of
+//     an agent is observed each tick when its task list can be listed within PushTimeout. The runner logs when
+//     that stops being so, with the cause, and when it is so again, not on every tick.
 //  3. After processing rollouts, the finalizer pass actually removes any
 //     `Spec.DeletionRequested=true` spec whose last rollout has drained.
 package sync

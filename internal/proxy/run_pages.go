@@ -153,7 +153,7 @@ func (p *grpcProxyV1) ListTaskRunsPage(ctx context.Context, name string, q TaskR
 		if status.Code(err) == codes.OutOfRange {
 			return nil, fmt.Errorf("%w: %w", ErrRunSnapshotExpired, agentError(ErrListTaskRuns, err))
 		}
-		return nil, agentError(ErrListTaskRuns, err)
+		return nil, responseError(ErrListTaskRuns, err)
 	}
 	out := &TaskRunPage{TaskUID: page.GetTaskUid(), ResourceVersion: page.GetResourceVersion(), NextCursor: page.GetContinue(), Runs: make([]proxyv1.TaskRun, 0, len(page.GetRuns()))}
 	for _, r := range page.GetRuns() {

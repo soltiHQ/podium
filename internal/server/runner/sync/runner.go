@@ -43,10 +43,12 @@ type Runner struct {
 
 	// clock replaces time.Now in tests; nil means time.Now.
 	clock func() time.Time
-	// backoffs holds back the calls to agents that left calls unanswered. It
-	// lives in memory only and is used by the tick goroutine only, before the
-	// workers start and after they are done.
-	backoffs map[string]agentBackoff
+	// backoffs holds back the calls to agents that left calls unanswered, and
+	// incomplete says, for each agent whose tasks could not be listed completely
+	// when last tried, why. Both live in memory only and are used by the tick
+	// goroutine only, before the workers start and after they are done.
+	backoffs   map[string]agentBackoff
+	incomplete map[string]string
 }
 
 // agentBackoff holds back the calls to one agent.
@@ -149,7 +151,25 @@ type agentTurn struct {
 	observe  int       // index of the first observation; len(rollouts) if none
 	answered bool      // the agent answered a call
 	silentAt time.Time // when a call went unanswered; zero if none did
+	listed   listing   // what listing the agent's tasks came to
 }
+
+// listing is what listing an agent's tasks came to in a turn. Its zero value
+// says nothing: the agent was not listed, or went silent, or the tick was
+// cancelled.
+type listing struct {
+	complete bool
+	cause    string // why not, when the agent answered and the listing still failed
+	err      error  // the agent's answer behind the cause, if it was an error
+}
+
+// Why the tasks of an agent that answers cannot be listed completely.
+const (
+	causeTooLarge = "page refused as too large even at limit 1"
+	causeBudget   = "turn budget used before the last page"
+	causeCursor   = "agent repeated a cursor"
+	causeAnswer   = "page answered with an error"
+)
 
 // reconcileRollouts dispatches every due rollout by intent, one worker per agent.
 // A worker takes its agent's rollouts in turn order, each call within its own
@@ -204,13 +224,19 @@ func (r *Runner) reconcileRollouts(ctx context.Context) {
 }
 
 // forgetAgents drops what the runner keeps in memory about agents without
-// rollouts: their backoff holds nothing back. It also drops the backoff of an
-// agent that is held back while its row shows a reconnect since the backoff
-// started: an agent that came back is called again at once.
+// rollouts: their backoff holds nothing back, and a listing that failed is news
+// no more. It also drops the backoff of an agent that is held back while its row
+// shows a reconnect since the backoff started: an agent that came back is called
+// again at once.
 func (r *Runner) forgetAgents(ctx context.Context, listed map[string]bool, now time.Time) {
 	for agentID, b := range r.backoffs {
 		if !listed[agentID] || (now.Before(b.until) && r.reconnected(ctx, agentID, b)) {
 			delete(r.backoffs, agentID)
+		}
+	}
+	for agentID := range r.incomplete {
+		if !listed[agentID] {
+			delete(r.incomplete, agentID)
 		}
 	}
 }
@@ -299,11 +325,13 @@ func (r *Runner) reconcileAgent(ctx context.Context, turn *agentTurn) {
 	}
 }
 
-// noteAgent updates the agent's backoff after its turn. An answered call clears
-// the backoff. A call left unanswered holds the agent's calls back for
-// backoff(n), n being the unanswered calls since the agent last answered, and
-// records the agent row as the backoff starts.
+// noteAgent updates the agent's backoff after its turn, and notes how listing
+// its tasks went. An answered call clears the backoff. A call left unanswered
+// holds the agent's calls back for backoff(n), n being the unanswered calls since
+// the agent last answered, and records the agent row as the backoff starts.
 func (r *Runner) noteAgent(ctx context.Context, turn *agentTurn) {
+	r.noteListing(turn)
+
 	switch {
 	case !turn.silentAt.IsZero():
 		failures := 1
@@ -323,6 +351,25 @@ func (r *Runner) noteAgent(ctx context.Context, turn *agentTurn) {
 			Msg("agent unreachable; its calls wait for the backoff")
 	case turn.answered:
 		delete(r.backoffs, turn.agentID)
+	}
+}
+
+// noteListing logs when the tasks of an agent that answers can no longer be
+// listed completely, with the cause, and when they can be again: once for each
+// change, not on every tick the listing stays as it was. A turn that listed
+// nothing, got no answer or was cancelled leaves the state as it was.
+func (r *Runner) noteListing(turn *agentTurn) {
+	was, incomplete := r.incomplete[turn.agentID]
+	switch l := turn.listed; {
+	case l.complete && incomplete:
+		delete(r.incomplete, turn.agentID)
+		r.logger.Info().Str("agent_id", turn.agentID).Str("was", was).Msg("agent tasks listed completely again; its rollouts are observed")
+	case l.cause != "" && !incomplete:
+		if r.incomplete == nil {
+			r.incomplete = make(map[string]string)
+		}
+		r.incomplete[turn.agentID] = l.cause
+		r.logger.Warn().Err(l.err).Str("agent_id", turn.agentID).Str("cause", l.cause).Msg("agent tasks cannot be listed completely; its rollouts are not observed")
 	}
 }
 
@@ -701,25 +748,34 @@ func (r *Runner) observeAgent(ctx context.Context, turn *agentTurn, start time.T
 	}
 }
 
-// taskListLimit is the page size of the listing: the most an agent serves.
+// taskListLimit is the page size a listing starts at: the most an agent serves.
 const taskListLimit = 1000
 
-// listTasks lists every task of the turn's agent, a page of taskListLimit at a
-// time and with no filter, so that a task is there whatever its phase, as it was
-// to GetTask. Each page is a call of its own, within PushTimeout; a page after
-// the first starts only while the turn is within its budget. Only a listing that
-// reaches the last page is complete. One that stops short reports false, and no
-// task may be judged missing by it: the budget is used, a page fails, the agent
-// repeats a cursor or the tick is cancelled. A page answers or goes unanswered
-// as any call does, an error status included: the turn notes it.
+// listTasks lists every task of the turn's agent, a page at a time and with no
+// filter, so that a task is there whatever its phase, as it was to GetTask. Each
+// page is a call of its own, within PushTimeout, and starts only while the turn is
+// within its budget. A page starts at taskListLimit tasks. One that the proxy
+// refuses as too large is asked again from the same cursor with half the limit,
+// down to one task, and the smaller limit holds for the rest of the turn. Only a
+// listing that reaches the last page is complete. One that stops short reports
+// false, and no task may be judged missing by it: the budget is used, a task is
+// too large to list, a page fails, the agent repeats a cursor or the tick is
+// cancelled. A page answers or goes unanswered as any call does, a refusal and an
+// error status included: the turn notes it, and turn.listed says why a listing is
+// incomplete.
 func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agentTurn, start time.Time) (map[string]struct{}, bool) {
 	var (
 		tasks  = make(map[string]struct{})
 		cursor string
+		limit  = taskListLimit
 	)
-	for page := 1; ; page++ {
+	for call := 0; ; call++ {
+		if call > 0 && r.now().Sub(start) >= r.cfg.PushTimeout {
+			turn.listed = listing{cause: causeBudget}
+			return nil, false
+		}
 		callCtx, cancel := context.WithTimeout(ctx, r.cfg.PushTimeout)
-		resp, err := ap.ListTasks(callCtx, proxy.TaskFilter{Limit: taskListLimit, Cursor: cursor})
+		resp, err := ap.ListTasks(callCtx, proxy.TaskFilter{Limit: limit, Cursor: cursor})
 		result := called(callCtx, err)
 		cancel()
 		if ctx.Err() != nil {
@@ -732,20 +788,26 @@ func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agent
 			turn.silentAt = r.now()
 			return nil, false
 		}
-		if err != nil {
-			r.logger.Warn().Err(err).Str("agent_id", turn.agentID).Int("page", page).Msg("observe: list tasks failed; no rollout judged missing")
+		switch {
+		case errors.Is(err, proxy.ErrResponseTooLarge) && limit > 1:
+			limit /= 2
+			continue
+		case errors.Is(err, proxy.ErrResponseTooLarge):
+			turn.listed = listing{cause: causeTooLarge, err: err}
+			return nil, false
+		case err != nil:
+			turn.listed = listing{cause: causeAnswer, err: err}
 			return nil, false
 		}
 		for _, task := range resp.Tasks {
 			tasks[task.ID] = struct{}{}
 		}
-		switch {
-		case resp.NextCursor == "":
+		switch resp.NextCursor {
+		case "":
+			turn.listed = listing{complete: true}
 			return tasks, true
-		case resp.NextCursor == cursor:
-			r.logger.Warn().Str("agent_id", turn.agentID).Int("page", page).Msg("observe: agent repeated a list cursor; no rollout judged missing")
-			return nil, false
-		case r.now().Sub(start) >= r.cfg.PushTimeout:
+		case cursor:
+			turn.listed = listing{cause: causeCursor}
 			return nil, false
 		}
 		cursor = resp.NextCursor

@@ -39,12 +39,16 @@ Condition status strings retain the SDK's `True`/`False`/`Unknown` values;
 transition times use Unix milliseconds, with null only for missing HTTP data.
 
 Task listing uses snapshot cursors (`continue`), phase/slot/label filters and a
-limit up to 1000. Offset pagination is unsupported. The live run-history
-inspector joins only pages with the same task UID and resource version. It
-rejects repeated cursors and histories exceeding 1024 rows, 16 pages or 8 MiB
-of logical payload, returning an actionable error instead of an incomplete
-history. Larger histories use the agent's paginated run API or the retained
-archive. Each run preserves its workload GVK and optional finish timestamp. Live logs require an
+limit up to 1000. Offset pagination is unsupported. An answer that the proxy
+refuses for its size, a body over 4 MiB from an HTTP agent (an `ErrDecode` too)
+or a message over the gRPC receive limit, carries `ErrResponseTooLarge`, so that
+a caller can ask for a smaller page; an agent's own `ResourceExhausted`, a quota
+for one, does not. The live run-history inspector joins only pages with the same
+task UID and resource version. It rejects repeated cursors and histories
+exceeding 1024 rows, 16 pages or 8 MiB of logical payload, returning an
+actionable error instead of an incomplete history. Larger histories use the
+agent's paginated run API or the retained archive. Each run preserves its
+workload GVK and optional finish timestamp. Live logs require an
 exact task UID; `TaskLogStreamer` allows a caller to preserve that incarnation
 when reconnecting. The returned event channel closes at stream completion,
 cancellation or a transport error. `AgentProxy` does not expose a separate
