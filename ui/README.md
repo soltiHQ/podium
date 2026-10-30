@@ -112,10 +112,14 @@ and does not prove physical process shutdown.
 ## Verification
 
 ```sh
-node --test ui/tests/spec-builder.test.cjs
+task ci/ui/test
 go test ./internal/auth/... ./internal/handler ./internal/transport/http/middleware \
   ./internal/uikit/... ./domain/wire ./ui/templates/...
 ```
+
+`task ci/ui/test` runs every `ui/tests/*.test.cjs` with Node's built-in test
+runner in the Node container pinned in `Taskfile.yml`, so it needs Docker but no
+local Node. The `ui` job of the PR workflow runs the same task.
 
 `task generate` runs `go tool templ generate`, so the generator is always the
 templ version pinned in `go.mod`. `task assets` downloads Alpine and HTMX and

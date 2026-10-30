@@ -25,6 +25,18 @@ jobs:
         with:
           task: ci/markdown/fmt
 
+  ui:
+    name: UI tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: mr-chelyshkin/actions/task-run@577ea5b38e0b2ad2bffe7977574fda5e59657a60 # v2
+        with:
+          task: ci/ui/test
+
   go:
     uses: ./.github/workflows/_checks.yml
     permissions:
@@ -37,7 +49,7 @@ jobs:
 
   gate:
     if: always()
-    needs: [markdown, go, build]
+    needs: [markdown, ui, go, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
