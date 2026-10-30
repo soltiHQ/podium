@@ -229,10 +229,10 @@ func (r *Runner) reconnected(ctx context.Context, agentID string, b agentBackoff
 
 // planTurns groups the due rollouts into one turn per agent, the agents in the
 // stage order of their first rollout, and orders each turn: the uninstalls that
-// need no call, in listing order; then the pushes, least recently attempted
-// first (never attempted, then by LastPushedAt); then the observations, by
-// rollout ID from where the agent's last turn stopped, so that every one gets
-// its turn while a turn has time for only some.
+// need no call, in listing order; then the pushes by LastPushedAt, which only
+// MarkFailed sets (rollouts that never failed first, then the oldest failure);
+// then the observations, by rollout ID from where the agent's last turn
+// stopped, so that every one gets its turn while a turn has time for only some.
 func (r *Runner) planTurns(due []*model.Rollout) []*agentTurn {
 	slices.SortStableFunc(due, func(a, b *model.Rollout) int { return cmp.Compare(stage(a), stage(b)) })
 	var (

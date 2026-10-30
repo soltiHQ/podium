@@ -20,11 +20,15 @@ const sseKeepalive = ": keepalive\n\n"
 // SSEHandler returns an http.HandlerFunc that streams UI update notifications as Server-Sent Events.
 //
 // Before every write the stream sets the write deadline of its connection to 2×streamKeepalive
-// ahead: the server's write timeout does not end it, but a client that stops reading is dropped.
-// It writes a keepalive comment after streamKeepalive without output and, every streamKeepalive
-// whether it wrote or not, calls access, which re-checks the caller's access (authentication, like
-// the route): an error ends the stream, and EventSource reconnects through authentication.
-// SSEHandler panics on a nil access.
+// ahead: the server's write timeout does not end it, but a client whose write blocks, that is,
+// whose buffers are full, is dropped. On a quiet stream small keepalives can fit into the buffers
+// for a long time, so a reader that stopped reading is not guaranteed to be dropped after
+// 2×streamKeepalive. It writes a keepalive comment after streamKeepalive without output and,
+// every streamKeepalive whether it wrote or not, calls access, which re-checks the caller's access
+// (authentication, like the route): an error ends the stream, within one streamKeepalive of a
+// revocation plus at most one blocked write (at most 2×streamKeepalive). EventSource then
+// reconnects through the route's checks, which answer 401 or 403, or 503 if the store is
+// unavailable. SSEHandler panics on a nil access.
 func (h *Hub) SSEHandler(access func(*http.Request) error) http.HandlerFunc {
 	if access == nil {
 		panic(ErrNilAccess)

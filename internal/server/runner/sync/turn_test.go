@@ -167,10 +167,10 @@ func specOf(applies []*taskv1.TaskManifest) []string {
 	return out
 }
 
-// An agent's pushes go least recently attempted first: those never attempted,
-// then by their last push, oldest first. Listing order, newest rollout first,
-// would put them the other way round.
-func TestPushesLeastRecentlyAttemptedFirst(t *testing.T) {
+// An agent's pushes go by LastPushedAt, which only a failed push sets: the
+// rollouts that never failed first, then by their last failure, oldest first.
+// Listing order, newest rollout first, would put them the other way round.
+func TestPushesGoByLastFailureOldestFirst(t *testing.T) {
 	ctx := context.Background()
 	fp := &fakeProxy{}
 	r, s, _ := newFakeRunner(t, fp)
@@ -178,7 +178,7 @@ func TestPushesLeastRecentlyAttemptedFirst(t *testing.T) {
 	r.clock = func() time.Time { return now }
 	for i, tc := range []struct {
 		specID   string
-		pushedAt time.Time // zero: never attempted
+		pushedAt time.Time // zero: never failed
 	}{
 		{"sp-never", time.Time{}},
 		{"sp-oldest", now.Add(-time.Hour)},

@@ -500,15 +500,20 @@ func TestDiscoveryRejectsOverlongToken(t *testing.T) {
 // A sync without a token while agent auth is required is refused and logged
 // at WARN with the agent ID and the ways out. With an enrollment secret the
 // ways out leave agent_auth.require=false aside, which fails validation next to
-// a secret, and point to podium agent-token instead. Only attempts the limiter
-// admits log, so a pair logs at most rate_attempts lines per window.
+// a secret. They point to podium agent-token for an ID that is not enrolled
+// yet, and tell an agent enrolled earlier to keep sending its existing token
+// and fix its token transport: a derived token that differs locks it out. Only
+// attempts the limiter admits log, so a pair logs at most rate_attempts lines
+// per window.
 func TestTokenlessSyncWarns(t *testing.T) {
 	const (
 		secret  = "0123456789abcdef0123456789abcdef"
 		warning = "agent sent no token: serve discovery over TLS so the SDK sends it, " +
 			"call allow_insecure_token_transport() in the SDK, or set agent_auth.require=false"
-		warningWithSecret = "agent sent no token: give it the token podium agent-token derives for its ID, " +
-			"and serve discovery over TLS so the SDK sends it, or call allow_insecure_token_transport() in the SDK"
+		warningWithSecret = "agent sent no token: give an agent ID that is not enrolled yet the token " +
+			"podium agent-token derives for it; an agent enrolled earlier must keep sending its existing token, " +
+			"so fix its token transport: serve discovery over TLS so the SDK sends it, " +
+			"or call allow_insecure_token_transport() in the SDK"
 	)
 	for _, transport := range []struct {
 		name string

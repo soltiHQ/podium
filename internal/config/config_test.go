@@ -166,6 +166,21 @@ func TestLoadRejectsMalformedCORSOrigins(t *testing.T) {
 	}
 }
 
+// unsetEnv removes the named variables for the rest of the test. envconfig
+// takes a variable that is set but empty as present and overwrites the field
+// with "", which would hide a value the YAML file had set: t.Setenv(name, "")
+// is not enough. t.Setenv comes first so that its cleanup restores the
+// original value.
+func unsetEnv(t *testing.T, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // The first administrator's password comes from the environment only: a YAML
 // file cannot carry it.
 func TestLoadBootstrapAdminPasswordIsEnvOnly(t *testing.T) {
@@ -177,6 +192,8 @@ func TestLoadBootstrapAdminPasswordIsEnvOnly(t *testing.T) {
 	}
 	t.Setenv("CONFIG_PATH", path)
 	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+	// Only the file may set it here: envconfig reads both names.
+	unsetEnv(t, bootstrap.AdminPasswordEnv, "BOOTSTRAP_ADMIN_PASSWORD")
 	cfg, err := load(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -211,8 +228,7 @@ func TestLoadEnrollSecretIsEnvOnly(t *testing.T) {
 			t.Setenv("CONFIG_PATH", path)
 			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
 			// Only the file may set it here: envconfig reads both names.
-			t.Setenv("SOLTI_AGENT_AUTH_ENROLL_SECRET", "")
-			t.Setenv("ENROLL_SECRET", "")
+			unsetEnv(t, "SOLTI_AGENT_AUTH_ENROLL_SECRET", "ENROLL_SECRET")
 			cfg, err := load(nil)
 			if err != nil {
 				t.Fatal(err)

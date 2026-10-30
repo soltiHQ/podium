@@ -108,9 +108,11 @@ The user, credential and session services enforce these inside the transaction o
 The task log stream and the event stream (see "Other") run their route's access check again every keepalive interval
 (15s), whether they wrote or not: the session is live, the user enabled and, for task logs, still holds `AgentsGet`.
 `app` builds both checks from the session service with `middleware.Recheck`. A failed check, or one that cannot be made
-(a storage error), ends the stream; `EventSource` then reconnects through authentication and gets 401 or 403. Before
-every write a stream sets its write deadline 30s ahead, so a client that stops reading is dropped, and
-`http.write_timeout` ends no healthy stream.
+(a storage error), ends the stream: within one check period of a revocation, plus at most one blocked write (up to
+30s). `EventSource` then reconnects through authentication and gets 401 or 403, or 503 if the store is unavailable.
+Before every write a stream sets its write deadline 30s ahead, so `http.write_timeout` ends no healthy stream. The
+deadline drops a client whose write blocks, that is, whose buffers are full. On a quiet stream the small keepalives can
+fit into the buffers for a long time, so a reader that stopped reading is not guaranteed to be dropped at 30s.
 
 ### Specs `/api/v1/specs`
 | Method | Path                           | Permission               |

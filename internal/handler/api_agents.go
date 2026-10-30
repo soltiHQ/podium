@@ -148,11 +148,16 @@ const sseKeepalive = ": keepalive\n\n"
 //
 // Before every write the stream sets the write deadline of its connection to
 // 2×streamKeepalive ahead: the server's write timeout does not end it, but a
-// client that stops reading is dropped. It writes a keepalive comment after
-// streamKeepalive without output and, every streamKeepalive whether it wrote
-// or not, re-checks the viewer's access with logAccess (the session, the user
-// and AgentsGet, like the route): a failed check, or one that cannot be made,
-// ends the stream, and EventSource reconnects through authentication.
+// client whose write blocks, that is, whose buffers are full, is dropped. On a
+// quiet stream small keepalives can fit into the buffers for a long time, so a
+// reader that stopped reading is not guaranteed to be dropped after
+// 2×streamKeepalive. It writes a keepalive comment after streamKeepalive
+// without output and, every streamKeepalive whether it wrote or not, re-checks
+// the viewer's access with logAccess (the session, the user and AgentsGet, like
+// the route): a failed check, or one that cannot be made, ends the stream,
+// within one streamKeepalive of a revocation plus at most one blocked write (at
+// most 2×streamKeepalive). EventSource then reconnects through authentication,
+// which answers 401 or 403, or 503 if the store is unavailable.
 //
 // Frame format: `data: <protojson-StreamTaskLogsResponse>\n\n`.
 func (a *API) AgentTaskLogsStream(w http.ResponseWriter, r *http.Request) {

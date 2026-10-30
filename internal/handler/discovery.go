@@ -249,10 +249,13 @@ func verifyAgentToken(ctx context.Context, logger zerolog.Logger, svc *agent.Ser
 
 	if token == "" {
 		// The SDK sends no token over plaintext unless told to. With a secret,
-		// agent_auth.require=false fails validation: point to the token instead.
+		// agent_auth.require=false fails validation: point to the token instead,
+		// but only for an ID that is not enrolled yet. A derived token that
+		// differs from the one an agent enrolled with locks it out, so an
+		// enrolled agent keeps its token and its token transport is what to fix.
 		msg := "agent sent no token: serve discovery over TLS so the SDK sends it, call allow_insecure_token_transport() in the SDK, or set agent_auth.require=false"
 		if svc.EnrollSecretSet() {
-			msg = "agent sent no token: give it the token podium agent-token derives for its ID, and serve discovery over TLS so the SDK sends it, or call allow_insecure_token_transport() in the SDK"
+			msg = "agent sent no token: give an agent ID that is not enrolled yet the token podium agent-token derives for it; an agent enrolled earlier must keep sending its existing token, so fix its token transport: serve discovery over TLS so the SDK sends it, or call allow_insecure_token_transport() in the SDK"
 		}
 		logger.Warn().Str("agent_id", agentID).Msg(msg)
 	}

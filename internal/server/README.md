@@ -140,8 +140,8 @@ work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s, 40s, …):
   at once. An agent's rollouts go one after another, each with its own
   `push_timeout` (15s): first the uninstalls of tasks the agent never got
   (they need no call and run even while the agent backs off), then pushes,
-  least recently attempted first, then observations, so an observation never
-  holds back a push.
+  ordered by last failure (rollouts that never failed first, then the oldest
+  failure), then observations, so an observation never holds back a push.
 - **A turn gets `push_timeout` of wall time.** Once an agent's turn in a tick
   has used `push_timeout`, it starts no more calls. The call under way
   finishes, so an agent that answers slowly, but within `push_timeout`, holds
