@@ -6,6 +6,12 @@ const (
 	defaultTickInterval = 10 * time.Second
 	defaultPushTimeout  = 15 * time.Second
 
+	// stateWriteTimeout bounds each rollout state write. The write does not
+	// inherit the push deadline, so a call that used up its budget is recorded.
+	stateWriteTimeout = 5 * time.Second
+	// maxRetryBackoff caps the wait between pushes of a failed rollout.
+	maxRetryBackoff = 5 * time.Minute
+
 	defaultName           = "sync"
 	defaultMaxRetries     = 5
 	defaultMaxConcurrency = 4
@@ -39,4 +45,14 @@ func (c Config) withDefaults() Config {
 		c.MaxConcurrency = defaultMaxConcurrency
 	}
 	return c
+}
+
+// backoff is how long a rollout that failed attempts times waits before its next
+// push: TickInterval × 2^(attempts−1), capped at maxRetryBackoff.
+func (c Config) backoff(attempts int) time.Duration {
+	wait := c.TickInterval
+	for n := 1; n < attempts && wait < maxRetryBackoff; n++ {
+		wait *= 2
+	}
+	return min(wait, maxRetryBackoff)
 }

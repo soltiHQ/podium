@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -75,7 +76,10 @@ func (r *Runner) tick(ctx context.Context) {
 	r.finalizeDeletedSpecs(ctx)
 }
 
-// reconcileRollouts picks up every actionable rollout and dispatches it by intent.
+// reconcileRollouts dispatches every due rollout by intent, one worker per agent.
+// A worker takes its agent's rollouts in order, each within its own PushTimeout,
+// and stops at the first call the agent leaves unanswered: a hung agent holds one
+// worker slot for one PushTimeout per tick.
 func (r *Runner) reconcileRollouts(ctx context.Context) {
 	items, err := storage.AllRollouts(ctx, r.store, nil)
 	if err != nil {
@@ -83,74 +87,113 @@ func (r *Runner) reconcileRollouts(ctx context.Context) {
 		return
 	}
 
+	var (
+		now     = time.Now()
+		agents  []string
+		byAgent = make(map[string][]string)
+	)
+	for _, ss := range items {
+		if ss == nil || !retryDue(ss, now, r.cfg) {
+			continue
+		}
+		if _, ok := byAgent[ss.AgentID()]; !ok {
+			agents = append(agents, ss.AgentID())
+		}
+		byAgent[ss.AgentID()] = append(byAgent[ss.AgentID()], ss.ID())
+	}
+
 	var g errgroup.Group
 	g.SetLimit(r.cfg.MaxConcurrency)
 
-	for _, ss := range items {
-		if ss == nil {
-			continue
-		}
-		if ss.Intent() != enum.RolloutIntentNoop && ss.Status() == enum.SyncStatusFailed && ss.Attempts() >= r.cfg.MaxRetries {
-			continue
-		}
+	for _, agentID := range agents {
 		if ctx.Err() != nil {
 			break
 		}
-		rolloutID := ss.ID()
+		rolloutIDs := byAgent[agentID]
 		g.Go(func() error {
-			pushCtx, cancel := context.WithTimeout(ctx, r.cfg.PushTimeout)
-			defer cancel()
-			r.reconcile(pushCtx, rolloutID)
+			r.reconcileAgent(ctx, agentID, rolloutIDs)
 			return nil
 		})
 	}
 	_ = g.Wait()
 }
 
+// reconcileAgent reconciles one agent's rollouts in order. After a call the agent
+// left unanswered, its remaining rollouts stay untouched until the next tick.
+func (r *Runner) reconcileAgent(ctx context.Context, agentID string, rolloutIDs []string) {
+	for i, rolloutID := range rolloutIDs {
+		if ctx.Err() != nil {
+			return
+		}
+		pushCtx, cancel := context.WithTimeout(ctx, r.cfg.PushTimeout)
+		answered := r.reconcile(pushCtx, rolloutID)
+		cancel()
+		if !answered {
+			r.logger.Debug().
+				Str("agent_id", agentID).
+				Str("rid", rolloutID).
+				Int("skipped", len(rolloutIDs)-i-1).
+				Msg("agent unreachable; its other rollouts wait for the next tick")
+			return
+		}
+	}
+}
+
+// retryDue reports whether a tick should reconcile the rollout. A failed rollout
+// waits backoff(attempts) after its last push; after MaxRetries attempts it waits
+// for its agent to reconnect or for a new Deploy.
+func retryDue(r *model.Rollout, now time.Time, cfg Config) bool {
+	if r.Status() != enum.SyncStatusFailed {
+		return true
+	}
+	return r.Attempts() < cfg.MaxRetries && !now.Before(r.LastPushedAt().Add(cfg.backoff(r.Attempts())))
+}
+
 // reconcile loads the rollout fresh (to pick up any changes since tick started) and dispatches by intent.
-func (r *Runner) reconcile(ctx context.Context, rolloutID string) {
+// It returns false only when a call to the agent went unanswered.
+func (r *Runner) reconcile(ctx context.Context, rolloutID string) bool {
 	ss, err := r.store.GetRollout(ctx, rolloutID)
 	if err != nil {
 		r.logger.Warn().Err(err).Str("rid", rolloutID).Msg("reconcile: load rollout failed")
-		return
+		return true
 	}
 
 	switch ss.Intent() {
 	case enum.RolloutIntentUninstall:
-		r.reconcileUninstall(ctx, ss)
+		return r.reconcileUninstall(ctx, ss)
 	case enum.RolloutIntentInstall, enum.RolloutIntentUpdate:
-		r.reconcileSubmit(ctx, ss)
+		return r.reconcileSubmit(ctx, ss)
 	case enum.RolloutIntentNoop:
-		r.observe(ctx, ss)
-		return
+		return r.observe(ctx, ss)
 	}
+	return true
 }
 
-func (r *Runner) reconcileUninstall(ctx context.Context, ss *model.Rollout) {
+func (r *Runner) reconcileUninstall(ctx context.Context, ss *model.Rollout) bool {
 	if ss.ActualTaskID() == "" {
 		if err := r.completeUninstall(ctx, ss); err != nil {
 			r.logger.Error().Err(err).Str("rid", ss.ID()).Msg("reconcile/uninstall: delete rollout failed")
-			return
+			return true
 		}
 		r.hub.Notify(event.RefreshSpecs)
-		return
+		return true
 	}
 
 	ap, ok := r.getProxy(ctx, ss)
 	if !ok {
-		return
+		return true
 	}
 
 	r.captureBeforeDelete(ctx, ss, ap)
 
 	if err := ap.DeleteTask(ctx, ss.ActualTaskID()); err != nil && !isNotFound(err) {
 		r.markFailed(ctx, ss, "delete task: "+err.Error())
-		return
+		return !unreachable(ctx, err)
 	}
 
 	if err := r.completeUninstall(ctx, ss); err != nil {
 		r.logger.Error().Err(err).Str("rid", ss.ID()).Msg("reconcile/uninstall: delete rollout failed")
-		return
+		return true
 	}
 	r.logger.Info().
 		Str("rid", ss.ID()).
@@ -158,19 +201,20 @@ func (r *Runner) reconcileUninstall(ctx context.Context, ss *model.Rollout) {
 		Str("agent_id", ss.AgentID()).
 		Msg("rollout uninstalled")
 	r.hub.Notify(event.RefreshSpecs)
+	return true
 }
 
-func (r *Runner) reconcileSubmit(ctx context.Context, ss *model.Rollout) {
+func (r *Runner) reconcileSubmit(ctx context.Context, ss *model.Rollout) bool {
 	ts, ap, protoSpec, ok := r.prepareSubmit(ctx, ss)
 	if !ok {
-		return
+		return true
 	}
 
 	wasInstalled := ss.ActualTaskID() != ""
 	newID, err := ap.ApplyTask(ctx, proxy.TaskSubmission{Spec: protoSpec})
 	if err != nil {
 		r.markFailed(ctx, ss, "apply task: "+err.Error())
-		return
+		return !unreachable(ctx, err)
 	}
 
 	r.completeSubmit(ctx, ss, ts.Generation(), newID)
@@ -185,6 +229,7 @@ func (r *Runner) reconcileSubmit(ctx context.Context, ss *model.Rollout) {
 		Str("task_id", newID).
 		Int("generation", ts.Generation()).
 		Msgf("rollout %s", verb)
+	return true
 }
 
 // prepareSubmit loads spec + agent + proxy + proto conversion.
@@ -296,9 +341,18 @@ func (r *Runner) finalizeDeletedSpecs(ctx context.Context) {
 	}
 }
 
+// writeContext gives a state write its own stateWriteTimeout budget. It keeps the
+// push context's values but not its cancellation, so the outcome of a call that
+// used up the push deadline is still written.
+func writeContext(pushCtx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(pushCtx), stateWriteTimeout)
+}
+
 // completeSubmit preserves desired-state changes made while an agent call was in flight.
 // In particular, a concurrent deletion still needs to uninstall the task just returned.
 func (r *Runner) completeSubmit(ctx context.Context, attempted *model.Rollout, generation int, taskID string) {
+	ctx, cancel := writeContext(ctx)
+	defer cancel()
 	err := r.store.WithTx(ctx, func(tx storage.Storage) error {
 		current, err := tx.GetRollout(ctx, attempted.ID())
 		if errors.Is(err, storage.ErrNotFound) {
@@ -331,6 +385,8 @@ func (r *Runner) completeSubmit(ctx context.Context, attempted *model.Rollout, g
 }
 
 func (r *Runner) completeUninstall(ctx context.Context, attempted *model.Rollout) error {
+	ctx, cancel := writeContext(ctx)
+	defer cancel()
 	return r.store.WithTx(ctx, func(tx storage.Storage) error {
 		current, err := tx.GetRollout(ctx, attempted.ID())
 		if errors.Is(err, storage.ErrNotFound) {
@@ -354,6 +410,8 @@ func (r *Runner) completeUninstall(ctx context.Context, attempted *model.Rollout
 }
 
 func (r *Runner) markFailed(ctx context.Context, attempted *model.Rollout, errMsg string) {
+	ctx, cancel := writeContext(ctx)
+	defer cancel()
 	changed := false
 	err := r.store.WithTx(ctx, func(tx storage.Storage) error {
 		current, err := tx.GetRollout(ctx, attempted.ID())
@@ -386,31 +444,53 @@ func (r *Runner) markFailed(ctx context.Context, attempted *model.Rollout, errMs
 }
 func isNotFound(err error) bool { return errkind.Classify(err) == errkind.NotFound }
 
+// unreachable reports whether a failed agent call went unanswered: the push
+// deadline passed, the HTTP request got no response, or the call timed out or
+// lost its connection. An HTTP status the agent sent back, 4xx or 5xx, is always
+// an answer. errkind.Unavailable does not count: agents answer 429, 503 and gRPC
+// resource exhausted with it, so a refused gRPC connection, which gRPC also
+// reports as Unavailable, cannot be told apart from an answer.
+func unreachable(ctx context.Context, err error) bool {
+	switch {
+	case err == nil, errors.Is(err, proxy.ErrUnexpectedStatus):
+		return false
+	case ctx.Err() != nil, errors.Is(err, proxy.ErrRequest), errkind.Classify(err) == errkind.DeadlineExceeded:
+		return true
+	}
+	// net.Error covers timeouts, context.DeadlineExceeded included, and refused
+	// or reset connections.
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
 // observe detects lost agent state after restart, without rotating terminal tasks
 // that still exist. Recovery reuses the stable manifest name and current intent.
-func (r *Runner) observe(ctx context.Context, attempted *model.Rollout) {
+// It returns false when the agent left the call unanswered.
+func (r *Runner) observe(ctx context.Context, attempted *model.Rollout) bool {
 	if attempted.ActualTaskID() == "" {
-		return
+		return true
 	}
 	ag, err := r.store.GetAgent(ctx, attempted.AgentID())
 	if err != nil {
-		return
+		return true
 	}
 	token, err := r.agentToken(ctx, ag.ID())
 	if err != nil {
-		return
+		return true
 	}
 	ap, err := r.pool.Get(ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
 	if err != nil {
-		return
+		return true
 	}
 	_, err = ap.GetTask(ctx, attempted.ActualTaskID())
 	if !isNotFound(err) {
-		return
+		return !unreachable(ctx, err)
 	}
+	writeCtx, cancel := writeContext(ctx)
+	defer cancel()
 	changed := false
-	err = r.store.WithTx(ctx, func(tx storage.Storage) error {
-		current, err := tx.GetRollout(ctx, attempted.ID())
+	err = r.store.WithTx(writeCtx, func(tx storage.Storage) error {
+		current, err := tx.GetRollout(writeCtx, attempted.ID())
 		if errors.Is(err, storage.ErrNotFound) {
 			return nil
 		}
@@ -424,7 +504,7 @@ func (r *Runner) observe(ctx context.Context, attempted *model.Rollout) {
 		current.SetIntent(enum.RolloutIntentInstall)
 		current.MarkPending(current.DesiredGeneration())
 		changed = true
-		return tx.UpsertRollout(ctx, current)
+		return tx.UpsertRollout(writeCtx, current)
 	})
 	if err != nil {
 		r.logger.Warn().Err(err).Str("rid", attempted.ID()).Msg("observe: recovery failed")
@@ -432,6 +512,7 @@ func (r *Runner) observe(ctx context.Context, attempted *model.Rollout) {
 	if changed {
 		r.hub.Notify(event.RefreshSpecs)
 	}
+	return true
 }
 
 // captureBeforeDelete records only already terminal observations. It neither

@@ -270,3 +270,20 @@ forgets the labels operators set on it: the same agent syncing again later
 comes back without them. Zero or negative values inherit the defaults shown;
 `delete_after` is also read from `SOLTI_LIFECYCLE_DELETEAFTER`. See
 `internal/server/README.md` for the states and the restart grace.
+
+## Rollout sync
+
+```yaml
+sync:
+  tick_interval: 10s
+  push_timeout: 15s    # budget of each rollout's agent calls
+  max_concurrency: 4   # agents worked on at once
+  max_retries: 5       # failed pushes before a rollout waits for its agent
+```
+
+A failed rollout is pushed again after `tick_interval` × 2^(attempts−1), at
+most 5 minutes; after `max_retries` failures it waits until its agent
+reconnects or the spec is deployed again. Each agent's rollouts go one after
+another, so an agent that does not answer holds one of the `max_concurrency`
+slots for one `push_timeout` per tick. Zero or negative values inherit the
+defaults shown. See `internal/server/README.md` for the scheduling.

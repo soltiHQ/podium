@@ -106,3 +106,28 @@ by how long they have been silent. `hb` is the heartbeat the agent reported, or
   most 10h and never beats the floor. It wins only with a `default_heartbeat`
   above 2.4h (for agents that report none), or a `delete_multiplier` above 24
   at the 1h cap.
+
+### Sync runner
+Each tick reconciles the due rollouts: install, update, uninstall, or a check
+that an installed task still exists on its agent. A rollout is due unless it
+failed. A failed rollout is pushed again only after a backoff that doubles
+with each failure:
+
+| Failed attempts   | Next push after                                                |
+|-------------------|----------------------------------------------------------------|
+| 1, 2, 3, …        | `tick_interval` × 2^(attempts−1), at most 5m: 10s, 20s, 40s, … |
+| `max_retries` (5) | never: it waits for its agent to reconnect or a new Deploy     |
+
+- **One worker per agent.** At most `max_concurrency` (4) agents are worked on
+  at once. An agent's rollouts go one after another, each with its own
+  `push_timeout` (15s).
+- **An unreachable agent costs one push timeout per tick.** A call that gets no
+  answer (the push timeout passes, the request gets no response, the connection
+  is refused or reset) ends the agent's turn: a failed push is recorded for its
+  rollout, and the agent's other rollouts wait, untouched, for the next tick. An
+  answer, whatever its status, does not end the turn. A refused gRPC connection
+  does not end it either: gRPC reports it as `Unavailable`, which agents also
+  answer with. Such calls fail fast, and each rollout records its own failure.
+- **Failures are always recorded.** State writes get their own 5s budget instead
+  of what is left of the push timeout, so a push that used up its timeout still
+  records the status, the attempt and the `sync_failed` event.
