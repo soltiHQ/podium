@@ -20,6 +20,23 @@ templ Confirm(
 	method Method,
 	variant Variant,
 ) {
+	@ConfirmWith(name, titleText, messageText, confirmLabel, action, method, variant, nil)
+}
+
+// ConfirmWith is Confirm with extra attributes on the form that sends the
+// request, for example an Alpine handler that adds a request header. They must
+// not repeat the form's own attributes. Their values are code: dynamic values
+// go through jsexpr, names and selectors are constants.
+templ ConfirmWith(
+	name string,
+	titleText string,
+	messageText string,
+	confirmLabel string,
+	action string,
+	method Method,
+	variant Variant,
+	form templ.Attributes,
+) {
 	@Modal(name) {
  <div x-data="{ submitting:false, error:'' }">
 		@Body() {
@@ -29,7 +46,7 @@ templ Confirm(
 		}
 		@Footer() {
 			@CancelButton("Cancel")
-			<form { hxMethod(method, action)... } hx-swap="none" hx-disabled-elt="find button" x-on:htmx:before-request="submitting=true;error=''" x-on:htmx:after-request="submitting=false; if($event.detail.successful) { show=false } else { try { error=JSON.parse($event.detail.xhr.responseText).message || 'Request failed' } catch { error='Request failed. You can retry.' } }">
+			<form { hxMethod(method, action)... } hx-swap="none" hx-disabled-elt="find button" x-on:htmx:before-request="submitting=true;error=''" x-on:htmx:after-request="submitting=false; if($event.detail.successful) { show=false } else { try { error=JSON.parse($event.detail.xhr.responseText).message || 'Request failed' } catch { error='Request failed. You can retry.' } }" { form... }>
 				@button.Button(confirmLabel, "submit", false, buttonVariant(variant), false, templ.Attributes{"x-bind:disabled":"submitting"})
 			</form>
 		}

@@ -244,15 +244,16 @@ func (p *httpProxyV1) request(ctx context.Context, method, target string, body [
 		_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, maxAgentResponseBytes))
 		return err
 	}
+	// %w keeps the cause visible: a deadline that cuts the body off is not a bad answer.
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAgentResponseBytes+1))
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrDecode, err)
+		return fmt.Errorf("%w: %w", ErrDecode, err)
 	}
 	if len(data) > maxAgentResponseBytes {
 		return fmt.Errorf("%w: agent response exceeds 4 MiB", ErrDecode)
 	}
 	if err = json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("%w: %v", ErrDecode, err)
+		return fmt.Errorf("%w: %w", ErrDecode, err)
 	}
 	return nil
 }

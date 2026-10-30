@@ -303,8 +303,19 @@ func (a *API) specForceDelete(w http.ResponseWriter, r *http.Request, mode httpc
 	response.NoContent(w, r)
 }
 
+// specDeploy deploys the current placement. With If-Match naming plan tokens
+// of placement previews, a placement whose plan has none of them is refused
+// with 412 and nothing is written; the HX-Trigger refreshes the page's
+// placement panel so the operator reviews the new plan. Without If-Match (or
+// with "*") the current placement is deployed unchecked, as before.
 func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
-	if err := a.specSVC.Deploy(r.Context(), id); err != nil {
+	if err := a.specSVC.Deploy(r.Context(), id, planTokensFromIfMatch(r)); err != nil {
+		if errors.Is(err, spec.ErrPlacementChanged) {
+			a.logger.Warn().Str("spec", id).Msg("spec deploy rejected: placement changed since preview")
+			htmx.Trigger(w, event.RefreshSpecs)
+			response.PreconditionFailed(w, r, mode, "Placement changed since it was previewed. Review it again.")
+			return
+		}
 		var unsupported *spec.UnsupportedTargetsError
 		if errors.As(err, &unsupported) {
 			a.logger.Warn().Str("spec", id).Strs("unsupported_agents", unsupported.Agents).Msg("spec deploy rejected")

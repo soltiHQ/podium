@@ -16,8 +16,12 @@ var _ domain.Entity[*AgentCredential] = (*AgentCredential)(nil)
 const AgentTokenMaxBytes = 1024
 
 // AgentCredential is the per-agent bearer secret the control plane learns at
-// discovery (trust-on-first-use) and reuses to authenticate outbound calls to
-// that agent. Keyed by agent ID — one credential per agent.
+// discovery and reuses to authenticate outbound calls to that agent. Keyed by
+// agent ID — one credential per agent. The first sync of an unknown agent ID
+// enrolls it: any token it presents (trust on first use), or, while an
+// enrollment secret is set, only the token derived from that secret for the ID.
+// Every later sync must present it. It outlives the agent row: deleting an
+// agent leaves its credential, and nothing resets one yet.
 //
 // The token is a raw secret. It is replicated through Raft so any replica can
 // verify inbound discovery and authenticate outbound proxy calls, but it MUST

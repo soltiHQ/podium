@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"regexp"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -82,7 +84,7 @@ func TestDeployFreshTargetsInstall(t *testing.T) {
 	svc, store := mkService(t)
 	mkSpec(t, svc, store, "sp-1", []string{"agent-a", "agent-b"})
 
-	if err := svc.Deploy(context.Background(), "sp-1"); err != nil {
+	if err := svc.Deploy(context.Background(), "sp-1", nil); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 
@@ -104,14 +106,14 @@ func TestDeploySkipsAlreadySyncedAtSameGeneration(t *testing.T) {
 	svc, store := mkService(t)
 	mkSpec(t, svc, store, "sp-1", []string{"agent-a", "agent-b"})
 
-	_ = svc.Deploy(context.Background(), "sp-1")
+	_ = svc.Deploy(context.Background(), "sp-1", nil)
 
 	rA, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-a"))
 	rA.SetActualTaskID("sub-slot-1")
 	rA.MarkSynced(1)
 	_ = store.UpsertRollout(context.Background(), rA)
 
-	if err := svc.Deploy(context.Background(), "sp-1"); err != nil {
+	if err := svc.Deploy(context.Background(), "sp-1", nil); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 	rA2, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-a"))
@@ -132,7 +134,7 @@ func TestDeployQueuesUpdateForStaleRollout(t *testing.T) {
 	svc, store := mkService(t)
 	ts := mkSpec(t, svc, store, "sp-1", []string{"agent-a"})
 
-	_ = svc.Deploy(context.Background(), "sp-1")
+	_ = svc.Deploy(context.Background(), "sp-1", nil)
 	rA, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-a"))
 	rA.SetActualTaskID("sub-slot-1")
 	rA.MarkSynced(1)
@@ -143,7 +145,7 @@ func TestDeployQueuesUpdateForStaleRollout(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	_ = svc.Deploy(context.Background(), "sp-1")
+	_ = svc.Deploy(context.Background(), "sp-1", nil)
 
 	rA2, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-a"))
 	if rA2.Intent() != enum.RolloutIntentUpdate {
@@ -158,7 +160,7 @@ func TestDeployQueuesUninstallForRemovedTarget(t *testing.T) {
 	svc, store := mkService(t)
 	ts := mkSpec(t, svc, store, "sp-1", []string{"agent-a", "agent-b"})
 
-	_ = svc.Deploy(context.Background(), "sp-1")
+	_ = svc.Deploy(context.Background(), "sp-1", nil)
 	for _, ag := range []string{"agent-a", "agent-b"} {
 		r, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", ag))
 		r.SetActualTaskID("sub-" + ag)
@@ -168,7 +170,7 @@ func TestDeployQueuesUninstallForRemovedTarget(t *testing.T) {
 
 	ts.SetTargets([]string{"agent-a"})
 	_ = svc.Upsert(context.Background(), ts, 0)
-	_ = svc.Deploy(context.Background(), "sp-1")
+	_ = svc.Deploy(context.Background(), "sp-1", nil)
 
 	rB, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-b"))
 	if rB.Intent() != enum.RolloutIntentUninstall {
@@ -195,7 +197,7 @@ func TestDeleteFastPathWithoutRollouts(t *testing.T) {
 func TestDeleteSoftPathWithRollouts(t *testing.T) {
 	svc, store := mkService(t)
 	mkSpec(t, svc, store, "sp-1", []string{"agent-a"})
-	_ = svc.Deploy(context.Background(), "sp-1")
+	_ = svc.Deploy(context.Background(), "sp-1", nil)
 
 	r, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-a"))
 	r.SetActualTaskID("sub-x")
@@ -229,7 +231,7 @@ func TestDeleteSoftPathWithRollouts(t *testing.T) {
 func TestForceDeleteDropsSpecAndRollouts(t *testing.T) {
 	svc, store := mkService(t)
 	mkSpec(t, svc, store, "sp-1", []string{"agent-a", "agent-b"})
-	_ = svc.Deploy(context.Background(), "sp-1")
+	_ = svc.Deploy(context.Background(), "sp-1", nil)
 
 	for _, ag := range []string{"agent-a", "agent-b"} {
 		r, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", ag))
@@ -273,7 +275,7 @@ func TestDeployRejectsUnknownTargets(t *testing.T) {
 	}
 	_ = store.UpsertAgent(context.Background(), real)
 
-	err = svc.Deploy(context.Background(), "sp-1")
+	err = svc.Deploy(context.Background(), "sp-1", nil)
 	if err == nil {
 		t.Fatal("Deploy must fail when a target agent is missing")
 	}
@@ -294,7 +296,7 @@ func TestDeployRejectsUnknownTargets(t *testing.T) {
 func TestDeployAndDeleteAreSerialisedPerSpec(t *testing.T) {
 	svc, store := mkService(t)
 	mkSpec(t, svc, store, "sp-1", []string{"agent-a"})
-	_ = svc.Deploy(context.Background(), "sp-1")
+	_ = svc.Deploy(context.Background(), "sp-1", nil)
 
 	r, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-a"))
 	r.SetActualTaskID("sub-x")
@@ -304,7 +306,7 @@ func TestDeployAndDeleteAreSerialisedPerSpec(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(2)
-		go func() { defer wg.Done(); _ = svc.Deploy(context.Background(), "sp-1") }()
+		go func() { defer wg.Done(); _ = svc.Deploy(context.Background(), "sp-1", nil) }()
 		go func() { defer wg.Done(); _ = svc.Delete(context.Background(), "sp-1") }()
 	}
 	wg.Wait()
@@ -387,6 +389,367 @@ func TestUpsertRejectsTombstonedSpec(t *testing.T) {
 	stored, _ := store.GetSpec(context.Background(), "sp-1")
 	if stored.Name() != "n-sp-1" {
 		t.Errorf("tombstoned spec name changed: got %q, want %q", stored.Name(), "n-sp-1")
+	}
+}
+
+// mkTokenFixture stores a spec that targets the agents labelled env=prod and
+// one such agent, agent-a, with a compatible runner.
+func mkTokenFixture(t *testing.T) (*Service, *inmemory.Store, *model.Spec) {
+	t.Helper()
+	svc, store := mkService(t)
+	ts := mkSpec(t, svc, store, "sp-token", nil)
+	ts.SetTargetLabels(map[string]string{"env": "prod"})
+	if err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
+		t.Fatal(err)
+	}
+	addMatchingAgent(t, store, "agent-a")
+	return svc, store, ts
+}
+
+// addMatchingAgent stores an agent labelled env=prod whose runner "sub" runs
+// the fixture's Subprocess workload.
+func addMatchingAgent(t *testing.T, store *inmemory.Store, id string) {
+	t.Helper()
+	a, err := model.NewAgent(id, "name-"+id, "http://"+id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.LabelAdd("env", "prod")
+	a.SetCapabilities([]model.RunnerCapability{{Name: "sub", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Subprocess"}}}})
+	if err = store.UpsertAgent(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// changeAgent stores agent id after change edits it.
+func changeAgent(t *testing.T, store *inmemory.Store, id string, change func(*model.Agent)) {
+	t.Helper()
+	a, err := store.GetAgent(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change(a)
+	if err = store.UpsertAgent(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func previewToken(t *testing.T, svc *Service, specID string) string {
+	t.Helper()
+	plan, err := svc.PreviewPlacement(context.Background(), specID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plan.Token
+}
+
+func TestPlanTokenIgnoresObservationTimes(t *testing.T) {
+	_, store, ts := mkTokenFixture(t)
+	ctx := context.Background()
+	now := time.Now()
+	changeAgent(t, store, "agent-a", func(a *model.Agent) {
+		a.SetStatus(enum.AgentStatusActive)
+		a.SetLastSeenAt(now)
+		a.SetStaleAt(now.Add(30 * time.Second))
+	})
+	before, _, err := loadPlacement(ctx, store, ts, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A later heartbeat, after the agent went overdue and inactive, observed an hour later.
+	changeAgent(t, store, "agent-a", func(a *model.Agent) {
+		a.SetStatus(enum.AgentStatusInactive)
+		a.SetLastSeenAt(now.Add(time.Minute))
+		a.SetStaleAt(now.Add(90 * time.Second))
+		a.SetUptimeSeconds(3600)
+	})
+	after, _, err := loadPlacement(ctx, store, ts, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	b, a := before.Targets[0], after.Targets[0]
+	if before.CheckedAt.Equal(after.CheckedAt) || b.LastSeenAt.Equal(a.LastSeenAt) || b.HeartbeatDueAt.Equal(a.HeartbeatDueAt) ||
+		b.HeartbeatFreshness == a.HeartbeatFreshness || b.Status == a.Status {
+		t.Fatalf("fixture did not move the observations: %+v / %+v", b, a)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(before.Token) {
+		t.Fatalf("token %q is not 16 bytes of lowercase hex", before.Token)
+	}
+	if after.Token != before.Token {
+		t.Fatalf("observations changed the token: %s → %s", before.Token, after.Token)
+	}
+}
+
+// The sync runner moves rollouts on its own between a preview and Deploy. The
+// action of a target with a rollout stays "update" whatever its sync state, so
+// a change of that state never asks for a new review.
+func TestPlanTokenIgnoresSyncProgress(t *testing.T) {
+	svc, store, ts := mkTokenFixture(t)
+	ctx := context.Background()
+	if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
+		t.Fatal(err)
+	}
+	pending := previewToken(t, svc, ts.ID())
+	for _, progress := range []func(*model.Rollout){
+		func(r *model.Rollout) { r.SetActualTaskID("task-a"); r.MarkSynced(ts.Generation()) },
+		func(r *model.Rollout) { r.MarkFailed("agent unreachable") },
+		func(r *model.Rollout) {
+			r.SetActualTaskID("")
+			r.SetIntent(enum.RolloutIntentInstall)
+			r.MarkPending(ts.Generation())
+		},
+	} {
+		r, _ := store.GetRollout(ctx, model.RolloutID(ts.ID(), "agent-a"))
+		progress(r)
+		if err := store.UpsertRollout(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+		if got := previewToken(t, svc, ts.ID()); got != pending {
+			t.Fatalf("rollout at status %s, task %q changed the token", r.Status(), r.ActualTaskID())
+		}
+	}
+}
+
+// The sync runner deletes a rollout once its uninstall completes. Only targets
+// enter the token, so that deletion never asks for a new review.
+func TestPlanTokenIgnoresCompletedUninstall(t *testing.T) {
+	svc, store, ts := mkTokenFixture(t)
+	ctx := context.Background()
+	addMatchingAgent(t, store, "agent-c")
+	if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
+		t.Fatal(err)
+	}
+	changeAgent(t, store, "agent-c", func(a *model.Agent) { a.LabelAdd("env", "dev") })
+	if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
+		t.Fatal(err)
+	}
+	r, err := store.GetRollout(ctx, model.RolloutID(ts.ID(), "agent-c"))
+	if err != nil || r.Intent() != enum.RolloutIntentUninstall {
+		t.Fatalf("fixture: agent-c rollout %v (%v), want a queued uninstall", r, err)
+	}
+
+	token := previewToken(t, svc, ts.ID())
+	if err = store.DeleteRollout(ctx, r.ID()); err != nil {
+		t.Fatal(err)
+	}
+	if got := previewToken(t, svc, ts.ID()); got != token {
+		t.Fatalf("a completed uninstall changed the token: %s → %s", token, got)
+	}
+	if err = svc.Deploy(ctx, ts.ID(), []string{token}); err != nil {
+		t.Fatalf("Deploy after a completed uninstall: %v", err)
+	}
+}
+
+func TestPlanTokenChangesWithTargets(t *testing.T) {
+	svc, store, ts := mkTokenFixture(t)
+	first := previewToken(t, svc, ts.ID())
+
+	addMatchingAgent(t, store, "agent-b")
+	joined := previewToken(t, svc, ts.ID())
+	if joined == first {
+		t.Fatal("a matching agent joined without changing the token")
+	}
+
+	// A rename bumps the version only: generation stays, so it alone cannot tell.
+	ts.SetName("renamed")
+	if err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
+		t.Fatal(err)
+	}
+	if ts.Generation() != 1 {
+		t.Fatalf("fixture: rename bumped generation to %d", ts.Generation())
+	}
+	if edited := previewToken(t, svc, ts.ID()); edited == joined {
+		t.Fatal("a spec edit did not change the token")
+	}
+}
+
+// wasmOnly is runner inventory that cannot run the fixture's Subprocess workload.
+var wasmOnly = []model.RunnerCapability{{Name: "wasm", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Wasm"}}}}
+
+// addMissingTarget adds an explicit target that discovery does not know.
+func addMissingTarget(t *testing.T, svc *Service, _ *inmemory.Store, ts *model.Spec) {
+	t.Helper()
+	ts.SetTargets([]string{"agent-x"})
+	if err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Each change moves one input of the token and leaves the others alone, so only
+// that input can change the token.
+func TestPlanTokenCoversEveryInput(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		before, change func(t *testing.T, svc *Service, store *inmemory.Store, ts *model.Spec)
+	}{
+		{name: "another agent matches instead", change: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
+			changeAgent(t, store, "agent-a", func(a *model.Agent) { a.LabelAdd("env", "dev") })
+			addMatchingAgent(t, store, "agent-b")
+		}},
+		{name: "the agent advertises another first runner", change: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
+			changeAgent(t, store, "agent-a", func(a *model.Agent) {
+				a.SetCapabilities(append([]model.RunnerCapability{{Name: "first", Workloads: a.Capabilities()[0].Workloads}}, a.Capabilities()...))
+			})
+		}},
+		{name: "another deploy created the rollout", change: func(t *testing.T, svc *Service, _ *inmemory.Store, ts *model.Spec) {
+			if err := svc.Deploy(context.Background(), ts.ID(), nil); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		// Missing and then registered without a compatible runner: only Exists moves.
+		{name: "a missing target registers", before: addMissingTarget, change: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
+			a, err := model.NewAgent("agent-x", "name-agent-x", "http://agent-x")
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.SetCapabilities(wasmOnly)
+			if err = store.UpsertAgent(context.Background(), a); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		// Unknown inventory, then a runner for another workload: only Eligible moves.
+		{name: "a target stops supporting the workload", before: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
+			changeAgent(t, store, "agent-a", func(a *model.Agent) { a.SetCapabilities(nil) })
+		}, change: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
+			changeAgent(t, store, "agent-a", func(a *model.Agent) { a.SetCapabilities(wasmOnly) })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, store, ts := mkTokenFixture(t)
+			if tc.before != nil {
+				tc.before(t, svc, store, ts)
+			}
+			before := previewToken(t, svc, ts.ID())
+			tc.change(t, svc, store, ts)
+			if after := previewToken(t, svc, ts.ID()); after == before {
+				t.Fatalf("token stayed %s", before)
+			}
+		})
+	}
+
+	t.Run("another spec with the same plan", func(t *testing.T) {
+		svc, store, ts := mkTokenFixture(t)
+		twin := mkSpec(t, svc, store, "sp-twin", nil)
+		twin.SetTargetLabels(ts.TargetLabels())
+		if err := svc.Upsert(context.Background(), twin, twin.Version()); err != nil {
+			t.Fatal(err)
+		}
+		if previewToken(t, svc, twin.ID()) == previewToken(t, svc, ts.ID()) {
+			t.Fatal("two specs share a token")
+		}
+	})
+}
+
+func TestDeployRefusesChangedPlacement(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		before, change func(t *testing.T, svc *Service, store *inmemory.Store, ts *model.Spec)
+	}{
+		{name: "a matching agent joins", change: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
+			addMatchingAgent(t, store, "agent-b")
+		}},
+		{name: "the spec is edited", change: func(t *testing.T, svc *Service, _ *inmemory.Store, ts *model.Spec) {
+			ts.SetTimeoutMs(60_000)
+			if err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		// The preview showed the deployment blocked by a missing target.
+		{name: "a missing target registers", before: addMissingTarget, change: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
+			a, err := model.NewAgent("agent-x", "name-agent-x", "http://agent-x")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = store.UpsertAgent(context.Background(), a); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, store, ts := mkTokenFixture(t)
+			ctx := context.Background()
+			// agent-a already runs the spec, so a refused Deploy also must not queue its update.
+			if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
+				t.Fatal(err)
+			}
+			r, _ := store.GetRollout(ctx, model.RolloutID(ts.ID(), "agent-a"))
+			r.SetActualTaskID("task-a")
+			r.MarkSynced(ts.Generation())
+			if err := store.UpsertRollout(ctx, r); err != nil {
+				t.Fatal(err)
+			}
+			synced, _ := store.GetRollout(ctx, r.ID())
+			if tc.before != nil {
+				tc.before(t, svc, store, ts)
+			}
+
+			token := previewToken(t, svc, ts.ID())
+			tc.change(t, svc, store, ts)
+			if err := svc.Deploy(ctx, ts.ID(), []string{token}); !errors.Is(err, ErrPlacementChanged) {
+				t.Fatalf("Deploy of a changed placement: %v, want ErrPlacementChanged", err)
+			}
+
+			rs := listRollouts(t, store, ts.ID())
+			if len(rs) != 1 {
+				t.Fatalf("refused deploy created rollouts: %d rows", len(rs))
+			}
+			if rs[0].Status() != enum.SyncStatusSynced || rs[0].Intent() != enum.RolloutIntentNoop || !rs[0].UpdatedAt().Equal(synced.UpdatedAt()) {
+				t.Fatalf("refused deploy changed the existing rollout: status %s intent %s", rs[0].Status(), rs[0].Intent())
+			}
+		})
+	}
+}
+
+func TestDeployAcceptsUnchangedPlacement(t *testing.T) {
+	svc, store, ts := mkTokenFixture(t)
+	ctx := context.Background()
+	// One plan with every action: agent-a runs an older generation (update),
+	// agent-b is new (install) and agent-c left the selector but keeps its
+	// rollout (uninstall).
+	addMatchingAgent(t, store, "agent-c")
+	if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := store.GetRollout(ctx, model.RolloutID(ts.ID(), "agent-a"))
+	r.SetActualTaskID("task-a")
+	r.MarkSynced(ts.Generation())
+	if err := store.UpsertRollout(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	ts.SetTimeoutMs(60_000)
+	if err := svc.Upsert(ctx, ts, ts.Version()); err != nil {
+		t.Fatal(err)
+	}
+	changeAgent(t, store, "agent-c", func(a *model.Agent) { a.LabelAdd("env", "dev") })
+	addMatchingAgent(t, store, "agent-b")
+
+	token := previewToken(t, svc, ts.ID())
+	// A heartbeat between preview and Deploy changes no decision.
+	changeAgent(t, store, "agent-a", func(a *model.Agent) {
+		a.SetStatus(enum.AgentStatusInactive)
+		a.SetLastSeenAt(time.Now())
+		a.SetStaleAt(time.Now().Add(-time.Second))
+	})
+	if err := svc.Deploy(ctx, ts.ID(), []string{token}); err != nil {
+		t.Fatalf("Deploy of the previewed placement: %v", err)
+	}
+
+	want := map[string]enum.RolloutIntent{
+		"agent-a": enum.RolloutIntentUpdate,
+		"agent-b": enum.RolloutIntentInstall,
+		"agent-c": enum.RolloutIntentUninstall,
+	}
+	rs := listRollouts(t, store, ts.ID())
+	if len(rs) != len(want) {
+		t.Fatalf("got %d rollouts, want %d", len(rs), len(want))
+	}
+	for _, r := range rs {
+		if r.Intent() != want[r.AgentID()] || r.Status() != enum.SyncStatusPending || r.DesiredGeneration() != ts.Generation() {
+			t.Errorf("%s: intent %s status %s gen %d, want %s pending gen %d",
+				r.AgentID(), r.Intent(), r.Status(), r.DesiredGeneration(), want[r.AgentID()], ts.Generation())
+		}
 	}
 }
 

@@ -5,6 +5,7 @@
 package config
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
 	syncrunner "github.com/soltiHQ/control-plane/internal/server/runner/sync"
+	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/service/history"
 	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
@@ -40,20 +42,54 @@ type TLSConfig struct {
 	Client tlsconf.ClientConfig `yaml:"client" envconfig:"CLIENT"`
 }
 
+// EnrollSecretEnv is the environment variable that carries
+// [AgentAuthConfig.EnrollSecret].
+const EnrollSecretEnv = envPrefix + "_AGENT_AUTH_ENROLL_SECRET"
+
+// ErrEnrollSecretTooShort indicates an enrollment secret shorter than
+// [agent.MinEnrollSecretBytes].
+var ErrEnrollSecretTooShort = errors.New("enroll secret is shorter than the minimum length")
+
+// ErrEnrollSecretNeedsRequire indicates an enrollment secret set while
+// [AgentAuthConfig.Require] is false: it would close nothing.
+var ErrEnrollSecretNeedsRequire = errors.New("enroll secret is set while agent_auth.require is false")
+
 // AgentAuthConfig controls bearer-token authentication between agents and the
 // control plane — one switch for both directions.
 //
 // When Require is true (the default), enrolled agents are authenticated: the
-// first sync of an unknown agent ID enrolls its token (trust on first use) and
-// sets the endpoint podium calls, every later sync must present that token,
-// and outbound proxy calls present it. It does not keep other hosts from
-// enrolling new agent IDs: until enrollment tokens exist, the discovery
-// listeners must be reachable only from agent networks or require client
-// certificates, and startup warns when no client CA is set. When false, no
-// token is verified inbound and none is sent outbound, and startup logs a
-// warning. Orthogonal to TLS.
+// first sync of an unknown agent ID enrolls its token and sets the endpoint
+// podium calls, every later sync must present that token, and outbound proxy
+// calls present it. By itself that does not keep other hosts from enrolling
+// new agent IDs (trust on first use). Set EnrollSecret, or require client
+// certificates (tls.server.client_ca_file), or keep the discovery listeners
+// reachable only from agent networks; startup warns when neither EnrollSecret
+// nor a client CA is set. When false, no token is verified inbound and none is
+// sent outbound, and startup logs a warning. Orthogonal to TLS.
 type AgentAuthConfig struct {
 	Require bool `yaml:"require" envconfig:"REQUIRE"`
+
+	// EnrollSecret closes enrollment (env SOLTI_AGENT_AUTH_ENROLL_SECRET): an
+	// unknown agent ID then enrolls only with the token derived from the
+	// secret for that ID, see [agent.EnrollToken]. Known agents are
+	// unaffected. It is never read from YAML, so config files stay free of
+	// it. Empty means enrollment stays trust on first use.
+	EnrollSecret string `yaml:"-" envconfig:"ENROLL_SECRET"`
+}
+
+// Validate reports an error if EnrollSecret is set but unusable: shorter than
+// [agent.MinEnrollSecretBytes], or set while Require is false. Neither error
+// shows the secret.
+func (c AgentAuthConfig) Validate() error {
+	switch {
+	case c.EnrollSecret == "":
+		return nil
+	case len(c.EnrollSecret) < agent.MinEnrollSecretBytes:
+		return fmt.Errorf("%w (min %d bytes, set %s)", ErrEnrollSecretTooShort, agent.MinEnrollSecretBytes, EnrollSecretEnv)
+	case !c.Require:
+		return fmt.Errorf("%w (set agent_auth.require to true or unset %s)", ErrEnrollSecretNeedsRequire, EnrollSecretEnv)
+	}
+	return nil
 }
 
 // HistoryConfig separates durable retention from bounded collection.
@@ -125,6 +161,9 @@ func (c Config) Validate() error {
 	}
 	if err := c.Auth.Validate(); err != nil {
 		return fmt.Errorf("config.auth: %w", err)
+	}
+	if err := c.AgentAuth.Validate(); err != nil {
+		return fmt.Errorf("config.agent_auth: %w", err)
 	}
 	if err := c.CORS.Validate(); err != nil {
 		return fmt.Errorf("config.cors: %w", err)

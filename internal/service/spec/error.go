@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -48,3 +49,10 @@ func (e *UnsupportedTargetsError) Error() string {
 	return fmt.Sprintf("deploy rejected: no compatible workload runner on agents: %s", strings.Join(e.Agents, ", "))
 }
 func (e *UnsupportedTargetsError) Unwrap() error { return storage.ErrInvalidArgument }
+
+// ErrPlacementChanged is returned by Deploy when the caller's plan token no
+// longer matches the plan recomputed inside the transaction: since the preview
+// the spec was saved, the set of targets changed, a target was registered or
+// changed eligibility or selected runner, or another deploy created rollouts.
+// Deploy writes nothing; the caller previews again.
+var ErrPlacementChanged = errors.New("placement changed since preview")

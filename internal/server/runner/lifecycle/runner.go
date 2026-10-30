@@ -25,6 +25,12 @@ type Runner struct {
 	logger zerolog.Logger
 	store  storage.Storage
 	cfg    Config
+
+	// startedAt is when this runner began watching. Silence is never counted from before it, so downtime is not held
+	// against the agents. Zero means no grace.
+	startedAt time.Time
+	// clock replaces time.Now in tests; nil means time.Now.
+	clock func() time.Time
 }
 
 // New creates a lifecycle runner.
@@ -46,12 +52,63 @@ func New(cfg Config, logger zerolog.Logger, store storage.Storage, hub *event.Hu
 		store:  store,
 		hub:    hub,
 	}
+	r.startedAt = r.now()
 	r.Runner = base.New(cfg.Name, cfg.TickInterval, leadership, logger, r.tick)
 	return r, nil
 }
 
+func (r *Runner) now() time.Time {
+	if r.clock != nil {
+		return r.clock()
+	}
+	return time.Now()
+}
+
+// action is the transition an agent is owed.
+type action uint8
+
+const (
+	actionNone action = iota
+	actionInactive
+	actionDisconnected
+	actionDelete
+)
+
+// due returns the transition the agent is owed at now. It decides from the agent, now and this runner's config and
+// start alone, so tick can ask it of a snapshot and reconcile of the re-read agent.
+func (r *Runner) due(a *model.Agent, now time.Time) action {
+	hb := a.HeartbeatInterval()
+	if hb <= 0 {
+		hb = r.cfg.DefaultHeartbeat
+	}
+	// Count the silence from the later of the last sync and this runner's start: a control plane that was down
+	// must not delete agents that had no chance to sync yet.
+	since := a.LastSeenAt()
+	if r.startedAt.After(since) {
+		since = r.startedAt
+	}
+	silence := now.Sub(since)
+	// Statuses rank active < inactive < disconnected and lifecycle never lowers one: the silence restarts at
+	// zero after a restart, and only a sync makes an agent active again.
+	switch {
+	case silence > max(r.cfg.DeleteAfter, hb*time.Duration(r.cfg.DeleteMultiplier)):
+		return actionDelete
+	case silence > hb*time.Duration(r.cfg.DisconnectMultiplier):
+		if a.Status() >= enum.AgentStatusDisconnected {
+			return actionNone
+		}
+		return actionDisconnected
+	case silence > hb*time.Duration(r.cfg.InactiveMultiplier):
+		if a.Status() >= enum.AgentStatusInactive {
+			return actionNone
+		}
+		return actionInactive
+	}
+	return actionNone
+}
+
 func (r *Runner) tick(ctx context.Context) {
-	now := time.Now()
+	now := r.now()
 	items, err := storage.AllAgents(ctx, r.store, inmemory.NewAgentFilter().StaleAtBefore(now))
 	if err != nil {
 		r.logger.Error().Err(err).Msg("tick: list agents failed")
@@ -65,6 +122,11 @@ func (r *Runner) tick(ctx context.Context) {
 		}
 		if ctx.Err() != nil {
 			break
+		}
+		// A silent agent stays in this scan until it is deleted, and every transaction rewrites the whole store:
+		// open one only for an agent with something due. A fresher state can only mean less silence.
+		if r.due(a, now) == actionNone {
+			continue
 		}
 		g.Go(func() error { r.reconcile(ctx, now, a); return nil })
 	}
@@ -83,30 +145,19 @@ func (r *Runner) reconcile(ctx context.Context, now time.Time, observed *model.A
 		if !a.LastSeenAt().Equal(observed.LastSeenAt()) {
 			return nil
 		}
-		hb := a.HeartbeatInterval()
-		if hb <= 0 {
-			hb = r.cfg.DefaultHeartbeat
-		}
-		silence := now.Sub(a.LastSeenAt())
-		switch {
-		case silence > hb*time.Duration(r.cfg.DeleteMultiplier):
+		switch r.due(a, now) {
+		case actionDelete:
 			if err = tx.DeleteAgent(ctx, a.ID()); err != nil {
 				return err
 			}
 			kind = event.AgentDeleted
-		case silence > hb*time.Duration(r.cfg.DisconnectMultiplier):
-			if a.Status() == enum.AgentStatusDisconnected {
-				return nil
-			}
+		case actionDisconnected:
 			a.MarkStatus(enum.AgentStatusDisconnected)
 			if err = tx.UpsertAgent(ctx, a); err != nil {
 				return err
 			}
 			kind = event.AgentDisconnected
-		case silence > hb*time.Duration(r.cfg.InactiveMultiplier):
-			if a.Status() == enum.AgentStatusInactive {
-				return nil
-			}
+		case actionInactive:
 			a.MarkStatus(enum.AgentStatusInactive)
 			if err = tx.UpsertAgent(ctx, a); err != nil {
 				return err

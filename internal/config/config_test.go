@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -165,6 +166,21 @@ func TestLoadRejectsMalformedCORSOrigins(t *testing.T) {
 	}
 }
 
+// unsetEnv removes the named variables for the rest of the test. envconfig
+// takes a variable that is set but empty as present and overwrites the field
+// with "", which would hide a value the YAML file had set: t.Setenv(name, "")
+// is not enough. t.Setenv comes first so that its cleanup restores the
+// original value.
+func unsetEnv(t *testing.T, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // The first administrator's password comes from the environment only: a YAML
 // file cannot carry it.
 func TestLoadBootstrapAdminPasswordIsEnvOnly(t *testing.T) {
@@ -176,6 +192,8 @@ func TestLoadBootstrapAdminPasswordIsEnvOnly(t *testing.T) {
 	}
 	t.Setenv("CONFIG_PATH", path)
 	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+	// Only the file may set it here: envconfig reads both names.
+	unsetEnv(t, bootstrap.AdminPasswordEnv, "BOOTSTRAP_ADMIN_PASSWORD")
 	cfg, err := load(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -190,5 +208,124 @@ func TestLoadBootstrapAdminPasswordIsEnvOnly(t *testing.T) {
 	}
 	if cfg.BootstrapAdminPassword != "from-the-environment" {
 		t.Fatalf("bootstrap admin password = %q, want the environment value", cfg.BootstrapAdminPassword)
+	}
+}
+
+// The enrollment secret comes from the environment only: a YAML file cannot
+// carry it, under the key it would naturally have or under the one yaml.v3
+// derives when the field has no tag.
+func TestLoadEnrollSecretIsEnvOnly(t *testing.T) {
+	secret := strings.Repeat("y", 32)
+	for _, key := range []string{
+		"enroll_secret",
+		"enrollsecret", // the key yaml.v3 derives when the field has no tag
+	} {
+		t.Run(key, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte("agent_auth:\n  "+key+": "+secret+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CONFIG_PATH", path)
+			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+			// Only the file may set it here: envconfig reads both names.
+			unsetEnv(t, "SOLTI_AGENT_AUTH_ENROLL_SECRET", "ENROLL_SECRET")
+			cfg, err := load(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.AgentAuth.EnrollSecret != "" {
+				t.Fatalf("the YAML file set the enrollment secret through agent_auth.%s", key)
+			}
+		})
+	}
+
+	t.Setenv("CONFIG_PATH", "")
+	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+	t.Setenv("SOLTI_AGENT_AUTH_ENROLL_SECRET", "from-the-environment-0123456789abcdef")
+	cfg, err := load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AgentAuth.EnrollSecret != "from-the-environment-0123456789abcdef" {
+		t.Fatal("the environment did not set the enrollment secret")
+	}
+}
+
+// A secret under 32 bytes fails configuration loading with an error that names
+// the setting and never shows the value. Unset or empty means no secret.
+func TestEnrollSecretTooShortFailsValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, secret string
+		wantErr      bool
+	}{
+		{name: "empty", secret: ""},
+		{name: "31 bytes", secret: strings.Repeat("s", 31), wantErr: true},
+		{name: "32 bytes", secret: strings.Repeat("s", 32)},
+		{name: "32 bytes in 16 characters", secret: strings.Repeat("é", 16)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CONFIG_PATH", "")
+			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+			t.Setenv("SOLTI_AGENT_AUTH_ENROLL_SECRET", tc.secret)
+			_, err := load(nil)
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrEnrollSecretTooShort) || !strings.Contains(err.Error(), "config.agent_auth") {
+				t.Fatalf("want a config.agent_auth error wrapping ErrEnrollSecretTooShort, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "SOLTI_AGENT_AUTH_ENROLL_SECRET") || strings.Contains(err.Error(), tc.secret) {
+				t.Fatalf("error %q must name the variable and not show the value", err)
+			}
+		})
+	}
+}
+
+// The secret closes enrollment only while agent auth is required. Set with
+// require false it would do nothing, so loading fails instead of letting an
+// operator believe discovery is closed.
+func TestEnrollSecretNeedsAgentAuthRequired(t *testing.T) {
+	requireOff := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(requireOff, []byte("agent_auth:\n  require: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, path, require string
+		secret, wantErr     bool
+	}{
+		{name: "required by default", secret: true},
+		{name: "required explicitly", require: "true", secret: true},
+		{name: "env turns it off", require: "false", secret: true, wantErr: true},
+		{name: "yaml turns it off", path: requireOff, secret: true, wantErr: true},
+		{name: "off without a secret", require: "false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CONFIG_PATH", tc.path)
+			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+			secret := ""
+			if tc.secret {
+				secret = strings.Repeat("s", 32)
+			}
+			t.Setenv("SOLTI_AGENT_AUTH_ENROLL_SECRET", secret)
+			if tc.require != "" {
+				t.Setenv("SOLTI_AGENT_AUTH_REQUIRE", tc.require)
+			}
+			_, err := load(nil)
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrEnrollSecretNeedsRequire) || !strings.Contains(err.Error(), "config.agent_auth") {
+				t.Fatalf("want a config.agent_auth error wrapping ErrEnrollSecretNeedsRequire, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "agent_auth.require") || strings.Contains(err.Error(), secret) {
+				t.Fatalf("error %q must name agent_auth.require and not show the value", err)
+			}
+		})
 	}
 }

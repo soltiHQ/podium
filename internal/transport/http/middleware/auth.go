@@ -143,6 +143,35 @@ func RequirePermission(perm enum.Permission) func(http.Handler) http.Handler {
 	}
 }
 
+// Recheck returns the access check Auth makes when a request starts, followed
+// by RequirePermission(perm) when perm is set, for a request that is still
+// running: the session of the identity Auth stored in its context must still
+// be live and its user enabled, with some permission and, when perm is set,
+// with perm. A long-lived stream calls it every keepalive interval and ends on
+// any error. Credentials that could not be checked, during a storage outage for
+// one, are an error too, logged like in Auth.
+func Recheck(sessionSvc *session.Service, perm enum.Permission, logger zerolog.Logger) func(*http.Request) error {
+	return func(r *http.Request) error {
+		id, ok := transportctx.Identity(r.Context())
+		if !ok {
+			return auth.ErrUnauthorized
+		}
+		current, err := sessionSvc.AuthorizeAccess(r.Context(), id)
+		switch {
+		case err == nil:
+		case rejected(err):
+			return err
+		default:
+			logCheckFailure(logger, r, err)
+			return err
+		}
+		if perm != "" && !current.HasPermission(perm) {
+			return auth.ErrUnauthorized
+		}
+		return nil
+	}
+}
+
 func extractBearer(r *http.Request) (token string, fromHeader bool) {
 	if h := r.Header.Get("Authorization"); h != "" {
 		const prefix = "Bearer "

@@ -31,7 +31,7 @@ import (
 
 const (
 	agentAuthDisabledWarning = "agent authentication disabled: any host that reaches the discovery listeners can register agents"
-	openDiscoveryWarning     = "agent authentication covers enrolled agents only: the first sync of an unknown agent ID enrolls it and sets the endpoint podium calls, so keep the discovery listeners reachable only from agent networks or set tls.server.client_ca_file"
+	openDiscoveryWarning     = "agent authentication covers enrolled agents only: the first sync of an unknown agent ID enrolls it and sets the endpoint podium calls, so set SOLTI_AGENT_AUTH_ENROLL_SECRET or tls.server.client_ca_file, or keep the discovery listeners reachable only from agent networks"
 )
 
 // discoveryWarnings returns the startup warnings about who can register
@@ -53,7 +53,8 @@ func discoveryWarnings(t *testing.T, logs []byte) []map[string]any {
 
 // Startup says who can register agents. With agent auth off, any host that
 // reaches discovery. With it on, enrolled agents must present their token, but
-// any host can still enroll a new agent ID until enrollment tokens exist.
+// any host can still enroll a new agent ID unless an enrollment secret or
+// client certificates keep it out.
 func TestNewWarnsWhoCanRegisterAgents(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -102,6 +103,44 @@ func TestOpenDiscoveryWarningSkipsClientCertificates(t *testing.T) {
 	}
 }
 
+// An enrollment secret keeps hosts without a derived token out of enrollment
+// as client certificates keep out hosts without one: with agent auth on there
+// is nothing to warn about. With agent auth off the secret does nothing, and
+// the warning says so.
+func TestOpenDiscoveryWarnSilencedBySecret(t *testing.T) {
+	secret := strings.Repeat("s", 32)
+	for _, tc := range []struct {
+		name, secret, clientCA string
+		require                bool
+		want                   string // the one warning, or "" for none
+	}{
+		{name: "neither", require: true, want: openDiscoveryWarning},
+		{name: "secret", secret: secret, require: true},
+		{name: "client CA", clientCA: "agents-ca.pem", require: true},
+		{name: "secret and client CA", secret: secret, clientCA: "agents-ca.pem", require: true},
+		{name: "secret with agent auth off", secret: secret, want: agentAuthDisabledWarning},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.AgentAuth.Require = tc.require
+			cfg.AgentAuth.EnrollSecret = tc.secret
+			cfg.TLS.Server.ClientCAFile = tc.clientCA
+			var logs bytes.Buffer
+			warnOpenDiscovery(zerolog.New(&logs), cfg)
+			warnings := discoveryWarnings(t, logs.Bytes())
+			switch {
+			case tc.want == "" && len(warnings) != 0:
+				t.Fatalf("discovery warnings %v, want none", warnings)
+			case tc.want != "" && (len(warnings) != 1 || warnings[0]["message"] != tc.want):
+				t.Fatalf("discovery warnings %v, want one: %q", warnings, tc.want)
+			}
+			if strings.Contains(logs.String(), secret) {
+				t.Fatalf("startup log shows the secret: %s", logs.String())
+			}
+		})
+	}
+}
+
 // serveDiscovery serves srv on a loopback port and returns a client of it.
 // The server sees the client as 127.0.0.1.
 func serveDiscovery(t *testing.T, srv *grpc.Server) discoverv1.DiscoverServiceClient {
@@ -121,19 +160,33 @@ func serveDiscovery(t *testing.T, srv *grpc.Server) discoverv1.DiscoverServiceCl
 }
 
 // discoveryClients syncs agents through both discovery listeners, as wired by
-// buildDiscoveryListeners from the default config, always as the client 127.0.0.1.
+// initServices and buildDiscoveryListeners from a config, always as the client
+// 127.0.0.1. agents is the service behind them.
 type discoveryClients struct {
-	http http.Handler
-	grpc discoverv1.DiscoverServiceClient
+	http   http.Handler
+	grpc   discoverv1.DiscoverServiceClient
+	agents *agent.Service
 }
 
+// newDiscoveryClients serves discovery wired from the default config.
 func newDiscoveryClients(t *testing.T) discoveryClients {
 	t.Helper()
+	return newDiscoveryClientsFor(t, config.Default())
+}
+
+// newDiscoveryClientsFor serves discovery wired from cfg the way [New] wires it.
+func newDiscoveryClientsFor(t *testing.T, cfg config.Config) discoveryClients {
+	t.Helper()
 	logger := zerolog.Nop()
+	store := inmemory.New()
+	svc, err := initServices(store, kit.New(store, cfg.Auth), cfg.History.Archive, cfg.AgentAuth, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
 	hub := event.NewHub(logger)
 	t.Cleanup(hub.Close)
-	h, srv := buildDiscoveryListeners(logger, agent.New(inmemory.New(), logger), hub, standalone.NewLeadership(), config.Default(), nil, nil)
-	return discoveryClients{http: h, grpc: serveDiscovery(t, srv)}
+	h, srv := buildDiscoveryListeners(logger, svc.agent, hub, standalone.NewLeadership(), cfg, nil, nil)
+	return discoveryClients{http: h, grpc: serveDiscovery(t, srv), agents: svc.agent}
 }
 
 func (c discoveryClients) syncHTTP(id, token string) int {
@@ -273,6 +326,49 @@ func TestDiscoveryTransportsShareTheFailureBudget(t *testing.T) {
 	}
 	if code := c.syncHTTP("agent-a", "token-agent-a"); code != http.StatusTooManyRequests {
 		t.Fatalf("HTTP after the shared budget ran out: HTTP %d, want 429", code)
+	}
+}
+
+// The enrollment secret reaches the agent service through the composition
+// root: on both listeners an unknown agent ID enrolls only with the token
+// derived from agent_auth's secret, and anything else is refused and stores
+// nothing.
+func TestDiscoveryEnrollmentUsesTheConfiguredSecret(t *testing.T) {
+	const (
+		secret = "0123456789abcdef0123456789abcdef"
+		token1 = "ee91297d059304dd88e1c5650d195795e3fa9c921c419a61aced53e41a3c0058" // HMAC-SHA256(secret, "agent-1"), hex
+		token2 = "14202fea7ea2cc313572d5d8e8c424489c954421b0f6160ce9e07d27340644fc" // the same for "agent-2"
+	)
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.AgentAuth.EnrollSecret = secret
+	c := newDiscoveryClientsFor(t, cfg)
+
+	if code := c.syncHTTP("agent-1", "made-up-token"); code != http.StatusUnauthorized {
+		t.Fatalf("HTTP enroll with a made-up token: HTTP %d, want 401", code)
+	}
+	if err := c.syncGRPC("agent-2", "made-up-token"); status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("gRPC enroll with a made-up token: %v, want Unauthenticated", err)
+	}
+	for _, id := range []string{"agent-1", "agent-2"} {
+		if token, err := c.agents.AgentToken(ctx, id); err != nil || token != "" {
+			t.Fatalf("refused agent %s enrolled a token: %q %v", id, token, err)
+		}
+		if _, err := c.agents.Get(ctx, id); !errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("refused agent %s was stored: %v", id, err)
+		}
+	}
+
+	if code := c.syncHTTP("agent-1", token1); code != http.StatusOK {
+		t.Fatalf("HTTP enroll with the derived token: HTTP %d, want 200", code)
+	}
+	if err := c.syncGRPC("agent-2", token2); err != nil {
+		t.Fatalf("gRPC enroll with the derived token: %v", err)
+	}
+	for id, want := range map[string]string{"agent-1": token1, "agent-2": token2} {
+		if token, err := c.agents.AgentToken(ctx, id); err != nil || token != want {
+			t.Fatalf("stored token of %s: %q %v, want its derived token", id, token, err)
+		}
 	}
 }
 

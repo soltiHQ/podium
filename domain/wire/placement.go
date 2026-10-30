@@ -12,7 +12,7 @@ func PlacementToREST(plan *model.PlacementPlan) restv1.SpecPlacement {
 		return restv1.SpecPlacement{}
 	}
 	out := restv1.SpecPlacement{
-		SpecID: plan.SpecID, SpecVersion: plan.SpecVersion, Generation: plan.Generation,
+		SpecID: plan.SpecID, SpecVersion: plan.SpecVersion, Generation: plan.Generation, PlanToken: plan.Token,
 		CheckedAt: plan.CheckedAt.Format(time.RFC3339Nano), DeployAllowed: plan.DeployAllowed,
 		NoTargets: plan.NoTargets, DeletionRequested: plan.DeletionRequested, BlockingReason: plan.BlockingReason,
 		Targets: make([]restv1.PlacementTarget, 0, len(plan.Targets)),

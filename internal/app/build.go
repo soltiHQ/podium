@@ -61,7 +61,9 @@ type services struct {
 	role       *role.Service
 }
 
-func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history.Config, logger zerolog.Logger) (services, error) {
+// initServices constructs the domain services. agentAuth gives the agent
+// service the enrollment secret that closes discovery to unknown agent IDs.
+func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history.Config, agentAuth config.AgentAuthConfig, logger zerolog.Logger) (services, error) {
 	historySVC, err := history.New(store, historyCfg)
 	if err != nil {
 		return services{}, err
@@ -71,7 +73,7 @@ func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history
 		access:     access.New(authModel, store, logger),
 		credential: credential.New(store, logger),
 		session:    session.New(store, logger),
-		agent:      agent.New(store, logger),
+		agent:      agent.New(store, logger, agent.WithEnrollSecret(agentAuth.EnrollSecret)),
 		spec:       spec.New(store, logger),
 		role:       role.New(store, logger),
 		user:       user.New(store, logger),
@@ -205,17 +207,18 @@ func waitForLeader(ctx context.Context, l cluster.Leadership) bool {
 // login limiter. Cross-origin browser mutations are refused before any route.
 func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership, resolver *clientip.Resolver) (http.Handler, *loghub.Hub) {
 	var (
-		secure        = cookieSecure(cfg.Auth.CookieSecure, resolver)
-		logHub        = buildLogHub(logger, svc.agent, proxyPool, cfg.Streams)
-		streamLimit   = middleware.NewStreamLimiter(cfg.Streams.MaxPerIP, resolver)
-		apiHandler    = handler.NewAPI(logger, svc.user, svc.access, svc.session, svc.credential, svc.agent, svc.spec, svc.history, proxyPool, eventHub, logHub, streamLimit)
-		authMW        = middleware.Auth(authModel.Verifier, authModel.Session, secure, logger)
-		optAuthMW     = middleware.OptionalAuth(authModel.Verifier, authModel.Session, secure, logger)
-		uiHandler     = handler.NewUI(logger, svc.access, svc.spec, eventHub, resolver, secure)
-		staticHandler = handler.NewStatic(logger)
-		logMW         = middleware.Logger(logger)
-		ridMW         = middleware.RequestID()
-		mux           = http.NewServeMux()
+		secure                 = cookieSecure(cfg.Auth.CookieSecure, resolver)
+		logHub                 = buildLogHub(logger, svc.agent, proxyPool, cfg.Streams)
+		streamLimit            = middleware.NewStreamLimiter(cfg.Streams.MaxPerIP, resolver)
+		logAccess, eventAccess = streamChecks(authModel, logger)
+		apiHandler             = handler.NewAPI(logger, svc.user, svc.access, svc.session, svc.credential, svc.agent, svc.spec, svc.history, proxyPool, eventHub, logHub, streamLimit, logAccess)
+		authMW                 = middleware.Auth(authModel.Verifier, authModel.Session, secure, logger)
+		optAuthMW              = middleware.OptionalAuth(authModel.Verifier, authModel.Session, secure, logger)
+		uiHandler              = handler.NewUI(logger, svc.access, svc.spec, eventHub, resolver, secure)
+		staticHandler          = handler.NewStatic(logger)
+		logMW                  = middleware.Logger(logger)
+		ridMW                  = middleware.RequestID()
+		mux                    = http.NewServeMux()
 
 		permMW = route.PermMW(func(p enum.Permission) route.BaseMW {
 			return middleware.RequirePermission(p)
@@ -225,7 +228,7 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 	uiHandler.Routes(mux, authMW, optAuthMW, permMW)
 	staticHandler.Routes(mux)
 
-	route.HandleFunc(mux, routepath.ApiEventStream, eventHub.SSEHandler(), ridMW, logMW, authMW, middleware.StreamLimit(streamLimit))
+	route.HandleFunc(mux, routepath.ApiEventStream, eventHub.SSEHandler(eventAccess), ridMW, logMW, authMW, middleware.StreamLimit(streamLimit))
 
 	var h http.Handler = mux
 	h = middleware.CrossOrigin(cfg.CORS, logger)(h)
@@ -237,6 +240,14 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 	h = middleware.CORS(cfg.CORS)(h)
 	h = middleware.Recovery(logger)(h)
 	return h, logHub
+}
+
+// streamChecks returns the access re-checks of the two long-lived streams, built
+// on the session service Auth uses: the task log stream needs AgentsGet, like
+// its route; the event stream needs authentication only, like its route. Each
+// stream runs its check every keepalive interval and ends when it fails.
+func streamChecks(authModel *kit.Auth, logger zerolog.Logger) (logs, events func(*http.Request) error) {
+	return middleware.Recheck(authModel.Session, enum.AgentsGet, logger), middleware.Recheck(authModel.Session, "", logger)
 }
 
 // cookieSecure decides whether the auth and device cookies of a response carry
@@ -252,17 +263,18 @@ func cookieSecure(mode string, resolver *clientip.Resolver) func(*http.Request) 
 // warnOpenDiscovery logs who can register agents through the discovery
 // listeners. agent_auth.require authenticates enrolled agents only: the first
 // sync of an unknown agent ID enrolls its token and sets the endpoint podium
-// calls. Until enrollment tokens exist, only the network or client
-// certificates (tls.server.client_ca_file) keep other hosts out.
+// calls. Besides the network, only an enrollment secret
+// (SOLTI_AGENT_AUTH_ENROLL_SECRET) or client certificates
+// (tls.server.client_ca_file) keep other hosts out of enrollment.
 func warnOpenDiscovery(logger zerolog.Logger, cfg config.Config) {
 	switch {
 	case !cfg.AgentAuth.Require:
 		logger.Warn().Msg("agent authentication disabled: any host that reaches the discovery listeners can register agents")
-	case cfg.TLS.Server.ClientCAFile == "":
+	case cfg.AgentAuth.EnrollSecret == "" && cfg.TLS.Server.ClientCAFile == "":
 		logger.Warn().
 			Str("http_discovery_addr", cfg.HTTPDiscovery.Addr).
 			Str("grpc_addr", cfg.GRPC.Addr).
-			Msg("agent authentication covers enrolled agents only: the first sync of an unknown agent ID enrolls it and sets the endpoint podium calls, so keep the discovery listeners reachable only from agent networks or set tls.server.client_ca_file")
+			Msg("agent authentication covers enrolled agents only: the first sync of an unknown agent ID enrolls it and sets the endpoint podium calls, so set SOLTI_AGENT_AUTH_ENROLL_SECRET or tls.server.client_ca_file, or keep the discovery listeners reachable only from agent networks")
 	}
 }
 

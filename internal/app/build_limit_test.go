@@ -34,7 +34,7 @@ func mainHandlerOver(t *testing.T, cfg config.Config, store storage.Storage, log
 	t.Helper()
 	cfg.Auth.JWTSecret = mainHandlerSecret
 	authModel := kit.New(store, cfg.Auth)
-	svc, err := initServices(store, authModel, cfg.History.Archive, logger)
+	svc, err := initServices(store, authModel, cfg.History.Archive, cfg.AgentAuth, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -66,7 +66,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 	}
 
 	authModel := kit.New(store, cfg.Auth)
-	svc, err := initServices(store, authModel, cfg.History.Archive, logger)
+	svc, err := initServices(store, authModel, cfg.History.Archive, cfg.AgentAuth, logger)
 	if err != nil {
 		closeOnError(raftShutdown, eventHub)
 		return nil, err

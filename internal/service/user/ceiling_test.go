@@ -5,9 +5,11 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/rs/zerolog"
+	"github.com/soltiHQ/control-plane/domain"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
@@ -63,6 +65,38 @@ func stored(t *testing.T, st storage.Storage, id string) *model.User {
 		t.Fatalf("user %s: %v", id, err)
 	}
 	return u
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// commitBeforeTx is a store whose first transaction is preceded by change,
+// committed on its own: another request that lands after this request was
+// authorized and before its transaction starts.
+type commitBeforeTx struct {
+	storage.Storage
+	change func(storage.Storage)
+	once   sync.Once
+}
+
+func (s *commitBeforeTx) WithTx(ctx context.Context, fn func(tx storage.Storage) error) error {
+	s.once.Do(func() { s.change(s.Storage) })
+	return s.Storage.WithTx(ctx, fn)
+}
+
+// racing returns a service over st whose first transaction is preceded by
+// the committed edit of user id.
+func racing(t *testing.T, st storage.Storage, id string, edit func(*model.User)) *Service {
+	t.Helper()
+	return New(&commitBeforeTx{Storage: st, change: func(inner storage.Storage) {
+		u, err := inner.GetUser(context.Background(), id)
+		if err == nil {
+			edit(u)
+			err = inner.UpsertUser(context.Background(), u)
+		}
+		if err != nil {
+			t.Errorf("concurrent edit of %s: %v", id, err)
+		}
+	}}, zerolog.Nop())
 }
 
 func TestEffectivePermissionsUnionsRolesAndDirectGrants(t *testing.T) {
@@ -170,43 +204,227 @@ func TestUpdateEnforcesTargetAndGrantCeilings(t *testing.T) {
 	ctx := context.Background()
 	editor := actor("editor", userEditorPerms...)
 
-	admin := stored(t, st, "user-admin")
-	admin.SetName("Renamed")
-	if err := svc.Update(ctx, editor, admin); !errors.Is(err, ErrPermissionCeiling) {
+	if _, err := svc.Update(ctx, editor, "user-admin", UpdatePatch{Name: ptr("Renamed")}); !errors.Is(err, ErrPermissionCeiling) {
 		t.Fatalf("rename an Admin = %v, want ErrPermissionCeiling", err)
 	}
 	if got := stored(t, st, "user-admin").Name(); got != "" {
 		t.Fatalf("refused update renamed the Admin to %q", got)
 	}
 
-	promoted := stored(t, st, "reader")
-	promoted.SetRoleIDs([]string{enum.RoleAdminID})
-	if err := svc.Update(ctx, editor, promoted); !errors.Is(err, ErrPermissionCeiling) {
+	if _, err := svc.Update(ctx, editor, "reader", UpdatePatch{RoleIDs: ptr([]string{enum.RoleAdminID})}); !errors.Is(err, ErrPermissionCeiling) {
 		t.Fatalf("promote to Admin = %v, want ErrPermissionCeiling", err)
 	}
 	if got := stored(t, st, "reader").RoleIDsAll(); !slices.Equal(got, []string{enum.RoleUserReaderID}) {
 		t.Fatalf("refused promotion changed roles to %v", got)
 	}
 
-	renamed := stored(t, st, "reader")
-	renamed.SetName("Reader")
-	renamed.SetRoleIDs([]string{enum.RoleUserEditorID})
-	if err := svc.Update(ctx, editor, renamed); err != nil {
+	within := UpdatePatch{Name: ptr("Reader"), RoleIDs: ptr([]string{enum.RoleUserEditorID})}
+	if _, err := svc.Update(ctx, editor, "reader", within); err != nil {
 		t.Fatalf("update within the ceiling = %v", err)
 	}
 	if got := stored(t, st, "reader"); got.Name() != "Reader" || !slices.Equal(got.RoleIDsAll(), []string{enum.RoleUserEditorID}) {
 		t.Fatalf("update within the ceiling not saved: %q %v", got.Name(), got.RoleIDsAll())
 	}
 
-	missing, err := model.NewUser("missing", "missing")
-	if err != nil {
-		t.Fatal(err)
+	if _, err := svc.Update(ctx, nil, "reader", UpdatePatch{}); !errors.Is(err, ErrPermissionCeiling) {
+		t.Fatalf("Update without an actor = %v, want ErrPermissionCeiling", err)
 	}
-	if err := svc.Update(ctx, editor, missing); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := svc.Update(ctx, editor, "missing", UpdatePatch{Name: ptr("Missing")}); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("Update of an unknown user = %v, want ErrNotFound", err)
 	}
 	if _, err := st.GetUser(ctx, "missing"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("Update created a user: %v", err)
+	}
+	if _, err := svc.Update(ctx, editor, "", UpdatePatch{}); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("Update without an ID = %v, want ErrInvalidArgument", err)
+	}
+}
+
+// The target ceiling looks at the user as stored, not at the result of the
+// patch: an actor may not lower a user who holds more than the actor does.
+func TestUpdateCannotDemoteAboveTheTargetCeiling(t *testing.T) {
+	svc, st := fixture(t, map[string][]string{
+		"first-admin":  {enum.RoleAdminID},
+		"second-admin": {enum.RoleAdminID},
+	})
+	patch := UpdatePatch{RoleIDs: ptr([]string{enum.RoleUserReaderID})}
+	if _, err := svc.Update(context.Background(), actor("editor", userEditorPerms...), "first-admin", patch); !errors.Is(err, ErrPermissionCeiling) {
+		t.Fatalf("demote an Admin = %v, want ErrPermissionCeiling", err)
+	}
+	if got := stored(t, st, "first-admin").RoleIDsAll(); !slices.Equal(got, []string{enum.RoleAdminID}) {
+		t.Fatalf("refused demotion changed the roles to %v", got)
+	}
+}
+
+// profile is what an update may change, as stored.
+type profile struct {
+	subject, name, email string
+	roles                []string
+	perms                []enum.Permission
+	disabled             bool
+}
+
+func profileOf(u *model.User) profile {
+	return profile{u.Subject(), u.Name(), u.Email(), u.RoleIDsAll(), u.PermissionsAll(), u.Disabled()}
+}
+
+func (p profile) same(q profile) bool {
+	return p.subject == q.subject && p.name == q.name && p.email == q.email && p.disabled == q.disabled &&
+		slices.Equal(p.roles, q.roles) && slices.Equal(p.perms, q.perms)
+}
+
+// Update applies its patch to the user its transaction reads, so a change that
+// commits after the request was authorized and before the transaction starts
+// survives an update that does not set it.
+func TestConcurrentDisableSurvivesUpdate(t *testing.T) {
+	_, st := fixture(t, map[string][]string{"reader": {enum.RoleUserReaderID}})
+	svc := racing(t, st, "reader", (*model.User).Disable)
+
+	got, err := svc.Update(context.Background(), actor("editor", userEditorPerms...), "reader", UpdatePatch{Name: ptr("New Name")})
+	if err != nil {
+		t.Fatalf("name-only update = %v", err)
+	}
+	for _, u := range []*model.User{got, stored(t, st, "reader")} {
+		if !u.Disabled() || u.Name() != "New Name" {
+			t.Fatalf("update after a concurrent disable: disabled %v name %q, want true %q", u.Disabled(), u.Name(), "New Name")
+		}
+	}
+}
+
+// The member saves their own profile while an admin takes away a role or a
+// direct permission: the profile save must not give it back.
+func TestConcurrentDemotionSurvivesProfileSave(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		edit  func(*model.User)
+		roles []string
+		perms []enum.Permission
+	}{
+		{
+			name:  "role removed",
+			edit:  func(u *model.User) { u.RoleDelete(enum.RoleUserEditorID) },
+			roles: []string{enum.RoleUserReaderID},
+			perms: []enum.Permission{enum.UsersEdit},
+		},
+		{
+			name:  "direct permission removed",
+			edit:  func(u *model.User) { u.PermissionDelete(enum.UsersEdit) },
+			roles: []string{enum.RoleUserReaderID, enum.RoleUserEditorID},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, st := fixture(t, map[string][]string{"member": {enum.RoleUserReaderID, enum.RoleUserEditorID}})
+			member := stored(t, st, "member")
+			member.SetPermissions([]string{string(enum.UsersEdit)})
+			if err := st.UpsertUser(context.Background(), member); err != nil {
+				t.Fatal(err)
+			}
+			svc := racing(t, st, "member", tc.edit)
+
+			if _, err := svc.Update(context.Background(), actor("member", userEditorPerms...), "member", UpdatePatch{Name: ptr("Me")}); err != nil {
+				t.Fatalf("profile save = %v", err)
+			}
+			got := stored(t, st, "member")
+			if got.Name() != "Me" || !slices.Equal(got.RoleIDsAll(), tc.roles) || !slices.Equal(got.PermissionsAll(), tc.perms) {
+				t.Fatalf("after the profile save: name %q roles %v permissions %v, want Me %v %v",
+					got.Name(), got.RoleIDsAll(), got.PermissionsAll(), tc.roles, tc.perms)
+			}
+		})
+	}
+}
+
+func TestUpdatePatchKeepsUnsetFields(t *testing.T) {
+	editor := actor("editor", userEditorPerms...)
+	base := profile{
+		subject:  "target",
+		name:     "Target",
+		email:    "target@example.com",
+		roles:    []string{enum.RoleUserReaderID},
+		perms:    []enum.Permission{enum.UsersEdit},
+		disabled: true,
+	}
+	for _, tc := range []struct {
+		name  string
+		patch UpdatePatch
+		want  func(*profile)
+	}{
+		{"nothing", UpdatePatch{}, func(*profile) {}},
+		{"name", UpdatePatch{Name: ptr("Renamed")}, func(p *profile) { p.name = "Renamed" }},
+		{"empty name", UpdatePatch{Name: ptr("")}, func(p *profile) { p.name = "" }},
+		{"email", UpdatePatch{Email: ptr("other@example.com")}, func(p *profile) { p.email = "other@example.com" }},
+		{"empty email", UpdatePatch{Email: ptr("")}, func(p *profile) { p.email = "" }},
+		{"subject", UpdatePatch{Subject: ptr("renamed")}, func(p *profile) { p.subject = "renamed" }},
+		{"roles", UpdatePatch{RoleIDs: ptr([]string{enum.RoleUserEditorID})}, func(p *profile) { p.roles = []string{enum.RoleUserEditorID} }},
+		{"no roles", UpdatePatch{RoleIDs: ptr([]string(nil))}, func(p *profile) { p.roles = nil }},
+		{"permissions", UpdatePatch{Permissions: ptr([]string{string(enum.UsersGet)})}, func(p *profile) { p.perms = []enum.Permission{enum.UsersGet} }},
+		{"no permissions", UpdatePatch{Permissions: ptr([]string{})}, func(p *profile) { p.perms = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, st := fixture(t, map[string][]string{"target": base.roles})
+			u := stored(t, st, "target")
+			u.SetName(base.name)
+			u.SetEmail(base.email)
+			u.SetPermissions([]string{string(enum.UsersEdit)})
+			u.Disable()
+			if err := st.UpsertUser(context.Background(), u); err != nil {
+				t.Fatal(err)
+			}
+
+			want := base
+			tc.want(&want)
+			got, err := svc.Update(context.Background(), editor, "target", tc.patch)
+			if err != nil {
+				t.Fatalf("Update = %v", err)
+			}
+			if p := profileOf(got); !p.same(want) {
+				t.Fatalf("returned %+v, want %+v", p, want)
+			}
+			if p := profileOf(stored(t, st, "target")); !p.same(want) {
+				t.Fatalf("stored %+v, want %+v", p, want)
+			}
+		})
+	}
+}
+
+// Update runs the checks and the normalization Create and Upsert run, on the
+// user the patch makes.
+func TestUpdateNormalizesAndChecksTheMergedUser(t *testing.T) {
+	ctx := context.Background()
+	editor := actor("editor", userEditorPerms...)
+	for _, tc := range []struct {
+		name  string
+		patch UpdatePatch
+		want  error
+	}{
+		{"blank subject", UpdatePatch{Subject: ptr("  ")}, domain.ErrInvalidSubject},
+		{"invalid email", UpdatePatch{Email: ptr("not-an-email")}, domain.ErrInvalidEmail},
+		{"subject of another user", UpdatePatch{Subject: ptr("other")}, storage.ErrAlreadyExists},
+		{"subject of another user in another case", UpdatePatch{Subject: ptr(" OTHER ")}, storage.ErrAlreadyExists},
+		{"unknown role", UpdatePatch{RoleIDs: ptr([]string{"no-such-role"})}, storage.ErrNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, st := fixture(t, map[string][]string{"target": {enum.RoleUserReaderID}, "other": nil})
+			before := profileOf(stored(t, st, "target"))
+			if _, err := svc.Update(ctx, editor, "target", tc.patch); !errors.Is(err, tc.want) {
+				t.Fatalf("Update = %v, want %v", err, tc.want)
+			}
+			if after := profileOf(stored(t, st, "target")); !after.same(before) {
+				t.Fatalf("refused update changed the user to %+v, was %+v", after, before)
+			}
+		})
+	}
+
+	svc, st := fixture(t, map[string][]string{"target": {enum.RoleUserReaderID}})
+	patch := UpdatePatch{Subject: ptr("  Mixed.CASE "), Name: ptr("  Padded  "), Email: ptr(" Mixed@Example.COM ")}
+	if _, err := svc.Update(ctx, editor, "target", patch); err != nil {
+		t.Fatalf("Update = %v", err)
+	}
+	want := profile{subject: "mixed.case", name: "Padded", email: "mixed@example.com", roles: []string{enum.RoleUserReaderID}}
+	if p := profileOf(stored(t, st, "target")); !p.same(want) {
+		t.Fatalf("stored %+v, want %+v", p, want)
+	}
+	if _, err := svc.Update(ctx, editor, "target", UpdatePatch{Subject: ptr("MIXED.case")}); err != nil {
+		t.Fatalf("keeping the own subject in another case = %v, want nil", err)
 	}
 }
 
@@ -255,30 +473,27 @@ func TestLastAdminKeepsEveryPermission(t *testing.T) {
 	admin := actor("admin", enum.All...)
 	for _, tc := range []struct {
 		name string
-		run  func(*Service, storage.Storage) error
+		run  func(*Service) error
 	}{
-		{"disable", func(svc *Service, _ storage.Storage) error {
+		{"disable", func(svc *Service) error {
 			_, err := svc.SetDisabled(ctx, admin, "admin", true)
 			return err
 		}},
-		{"delete", func(svc *Service, _ storage.Storage) error { return svc.Delete(ctx, admin, "admin") }},
-		{"demote", func(svc *Service, st storage.Storage) error {
-			u := stored(t, st, "admin")
-			u.SetRoleIDs([]string{enum.RoleReaderID})
-			return svc.Update(ctx, admin, u)
+		{"delete", func(svc *Service) error { return svc.Delete(ctx, admin, "admin") }},
+		{"demote", func(svc *Service) error {
+			_, err := svc.Update(ctx, admin, "admin", UpdatePatch{RoleIDs: ptr([]string{enum.RoleReaderID})})
+			return err
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, st := fixture(t, map[string][]string{"admin": {enum.RoleAdminID}, "reader": {enum.RoleReaderID}})
-			if err := tc.run(svc, st); !errors.Is(err, ErrLastAdmin) {
+			if err := tc.run(svc); !errors.Is(err, ErrLastAdmin) {
 				t.Fatalf("last Admin: %v, want ErrLastAdmin", err)
 			}
 			if u := stored(t, st, "admin"); u.Disabled() || !slices.Equal(u.RoleIDsAll(), []string{enum.RoleAdminID}) {
 				t.Fatalf("last Admin changed: disabled %v roles %v", u.Disabled(), u.RoleIDsAll())
 			}
-			renamed := stored(t, st, "admin")
-			renamed.SetName("Still Admin")
-			if err := svc.Update(ctx, admin, renamed); err != nil {
+			if _, err := svc.Update(ctx, admin, "admin", UpdatePatch{Name: ptr("Still Admin")}); err != nil {
 				t.Fatalf("renaming the last Admin = %v, want nil", err)
 			}
 
@@ -292,7 +507,7 @@ func TestLastAdminKeepsEveryPermission(t *testing.T) {
 			if err := st.UpsertUser(ctx, off); err != nil {
 				t.Fatal(err)
 			}
-			if err := tc.run(svc, st); !errors.Is(err, ErrLastAdmin) {
+			if err := tc.run(svc); !errors.Is(err, ErrLastAdmin) {
 				t.Fatalf("with only a disabled Admin left: %v, want ErrLastAdmin", err)
 			}
 
@@ -309,7 +524,7 @@ func TestLastAdminKeepsEveryPermission(t *testing.T) {
 			if err := st.UpsertUser(ctx, direct); err != nil {
 				t.Fatal(err)
 			}
-			if err := tc.run(svc, st); err != nil {
+			if err := tc.run(svc); err != nil {
 				t.Fatalf("with another enabled Admin: %v", err)
 			}
 		})
@@ -334,9 +549,8 @@ func TestUnknownPermissionsNeitherBlockNorGrant(t *testing.T) {
 	if err := CheckTarget(ctx, st, editor, stored(t, st, "legacy")); err != nil {
 		t.Fatalf("manage a user with an unknown permission = %v, want nil", err)
 	}
-	cleaned := stored(t, st, "legacy")
-	cleaned.SetPermissions([]string{string(enum.UsersGet)})
-	if err := svc.Update(ctx, editor, cleaned); err != nil {
+	cleaned := UpdatePatch{Permissions: ptr([]string{string(enum.UsersGet)})}
+	if _, err := svc.Update(ctx, editor, "legacy", cleaned); err != nil {
 		t.Fatalf("remove the unknown permission = %v, want nil", err)
 	}
 	if got := stored(t, st, "legacy").PermissionsAll(); !slices.Equal(got, []enum.Permission{enum.UsersGet}) {

@@ -122,6 +122,28 @@ func Conflict(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, m
 	})
 }
 
+// PreconditionFailed renders a 412 response with a custom message.
+func PreconditionFailed(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, msg string) {
+	transportctx.SetError(r.Context(), msg)
+	httpctx.Responder(r.Context()).Respond(w, r, http.StatusPreconditionFailed, &responder.View{
+		Data: errorBody{
+			Code:      http.StatusPreconditionFailed,
+			Message:   msg,
+			RequestID: transportctx.TryRequestID(r.Context()),
+		},
+		Component: func(m httpctx.RenderMode) templ.Component {
+			if m == httpctx.RenderPage {
+				return renderErrorPage(
+					http.StatusPreconditionFailed,
+					"Precondition failed",
+					msg,
+				)
+			}
+			return nil
+		}(mode),
+	})
+}
+
 // NotAllowed renders a 405 response.
 func NotAllowed(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
 	transportctx.SetError(r.Context(), "not allowed")

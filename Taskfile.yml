@@ -14,6 +14,12 @@ includes:
     # v0.1.0
     taskfile: https://raw.githubusercontent.com/mr-chelyshkin/tasks/3aa8c569bdc71b41fa50fc33f66e2ef1317813ed/taskfiles/markdown/Taskfile.yml
     internal: true
+  node:
+    # v0.1.0
+    taskfile: https://raw.githubusercontent.com/mr-chelyshkin/tasks/3aa8c569bdc71b41fa50fc33f66e2ef1317813ed/taskfiles/node/Taskfile.yml
+    internal: true
+    vars:
+      NODE_VERSION: '22.23.1'
 
 vars:
   name: podium
@@ -67,6 +73,22 @@ tasks:
       - task: markdown:fmt/fix
         vars:
           FMT_ARGS: '{{.markdown_paths}}'
+
+  ci/ui/test:
+    desc: Run the UI node tests (ui/tests/*.test.cjs)
+    preconditions:
+      # Node runs 0 tests and exits 0 for a glob that matches nothing, so a
+      # moved or renamed test file would pass CI without a test.
+      - sh: 'for f in ui/tests/*.test.cjs; do test -f "$f" && exit 0; done; exit 1'
+        msg: 'no UI tests: ui/tests/*.test.cjs matches no file'
+    cmds:
+      - task: node:exec
+        vars:
+          # The container command runs without a shell, so Node expands the
+          # quoted glob itself. The directory form (node --test ui/tests/)
+          # fails on Node 22.
+          CMD: node --test 'ui/tests/*.test.cjs'
+          CONTAINER_MOUNT_MODE: ro
 
   ci/golang/fmt:
     desc: Run Go fmt check

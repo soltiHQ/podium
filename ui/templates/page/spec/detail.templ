@@ -5,6 +5,8 @@ import (
 	"github.com/soltiHQ/control-plane/internal/uikit/policy"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 	"github.com/soltiHQ/control-plane/ui/templates/layout"
+
+	contentSpec "github.com/soltiHQ/control-plane/ui/templates/content/spec"
 )
 
 // Detail renders the saved spec, optional placement preview and rollout state.
@@ -19,7 +21,7 @@ func detailPanels(specID string, p policy.SpecDetail) []layout.SectionPanel {
 	}}
 	if p.CanViewPlacement {
 		panels = append(panels, layout.SectionPanel{
-			ID: "spec-placement", URL: routepath.ApiSpecPlacement(specID),
+			ID: contentSpec.PlacementPanelID, URL: routepath.ApiSpecPlacement(specID),
 			Trigger: "load, " + htmx.PollMulti(htmx.GetSpecDetailRefresh(), htmx.SpecUpdate, htmx.AgentUpdate), PreloadMsg: "Calculating placement...",
 		})
 	}

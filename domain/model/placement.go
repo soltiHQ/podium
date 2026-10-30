@@ -5,9 +5,14 @@ import "time"
 // PlacementPlan describes the saved desired state against observed discovery
 // inventory. It is an advisory plan, not a reservation or execution result.
 type PlacementPlan struct {
-	SpecID            string
-	SpecVersion       int
-	Generation        int
+	SpecID      string
+	SpecVersion int
+	Generation  int
+	// Token identifies what Deploy would do with this plan: the spec revision
+	// and, per target, whether it exists and is eligible, its selected runner
+	// and the action on its rollout. CheckedAt and heartbeat observations do not
+	// change it. Deploy refuses a token that no longer matches.
+	Token             string
 	CheckedAt         time.Time
 	DeployAllowed     bool
 	NoTargets         bool

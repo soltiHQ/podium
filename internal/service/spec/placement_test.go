@@ -48,7 +48,7 @@ func TestPlacementMatchesDeployBeyond500AndUsesAllLabelUnion(t *testing.T) {
 	if got, _ := svc.RolloutsBySpec(ctx, ts.ID()); len(got) != 0 {
 		t.Fatal("preview mutated desired rollouts")
 	}
-	if err := svc.Deploy(ctx, ts.ID()); err != nil {
+	if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
 		t.Fatal(err)
 	}
 	rollouts, _ := svc.RolloutsBySpec(ctx, ts.ID())
@@ -111,7 +111,7 @@ func TestPlacementUnknownInventoryAcceptedAndKnownIncompatibleBlocksAll(t *testi
 	if err != nil || !plan.DeployAllowed || !plan.Targets[0].Eligible || plan.Targets[0].InventoryKnown || plan.Targets[0].EligibilityReason != "inventory_unknown" {
 		t.Fatalf("missing inventory falsely rejected or claims runner: %+v %v", plan, err)
 	}
-	if err := svc.Deploy(ctx, ts.ID()); err != nil {
+	if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := svc.RolloutsBySpec(ctx, ts.ID())
@@ -129,7 +129,7 @@ func TestPlacementUnknownInventoryAcceptedAndKnownIncompatibleBlocksAll(t *testi
 		t.Fatalf("incompatible inventory not blocked: %+v %v", plan, err)
 	}
 	var unsupported *UnsupportedTargetsError
-	if err := svc.Deploy(ctx, ts.ID()); !errors.As(err, &unsupported) {
+	if err := svc.Deploy(ctx, ts.ID(), nil); !errors.As(err, &unsupported) {
 		t.Fatalf("preview/deploy admission drift: %v", err)
 	}
 	after, _ := svc.RolloutsBySpec(ctx, ts.ID())
@@ -145,7 +145,7 @@ func TestPlacementUnknownInventoryAcceptedAndKnownIncompatibleBlocksAll(t *testi
 		t.Fatalf("unknown agent omitted/accepted: %+v %v", plan, err)
 	}
 	var missing *UnknownTargetsError
-	if err := svc.Deploy(ctx, ts.ID()); !errors.As(err, &missing) {
+	if err := svc.Deploy(ctx, ts.ID(), nil); !errors.As(err, &missing) {
 		t.Fatalf("unknown admission drift: %v", err)
 	}
 }
@@ -167,7 +167,7 @@ func TestPlacementReevaluatesMetadataAndEmptyTargetsDrain(t *testing.T) {
 	if err != nil || len(first.Targets) != 1 {
 		t.Fatalf("initial match: %+v %v", first, err)
 	}
-	if err := svc.Deploy(ctx, ts.ID()); err != nil {
+	if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
 		t.Fatal(err)
 	}
 	a.LabelAdd("env", "dev")
@@ -178,7 +178,7 @@ func TestPlacementReevaluatesMetadataAndEmptyTargetsDrain(t *testing.T) {
 	if err != nil || !second.DeployAllowed || !second.NoTargets || len(second.Targets) != 0 {
 		t.Fatalf("preview cached stale inventory: %+v %v", second, err)
 	}
-	if err := svc.Deploy(ctx, ts.ID()); err != nil {
+	if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
 		t.Fatal(err)
 	}
 	rollouts, _ := svc.RolloutsBySpec(ctx, ts.ID())

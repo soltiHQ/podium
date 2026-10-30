@@ -14,6 +14,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
+	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
 )
@@ -41,6 +42,7 @@ type fakeProxy struct {
 	listCalls    int
 	onApply      func()
 	onDelete     func()
+	onGet        func()
 	getErr       error
 }
 
@@ -82,6 +84,9 @@ func (f *fakeProxy) DeleteTask(ctx context.Context, id string) error {
 
 func (f *fakeProxy) GetTask(ctx context.Context, id string) (*proxyv1.GetTaskResponse, error) {
 	f.gets = append(f.gets, id)
+	if f.onGet != nil {
+		f.onGet()
+	}
 	return &proxyv1.GetTaskResponse{}, f.getErr
 }
 
@@ -96,9 +101,16 @@ func (f *fakeProxy) StreamTaskLogs(ctx context.Context, _ string) (<-chan *taskv
 	return ch, nil
 }
 
-type fakePool struct{ ap *fakeProxy }
+// fakePool hands out ap, or the proxy agents maps to the agent's endpoint.
+type fakePool struct {
+	ap     *fakeProxy
+	agents map[string]proxy.AgentProxy
+}
 
-func (p *fakePool) Get(_ string, _ enum.EndpointType, _ enum.APIVersion, _ string) (proxy.AgentProxy, error) {
+func (p *fakePool) Get(endpoint string, _ enum.EndpointType, _ enum.APIVersion, _ string) (proxy.AgentProxy, error) {
+	if ap, ok := p.agents[endpoint]; ok {
+		return ap, nil
+	}
 	return p.ap, nil
 }
 
@@ -118,7 +130,7 @@ func newFakeRunner(t *testing.T, fp *fakeProxy) (*Runner, *inmemory.Store, *even
 	return r, store, hub
 }
 
-func seedSpecAndAgent(t *testing.T, store *inmemory.Store, specID, agentID string) *model.Spec {
+func seedSpecAndAgent(t *testing.T, store storage.Storage, specID, agentID string) *model.Spec {
 	t.Helper()
 	ts, err := model.NewSpec(specID, "n", "slot-"+specID)
 	if err != nil {
@@ -132,7 +144,7 @@ func seedSpecAndAgent(t *testing.T, store *inmemory.Store, specID, agentID strin
 	ag, err := model.NewAgentFrom(model.AgentParams{
 		ID:           agentID,
 		Name:         "a-" + agentID,
-		Endpoint:     "http://agent",
+		Endpoint:     "http://" + agentID,
 		EndpointType: 2, // proto enum for HTTP
 		APIVersion:   1,
 	})

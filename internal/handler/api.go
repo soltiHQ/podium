@@ -56,11 +56,13 @@ type API struct {
 	hub           *event.Hub
 	logHub        *loghub.Hub
 	streamLimit   *middleware.StreamLimiter
+	logAccess     func(*http.Request) error
 
 	logger zerolog.Logger
 }
 
-// NewAPI creates a new API handler.
+// NewAPI creates a new API handler. logAccess re-checks, for a task log stream
+// that is still open, the access its route required (see AgentTaskLogsStream).
 func NewAPI(
 	logger zerolog.Logger,
 	userSVC *user.Service,
@@ -74,6 +76,7 @@ func NewAPI(
 	hub *event.Hub,
 	logHub *loghub.Hub,
 	streamLimit *middleware.StreamLimiter,
+	logAccess func(*http.Request) error,
 ) *API {
 	if accessSVC == nil {
 		panic(service.ErrNilService)
@@ -108,6 +111,9 @@ func NewAPI(
 	if streamLimit == nil {
 		panic("handler.NewAPI: nil stream limiter")
 	}
+	if logAccess == nil {
+		panic("handler.NewAPI: nil log stream access check")
+	}
 	return &API{
 		logger: logger.With().Str("handler", "api").Logger(),
 
@@ -122,6 +128,7 @@ func NewAPI(
 		hub:           hub,
 		logHub:        logHub,
 		streamLimit:   streamLimit,
+		logAccess:     logAccess,
 	}
 }
 

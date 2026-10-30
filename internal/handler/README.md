@@ -72,6 +72,13 @@ cross-origin browser mutations with 403 (see `internal/config`, "Browser session
 | POST   | `/api/v1/users/{id}/enable`   | `UsersEdit`                                              |
 | POST   | `/api/v1/users/{id}/password` | `UsersEdit`; 12 to 72 characters, else 400               |
 
+`PUT /api/v1/users/{id}` is a patch applied inside the transaction. A non-empty `subject`, `name` or `email` and a
+present `role_ids` or `permissions` list (`[]` clears it) replace the stored value; everything else stays as the
+transaction reads it. Fields the request does not set keep a change committed meanwhile, and `disabled` always does
+(see disable and enable). A present `role_ids` or `permissions` list overwrites the stored set, and the UI form for
+editing another user always sends both, so a stale form can still revert a concurrent role or permission change
+(known residual).
+
 ### Sessions `/api/v1/session`
 | Method | Path                          | Permission  |
 |--------|-------------------------------|-------------|
@@ -98,6 +105,15 @@ The user, credential and session services enforce these inside the transaction o
 | GET    | `/api/v1/agents/{id}/tasks/{taskID}/logs/stream` | `AgentsGet`  |
 | GET    | `/api/v1/history`                                | `AgentsGet`  |
 
+The task log stream and the event stream (see "Other") run their route's access check again every keepalive interval
+(15s), whether they wrote or not: the session is live, the user enabled and, for task logs, still holds `AgentsGet`.
+`app` builds both checks from the session service with `middleware.Recheck`. A failed check, or one that cannot be made
+(a storage error), ends the stream: within one check period of a revocation, plus at most one blocked write (up to
+30s). `EventSource` then reconnects through authentication and gets 401 or 403, or 503 if the store is unavailable.
+Before every write a stream sets its write deadline 30s ahead, so `http.write_timeout` ends no healthy stream. The
+deadline drops a client whose write blocks, that is, whose buffers are full. On a quiet stream the small keepalives can
+fit into the buffers for a long time, so a reader that stopped reading is not guaranteed to be dropped at 30s.
+
 ### Specs `/api/v1/specs`
 | Method | Path                           | Permission               |
 |--------|--------------------------------|--------------------------|
@@ -110,6 +126,24 @@ The user, credential and session services enforce these inside the transaction o
 | POST   | `/api/v1/specs/{id}/deploy`    | `SpecsDeploy`            |
 | GET    | `/api/v1/specs/{id}/sync`      | `SpecsGet`               |
 | GET    | `/api/v1/specs/{id}/placement` | `SpecsGet` + `AgentsGet` |
+
+The placement answers its plan token twice: as `plan_token` and as `ETag: "<token>"`. The token is the lowercase hex
+of the first 16 bytes of SHA-256 over the spec ID, version and generation and, sorted by agent ID, each target's ID,
+whether it exists in discovery and is eligible, the runner Deploy would use and the action on its rollout: `install`
+(no rollout yet) or `update` (the rollout exists; Deploy brings it to the current generation). Agents that keep only
+a rollout to uninstall are not part of it: an agent that leaves the targets already changes it. It is computed, never
+stored, and leaves out `checked_at`, heartbeat observations and the sync state of rollouts (status, task, observed
+generation), so neither a heartbeat nor a sync changes it. Nor does a completed uninstall, for an agent that is no
+longer targeted. An agent targeted again before its uninstall completes (its labels restored, say) is an `update`
+step until the uninstall drops its rollout, then an `install` step: that completion changes the token, one 412. A spec
+save changes it, through the version, even when generation stays, and so does another deploy that created rollouts.
+
+Deploy takes the token as `If-Match`, read as RFC 9110 lists over every `If-Match` header: strong entity tags, each
+with or without its quotes. When the plan recomputed in the deploy transaction has a token that no listed strong tag
+names, Deploy writes nothing and answers 412 `Placement changed since it was previewed. Review it again.`. A weak tag
+never matches, and a blank `If-Match`, or one of empty list elements only, names no plan and gets the same answer.
+Only without `If-Match`, or with `*` anywhere in it, Deploy deploys the current placement unchecked, as before, so API
+clients that never preview keep working.
 
 ### Dashboard `/api/v1/dashboard`
 | Method | Path                       | Permission                                                            |
@@ -142,14 +176,21 @@ Every event kind maps to a subject (`event.SubjectOf`):
 Both parse the agent heartbeat payload, call `model.NewAgentFrom`, then `agentSVC.Upsert`.
 
 With agent auth required, the first sync of an unknown agent ID enrolls the token it presents (trust on first use) and
-sets the endpoint podium calls; every later sync of that ID must present the same token. Until enrollment tokens exist,
-only the network or client certificates keep other hosts from enrolling new IDs (see `internal/config`, "Agent
-authentication"). A token over 1024 bytes (`model.AgentTokenMaxBytes`) is refused first, with HTTP 400
+sets the endpoint podium calls; every later sync of that ID must present the same token. With an enrollment secret
+(`SOLTI_AGENT_AUTH_ENROLL_SECRET`, held by the agent service as `agent.WithEnrollSecret`), the first sync enrolls only
+the token derived for that ID (`agent.EnrollToken`, printed by `podium agent-token`): any other token is an
+`ErrEnrollRefused`, an `ErrUnauthenticated` like a wrong one, so 401 / `Unauthenticated`, nothing stored, one failure for
+the limiter, and a WARN with the agent ID and the client IP, never the token. Known IDs
+are checked against their stored token, secret or not. Without a secret, only the network or client certificates keep
+other hosts from enrolling new IDs (see `internal/config`, "Agent authentication"). A token over 1024 bytes
+(`model.AgentTokenMaxBytes`) is refused first, with HTTP 400
 `Agent token is too long.` / gRPC `InvalidArgument`, and counts as no failure; `VerifyOrEnrollToken` never enrolls one
 either, while stored credentials load whatever their length. Then each sync reserves an attempt on
 the pair (client IP, agent ID) before its token check (`verifyAgentToken`), so checks in flight count like failures; a
 missing or wrong token turns the attempt into a failure, any other outcome releases it. A missing token is also logged
-at WARN with the agent ID and the ways out. Both transports share one limiter, so failures over HTTP count toward gRPC
+at WARN with the agent ID and the ways out; with an enrollment secret they name `podium agent-token`, not
+`agent_auth.require=false`. Only attempts the limiter admits log, so each WARN comes at most `auth.rate_attempts` times
+per `auth.rate_window` for a pair. Both transports share one limiter, so failures over HTTP count toward gRPC
 and back. `auth.rate_attempts` failures block that pair for `auth.rate_window`: HTTP answers 429, gRPC `ResourceExhausted`.
 There is no per-IP limit, so agents behind one egress IP (NAT, Kubernetes) never block each other.
 HTTP takes the client IP from `trusted_proxies`; gRPC uses the peer address.

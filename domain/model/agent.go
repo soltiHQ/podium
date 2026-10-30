@@ -199,6 +199,14 @@ func (a *Agent) MarkStatus(s enum.AgentStatus) {
 	a.updatedAt = time.Now()
 }
 
+// ReconnectedSince reports whether this row of the agent shows a reconnect
+// since an earlier row that had status and uptimeSeconds: the agent is active
+// after that row was not, or its uptime went down because it restarted. Only a
+// sync makes an agent active, so the first clause means it synced again.
+func (a *Agent) ReconnectedSince(status enum.AgentStatus, uptimeSeconds int64) bool {
+	return (status != enum.AgentStatusActive && a.status == enum.AgentStatusActive) || a.uptimeSeconds < uptimeSeconds
+}
+
 // SetStatus restores the agent's status WITHOUT bumping UpdatedAt.
 func (a *Agent) SetStatus(s enum.AgentStatus) {
 	a.status = s

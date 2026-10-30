@@ -51,16 +51,18 @@ Env equivalents: `SOLTI_TLS_SERVER_CERT_FILE`, `SOLTI_TLS_CLIENT_CA_FILE`, etc.
 `agent_auth.require` defaults to `true`. It authenticates enrolled agents: a
 sync for an agent ID that has a token, but without that token, gets HTTP 401 /
 gRPC `Unauthenticated`, and outbound calls to the agent present the stored
-token. It does not keep other hosts out: the first sync of an unknown agent ID
-enrolls the token it presents (trust on first use) and sets the endpoint
-podium will call. Until enrollment tokens exist (a later phase), the discovery
-listeners (`http_discovery.addr`, default `:8082`, and `grpc.addr`, default
-`:50051`) must be reachable only from agent networks, or must require client
-certificates (`tls.server.client_ca_file`). Without a client CA, startup logs
-one WARN line, with the two listen addresses: `agent authentication covers
-enrolled agents only: the first sync of an unknown agent ID enrolls it and sets
-the endpoint podium calls, so keep the discovery listeners reachable only from
-agent networks or set tls.server.client_ca_file`.
+token. By itself it does not keep other hosts out: the first sync of an unknown
+agent ID enrolls the token it presents (trust on first use) and sets the
+endpoint podium will call. Close enrollment with an enrollment secret (see
+"Enrollment secret" below) or with client certificates
+(`tls.server.client_ca_file`), or keep the discovery listeners
+(`http_discovery.addr`, default `:8082`, and `grpc.addr`, default `:50051`)
+reachable only from agent networks. With neither a secret nor a client CA,
+startup logs one WARN line, with the two listen addresses: `agent
+authentication covers enrolled agents only: the first sync of an unknown agent
+ID enrolls it and sets the endpoint podium calls, so set
+SOLTI_AGENT_AUTH_ENROLL_SECRET or tls.server.client_ca_file, or keep the
+discovery listeners reachable only from agent networks`.
 
 With `require: true`, a token longer than 1024 bytes is refused before any
 check, with HTTP 400 `Agent token is too long.` / gRPC `InvalidArgument`, and
@@ -74,9 +76,11 @@ SDK agents send their token only over TLS unless the agent explicitly allows
 insecure token transport (`allow_insecure_token_transport()`). With `require:
 true`, a sync without a token is refused like a wrong one and logged at WARN
 with the agent ID and the three ways out: TLS, so the SDK sends its token; the
-SDK's insecure-token option; or `agent_auth.require: false`. The discovery
-limiter bounds these lines to `auth.rate_attempts` per `auth.rate_window` for
-each client IP and agent ID.
+SDK's insecure-token option; or `agent_auth.require: false`. With an
+enrollment secret set, the line names `podium agent-token` instead of
+`agent_auth.require: false`, which fails validation next to a secret. The
+discovery limiter bounds these lines to `auth.rate_attempts` per
+`auth.rate_window` for each client IP and agent ID.
 
 ```yaml
 agent_auth:
@@ -86,6 +90,60 @@ agent_auth:
 `require: false` turns off both directions: no token is checked and none is
 sent. Startup then logs one WARN line: `agent authentication disabled: any host
 that reaches the discovery listeners can register agents`.
+
+### Enrollment secret
+
+`SOLTI_AGENT_AUTH_ENROLL_SECRET` closes enrollment. It is env-only: the field
+has no YAML key, so a config file cannot carry it. It needs 32 bytes at least
+and is used as is, without trimming; an empty value counts as unset. A shorter
+one fails configuration loading with an error that names the variable and not
+the value. So does setting it while `agent_auth.require` is `false`, where it
+would close nothing.
+
+With the secret set, the first sync of an unknown agent ID enrolls only if its
+bearer token is the lowercase hex of HMAC-SHA256 of the agent ID under the
+secret (64 characters). Any other token, a missing one included, is refused
+like a wrong one: HTTP 401 / gRPC `Unauthenticated`, nothing is enrolled, and
+it counts as a failure of the discovery limiter (see "Rate limiting"). A wrong
+token is also logged at WARN with the agent ID and the client IP, never the
+token, bounded by the discovery limiter like the WARN for a missing token. A
+token over 1024 bytes still gets the 400 above. Agents that are already enrolled are
+unaffected: their stored token is compared as before, so the secret revokes
+nobody, and changing or removing it leaves them enrolled. No API resets a
+stored credential yet. In raft mode each replica reads its own environment:
+give every replica the same secret.
+
+To provision an agent, derive its token on a host that has the secret, then
+give the token to the agent as its bearer token. The agent must run with the
+same ID:
+
+```sh
+export SOLTI_AGENT_AUTH_ENROLL_SECRET=...   # the value podium runs with
+podium agent-token agent-1                   # prints the token and a newline
+```
+
+In the agent, pass it to the SDK with `with_token(Token::new(token)?)`, or
+load it with `Token::from_env(...)`. Podium then presents the same token on its
+calls to that agent. The SDK still sends it over TLS only, unless the agent
+opts in with `allow_insecure_token_transport()`. Agents never see the secret,
+only their own token: a leaked token lets nobody enroll another ID.
+
+Derive a token only for an agent ID that is not enrolled yet. An enrolled agent
+is checked against the token it enrolled with, so re-provisioning it with a
+derived token that differs (it enrolled before the secret was set, or under
+another secret) locks it out: every sync it makes gets 401, and no API resets a
+stored credential. That includes an agent that lifecycle deleted: deletion
+drops the agent row but keeps its credential, so the ID stays enrolled.
+Instead, keep the agent's existing token, or, if that token is lost, run the
+agent under a new agent ID and derive the token for that one.
+
+`podium agent-token <agent-id>` must come first among the arguments. It checks
+the ID like discovery does (1 to 128 bytes of `[A-Za-z0-9._-]`) and reads the
+secret from the environment only. It never prints the secret, and exits non-zero
+with one short line when the secret is missing or shorter than 32 bytes, or the
+ID is invalid. It needs no configuration file. A bare `-h` or `--help` prints
+the usage and exits 0; for an agent ID that starts with `-`, put `--` before
+it: `podium agent-token -- -h`.
 
 ## Client IPs and trusted proxies
 
@@ -157,7 +215,11 @@ cors:
 Each entry is an exact `scheme://host[:port]`, without a path; anything else
 fails configuration loading. A listed origin may also send mutations past the
 cross-origin check. `"*"` lets any origin read through CORS, but trusts none
-with a mutation, and cannot be combined with `allow_credentials`.
+with a mutation, and cannot be combined with `allow_credentials`. By default a
+preflight allows the request headers `Authorization`, `Content-Type`,
+`X-Request-Id` and `If-Match`, and responses expose `X-Request-Id` and `ETag`,
+so a client of another origin can read a placement's `ETag` and send it back as
+`If-Match` on Deploy. `allow_headers` and `expose_headers` replace these lists.
 
 ## Rate limiting
 
@@ -247,3 +309,56 @@ Zero values inherit owning-package defaults; negative values and collector count
 above their supported bounds fail configuration loading. `max_bytes` measures
 conservative retained-record payload, not database/RSS size. Captures are best
 effort and bound each task buffer to 8 MiB in addition to page/time limits.
+
+## Agent lifecycle
+
+```yaml
+lifecycle:
+  tick_interval: 10s
+  default_heartbeat: 30s    # for agents that report none
+  inactive_multiplier: 2    # silence over 2 × heartbeat: inactive
+  disconnect_multiplier: 5  # over 5 × heartbeat: disconnected
+  delete_multiplier: 10     # deleted past the larger of 10 × heartbeat ...
+  delete_after: 24h         # ... and this
+  max_concurrency: 4
+```
+
+`delete_after` is a floor: an agent is deleted once its silence exceeds the
+larger of `delete_after` and `delete_multiplier` × its heartbeat, and never
+sooner. Silence counts from the later of the agent's last sync and the control
+plane's start, so after a restart every agent that has not synced yet gets the
+full thresholds to sync again before its status changes. Zero or negative
+values inherit the defaults shown; `delete_after` is also read from
+`SOLTI_LIFECYCLE_DELETEAFTER`. See `internal/server/README.md` for the states
+and the restart grace.
+
+Deleting an agent drops its row and the labels operators set on it. Its
+rollouts and its credential stay: until the agent syncs again, its pushes fail
+with `agent not found` until `max_retries`, and its synced rollouts are
+skipped. When it syncs again, with its stored token, it comes back without
+labels, so the next Deploy of a spec that targets it by labels turns its
+rollout into an uninstall unless the labels are restored first.
+
+## Rollout sync
+
+```yaml
+sync:
+  tick_interval: 10s
+  push_timeout: 15s    # budget of each agent call, and of an agent's turn per tick
+  max_concurrency: 4   # agents worked on at once
+  max_retries: 5       # failed pushes before a rollout waits for its agent
+```
+
+A failed rollout is pushed again after `tick_interval` × 2^(attempts−1), at
+most 5 minutes; after `max_retries` failures it waits until its agent
+reconnects or the spec is deployed again. An agent that leaves a call
+unanswered holds one of the `max_concurrency` slots for one `push_timeout`,
+then gets no call until its own backoff passes: the same schedule, counted in
+unanswered calls and kept in memory. The backoff ends sooner when the agent row
+shows a reconnect: the agent active again after it was inactive or
+disconnected, or with a lower uptime. An agent that stays active keeps it. Each
+agent's turn in a tick starts calls for one `push_timeout` of wall time at
+most; what is left waits for the next tick, so an agent that answers slowly
+holds a tick for about one `push_timeout`, not one per rollout. Zero or
+negative values inherit the defaults shown. See `internal/server/README.md`
+for the scheduling.

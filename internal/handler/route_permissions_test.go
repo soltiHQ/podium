@@ -104,12 +104,12 @@ func newAPIFixtureOver(t *testing.T, wrap func(storage.Storage) storage.Storage)
 		credential.New(st, logger),
 		agent.New(st, logger),
 		spec.New(st, logger),
-		archive, pool, hub, logs, streams,
+		archive, pool, hub, logs, streams, allowAccess,
 	)
 	mux := http.NewServeMux()
 	api.Routes(mux, requireIdentity, nil)
 	// app.buildMainHandler registers the event stream next to the API routes.
-	route.HandleFunc(mux, routepath.ApiEventStream, hub.SSEHandler(), requireIdentity, middleware.StreamLimit(streams))
+	route.HandleFunc(mux, routepath.ApiEventStream, hub.SSEHandler(allowAccess), requireIdentity, middleware.StreamLimit(streams))
 	return &apiFixture{store: store, hub: hub, mux: mux}
 }
 

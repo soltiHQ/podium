@@ -122,7 +122,7 @@ templ Detail(ts restv1.RolloutSpec, p policy.SpecDetail) {
 	</div>
 
 	if p.CanDeploy {
-		@modal.Confirm(
+		@modal.ConfirmWith(
 			"deploy-spec",
 			"Deploy spec",
 			"Deploy "+ts.Name+" to all targets? This will create rollouts for every matched agent.",
@@ -130,6 +130,7 @@ templ Detail(ts restv1.RolloutSpec, p policy.SpecDetail) {
 			routepath.ApiSpecDeploy(ts.ID),
 			modal.MethodPost,
 			modal.VariantDefault,
+			deployConfirmForm(),
 		)
 	}
 

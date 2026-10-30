@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -124,21 +125,22 @@ func TestUserEditorCannotResetAdminPassword(t *testing.T) {
 // so every mutation of an Admin exceeds its ceiling.
 func TestTargetCeilingCoversEveryUserMutation(t *testing.T) {
 	ctx := context.Background()
-	for _, tc := range []struct{ method, target, body string }{
-		{http.MethodPut, "/api/v1/users/admin", `{"name":"Renamed"}`},
-		{http.MethodPost, "/api/v1/users/admin/disable", ""},
-		{http.MethodPost, "/api/v1/users/admin/enable", ""},
-		{http.MethodDelete, "/api/v1/users/admin", ""},
-		{http.MethodPost, "/api/v1/users/admin/password", `{"password":"chosen-by-the-actor"}`},
-		{http.MethodPost, "/api/v1/session/admin-session/revoke", ""},
+	for _, tc := range []struct{ name, method, target, body string }{
+		{"rename", http.MethodPut, "/api/v1/users/admin", `{"name":"Renamed"}`},
+		{"demote", http.MethodPut, "/api/v1/users/admin", `{"role_ids":["` + enum.RoleUserReaderID + `"]}`},
+		{"disable", http.MethodPost, "/api/v1/users/admin/disable", ""},
+		{"enable", http.MethodPost, "/api/v1/users/admin/enable", ""},
+		{"delete", http.MethodDelete, "/api/v1/users/admin", ""},
+		{"set password", http.MethodPost, "/api/v1/users/admin/password", `{"password":"chosen-by-the-actor"}`},
+		{"revoke session", http.MethodPost, "/api/v1/session/admin-session/revoke", ""},
 	} {
-		t.Run(tc.method+" "+tc.target, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			f := newAPIFixture(t)
 			f.user(t, "admin", enum.RoleAdminID)
 			f.session(t, "admin-session", "admin")
 			actor := f.user(t, "user-manager", enum.RoleUserAdminID)
 			if w := f.do(tc.method, tc.target, tc.body, actor); w.Code != http.StatusForbidden {
-				t.Fatalf("%d %s, want 403", w.Code, w.Body.String())
+				t.Fatalf("%s %s: %d %s, want 403", tc.method, tc.target, w.Code, w.Body.String())
 			}
 			admin, err := f.store.GetUser(ctx, "admin")
 			if err != nil {
@@ -320,22 +322,30 @@ func TestUnknownPermissionInputIsBadRequest(t *testing.T) {
 	}
 }
 
-// deleteOnRead is a store whose user reads outside a transaction delete the
-// user they return, as a delete that commits right after the read would.
-type deleteOnRead struct{ storage.Storage }
-
-func (s deleteOnRead) GetUser(ctx context.Context, id string) (*model.User, error) {
-	u, err := s.Storage.GetUser(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	return u, s.DeleteUser(ctx, id)
+// commitBeforeTx is a store whose first transaction is preceded by change,
+// committed on its own: another request that lands after this request was
+// authorized and before its transaction starts.
+type commitBeforeTx struct {
+	storage.Storage
+	change func(storage.Storage)
+	once   sync.Once
 }
 
-// An update that read the user before a delete committed finds it gone in its
-// transaction: 404, as for any update of a missing user, not 503.
+func (s *commitBeforeTx) WithTx(ctx context.Context, fn func(tx storage.Storage) error) error {
+	s.once.Do(func() { s.change(s.Storage) })
+	return s.Storage.WithTx(ctx, fn)
+}
+
+// An update whose user is deleted before its transaction reads it finds the
+// user gone: 404, as for any update of a missing user, not 503.
 func TestUserUpdateRacingDeleteIsNotFound(t *testing.T) {
-	f := newAPIFixtureOver(t, func(s storage.Storage) storage.Storage { return deleteOnRead{s} })
+	f := newAPIFixtureOver(t, func(s storage.Storage) storage.Storage {
+		return &commitBeforeTx{Storage: s, change: func(inner storage.Storage) {
+			if err := inner.DeleteUser(context.Background(), "reader"); err != nil {
+				t.Errorf("concurrent delete: %v", err)
+			}
+		}}
+	})
 	admin := f.user(t, "admin", enum.RoleAdminID)
 	f.user(t, "reader", enum.RoleUserReaderID)
 	if w := f.do(http.MethodPut, "/api/v1/users/reader", `{"name":"Reader"}`, admin); w.Code != http.StatusNotFound {
@@ -343,6 +353,126 @@ func TestUserUpdateRacingDeleteIsNotFound(t *testing.T) {
 	}
 	if _, err := f.store.GetUser(context.Background(), "reader"); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("the update brought the deleted user back: %v", err)
+	}
+}
+
+// The member saves their profile while an admin disables them or takes away a
+// role: only the profile fields change, the admin's change stays.
+func TestUserProfileSaveKeepsConcurrentChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*model.User)
+		kept func(*model.User) bool
+	}{
+		{
+			name: "disable",
+			edit: (*model.User).Disable,
+			kept: (*model.User).Disabled,
+		},
+		{
+			name: "role removed",
+			edit: func(u *model.User) { u.RoleDelete(enum.RoleUserEditorID) },
+			kept: func(u *model.User) bool { return !u.RoleHas(enum.RoleUserEditorID) },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAPIFixtureOver(t, func(s storage.Storage) storage.Storage {
+				return &commitBeforeTx{Storage: s, change: func(inner storage.Storage) {
+					u, err := inner.GetUser(context.Background(), "member")
+					if err == nil {
+						tc.edit(u)
+						err = inner.UpsertUser(context.Background(), u)
+					}
+					if err != nil {
+						t.Errorf("concurrent change: %v", err)
+					}
+				}}
+			})
+			member := f.user(t, "member", enum.RoleUserReaderID, enum.RoleUserEditorID)
+			if w := f.do(http.MethodPut, "/api/v1/users/member", `{"name":"New Name"}`, member); w.Code != http.StatusNoContent {
+				t.Fatalf("profile save: %d %s, want 204", w.Code, w.Body.String())
+			}
+			u, err := f.store.GetUser(context.Background(), "member")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if u.Name() != "New Name" || !tc.kept(u) {
+				t.Fatalf("after the profile save: name %q disabled %v roles %v, want the new name and the concurrent change",
+					u.Name(), u.Disabled(), u.RoleIDsAll())
+			}
+		})
+	}
+}
+
+// PUT sets what the body names and keeps the rest as stored: an empty string
+// and a missing list name nothing, an empty list clears, and disabled belongs
+// to the disable and enable routes.
+func TestUserUpdateAppliesOnlyWhatTheBodySets(t *testing.T) {
+	type profile struct {
+		subject, name, email string
+		roles                []string
+		perms                []enum.Permission
+		disabled             bool
+	}
+	base := profile{
+		subject: "target",
+		name:    "target",
+		email:   "target@example.com",
+		roles:   []string{enum.RoleUserReaderID},
+		perms:   []enum.Permission{enum.AgentsGet},
+	}
+	for _, tc := range []struct {
+		name   string
+		body   string
+		status int
+		want   func(*profile)
+	}{
+		{"empty body", `{}`, http.StatusNoContent, func(*profile) {}},
+		{"name", `{"name":"New Name"}`, http.StatusNoContent, func(p *profile) { p.name = "New Name" }},
+		{"empty strings", `{"name":"","email":"","subject":""}`, http.StatusNoContent, func(*profile) {}},
+		{"email", `{"email":" New@Example.com "}`, http.StatusNoContent, func(p *profile) { p.email = "new@example.com" }},
+		{"subject", `{"subject":" New.Subject "}`, http.StatusNoContent, func(p *profile) { p.subject = "new.subject" }},
+		{"roles", `{"role_ids":["` + enum.RoleUserEditorID + `"]}`, http.StatusNoContent, func(p *profile) { p.roles = []string{enum.RoleUserEditorID} }},
+		{"empty roles", `{"role_ids":[]}`, http.StatusNoContent, func(p *profile) { p.roles = nil }},
+		{"empty permissions", `{"permissions":[]}`, http.StatusNoContent, func(p *profile) { p.perms = nil }},
+		{"null lists", `{"role_ids":null,"permissions":null}`, http.StatusNoContent, func(*profile) {}},
+		{"disabled", `{"disabled":true}`, http.StatusNoContent, func(*profile) {}},
+		{"own id", `{"id":"target","name":"New Name"}`, http.StatusNoContent, func(p *profile) { p.name = "New Name" }},
+		{"another id", `{"id":"other","name":"New Name"}`, http.StatusBadRequest, func(*profile) {}},
+		{"blank subject", `{"subject":"  "}`, http.StatusBadRequest, func(*profile) {}},
+		{"invalid email", `{"email":"nope"}`, http.StatusBadRequest, func(*profile) {}},
+		{"taken subject", `{"subject":" ADMIN "}`, http.StatusConflict, func(*profile) {}},
+		{"unknown role", `{"role_ids":["no-such-role"]}`, http.StatusNotFound, func(*profile) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAPIFixture(t)
+			admin := f.user(t, "admin", enum.RoleAdminID)
+			f.user(t, "target", enum.RoleUserReaderID)
+			seeded, err := f.store.GetUser(context.Background(), "target")
+			if err != nil {
+				t.Fatal(err)
+			}
+			seeded.SetEmail(base.email)
+			seeded.SetPermissions([]string{string(enum.AgentsGet)})
+			if err := f.store.UpsertUser(context.Background(), seeded); err != nil {
+				t.Fatal(err)
+			}
+
+			if w := f.do(http.MethodPut, "/api/v1/users/target", tc.body, admin); w.Code != tc.status {
+				t.Fatalf("PUT %s: %d %s, want %d", tc.body, w.Code, w.Body.String(), tc.status)
+			}
+			want := base
+			tc.want(&want)
+			u, err := f.store.GetUser(context.Background(), "target")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := profile{u.Subject(), u.Name(), u.Email(), u.RoleIDsAll(), u.PermissionsAll(), u.Disabled()}
+			if got.subject != want.subject || got.name != want.name || got.email != want.email || got.disabled != want.disabled ||
+				!slices.Equal(got.roles, want.roles) || !slices.Equal(got.perms, want.perms) {
+				t.Fatalf("PUT %s stored %+v, want %+v", tc.body, got, want)
+			}
+		})
 	}
 }
 

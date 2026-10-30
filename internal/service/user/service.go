@@ -177,23 +177,52 @@ func (s *Service) Create(ctx context.Context, actor *identity.Identity, u *model
 	})
 }
 
-// Update replaces an existing user on behalf of actor. Another user may be
-// updated only when actor holds all of that user's permissions, the result
-// may hold only permissions actor holds (ErrPermissionCeiling), and an
-// enabled user with every permission must remain (ErrLastAdmin).
-func (s *Service) Update(ctx context.Context, actor *identity.Identity, u *model.User) error {
-	return s.save(ctx, u, func(tx storage.Storage, existing *model.User) error {
-		if existing == nil {
-			return storage.ErrNotFound
-		}
-		if err := CheckTarget(ctx, tx, actor, existing); err != nil {
+// Update applies patch to the stored user id on behalf of actor and returns the
+// stored result. Only the fields the patch sets change, and the patch is applied
+// to the user the transaction reads: a disable that committed since the request
+// was authorized is always kept, and so is a role or permission change unless
+// the patch sets RoleIDs or Permissions, whose list replaces the stored one.
+// Another user may be updated only when actor holds all of that user's
+// permissions, the result may hold only permissions actor holds
+// (ErrPermissionCeiling), and an enabled user with every permission must remain
+// (ErrLastAdmin). A missing user is storage.ErrNotFound.
+func (s *Service) Update(ctx context.Context, actor *identity.Identity, id string, patch UpdatePatch) (*model.User, error) {
+	if id == "" {
+		return nil, storage.ErrInvalidArgument
+	}
+
+	var out *model.User
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		existing, err := tx.GetUser(ctx, id)
+		if err != nil {
 			return err
 		}
-		if err := checkGrant(ctx, tx, actor, u); err != nil {
+		if err = CheckTarget(ctx, tx, actor, existing); err != nil {
 			return err
 		}
-		return keepAdmin(ctx, tx, existing, u)
+		next := existing.Clone()
+		patch.apply(next)
+		if err = normalize(next); err != nil {
+			return err
+		}
+		if err = checkSubjectAndRoles(ctx, tx, next); err != nil {
+			return err
+		}
+		if err = checkGrant(ctx, tx, actor, next); err != nil {
+			return err
+		}
+		if err = keepAdmin(ctx, tx, existing, next); err != nil {
+			return err
+		}
+		out = next
+		return tx.UpsertUser(ctx, next)
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	s.logger.Debug().Str("user_id", id).Str("subject", out.Subject()).Msg("user updated")
+	return out, nil
 }
 
 // Upsert creates or replaces a user without actor checks. It is for trusted
@@ -209,33 +238,13 @@ func (s *Service) save(ctx context.Context, u *model.User, check func(tx storage
 	if u == nil {
 		return storage.ErrInvalidArgument
 	}
-
-	subject := model.NormalizeSubject(u.Subject())
-	if subject == "" {
-		return domain.ErrInvalidSubject
+	if err := normalize(u); err != nil {
+		return err
 	}
-	u.SetSubject(subject)
-	u.SetName(strings.TrimSpace(u.Name()))
-
-	email := strings.TrimSpace(strings.ToLower(u.Email()))
-	if email != "" && !isValidEmail(email) {
-		return domain.ErrInvalidEmail
-	}
-	u.SetEmail(email)
 
 	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
-		switch existing, err := tx.GetUserBySubject(ctx, subject); {
-		case err == nil:
-			if existing.ID() != u.ID() {
-				return storage.ErrAlreadyExists
-			}
-		case !errors.Is(err, storage.ErrNotFound):
+		if err := checkSubjectAndRoles(ctx, tx, u); err != nil {
 			return err
-		}
-		if ids := u.RoleIDsAll(); len(ids) > 0 {
-			if _, err := tx.GetRoles(ctx, ids); err != nil {
-				return err
-			}
 		}
 		if check != nil {
 			existing, err := tx.GetUser(ctx, u.ID())
@@ -257,8 +266,47 @@ func (s *Service) save(ctx context.Context, u *model.User, check func(tx storage
 
 	s.logger.Debug().
 		Str("user_id", u.ID()).
-		Str("subject", subject).
+		Str("subject", u.Subject()).
 		Msg("user upserted")
+	return nil
+}
+
+// normalize puts the subject, name and email of u into the form they are
+// stored in. A blank subject is domain.ErrInvalidSubject and a malformed
+// email is domain.ErrInvalidEmail.
+func normalize(u *model.User) error {
+	subject := model.NormalizeSubject(u.Subject())
+	if subject == "" {
+		return domain.ErrInvalidSubject
+	}
+	u.SetSubject(subject)
+	u.SetName(strings.TrimSpace(u.Name()))
+
+	email := strings.TrimSpace(strings.ToLower(u.Email()))
+	if email != "" && !isValidEmail(email) {
+		return domain.ErrInvalidEmail
+	}
+	u.SetEmail(email)
+	return nil
+}
+
+// checkSubjectAndRoles returns storage.ErrAlreadyExists when another user
+// holds the subject of u and storage.ErrNotFound when a role u names does not
+// exist.
+func checkSubjectAndRoles(ctx context.Context, tx storage.Storage, u *model.User) error {
+	switch existing, err := tx.GetUserBySubject(ctx, u.Subject()); {
+	case err == nil:
+		if existing.ID() != u.ID() {
+			return storage.ErrAlreadyExists
+		}
+	case !errors.Is(err, storage.ErrNotFound):
+		return err
+	}
+	if ids := u.RoleIDsAll(); len(ids) > 0 {
+		if _, err := tx.GetRoles(ctx, ids); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

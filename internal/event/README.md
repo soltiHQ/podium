@@ -8,7 +8,7 @@ event/
 ├── event.go   Payload, Record, event kind constants, IsIssueKind(), SubjectOf()
 ├── hub.go     Hub — fan-out to SSE clients, dual ring buffers (events + issues)
 ├── ring.go    Ring[T] — generic thread-safe capped ring buffer
-└── sse.go     Hub.SSEHandler() — text/event-stream HTTP endpoint
+└── sse.go     Hub.SSEHandler(access) — text/event-stream HTTP endpoint
 ```
 
 ## Event flow
@@ -42,7 +42,7 @@ defer hub.Close()
 | `RecentEvents(n)`           | Last n activity events (reverse chronological)               |
 | `RecentIssues(n)`           | Last n issue events (reverse chronological)                  |
 | `DeleteIssues(kind, id)`    | Remove matching issues from the ring, return count           |
-| `SSEHandler()`              | `http.HandlerFunc` that streams notifications                |
+| `SSEHandler(access)`        | Stream notifications; end when the `access` re-check fails   |
 | `Close()`                   | Disconnect all clients, mark hub as closed                   |
 
 Slow clients (full channel buffer) get their event dropped with a warning log instead of blocking the hub.

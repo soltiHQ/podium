@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -249,7 +250,12 @@ func (s *Service) RolloutsBySpec(ctx context.Context, specID string) ([]*model.R
 //
 // Deploying a spec flagged for deletion is rejected - the only valid transition from `DeletionRequested=true` is "finalized"
 // (rows drain, finalizer removes the spec).
-func (s *Service) Deploy(ctx context.Context, specID string) error {
+//
+// `planTokens` are the plan tokens of the placements the caller reviewed (see [Service.PreviewPlacement]). Unless it
+// is nil, the token of the plan recomputed inside the transaction must be one of them, else Deploy writes nothing and
+// returns [ErrPlacementChanged]; an empty list names no plan. Pass nil to deploy the current placement unchecked (API
+// clients that never preview).
+func (s *Service) Deploy(ctx context.Context, specID string, planTokens []string) error {
 	if specID == "" {
 		return storage.ErrInvalidArgument
 	}
@@ -267,9 +273,12 @@ func (s *Service) Deploy(ctx context.Context, specID string) error {
 			return storage.ErrInvalidArgument
 		}
 		generation = ts.Generation()
-		plan, err := loadPlacement(ctx, tx, ts, time.Now())
+		plan, steps, err := loadPlacement(ctx, tx, ts, time.Now())
 		if err != nil {
 			return err
+		}
+		if planTokens != nil && !slices.Contains(planTokens, plan.Token) {
+			return ErrPlacementChanged
 		}
 		missing, unsupported := blockedTargets(plan)
 		if len(missing) > 0 {
@@ -278,30 +287,17 @@ func (s *Service) Deploy(ctx context.Context, specID string) error {
 		if len(unsupported) > 0 {
 			return &UnsupportedTargetsError{Agents: unsupported}
 		}
-		targets := make([]string, 0, len(plan.Targets))
-		for _, target := range plan.Targets {
-			targets = append(targets, target.AgentID)
-		}
 
-		wanted := make(map[string]struct{}, len(targets))
-		for _, id := range targets {
-			wanted[id] = struct{}{}
-		}
-
-		rolloutsRes, err := storage.AllRollouts(ctx, tx, tx.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: specID}))
-		if err != nil {
-			return err
-		}
-
-		existing := make(map[string]*model.Rollout, len(rolloutsRes))
-		for _, r := range rolloutsRes {
-			if r != nil {
-				existing[r.AgentID()] = r
-			}
-		}
-
-		for _, agentID := range targets {
-			if r, ok := existing[agentID]; ok {
+		for _, step := range steps {
+			r := step.rollout
+			switch step.action {
+			case deployInstall:
+				if r, err = model.NewRollout(specID, step.agentID, ts.Generation()); err != nil {
+					return err
+				}
+				r.SetIntent(enum.RolloutIntentInstall)
+				install++
+			case deployUpdate:
 				if r.ObservedGeneration() == ts.Generation() && r.Status() == enum.SyncStatusSynced {
 					noop++
 					continue
@@ -314,32 +310,14 @@ func (s *Service) Deploy(ctx context.Context, specID string) error {
 					update++
 				}
 				r.MarkPending(ts.Generation())
-				if err = tx.UpsertRollout(ctx, r); err != nil {
-					return err
-				}
-				continue
+			case deployUninstall:
+				r.SetIntent(enum.RolloutIntentUninstall)
+				r.MarkPending(ts.Generation())
+				uninstall++
 			}
-			r, err := model.NewRollout(specID, agentID, ts.Generation())
-			if err != nil {
-				return err
-			}
-			r.SetIntent(enum.RolloutIntentInstall)
 			if err = tx.UpsertRollout(ctx, r); err != nil {
 				return err
 			}
-			install++
-		}
-
-		for agentID, r := range existing {
-			if _, kept := wanted[agentID]; kept {
-				continue
-			}
-			r.SetIntent(enum.RolloutIntentUninstall)
-			r.MarkPending(ts.Generation())
-			if err = tx.UpsertRollout(ctx, r); err != nil {
-				return err
-			}
-			uninstall++
 		}
 		return nil
 	})

@@ -3,6 +3,7 @@ package enum
 // AgentStatus describes the lifecycle state of an agent.
 type AgentStatus uint8
 
+// Declaration order is severity order: lifecycle compares statuses with >=, so keep it.
 const (
 	AgentStatusActive AgentStatus = iota
 	AgentStatusInactive

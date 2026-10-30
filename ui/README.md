@@ -38,7 +38,8 @@ color, radius and elevation tokens live in `static/css/app.css` and
 - `internal/handler/api_spec_placement.go`: read-only saved-spec placement from the
   same planner used by Deploy. Both SpecsGet and AgentsGet are required. It
   exposes ordered runner compatibility and stored heartbeat observations; the
-  plan is advisory and Deploy evaluates the current inventory again.
+  plan is advisory and Deploy evaluates the current inventory again. Its plan
+  token lets Deploy refuse a placement that changed since the preview.
 - `internal/handler/api_history.go`: stored terminal observations independent of
   live agent/spec existence. AgentsGet protects both API and page. Exact agent,
   spec, task name, UID and terminal-result filters use opaque continuations;
@@ -71,12 +72,47 @@ API answers any other body type with 415. The server refuses mutations from
 another origin with 403, and logout is a POST form in the navigation bar.
 HTMX confirmation dialogs close after success and retain errors after failure.
 
+The placement panel carries its plan token in `data-plan-token` (see
+`internal/handler`, "Specs") and copies it onto its container,
+`#spec-placement`, which a failed refresh empties but keeps. When the Deploy
+dialog opens, it keeps the container's token, that of the plan the panel shows
+or showed before a failed refresh, and sends it as `If-Match`. A placement
+that changed in the meantime (a spec save, an agent that starts or stops
+matching, a target that registers or changes eligibility or selected runner,
+rollouts created by another deploy) is refused with 412 `Placement changed
+since it was previewed. Review it again.` and nothing is written: the message
+stays in the dialog and the page refreshes the panel. The panel also
+refreshes while the dialog is open, so closing the dialog shows the new plan,
+and opening it again takes the new token. Heartbeats and the sync state of
+rollouts do not change the token, and neither does a completed uninstall of an
+agent that is no longer targeted. An agent targeted again before its uninstall
+completes moves from update to install when the uninstall completes, which
+changes the token: one 412. Deploy runs unchecked, without `If-Match`, in two
+cases only: without AgentsGet (no panel) and before the panel has loaded once.
+
 The task list passes exact slot filters to the agent before pagination and uses
 opaque continuation cursors. Run history is bounded by the agent's history
 retention. Logs are live streams, not a durable log archive. Log stream URLs
 carry the inspected task UID so reconnection cannot silently switch to a
 same-name replacement. Modal identifiers are encoded as lowercase UTF-8 hex so
 HTML attribute normalization preserves case-sensitive UID identity.
+
+The log and event streams are Server-Sent Events. `http.write_timeout` does
+not end a stream: before each write the stream gives that write 30 seconds
+instead. This deadline drops a client whose write blocks, that is, whose
+buffers are full. On a quiet stream the small keepalives can fit into the
+buffers for a long time, so a reader that stopped reading is not guaranteed to
+be dropped after 30 seconds. Each stream writes the comment `: keepalive` after
+15 seconds without output, which `EventSource` ignores, and re-checks access
+every 15 seconds, whether it wrote or not: the session must still be live and
+the user enabled, and the log stream also needs AgentsGet. A failed re-check,
+or one that cannot be made, ends the stream. After a revoked session, a
+disabled user or a lost AgentsGet, the stream thus ends within one re-check
+period (15 seconds) plus at most one blocked write (up to 30 seconds).
+`EventSource` then reconnects through authentication, which answers 401 or 403,
+or 503 if the store is unavailable. A reverse proxy in front of podium must
+keep its read timeout above 15 seconds (nginx `proxy_read_timeout` defaults to
+60); both streams send `X-Accel-Buffering: no`, so nginx does not buffer them.
 
 Execution history shows partial capture from periodic agent polling. It can
 miss attempts removed between polls and is bounded by retention policy. Each
@@ -89,10 +125,15 @@ and does not prove physical process shutdown.
 ## Verification
 
 ```sh
-node --test ui/tests/spec-builder.test.cjs
+task ci/ui/test
 go test ./internal/auth/... ./internal/handler ./internal/transport/http/middleware \
   ./internal/uikit/... ./domain/wire ./ui/templates/...
 ```
+
+`task ci/ui/test` runs every `ui/tests/*.test.cjs` with Node's built-in test
+runner in the Node container pinned in `Taskfile.yml`, so it needs Docker but no
+local Node. It fails when no file matches: Node would pass with no test. The
+`ui` job of the PR workflow runs the same task.
 
 `task generate` runs `go tool templ generate`, so the generator is always the
 templ version pinned in `go.mod`. `task assets` downloads Alpine and HTMX and

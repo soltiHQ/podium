@@ -63,9 +63,10 @@ type HTTPDiscovery struct {
 //
 // requireAuth turns on per-agent bearer-token authentication on every sync:
 // the first sync of an unknown agent ID enrolls its token (trust on first
-// use), later ones must present it (constant-time verify). limiter bounds the
-// token checks of each (client IP, agent ID) pair, see verifyAgentToken;
-// resolver gives the client IP (nil trusts no proxy).
+// use, or only the token derived from the agent service's enrollment secret
+// when it has one), later ones must present it (constant-time verify). limiter
+// bounds the token checks of each (client IP, agent ID) pair, see
+// verifyAgentToken; resolver gives the client IP (nil trusts no proxy).
 func NewHTTPDiscovery(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, limiter *ratelimit.Limiter, resolver *clientip.Resolver, requireAuth bool) *HTTPDiscovery {
 	if agentSVC == nil {
 		panic(service.ErrNilService)
@@ -231,9 +232,11 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 // on the (client IP, agent ID) pair, so checks in flight count like failures:
 // it returns auth.ErrRateLimited while the failures plus the checks in flight
 // of the pair reach the limit. A missing or wrong token
-// (agent.ErrUnauthenticated) becomes a failure, and a missing one logs a WARN,
-// at most rate_attempts per window for the pair; every other outcome, a panic
-// included, releases the attempt.
+// (agent.ErrUnauthenticated, which includes agent.ErrEnrollRefused, a
+// first-contact token other than the one derived from the enrollment secret)
+// becomes a failure. A missing token and a refused enrollment each log a WARN,
+// never the token, at most rate_attempts per window for the pair; every other
+// outcome, a panic included, releases the attempt.
 func verifyAgentToken(ctx context.Context, logger zerolog.Logger, svc *agent.Service, limiter *ratelimit.Limiter, clientIP, agentID, token string) error {
 	if len(token) > model.AgentTokenMaxBytes {
 		return agent.ErrTokenTooLong
@@ -245,11 +248,22 @@ func verifyAgentToken(ctx context.Context, logger zerolog.Logger, svc *agent.Ser
 	defer attempt.Release() // a no-op once the attempt has failed
 
 	if token == "" {
-		// The SDK sends no token over plaintext unless told to.
-		logger.Warn().Str("agent_id", agentID).
-			Msg("agent sent no token: serve discovery over TLS so the SDK sends it, call allow_insecure_token_transport() in the SDK, or set agent_auth.require=false")
+		// The SDK sends no token over plaintext unless told to. With a secret,
+		// agent_auth.require=false fails validation: point to the token instead,
+		// but only for an ID that is not enrolled yet. A derived token that
+		// differs from the one an agent enrolled with locks it out, so an
+		// enrolled agent keeps its token and its token transport is what to fix.
+		msg := "agent sent no token: serve discovery over TLS so the SDK sends it, call allow_insecure_token_transport() in the SDK, or set agent_auth.require=false"
+		if svc.EnrollSecretSet() {
+			msg = "agent sent no token: give an agent ID that is not enrolled yet the token podium agent-token derives for it; an agent enrolled earlier must keep sending its existing token, so fix its token transport: serve discovery over TLS so the SDK sends it, or call allow_insecure_token_transport() in the SDK"
+		}
+		logger.Warn().Str("agent_id", agentID).Msg(msg)
 	}
 	err = svc.VerifyOrEnrollToken(ctx, agentID, token)
+	if errors.Is(err, agent.ErrEnrollRefused) {
+		logger.Warn().Str("agent_id", agentID).Str("client_ip", clientIP).
+			Msg("enrollment refused: an unknown agent ID presented a token that is not the one derived for it from the enrollment secret; give the agent the token podium agent-token prints for its ID")
+	}
 	if errors.Is(err, agent.ErrUnauthenticated) {
 		attempt.Fail(time.Now())
 	}

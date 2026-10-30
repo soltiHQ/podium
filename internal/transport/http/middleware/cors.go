@@ -21,10 +21,11 @@ type CORSConfig struct {
 	// Defaults to GET, POST, PUT, DELETE, PATCH, OPTIONS.
 	AllowMethods []string `yaml:"allow_methods"`
 	// AllowHeaders is the list of allowed request headers.
-	// Defaults to Authorization, Content-Type, X-Request-Id.
+	// Defaults to Authorization, Content-Type, X-Request-Id, If-Match.
 	AllowHeaders []string `yaml:"allow_headers"`
 	// ExposeHeaders is the list of headers the browser can access.
-	// Defaults to X-Request-Id.
+	// Defaults to X-Request-Id, ETag: a client reads the ETag of a placement
+	// and sends it back as If-Match on Deploy.
 	ExposeHeaders []string `yaml:"expose_headers"`
 	// AllowCredentials indicates whether cookies/auth headers are allowed.
 	AllowCredentials bool `yaml:"allow_credentials"`
@@ -68,10 +69,10 @@ func (c CORSConfig) withDefaults() CORSConfig {
 		c.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"}
 	}
 	if len(c.AllowHeaders) == 0 {
-		c.AllowHeaders = []string{"Authorization", "Content-Type", "X-Request-Id"}
+		c.AllowHeaders = []string{"Authorization", "Content-Type", "X-Request-Id", "If-Match"}
 	}
 	if len(c.ExposeHeaders) == 0 {
-		c.ExposeHeaders = []string{"X-Request-Id"}
+		c.ExposeHeaders = []string{"X-Request-Id", "ETag"}
 	}
 	if c.MaxAge <= 0 {
 		c.MaxAge = 12 * time.Hour
