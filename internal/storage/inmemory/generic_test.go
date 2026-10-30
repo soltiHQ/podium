@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -335,6 +336,135 @@ func TestGenericStore_List_ReturnsClones(t *testing.T) {
 		if !reflect.DeepEqual(got, want[id]) {
 			t.Fatalf("a change to %q as List returned it reached the store: %+v, want %+v", id, got, want[id])
 		}
+	}
+}
+
+// panics reports whether f panics.
+func panics(f func()) (panicked bool) {
+	defer func() { panicked = recover() != nil }()
+	f()
+	return false
+}
+
+// upsertFinishes reports whether a write to s completes soon. It cannot while a
+// read lock is held, so it tells whether the call before it let go of the lock.
+func upsertFinishes(s *GenericStore[*testEntity]) bool {
+	done := make(chan error, 1)
+	go func() { done <- s.Upsert(context.Background(), newTestEntity("probe", time.Unix(1, 0).UTC())) }()
+	select {
+	case err := <-done:
+		return err == nil
+	case <-time.After(2 * time.Second):
+		return false
+	}
+}
+
+func TestGenericStore_ReleasesReadLockOnEveryExit(t *testing.T) {
+	t.Parallel()
+
+	const many = 1237 // more than the 1 000 entities between two looks at the context
+	boom := func(*testEntity) bool { panic("predicate failed") }
+	wantCanceled := func(err error) error {
+		if !errors.Is(err, context.Canceled) {
+			return fmt.Errorf("err = %v, want context.Canceled", err)
+		}
+		return nil
+	}
+	// cancelAt is a predicate that accepts every entity and cancels the context at its n-th call.
+	cancelAt := func(n int, cancel context.CancelFunc) func(*testEntity) bool {
+		calls := 0
+		return func(*testEntity) bool {
+			if calls++; calls == n {
+				cancel()
+			}
+			return true
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		rows int
+		// call makes one List or all and returns what is wrong with its outcome, if anything.
+		call func(s *GenericStore[*testEntity]) error
+	}{
+		{"List of an empty store", 0, func(s *GenericStore[*testEntity]) error {
+			_, err := s.List(context.Background(), nil, storage.ListOptions{})
+			return err
+		}},
+		{"List of a page", 10, func(s *GenericStore[*testEntity]) error {
+			_, err := s.List(context.Background(), nil, storage.ListOptions{Limit: 3})
+			return err
+		}},
+		{"List canceled after 1 000 entities", many, func(s *GenericStore[*testEntity]) error {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			_, err := s.List(ctx, cancelAt(500, cancel), storage.ListOptions{})
+			return wantCanceled(err)
+		}},
+		{"List with no match", 10, func(s *GenericStore[*testEntity]) error {
+			_, err := s.List(context.Background(), func(*testEntity) bool { return false }, storage.ListOptions{})
+			return err
+		}},
+		{"List with a cursor, canceled in the search for it", 10, func(s *GenericStore[*testEntity]) error {
+			first, err := s.List(context.Background(), nil, storage.ListOptions{Limit: 3})
+			if err != nil {
+				return err
+			}
+			// The last entity cancels the context, after the only look at it in the scan.
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			_, err = s.List(ctx, cancelAt(10, cancel), storage.ListOptions{Cursor: first.NextCursor})
+			return wantCanceled(err)
+		}},
+		{"List with a cursor past the last entity", 10, func(s *GenericStore[*testEntity]) error {
+			every := s.All(nil, nil)
+			last := every[len(every)-1]
+			past, err := encodeCursor(cursor{CreatedAtUnixNano: last.CreatedAt().UnixNano(), ID: last.ID()})
+			if err != nil {
+				return err
+			}
+			page, err := s.List(context.Background(), nil, storage.ListOptions{Cursor: past})
+			if err != nil {
+				return err
+			}
+			if len(page.Items) != 0 {
+				return fmt.Errorf("List returned %d items after the last entity, want none", len(page.Items))
+			}
+			return nil
+		}},
+		{"List with a predicate that panics", 10, func(s *GenericStore[*testEntity]) error {
+			if !panics(func() { _, _ = s.List(context.Background(), boom, storage.ListOptions{}) }) {
+				return errors.New("the panic of the predicate did not reach the caller")
+			}
+			return nil
+		}},
+		{"all of every entity", 10, func(s *GenericStore[*testEntity]) error {
+			_, err := s.all(context.Background(), nil, nil)
+			return err
+		}},
+		{"all canceled after 1 000 entities", many, func(s *GenericStore[*testEntity]) error {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			_, err := s.all(ctx, cancelAt(500, cancel), nil)
+			return wantCanceled(err)
+		}},
+		{"all with a predicate that panics", 10, func(s *GenericStore[*testEntity]) error {
+			if !panics(func() { _, _ = s.all(context.Background(), boom, nil) }) {
+				return errors.New("the panic of the predicate did not reach the caller")
+			}
+			return nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewGenericStore[*testEntity]()
+			fillTied(t, s, tc.rows)
+			if err := tc.call(s); err != nil {
+				t.Fatal(err)
+			}
+			if !upsertFinishes(s) {
+				t.Fatal("a write did not finish after the call: it left the read lock held")
+			}
+		})
 	}
 }
 

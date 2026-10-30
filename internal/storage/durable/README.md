@@ -132,29 +132,39 @@ a spec that selects every agent by label and `explicit20` one that lists 20
 agents by ID. Each time is the mean of one operation, taken as the median of 10
 runs.
 
-| benchmark | baseline time | baseline allocated | single-pass time | single-pass allocated |
-| -- | -- | -- | -- | -- |
-| HistoryPrune/1000 | 0.70 ms | 0.5 MiB | 0.32 ms | 0.3 MiB |
-| HistoryPrune/10000 | 47 ms | 52 MiB | 2.2 ms | 2.6 MiB |
-| LifecycleTick/stale0 | 0.11 ms | 40 KiB | 0.10 ms | 40 KiB |
-| LifecycleTick/stale10pct | 0.67 ms | 0.9 MiB | 0.60 ms | 0.9 MiB |
-| LifecycleTick/stale100pct | 65 ms | 88 MiB | 5.8 ms | 8.7 MiB |
-| PlacementPreview/explicit20 | 1.1 ms | 0.7 MiB | 0.57 ms | 0.4 MiB |
-| PlacementPreview/labels1000 | 4.3 ms | 5.8 MiB | 2.7 ms | 4.0 MiB |
-| PlacementPreview/labels5000 | 75 ms | 100 MiB | 13 ms | 21 MiB |
+| benchmark | earlier run | before | after |
+| -- | -- | -- | -- |
+| HistoryPrune/1000 | 0.70 ms / 0.5 MiB | 0.63 ms / 0.5 MiB | 0.32 ms / 0.3 MiB |
+| HistoryPrune/10000 | 47 ms / 52 MiB | 42 ms / 52 MiB | 2.2 ms / 2.6 MiB |
+| LifecycleTick/stale0 | 0.11 ms / 40 KiB | 0.092 ms / 40 KiB | 0.096 ms / 40 KiB |
+| LifecycleTick/stale10pct | 0.67 ms / 0.9 MiB | 0.60 ms / 0.9 MiB | 0.60 ms / 0.9 MiB |
+| LifecycleTick/stale100pct | 65 ms / 88 MiB | 58 ms / 88 MiB | 5.8 ms / 8.7 MiB |
+| PlacementPreview/explicit20 | 1.1 ms / 0.7 MiB | 0.98 ms / 0.7 MiB | 0.57 ms / 0.4 MiB |
+| PlacementPreview/labels1000 | 4.3 ms / 5.8 MiB | 3.8 ms / 5.8 MiB | 2.7 ms / 4.0 MiB |
+| PlacementPreview/labels5000 | 75 ms / 100 MiB | 67 ms / 100 MiB | 13 ms / 21 MiB |
+| ListPage | - | 5.99 ms / 8.7 MiB | 0.74 ms / 0.21 MiB |
 
-The baseline scans drain the store page by page: `storage.CollectPages` asks for
-pages of 500, and each page of an in-process store scanned, cloned and sorted all
-the rows that matched again, so k rows took k/500 passes. The single-pass columns
-are the same benchmarks once `storage.AllAgents` and its siblings take one pass from
+Each cell is the time and the memory allocated by one operation. "Earlier run" is
+the baseline above, taken before this work. "Before" and "after" were run back to
+back on the same machine, so read a factor against its own "before": that column
+came out 10% to 16% under the earlier run.
+
+For the scans, "after" is the single pass. Before it, the scans drained the store
+page by page: `storage.CollectPages` asks for pages of 500, and each page of an
+in-process store scanned, cloned and sorted all the rows that matched again, so k
+rows took k/500 passes. Now `storage.AllAgents` and its siblings take one pass from
 a store that implements `storage.Scanner`, as the in-memory, durable and Raft stores
-do; the durable store holds one read admission for the pass, not one per page. They
-are the median of 10 runs of `-benchtime=2s` like the baseline, and were taken right
-after a re-run of the baseline on the same machine, which came out 10% to 16% under
-the baseline columns. Against that re-run, `LifecycleTick/stale100pct` fell from
-58 ms to 5.8 ms (9.9x) and `HistoryPrune/10000` from 42 ms to 2.2 ms (19x). A scan
-of one page or less (`stale0`, `stale10pct`) was a single pass already and costs
-what it did.
+do; the durable store holds one read admission for the pass, not one per page.
+`LifecycleTick/stale100pct` fell from 58 ms to 5.8 ms (9.9x) and
+`HistoryPrune/10000` from 42 ms to 2.2 ms (19x). A scan of one page or less
+(`stale0`, `stale10pct`) was a single pass already and costs what it did.
+
+`ListPage` is the first page of 100 of the 5 000 agents, asked for with a limit as
+the API and the UI ask, which the single pass does not serve; it is the median of 5
+runs of `-benchtime=1s`. Its "before" and "after" are two versions of `List`: the
+first cloned every agent to return 100 of them, the second sorts the stored values
+and clones the page only. A page is still one scan and sort of the matches, and so
+is each page of a paged scan.
 
 These numbers come from the `task golang:exec` container on a busy development
 machine, where the database file is on the container's overlay filesystem. A

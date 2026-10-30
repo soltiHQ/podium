@@ -50,8 +50,8 @@ All errors are compatible with `errors.Is()`.
 ```text
   caller                          storage
   ──────                          ───────
-  ListAgents(filter, ListOptions{   ──→  snapshot + sort by (CreatedAt DESC, ID ASC)
-      Limit:  50,                        slice [cursor … cursor+limit]
+  ListAgents(filter, ListOptions{   ──→  sort the stored values by (CreatedAt DESC, ID ASC), under the read lock
+      Limit:  50,                        clone the page [cursor … cursor+limit]
       Cursor: "…",                       encode last item as NextCursor
   })                               ◀──  ListResult{ Items, NextCursor }
         │

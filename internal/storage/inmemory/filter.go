@@ -93,13 +93,14 @@ func (f *AgentFilter) Matches(a *model.Agent) bool {
 }
 
 // agentPredicate resolves the filter of a listing or a scan to its predicate.
-// A nil filter accepts every agent; one built by another backend is rejected.
+// A nil filter accepts every agent; one built by another backend, or a nil *AgentFilter,
+// is rejected.
 func agentPredicate(filter storage.AgentFilter) (func(*model.Agent) bool, error) {
 	if filter == nil {
 		return nil, nil
 	}
 	f, ok := filter.(*AgentFilter)
-	if !ok {
+	if !ok || f == nil {
 		return nil, storage.ErrInvalidArgument
 	}
 	return f.Matches, nil
@@ -251,13 +252,14 @@ func (f *SpecFilter) Matches(ts *model.Spec) bool {
 }
 
 // specPredicate resolves the filter of a listing or a scan to its predicate.
-// A nil filter accepts every spec; one built by another backend is rejected.
+// A nil filter accepts every spec; one built by another backend, or a nil *SpecFilter,
+// is rejected.
 func specPredicate(filter storage.SpecFilter) (func(*model.Spec) bool, error) {
 	if filter == nil {
 		return nil, nil
 	}
 	f, ok := filter.(*SpecFilter)
-	if !ok {
+	if !ok || f == nil {
 		return nil, storage.ErrInvalidArgument
 	}
 	return f.Matches, nil
@@ -317,13 +319,14 @@ func (f *RolloutFilter) Matches(ss *model.Rollout) bool {
 }
 
 // rolloutPredicate resolves the filter of a listing or a scan to its predicate.
-// A nil filter accepts every rollout; one built by another backend is rejected.
+// A nil filter accepts every rollout; one built by another backend, or a nil *RolloutFilter,
+// is rejected.
 func rolloutPredicate(filter storage.RolloutFilter) (func(*model.Rollout) bool, error) {
 	if filter == nil {
 		return nil, nil
 	}
 	f, ok := filter.(*RolloutFilter)
-	if !ok {
+	if !ok || f == nil {
 		return nil, storage.ErrInvalidArgument
 	}
 	return f.Matches, nil

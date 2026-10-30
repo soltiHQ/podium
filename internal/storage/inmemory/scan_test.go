@@ -137,7 +137,10 @@ func TestAllOfNothingIsNil(t *testing.T) {
 	}
 }
 
-func TestAllSeesOneStateWhileWritersRun(t *testing.T) {
+// It is a data-race test: the order and the absence of repeats hold whatever the
+// locking, so only the race detector, which CI runs it under, can fail it for a
+// missing lock.
+func TestAllIsOrderedWithoutRepeatsUnderConcurrentWritersRace(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -207,29 +210,60 @@ func TestAllStopsOnceContextIsDone(t *testing.T) {
 	}
 }
 
-// namedScan is one Scanner method, called with a filter of any kind.
+// namedScan is one Scanner method, and the listing it replaces, called with a
+// filter of any kind. nilFilter is a nil pointer to the filter type of the store.
 type namedScan struct {
-	name string
-	call func(context.Context, storage.Scanner, any) error
+	name      string
+	nilFilter any
+	call      func(context.Context, storage.Scanner, any) error
+	list      func(context.Context, storage.Storage, any) error
 }
 
 var scanCalls = []namedScan{
-	{"agents", func(ctx context.Context, s storage.Scanner, f any) error {
-		_, err := s.ScanAgents(ctx, f)
-		return err
-	}},
-	{"rollouts", func(ctx context.Context, s storage.Scanner, f any) error {
-		_, err := s.ScanRollouts(ctx, f)
-		return err
-	}},
-	{"specs", func(ctx context.Context, s storage.Scanner, f any) error {
-		_, err := s.ScanSpecs(ctx, f)
-		return err
-	}},
-	{"executions", func(ctx context.Context, s storage.Scanner, f any) error {
-		_, err := s.ScanExecutions(ctx, f)
-		return err
-	}},
+	{
+		"agents", (*AgentFilter)(nil),
+		func(ctx context.Context, s storage.Scanner, f any) error {
+			_, err := s.ScanAgents(ctx, f)
+			return err
+		},
+		func(ctx context.Context, s storage.Storage, f any) error {
+			_, err := s.ListAgents(ctx, f, storage.ListOptions{})
+			return err
+		},
+	},
+	{
+		"rollouts", (*RolloutFilter)(nil),
+		func(ctx context.Context, s storage.Scanner, f any) error {
+			_, err := s.ScanRollouts(ctx, f)
+			return err
+		},
+		func(ctx context.Context, s storage.Storage, f any) error {
+			_, err := s.ListRollouts(ctx, f, storage.ListOptions{})
+			return err
+		},
+	},
+	{
+		"specs", (*SpecFilter)(nil),
+		func(ctx context.Context, s storage.Scanner, f any) error {
+			_, err := s.ScanSpecs(ctx, f)
+			return err
+		},
+		func(ctx context.Context, s storage.Storage, f any) error {
+			_, err := s.ListSpecs(ctx, f, storage.ListOptions{})
+			return err
+		},
+	},
+	{
+		"executions", (*ExecutionFilter)(nil),
+		func(ctx context.Context, s storage.Scanner, f any) error {
+			_, err := s.ScanExecutions(ctx, f)
+			return err
+		},
+		func(ctx context.Context, s storage.Storage, f any) error {
+			_, err := s.ListExecutions(ctx, f, storage.ListOptions{})
+			return err
+		},
+	},
 }
 
 // checkScan compares a scan with the listing drained page by page, for a filter
@@ -276,8 +310,11 @@ func checkScan[T, F any](t *testing.T, kind string, total int, scanFn func(conte
 func TestScannerMatchesCollectPages(t *testing.T) {
 	ctx := context.Background()
 	s := New()
-	// Agents and executions have distinct creation times; all 3 711 rollouts and
-	// all specs share one, so their order is the ID tie-break alone.
+	// All 3 711 rollouts and all specs share one creation time, so their order is the
+	// ID tie-break alone. The executions have distinct creation times that no ID order
+	// follows, so they pin the CreatedAt key. The agents do not: the fixture creates
+	// them newest first with ascending IDs, so CreatedAt DESC and ID ASC give the
+	// same order for them.
 	const rows = 1237
 	requireNoErr(t, storagetest.Seed(ctx, s, storagetest.Fixture{Agents: rows, HistoryRows: rows}))
 
@@ -315,12 +352,18 @@ func TestScanFailsAsListingDoes(t *testing.T) {
 
 	t.Run("a filter of another backend", func(t *testing.T) {
 		for _, tc := range scanCalls {
-			if err := tc.call(context.Background(), s, struct{}{}); !errors.Is(err, storage.ErrInvalidArgument) {
-				t.Errorf("%s: err = %v, want ErrInvalidArgument", tc.name, err)
+			// A nil pointer to the filter type is no filter either: it would panic when asked to match.
+			for _, f := range []struct {
+				name   string
+				filter any
+			}{{"foreign", struct{}{}}, {"nil pointer", tc.nilFilter}} {
+				if err := tc.call(context.Background(), s, f.filter); !errors.Is(err, storage.ErrInvalidArgument) {
+					t.Errorf("Scan%s with a %s filter: err = %v, want ErrInvalidArgument", tc.name, f.name, err)
+				}
+				if err := tc.list(context.Background(), s, f.filter); !errors.Is(err, storage.ErrInvalidArgument) {
+					t.Errorf("List%s with a %s filter: err = %v, want ErrInvalidArgument", tc.name, f.name, err)
+				}
 			}
-		}
-		if _, err := s.ScanExecutions(context.Background(), (*ExecutionFilter)(nil)); !errors.Is(err, storage.ErrInvalidArgument) {
-			t.Errorf("a nil execution filter: err = %v, want ErrInvalidArgument", err)
 		}
 	})
 

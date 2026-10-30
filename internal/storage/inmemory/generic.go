@@ -176,64 +176,17 @@ func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts
 
 	limit := storage.NormalizeLimit(opts.Limit)
 
-	s.mu.RLock()
-	if len(s.data) == 0 {
-		s.mu.RUnlock()
-		return &storage.ListResult[T]{Items: []T{}, NextCursor: ""}, nil
-	}
-
-	// The matches are the stored values themselves, sorted and searched under the
-	// read lock; only the page is cloned.
-	matches := make([]T, 0, len(s.data))
-	i := 0
-	for _, entity := range s.data {
-		if i%1000 == 0 {
-			select {
-			case <-ctx.Done():
-				s.mu.RUnlock()
-				return nil, ctx.Err()
-			default:
-			}
-		}
-		i++
-
-		if predicate == nil || predicate(entity) {
-			matches = append(matches, entity)
-		}
-	}
-
-	if len(matches) == 0 {
-		s.mu.RUnlock()
-		return &storage.ListResult[T]{Items: []T{}, NextCursor: ""}, nil
-	}
-
-	sort.Slice(matches, func(i, j int) bool { return listLess(matches[i], matches[j]) })
-
-	start := 0
+	var after *cursor
 	if opts.Cursor != "" {
-		start, err = findCursorPosition(ctx, matches, cur)
-		if err != nil {
-			s.mu.RUnlock()
-			return nil, err
-		}
+		after = &cur
 	}
-
-	if start >= len(matches) {
-		s.mu.RUnlock()
+	page, more, err := s.readPage(ctx, predicate, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	if len(page) == 0 {
 		return &storage.ListResult[T]{Items: []T{}, NextCursor: ""}, nil
 	}
-
-	end := start + limit
-	if end > len(matches) {
-		end = len(matches)
-	}
-
-	page := make([]T, 0, end-start)
-	for _, entity := range matches[start:end] {
-		page = append(page, entity.Clone())
-	}
-	more := end < len(matches)
-	s.mu.RUnlock()
 
 	var nextCursor string
 	if more {
@@ -253,6 +206,67 @@ func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts
 	}, nil
 }
 
+// readPage reads one page of a listing: clones of at most limit of the entities that
+// predicate accepts, after the cursor if there is one, and whether more follow. It
+// reads under the read lock and releases it on every exit, a panic of predicate
+// included. The page is empty when nothing is left to list.
+func (s *GenericStore[T]) readPage(ctx context.Context, predicate func(T) bool, after *cursor, limit int) (page []T, more bool, err error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if len(s.data) == 0 {
+		return nil, false, nil
+	}
+
+	// The matches are the stored values themselves, sorted and searched under the
+	// read lock; only the page is cloned.
+	matches := make([]T, 0, len(s.data))
+	i := 0
+	for _, entity := range s.data {
+		if i%1000 == 0 {
+			select {
+			case <-ctx.Done():
+				return nil, false, ctx.Err()
+			default:
+			}
+		}
+		i++
+
+		if predicate == nil || predicate(entity) {
+			matches = append(matches, entity)
+		}
+	}
+
+	if len(matches) == 0 {
+		return nil, false, nil
+	}
+
+	sort.Slice(matches, func(i, j int) bool { return listLess(matches[i], matches[j]) })
+
+	start := 0
+	if after != nil {
+		start, err = findCursorPosition(ctx, matches, *after)
+		if err != nil {
+			return nil, false, err
+		}
+	}
+
+	if start >= len(matches) {
+		return nil, false, nil
+	}
+
+	end := start + limit
+	if end > len(matches) {
+		end = len(matches)
+	}
+
+	page = make([]T, 0, end-start)
+	for _, entity := range matches[start:end] {
+		page = append(page, entity.Clone())
+	}
+	return page, end < len(matches), nil
+}
+
 // All returns clones of the entities pred accepts, in one pass. Draining List
 // page by page scans and sorts the matches again for every page; All does each once.
 //
@@ -270,23 +284,10 @@ func (s *GenericStore[T]) All(pred func(T) bool, less func(a, b T) bool) []T {
 // all is All for a caller with a context. Like List it looks at ctx every 1000
 // entities and, once ctx is done, stops and returns its error.
 func (s *GenericStore[T]) all(ctx context.Context, pred func(T) bool, less func(a, b T) bool) ([]T, error) {
-	s.mu.RLock()
-	out := make([]T, 0, len(s.data))
-	i := 0
-	for _, entity := range s.data {
-		if i%1000 == 0 {
-			if err := ctx.Err(); err != nil {
-				s.mu.RUnlock()
-				return nil, err
-			}
-		}
-		i++
-
-		if pred == nil || pred(entity) {
-			out = append(out, entity.Clone())
-		}
+	out, err := s.clones(ctx, pred)
+	if err != nil {
+		return nil, err
 	}
-	s.mu.RUnlock()
 
 	if len(out) == 0 {
 		return nil, nil
@@ -297,6 +298,30 @@ func (s *GenericStore[T]) all(ctx context.Context, pred func(T) bool, less func(
 		sort.Slice(out, func(i, j int) bool { return listLess(out[i], out[j]) })
 	} else {
 		sort.Slice(out, func(i, j int) bool { return less(out[i], out[j]) })
+	}
+	return out, nil
+}
+
+// clones returns clones of the entities pred accepts, unsorted. It reads under the
+// read lock and releases it on every exit, a panic of pred included. Like List it
+// looks at ctx every 1000 entities.
+func (s *GenericStore[T]) clones(ctx context.Context, pred func(T) bool) ([]T, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]T, 0, len(s.data))
+	i := 0
+	for _, entity := range s.data {
+		if i%1000 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		i++
+
+		if pred == nil || pred(entity) {
+			out = append(out, entity.Clone())
+		}
 	}
 	return out, nil
 }

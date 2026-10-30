@@ -30,7 +30,8 @@ func (f *ExecutionFilter) Matches(e *model.ExecutionRecord) bool {
 }
 
 // executionPredicate resolves the filter of a listing or a scan to its predicate.
-// A nil filter accepts every record; one built by another backend is rejected.
+// A nil filter accepts every record; one built by another backend, or a nil
+// *ExecutionFilter, is rejected.
 func executionPredicate(filter storage.ExecutionFilter) (func(*model.ExecutionRecord) bool, error) {
 	if filter == nil {
 		return nil, nil
