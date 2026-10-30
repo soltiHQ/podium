@@ -25,6 +25,12 @@ type Runner struct {
 	logger zerolog.Logger
 	store  storage.Storage
 	cfg    Config
+
+	// startedAt is when this runner began watching. Silence is never counted from before it, so downtime is not held
+	// against the agents. Zero means no grace.
+	startedAt time.Time
+	// clock replaces time.Now in tests; nil means time.Now.
+	clock func() time.Time
 }
 
 // New creates a lifecycle runner.
@@ -46,12 +52,20 @@ func New(cfg Config, logger zerolog.Logger, store storage.Storage, hub *event.Hu
 		store:  store,
 		hub:    hub,
 	}
+	r.startedAt = r.now()
 	r.Runner = base.New(cfg.Name, cfg.TickInterval, leadership, logger, r.tick)
 	return r, nil
 }
 
+func (r *Runner) now() time.Time {
+	if r.clock != nil {
+		return r.clock()
+	}
+	return time.Now()
+}
+
 func (r *Runner) tick(ctx context.Context) {
-	now := time.Now()
+	now := r.now()
 	items, err := storage.AllAgents(ctx, r.store, inmemory.NewAgentFilter().StaleAtBefore(now))
 	if err != nil {
 		r.logger.Error().Err(err).Msg("tick: list agents failed")
@@ -87,15 +101,23 @@ func (r *Runner) reconcile(ctx context.Context, now time.Time, observed *model.A
 		if hb <= 0 {
 			hb = r.cfg.DefaultHeartbeat
 		}
-		silence := now.Sub(a.LastSeenAt())
+		// Count the silence from the later of the last sync and this runner's start: a control plane that was down
+		// must not delete agents that had no chance to sync yet.
+		since := a.LastSeenAt()
+		if r.startedAt.After(since) {
+			since = r.startedAt
+		}
+		silence := now.Sub(since)
+		// Statuses rank active < inactive < disconnected and lifecycle never lowers one: the silence restarts at
+		// zero after a restart, and only a sync makes an agent active again.
 		switch {
-		case silence > hb*time.Duration(r.cfg.DeleteMultiplier):
+		case silence > max(r.cfg.DeleteAfter, hb*time.Duration(r.cfg.DeleteMultiplier)):
 			if err = tx.DeleteAgent(ctx, a.ID()); err != nil {
 				return err
 			}
 			kind = event.AgentDeleted
 		case silence > hb*time.Duration(r.cfg.DisconnectMultiplier):
-			if a.Status() == enum.AgentStatusDisconnected {
+			if a.Status() >= enum.AgentStatusDisconnected {
 				return nil
 			}
 			a.MarkStatus(enum.AgentStatusDisconnected)
@@ -104,7 +126,7 @@ func (r *Runner) reconcile(ctx context.Context, now time.Time, observed *model.A
 			}
 			kind = event.AgentDisconnected
 		case silence > hb*time.Duration(r.cfg.InactiveMultiplier):
-			if a.Status() == enum.AgentStatusInactive {
+			if a.Status() >= enum.AgentStatusInactive {
 				return nil
 			}
 			a.MarkStatus(enum.AgentStatusInactive)

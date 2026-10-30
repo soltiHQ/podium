@@ -247,3 +247,26 @@ Zero values inherit owning-package defaults; negative values and collector count
 above their supported bounds fail configuration loading. `max_bytes` measures
 conservative retained-record payload, not database/RSS size. Captures are best
 effort and bound each task buffer to 8 MiB in addition to page/time limits.
+
+## Agent lifecycle
+
+```yaml
+lifecycle:
+  tick_interval: 10s
+  default_heartbeat: 30s    # for agents that report none
+  inactive_multiplier: 2    # silence over 2 × heartbeat: inactive
+  disconnect_multiplier: 5  # over 5 × heartbeat: disconnected
+  delete_multiplier: 10     # deleted past the larger of 10 × heartbeat ...
+  delete_after: 24h         # ... and this
+  max_concurrency: 4
+```
+
+`delete_after` is a floor: an agent is deleted once its silence exceeds the
+larger of `delete_after` and `delete_multiplier` × its heartbeat, and never
+sooner. Silence counts from the later of the agent's last sync and the control
+plane's start, so after a restart every agent that has not synced yet gets the
+full thresholds to sync again before its status changes. Deleting an agent also
+forgets the labels operators set on it: the same agent syncing again later
+comes back without them. Zero or negative values inherit the defaults shown;
+`delete_after` is also read from `SOLTI_LIFECYCLE_DELETEAFTER`. See
+`internal/server/README.md` for the states and the restart grace.
