@@ -51,6 +51,39 @@ func TestStandaloneDurabilityMustBeExplicit(t *testing.T) {
 	}
 }
 
+func TestStandaloneSnapshotThresholdConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name, yaml, env string
+		want            int
+		valid           bool
+	}{
+		{name: "default", want: cluster.DefaultStandaloneSnapshotThreshold, valid: true},
+		{name: "yaml", yaml: "standalone:\n  snapshot_threshold: 512\n", want: 512, valid: true},
+		{name: "env", env: "1024", want: 1024, valid: true},
+		{name: "zero keeps the store's default", env: "0", want: 0, valid: true},
+		{name: "negative", yaml: "standalone:\n  snapshot_threshold: -1\n", want: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := cluster.DefaultConfig()
+			if err := yaml.Unmarshal([]byte(tc.yaml), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if tc.env != "" {
+				t.Setenv("SOLTI_CLUSTER_STANDALONE_SNAPSHOT_THRESHOLD", tc.env)
+			}
+			if err := envconfig.Process("SOLTI_CLUSTER", &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Standalone.SnapshotThreshold != tc.want {
+				t.Fatalf("snapshot_threshold = %d, want %d", cfg.Standalone.SnapshotThreshold, tc.want)
+			}
+			if err := cfg.Validate(); (err == nil) != tc.valid {
+				t.Fatalf("Validate() = %v, want valid %v", err, tc.valid)
+			}
+		})
+	}
+}
+
 func TestDataDirIsThatOfTheSelectedBackend(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

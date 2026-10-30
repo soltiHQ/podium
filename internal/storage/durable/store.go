@@ -1,13 +1,12 @@
 // Package durable provides single-process disk-backed standalone storage.
-// Writes commit a versioned state snapshot in bbolt before publishing memory.
-// bbolt's file lock excludes a second Podium process using the same directory.
+// A transaction's writes are committed to a log in bbolt, synced, before they are
+// applied to the state readers see, and a snapshot of that state replaces the
+// log from time to time. bbolt's file lock excludes a second Podium process using
+// the same directory.
 package durable
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,43 +16,97 @@ import (
 
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
-	"github.com/soltiHQ/control-plane/internal/storage/snapshot"
+	"github.com/soltiHQ/control-plane/internal/storage/overlay"
 	bolt "go.etcd.io/bbolt"
 	"golang.org/x/sync/semaphore"
 )
 
 const FileName = "podium.db"
 
-// Readers share admission; a writer takes all weight. FIFO weighted acquisition
-// prevents new readers from starving a queued transaction.
-const admissionWeight int64 = 1 << 30
-
-var (
-	stateBucket = []byte("control-plane-state")
-	snapshotKey = []byte("snapshot")
-	checksumKey = []byte("sha256")
-)
+// DefaultSnapshotThreshold is the number of log entries past the snapshot that
+// starts the next one, unless WithSnapshotThreshold sets another.
+const DefaultSnapshotThreshold = 4096
 
 var _ storage.Storage = (*Store)(nil)
 
-// Store serializes transactions and publishes state only after the durable commit.
-// Each transaction rewrites the complete snapshot; cost is proportional to state
-// size. Large or high-write deployments should use the existing Raft backend.
+// Store logs the operations of each transaction and applies them to the published
+// state once the log commit is synced. Writers are serialized: a transaction holds
+// writer across its callback, its commit and its apply, so the log order is the
+// apply order and each transaction reads the latest published state. Readers hold
+// mu shared, which a writer takes exclusively only to apply a committed command,
+// so a read never waits for a sync.
 type Store struct {
-	mu        sync.RWMutex
-	admission *semaphore.Weighted
+	// writer admits one transaction or snapshot at a time. Waiting for it honours
+	// the caller's context.
+	writer *semaphore.Weighted
+
+	// mu guards the published state and whether the store serves.
+	mu sync.RWMutex
+	// inner is the published state. It changes only under mu and writer.
+	inner *inmemory.Store
 	// filters is an immutable empty factory; builders use criteria, never state.
 	filters *inmemory.Store
-	inner   *inmemory.Store
 	db      *bolt.DB
 	closed  bool
-	failed  bool
+	// failure is why the store stopped serving: a commit, an apply or a snapshot
+	// that failed, after which memory and disk may disagree until Open.
+	failure error
+
+	// The log, guarded by writer: the last committed entry, the entry the
+	// snapshot holds the state at, and the bytes of the entries past it.
+	last, snapshotIndex uint64
+	logBytes            int
+	threshold           int
+
+	snapshotter snapshotter
+	hooks       hooks
+}
+
+// Option configures Open.
+type Option func(*options)
+
+type options struct {
+	snapshotThreshold int
+	hooks             hooks
+}
+
+// WithSnapshotThreshold sets the number of log entries past the snapshot that
+// starts the next one. Zero keeps DefaultSnapshotThreshold; a negative number
+// fails Open.
+func WithSnapshotThreshold(n int) Option {
+	return func(o *options) { o.snapshotThreshold = n }
+}
+
+// hooks are the seams tests stall the store or end the process at. Production
+// leaves them nil.
+type hooks struct {
+	// commit runs in the bbolt transaction that appends a command, before bbolt
+	// commits it.
+	commit func()
+	// committed runs once a command is committed, under the read lock, before the
+	// store applies it.
+	committed func()
+	// snapshot runs at each point of a snapshot.
+	snapshot func(snapshotPoint)
+	// migrate runs in the migration transaction once the log layout is written,
+	// before the single-blob bucket is deleted.
+	migrate func()
 }
 
 // Open restores standalone state or creates a private database in dataDir.
 // Corrupt, incompatible or insecure existing files fail startup without reseeding.
 // The directory must be private to this single standalone deployment.
-func Open(dataDir string) (*Store, error) {
+func Open(dataDir string, opts ...Option) (*Store, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	switch {
+	case o.snapshotThreshold == 0:
+		o.snapshotThreshold = DefaultSnapshotThreshold
+	case o.snapshotThreshold < 0:
+		return nil, fmt.Errorf("%w: durable: snapshot threshold must not be negative", storage.ErrInvalidArgument)
+	}
 	if strings.TrimSpace(dataDir) == "" {
 		return nil, fmt.Errorf("%w: durable: data directory is required", storage.ErrInvalidArgument)
 	}
@@ -69,11 +122,9 @@ func Open(dataDir string) (*Store, error) {
 		return nil, fmt.Errorf("durable: data directory must be a private regular directory, not a symlink")
 	}
 	path := filepath.Join(dataDir, FileName)
-	newFile := false
 	info, err := os.Lstat(path)
 	switch {
 	case os.IsNotExist(err):
-		newFile = true
 	case err != nil:
 		return nil, fmt.Errorf("durable: stat: %w", err)
 	case !info.Mode().IsRegular() || info.Size() == 0:
@@ -85,40 +136,18 @@ func Open(dataDir string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("durable: open database: %w", err)
 	}
-	s := &Store{inner: inmemory.New(), filters: inmemory.New(), db: db, admission: semaphore.NewWeighted(admissionWeight)}
-	var content inmemory.SnapshotContent
-	err = db.Update(func(tx *bolt.Tx) error {
-		bucket := tx.Bucket(stateBucket)
-		if bucket == nil {
-			if !newFile {
-				return fmt.Errorf("durable: missing state bucket")
-			}
-			var err error
-			bucket, err = tx.CreateBucket(stateBucket)
-			if err != nil {
-				return err
-			}
-			data, err := snapshot.Marshal(content)
-			if err != nil {
-				return err
-			}
-			return putSnapshot(bucket, data)
-		}
-		data := bucket.Get(snapshotKey)
-		sum := sha256.Sum256(data)
-		if !bytes.Equal(bucket.Get(checksumKey), sum[:]) {
-			return fmt.Errorf("durable: snapshot checksum mismatch")
-		}
-		var err error
-		content, err = snapshot.Unmarshal(data)
-		return err
-	})
-	if err == nil && newFile {
+	s := &Store{
+		writer:    semaphore.NewWeighted(1),
+		filters:   inmemory.New(),
+		db:        db,
+		threshold: o.snapshotThreshold,
+		hooks:     o.hooks,
+	}
+	created, err := s.restore()
+	if err == nil && created {
 		// The first file creation also needs the containing directory entry synced.
-		directory, openErr := os.Open(dataDir)
-		if openErr != nil {
-			err = openErr
-		} else {
+		var directory *os.File
+		if directory, err = os.Open(dataDir); err == nil {
 			err = directory.Sync()
 			_ = directory.Close()
 		}
@@ -127,24 +156,18 @@ func Open(dataDir string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("durable: restore: %w", err)
 	}
-	s.inner.RestoreFromSnapshot(content)
+	s.startSnapshotter()
 	return s, nil
 }
 
-func putSnapshot(bucket *bolt.Bucket, data []byte) error {
-	if err := bucket.Put(snapshotKey, data); err != nil {
-		return err
-	}
-	sum := sha256.Sum256(data)
-	return bucket.Put(checksumKey, sum[:])
-}
-
-// WithTx stages changes in a private store and fsyncs the database transaction
-// before publishing them. Waiting admission respects ctx. Callback errors and
-// cancellation observed before native commit leave memory unchanged. Once bbolt
-// starts native commit, successful commit wins cancellation and publishes the full
-// state. A disk commit error leaves memory unchanged and makes the store unavailable
-// until restart because its disk outcome may be uncertain.
+// WithTx runs fn on a transaction over the published state, then appends the
+// operations it recorded to the log as one entry, which bbolt syncs, and applies
+// them to the published state. A transaction that recorded nothing touches no
+// disk. Waiting for the writer respects ctx. Callback errors and cancellation
+// observed before the commit change nothing. Once bbolt starts the commit, a
+// successful commit wins cancellation and the operations are applied. A commit
+// error, or an apply error after a commit, publishes nothing and makes the store
+// unavailable until restart: memory and disk may then disagree.
 func (s *Store) WithTx(ctx context.Context, fn func(tx storage.Storage) error) error {
 	if fn == nil {
 		return storage.ErrInvalidArgument
@@ -152,63 +175,43 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx storage.Storage) error) e
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := s.admission.Acquire(ctx, admissionWeight); err != nil {
+	if err := s.writer.Acquire(ctx, 1); err != nil {
 		return err
 	}
-	defer s.admission.Release(admissionWeight)
+	defer s.writer.Release(1)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed || s.failed {
-		return storage.ErrUnavailable
+	if err := s.serving(); err != nil {
+		return err
 	}
-	candidate := inmemory.New()
-	candidate.RestoreFromSnapshot(s.inner.SnapshotForRaft())
-	if err := candidate.WithTx(ctx, fn); err != nil {
+	// writer keeps every other writer out, so the base holds still while fn runs.
+	tx := overlay.New(s.inner)
+	if err := fn(tx); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	data, err := snapshot.Marshal(candidate.SnapshotForRaft())
-	if err != nil {
-		return fmt.Errorf("%w: durable snapshot: %w", storage.ErrInternal, err)
+	if tx.Empty() {
+		return nil
 	}
-	err = s.db.Update(func(tx *bolt.Tx) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		bucket := tx.Bucket(stateBucket)
-		if bucket == nil {
-			return fmt.Errorf("missing state bucket")
-		}
-		if err := putSnapshot(bucket, data); err != nil {
-			return err
-		}
-		return ctx.Err()
-	})
-	if err != nil {
-		// A failed fsync can leave the disk commit outcome uncertain. Fail closed
-		// until the next Open validates and restores the durable state.
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
-		s.failed = true
-		return fmt.Errorf("%w: durable commit: %w", storage.ErrInternal, err)
+	if err := s.commit(ctx, tx.Ops()); err != nil {
+		return err
 	}
-	s.inner = candidate
+	s.wakeSnapshotter()
 	return nil
 }
 
-// Close releases the database lock. Acknowledged writes are already on disk.
-// It is idempotent and waits for an in-flight transaction to finish.
+// Close stops the snapshotter, waits for an in-flight transaction or snapshot and
+// releases the database lock. Acknowledged writes are already on disk. It is
+// idempotent.
 func (s *Store) Close() error {
-	if err := s.admission.Acquire(context.Background(), admissionWeight); err != nil {
+	s.stopSnapshotter()
+	if err := s.writer.Acquire(context.Background(), 1); err != nil {
 		return err
 	}
-	defer s.admission.Release(admissionWeight)
+	defer s.writer.Release(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -218,21 +221,48 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// readState admits concurrent reads without making a canceled caller wait for a
-// disk commit. mu still protects the published fields and test snapshots.
-func readState[T any](ctx context.Context, s *Store, read func(*inmemory.Store) (T, error)) (T, error) {
-	var zero T
-	if err := s.admission.Acquire(ctx, 1); err != nil {
-		return zero, err
-	}
-	defer s.admission.Release(1)
+// serving returns the error of a call to a closed or failed store, and nil for a
+// store that serves.
+func (s *Store) serving() error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.servingLocked()
+}
+
+// servingLocked is serving for a caller that holds mu.
+func (s *Store) servingLocked() error {
+	switch {
+	case s.closed:
+		return storage.ErrUnavailable
+	case s.failure != nil:
+		return fmt.Errorf("%w: %v", storage.ErrUnavailable, s.failure)
+	}
+	return nil
+}
+
+// fail stops the store from serving with err as the reason, and returns err. The
+// first failure is the one kept.
+func (s *Store) fail(err error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failure == nil {
+		s.failure = err
+	}
+	return err
+}
+
+// readState reads the published state under the read lock. A writer takes the lock
+// only to apply a committed command, so a read waits for neither a transaction's
+// callback nor its sync.
+func readState[T any](ctx context.Context, s *Store, read func(*inmemory.Store) (T, error)) (T, error) {
+	var zero T
 	if err := ctx.Err(); err != nil {
 		return zero, err
 	}
-	if s.closed || s.failed {
-		return zero, storage.ErrUnavailable
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.servingLocked(); err != nil {
+		return zero, err
 	}
 	value, err := read(s.inner)
 	if canceled := ctx.Err(); canceled != nil {

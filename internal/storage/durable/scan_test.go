@@ -48,9 +48,9 @@ func TestScannerMatchesCollectPages(t *testing.T) {
 		s.BuildExecutionFilter(storage.ExecutionQueryCriteria{Statuses: []string{"failed"}}), s.ScanExecutions, s.ListExecutions)
 }
 
-// A paged scan reads each page in an admission of its own, so a transaction that
-// commits between two pages splits it across two states. A scan holds one
-// admission and shows one state.
+// A paged scan reads each page under a read lock of its own, so a transaction that
+// commits between two pages splits it across two states. A scan holds one read
+// lock and shows one state.
 func TestScanIsOneState(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()

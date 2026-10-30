@@ -96,7 +96,7 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger) (storage.Storage, c
 			logger.Warn().Msg("standalone.ephemeral=true: control-plane state will be lost on restart")
 			return inner, standalone.NewLeadership(), hub, nil, nil
 		}
-		store, err := durable.Open(cfg.Standalone.DataDir)
+		store, err := durable.Open(cfg.Standalone.DataDir, durable.WithSnapshotThreshold(cfg.Standalone.SnapshotThreshold))
 		if err != nil {
 			hub.Close()
 			return nil, nil, nil, nil, err

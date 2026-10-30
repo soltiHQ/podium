@@ -10,9 +10,9 @@ import (
 
 var _ storage.Scanner = (*Store)(nil)
 
-// A scan reads the published state under one admission and one read lock, like
-// any other read, where draining a listing takes both again for every page. Its
-// rows are one state, and a queued transaction waits for it once.
+// A scan reads the published state under one read lock, like any other read, where
+// draining a listing takes it again for every page. Its rows are one state, and
+// the apply of a committed transaction waits for it once.
 
 func (d *Store) ScanAgents(ctx context.Context, filter storage.AgentFilter) ([]*model.Agent, error) {
 	return readState(ctx, d, func(inner *inmemory.Store) ([]*model.Agent, error) { return inner.ScanAgents(ctx, filter) })

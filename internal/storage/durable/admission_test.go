@@ -12,7 +12,9 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
-func TestQueuedReadsAndWritesCancelBeforeActiveTransactionEnds(t *testing.T) {
+// While a transaction runs, reads do not queue behind it, and queued transactions
+// return as soon as their context ends, without aborting it.
+func TestQueuedWritesCancelAndReadsDoNotQueueBehindActiveTransaction(t *testing.T) {
 	s, _ := newTestStore(t)
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
@@ -28,36 +30,51 @@ func TestQueuedReadsAndWritesCancelBeforeActiveTransactionEnds(t *testing.T) {
 			t.Error(err)
 		}
 	}()
+	const callers = 20
+	reads := make(chan error, callers)
+	for range callers {
+		go func() {
+			_, err := s.GetAgent(context.Background(), "missing")
+			reads <- err
+		}()
+	}
+	readDeadline := time.NewTimer(250 * time.Millisecond)
+	defer readDeadline.Stop()
+	for i := 0; i < callers; i++ {
+		select {
+		case err := <-reads:
+			if !errors.Is(err, storage.ErrNotFound) {
+				t.Errorf("read%d during the transaction = %v, want ErrNotFound", i, err)
+			}
+		case <-readDeadline.C:
+			t.Fatal("reads waited for the active transaction")
+		}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	const callers = 40
-	replies := make(chan error, callers)
+	writes := make(chan error, callers)
 	ready := make(chan struct{}, callers)
-	for i := 0; i < callers; i++ {
-		go func(i int) {
+	for range callers {
+		go func() {
 			ready <- struct{}{}
-			if i%2 == 0 {
-				_, err := s.GetAgent(ctx, "missing")
-				replies <- err
-				return
-			}
-			replies <- s.WithTx(ctx, func(storage.Storage) error { return fmt.Errorf("canceled callback entered") })
-		}(i)
+			writes <- s.WithTx(ctx, func(storage.Storage) error { return fmt.Errorf("canceled callback entered") })
+		}()
 	}
 	for i := 0; i < callers; i++ {
 		<-ready
 	}
 	cancel()
-	deadline := time.NewTimer(250 * time.Millisecond)
-	defer deadline.Stop()
+	writeDeadline := time.NewTimer(250 * time.Millisecond)
+	defer writeDeadline.Stop()
 	for i := 0; i < callers; i++ {
 		select {
-		case err := <-replies:
+		case err := <-writes:
 			if !errors.Is(err, context.Canceled) {
-				t.Errorf("caller%d canceled result=%v", i, err)
+				t.Errorf("writer%d canceled result=%v", i, err)
 			}
-		case <-deadline.C:
-			t.Fatal("canceled queued calls waited for the active transaction")
+		case <-writeDeadline.C:
+			t.Fatal("canceled queued transactions waited for the active transaction")
 		}
 	}
 	// The active transaction remains held; returning canceled callers did not abort it.

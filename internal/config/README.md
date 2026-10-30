@@ -284,6 +284,26 @@ When the user table is empty, the first start creates the administrator
 Once users exist the variable is ignored, with one WARN per start: remove it from
 the environment after the first start. See `internal/bootstrap/README.md`.
 
+## Standalone storage
+
+```yaml
+cluster:
+  standalone:
+    data_dir: /var/lib/solti/podium   # default data/podium
+    snapshot_threshold: 4096          # log entries that start a snapshot
+```
+
+The standalone backend keeps its state in `podium.db` under
+`cluster.standalone.data_dir` (env `SOLTI_CLUSTER_STANDALONE_DATA_DIR`), unless
+`cluster.standalone.ephemeral: true` keeps it in memory. A blank `data_dir`
+without that flag fails configuration loading.
+
+`cluster.standalone.snapshot_threshold` (env
+`SOLTI_CLUSTER_STANDALONE_SNAPSHOT_THRESHOLD`, default 4096) is the number of
+log entries after which the store writes its state as a snapshot and truncates
+the log; 16 MiB of entries does the same. Zero keeps the default; a negative
+value fails configuration loading. See `internal/storage/durable/README.md`.
+
 ## Observed run history
 
 ```yaml

@@ -100,15 +100,24 @@ func BenchmarkTxAgentUpdate(b *testing.B) {
 	}
 }
 
+// committed is the index of the last committed log entry: the number of commits
+// the store has made.
+func committed(s *Store) uint64 {
+	_ = s.writer.Acquire(context.Background(), 1)
+	defer s.writer.Release(1)
+	return s.last
+}
+
 // BenchmarkHeartbeat is the heartbeat of an enrolled agent as discovery runs
 // it: verify the token, which writes nothing while it matches, then upsert the
-// agent.
+// agent. It reports the commits a heartbeat makes.
 func BenchmarkHeartbeat(b *testing.B) {
 	for _, n := range fleetSizes {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
 			s := benchStore(b, n)
 			svc := agent.New(s, zerolog.Nop())
 			ctx := context.Background()
+			first := committed(s)
 			b.ReportAllocs()
 			measure(b, func(i int) error {
 				// The payload is built per heartbeat, as discovery does. An agent
@@ -124,6 +133,31 @@ func BenchmarkHeartbeat(b *testing.B) {
 				}
 				return svc.Upsert(ctx, a)
 			})
+			b.ReportMetric(float64(committed(s)-first)/float64(b.N), "commits/op")
+		})
+	}
+}
+
+// BenchmarkSnapshot is the snapshot the store writes when its log reaches the
+// threshold: it encodes the published state and writes it, and truncates the log,
+// in one commit, while writers wait. Before each one, untimed, a one-agent update
+// commits an entry to take it at.
+func BenchmarkSnapshot(b *testing.B) {
+	for _, n := range fleetSizes {
+		b.Run(strconv.Itoa(n), func(b *testing.B) {
+			s := benchStore(b, n)
+			ctx := context.Background()
+			b.ReportAllocs()
+			for i := 0; b.Loop(); i++ {
+				b.StopTimer()
+				if err := touchAgent(ctx, s, n, i); err != nil {
+					b.Fatal(err)
+				}
+				b.StartTimer()
+				if err := s.writeSnapshot(ctx); err != nil {
+					b.Fatal(err)
+				}
+			}
 		})
 	}
 }
