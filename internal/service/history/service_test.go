@@ -3,10 +3,12 @@ package history
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"math/rand/v2"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -123,6 +125,20 @@ func (s *countedStore) WithTx(ctx context.Context, fn func(storage.Storage) erro
 		return s.landed
 	}
 	return err
+}
+
+// unreadable is a store that fails to list its executions while err is set. It is
+// no storage.Scanner, so the passes the service makes over it are listings.
+type unreadable struct {
+	storage.Storage
+	err error
+}
+
+func (u *unreadable) ListExecutions(ctx context.Context, f storage.ExecutionFilter, o storage.ListOptions) (*storage.ExecutionListResult, error) {
+	if u.err != nil {
+		return nil, u.err
+	}
+	return u.Storage.ListExecutions(ctx, f, o)
 }
 
 func newService(t *testing.T, cfg Config) (*Service, *countedStore) {
@@ -442,11 +458,16 @@ func TestKnownCompleteSnapshotDoesNotRecaptureRetentionEvictions(t *testing.T) {
 	}
 }
 
+// failedRow is a failed attempt of a task, captured at the given time.
+func failedRow(attempt int, uid string, at time.Time) (*model.ExecutionRecord, error) {
+	return model.NewExecutionRecord(model.ExecutionRecordParams{AgentID: "a", TaskName: "t", TaskUID: uid, Generation: 1, Attempt: uint32(attempt), Status: "failed", CapturedAt: at})
+}
+
 // put stores a failed attempt of a task, captured at the given time, behind the
 // service: the way rows reach a store that the service did not write to.
 func put(t *testing.T, s storage.Storage, attempt int, at time.Time) {
 	t.Helper()
-	record, err := model.NewExecutionRecord(model.ExecutionRecordParams{AgentID: "a", TaskName: "t", TaskUID: "u", Generation: 1, Attempt: uint32(attempt), Status: "failed", CapturedAt: at})
+	record, err := failedRow(attempt, "u", at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,8 +499,8 @@ func attempts(rows []*model.ExecutionRecord) []int {
 
 // held is what svc counted.
 func held(svc *Service) usage {
-	svc.mu.Lock()
-	defer svc.mu.Unlock()
+	_ = svc.gate.Acquire(context.Background(), 1) // a background ctx is never done
+	defer svc.gate.Release(1)
 	return svc.usage
 }
 
@@ -816,16 +837,142 @@ func TestFailedTransactionMarksCountersStale(t *testing.T) {
 
 func TestFailedCountLeavesCountersStale(t *testing.T) {
 	ctx := context.Background()
-	svc, s := newService(t, Config{})
+	s := &unreadable{Storage: inmemory.New(), err: errors.New("listing failed")}
+	svc := restart(t, s, Config{})
 	put(t, s, 1, svc.now().Add(-time.Hour))
-	canceled, cancel := context.WithCancel(ctx)
-	cancel()
-	if _, err := svc.Prune(canceled); !errors.Is(err, context.Canceled) {
-		t.Fatalf("counted the history with a canceled context: %v", err)
+	if _, err := svc.Prune(ctx); !errors.Is(err, s.err) {
+		t.Fatalf("counted a history that could not be read: %v", err)
 	}
+	s.err = nil
 	if n, err := svc.Prune(ctx); err != nil || n != 0 || held(svc).rows != 1 {
 		t.Fatalf("prune after the failed count removed %d rows, counted %d: %v", n, held(svc).rows, err)
 	}
+}
+
+func TestDeadlineEndsTheWaitForTheGate(t *testing.T) {
+	cases := []struct {
+		name string
+		call func(context.Context, *Service) error
+	}{
+		{"prune", func(ctx context.Context, svc *Service) error {
+			_, err := svc.Prune(ctx)
+			return err
+		}},
+		{"capture", func(ctx context.Context, svc *Service) error {
+			_, err := svc.Capture(ctx, captureReq(), source(run(3, "failed")), CaptureOptions{})
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			svc, s := newService(t, Config{})
+			put(t, s, 1, svc.now().Add(-time.Hour))
+			put(t, s, 2, svc.now().Add(-2*time.Hour))
+			if _, err := svc.Prune(ctx); err != nil {
+				t.Fatal(err)
+			}
+			counted, stored := held(svc), kept(all(t, s))
+
+			// A commit that never ends holds the gate.
+			if err := svc.gate.Acquire(ctx, 1); err != nil {
+				t.Fatal(err)
+			}
+			holding := true
+			release := func() {
+				if holding {
+					holding = false
+					svc.gate.Release(1)
+				}
+			}
+			defer release()
+			short, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+			defer cancel()
+			scans, opened := s.scans.Load(), s.transactions
+			done := make(chan error, 1)
+			go func() { done <- tc.call(short, svc) }()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("returned %v, want its deadline", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("kept waiting for the gate long after its deadline")
+			}
+			release()
+
+			// A wait that was cut short changed nothing, so the counters are still exact.
+			if s.scans.Load() != scans || s.transactions != opened {
+				t.Fatalf("the call read %d passes and opened %d transactions", s.scans.Load()-scans, s.transactions-opened)
+			}
+			if got := held(svc); !sameUsage(got, counted) {
+				t.Fatalf("counters %+v, were %+v", got, counted)
+			}
+			if got := kept(all(t, s)); !slices.Equal(got, stored) {
+				t.Fatalf("store holds %v, held %v", got, stored)
+			}
+			s.scans.Store(0)
+			if n, err := svc.Prune(ctx); err != nil || n != 0 || s.scans.Load() != 0 {
+				t.Fatalf("prune after the wait removed %d rows in %d passes: %v", n, s.scans.Load(), err)
+			}
+		})
+	}
+}
+
+// kept names rows by attempt, capture time and ID, in a fixed order.
+func kept(rows []*model.ExecutionRecord) []string {
+	var out []string
+	for _, row := range rows {
+		out = append(out, fmt.Sprintf("%d@%s/%s", row.Attempt(), row.CapturedAt().UTC().Format(time.RFC3339), row.ID()))
+	}
+	slices.Sort(out)
+	return out
+}
+
+// captured is the record that capturing run(attempt, "failed") makes at the given
+// time. The test builds it from the fixtures of the capture, to play the service.
+func captured(t *testing.T, attempt int, at time.Time) *model.ExecutionRecord {
+	t.Helper()
+	req, r, src := captureReq(), run(attempt, "failed"), source(run(attempt, "failed"))
+	record, err := model.NewExecutionRecord(model.ExecutionRecordParams{
+		AgentID: req.AgentID, AgentName: req.AgentName, TaskName: req.TaskName, TaskUID: src.uid,
+		Generation: r.Generation, Attempt: uint32(r.Attempt), Status: r.Status,
+		StartedAtMs: r.StartedAt, FinishedAtMs: r.FinishedAt,
+		WorkloadAPIVersion: r.WorkloadAPIVersion, WorkloadKind: r.WorkloadKind,
+		SpecID: req.SpecID, SpecName: req.SpecName, SourceResourceVersion: src.pages[""].ResourceVersion, CapturedAt: at,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
+// retained is what retention keeps of rows at now, by the loop the service ran
+// over every row before it kept counters: the oldest row goes while it is past
+// retention or a limit is crossed, and of rows captured at one time the lesser ID
+// goes first.
+func retained(cfg Config, rows []*model.ExecutionRecord, now time.Time) []*model.ExecutionRecord {
+	sorted := append([]*model.ExecutionRecord(nil), rows...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].CapturedAt().Equal(sorted[j].CapturedAt()) {
+			return sorted[i].ID() < sorted[j].ID()
+		}
+		return sorted[i].CapturedAt().Before(sorted[j].CapturedAt())
+	})
+	var bytes int64
+	for _, record := range sorted {
+		bytes += record.SizeBytes()
+	}
+	expiredBefore := now.Add(-cfg.Retention)
+	for len(sorted) > 0 {
+		oldest := sorted[0]
+		if !oldest.CapturedAt().Before(expiredBefore) && len(sorted) <= cfg.MaxRecords && bytes <= cfg.MaxBytes {
+			break
+		}
+		sorted = sorted[1:]
+		bytes -= oldest.SizeBytes()
+	}
+	return sorted
 }
 
 func TestRetentionHoldsAndCountersStayExactAcrossRandomHistories(t *testing.T) {
@@ -845,31 +992,54 @@ func TestRetentionHoldsAndCountersStayExactAcrossRandomHistories(t *testing.T) {
 		svc, s := newService(t, cfg)
 		clock := svc.now()
 		svc.now = func() time.Time { return clock }
+		// What the archive should hold, by the reference loop over the test's own records.
+		var reference []*model.ExecutionRecord
 		for step := range 30 {
 			// The clock mostly moves on; now and then it goes back, as a skewed one does.
 			clock = clock.Add(time.Duration(rng.IntN(5)-1) * 30 * time.Minute)
 			enforced := true
-			var err error
 			if rng.IntN(3) == 0 {
-				_, err = svc.Prune(ctx)
+				after := retained(cfg, reference, clock)
+				n, err := svc.Prune(ctx)
+				if err != nil || n != len(reference)-len(after) {
+					t.Fatalf("seed %d step %d: prune removed %d rows, reference %d: %v", seed, step, n, len(reference)-len(after), err)
+				}
+				reference = after
 			} else {
 				picked := map[int]bool{}
 				for range 1 + rng.IntN(4) {
 					picked[1+rng.IntN(40)] = true
 				}
+				// One capture stamps all the rows it adds with one time, so they tie.
 				var runs []proxyv1.TaskRun
+				var incoming []*model.ExecutionRecord
 				for _, attempt := range slices.Sorted(maps.Keys(picked)) {
 					runs = append(runs, run(attempt, "failed"))
+					record := captured(t, attempt, clock)
+					if !slices.ContainsFunc(reference, func(r *model.ExecutionRecord) bool { return r.ID() == record.ID() }) {
+						incoming = append(incoming, record)
+					}
 				}
-				var result CaptureResult
-				result, err = svc.Capture(ctx, captureReq(), source(runs...), CaptureOptions{})
-				// A capture of rows all archived already writes, so judges, nothing.
-				enforced = result.Added > 0
-			}
-			if err != nil {
-				t.Fatalf("seed %d step %d: %v", seed, step, err)
+				result, err := svc.Capture(ctx, captureReq(), source(runs...), CaptureOptions{})
+				if err != nil {
+					t.Fatalf("seed %d step %d: %v", seed, step, err)
+				}
+				pruned := 0
+				if len(incoming) > 0 {
+					after := retained(cfg, append(slices.Clone(reference), incoming...), clock)
+					pruned = len(reference) + len(incoming) - len(after)
+					reference = after
+				}
+				// A capture of rows all archived already writes nothing, so judges nothing.
+				enforced = len(incoming) > 0
+				if result.Added != len(incoming) || result.Existing != len(runs)-len(incoming) || result.Pruned != pruned {
+					t.Fatalf("seed %d step %d: capture %+v, reference added %d existing %d pruned %d", seed, step, result, len(incoming), len(runs)-len(incoming), pruned)
+				}
 			}
 			rows := all(t, s)
+			if !slices.Equal(kept(rows), kept(reference)) {
+				t.Fatalf("seed %d step %d: store holds attempts %v, reference %v", seed, step, attempts(rows), attempts(reference))
+			}
 			if !sameUsage(held(svc), truth(t, s)) {
 				t.Fatalf("seed %d step %d: counters %+v, store %+v", seed, step, held(svc), truth(t, s))
 			}
@@ -915,5 +1085,81 @@ func TestConcurrentCommitsKeepCountersExact(t *testing.T) {
 	}
 	if !sameUsage(held(svc), truth(t, s)) {
 		t.Fatalf("counters %+v, store %+v", held(svc), truth(t, s))
+	}
+}
+
+func TestResumeRacingDecisionsKeepsCountersExact(t *testing.T) {
+	ctx := context.Background()
+	const writers, each, foreign = 4, 25, 50
+	svc, s := newService(t, Config{MaxRecords: 1000})
+	base := svc.now()
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for w := range writers {
+		wg.Go(func() {
+			<-start
+			for j := range each {
+				n := w*each + j
+				record, err := failedRow(n+1, "u", base.Add(-time.Duration(n)*time.Second))
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if _, err := svc.commit(ctx, []*model.ExecutionRecord{record}, CaptureResult{}); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		})
+	}
+	for range 2 {
+		wg.Go(func() {
+			<-start
+			for range 100 {
+				if _, err := svc.Prune(ctx); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		})
+	}
+	// Another node writes, and each of its writes is followed by the Resume that
+	// reports it. Other Resumes report nothing.
+	wg.Go(func() {
+		<-start
+		for j := range foreign {
+			record, err := failedRow(j+1, "foreign", base.Add(-time.Duration(j)*time.Second))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if err := s.UpsertExecution(ctx, record); err != nil {
+				t.Error(err)
+				return
+			}
+			svc.Resume()
+		}
+	})
+	for range 2 {
+		wg.Go(func() {
+			<-start
+			for range 200 {
+				svc.Resume()
+			}
+		})
+	}
+	close(start)
+	wg.Wait()
+	// One more decision, with no Resume of its own, settles what the others left
+	// pending: every write was reported after it was made, so none is missed.
+	if _, err := svc.Prune(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want := truth(t, s)
+	if want.rows != writers*each+foreign {
+		t.Fatalf("store holds %d rows, want %d", want.rows, writers*each+foreign)
+	}
+	if got := held(svc); !sameUsage(got, want) {
+		t.Fatalf("counters %+v, store %+v", got, want)
 	}
 }

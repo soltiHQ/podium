@@ -10,7 +10,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -18,6 +17,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"golang.org/x/sync/semaphore"
 )
 
 // usage is what the archive holds, as retention weighs it against its limits.
@@ -60,15 +60,21 @@ func (u usage) exceeds(cfg Config, now time.Time) bool {
 // service that committed change it. They stop being exact when a transaction of
 // the service fails, as it may still have landed, and when Resume reports that
 // another node may have written. The next decision counts again.
+//
+// There must be one Service per store. The counters know of the writes of their
+// own Service only, so a second one over the same store would under-count
+// silently.
 type Service struct {
 	store storage.Storage
 	cfg   Config
 	now   func() time.Time
 
-	// mu orders each retention decision and each write with the counters they read
-	// and move. A write holds it across its transaction, as the stores run one
-	// transaction at a time anyway.
-	mu    sync.Mutex
+	// gate orders each retention decision and each write with the counters they
+	// read and move. A write holds it across its transaction, as the stores run one
+	// transaction at a time anyway. A caller waits for it as long as its ctx lasts,
+	// as for the writer gate of the durable store, so a capture on a deadline gives
+	// up on a stuck commit and changes nothing.
+	gate  *semaphore.Weighted
 	usage usage
 	exact bool // usage is what the store holds
 	// resumed is set by Resume, which must not wait for a write.
@@ -81,6 +87,8 @@ type Service struct {
 // this one what the others did, so the next decision counts the store again.
 func (s *Service) Resume() { s.resumed.Store(true) }
 
+// New returns the Service that archives into store. There must be one per store:
+// see Service.
 func New(store storage.Storage, cfg Config) (*Service, error) {
 	if store == nil {
 		return nil, storage.ErrInvalidArgument
@@ -88,7 +96,7 @@ func New(store storage.Storage, cfg Config) (*Service, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	return &Service{store: store, cfg: cfg.WithDefaults(), now: func() time.Time { return time.Now().UTC() }}, nil
+	return &Service{store: store, cfg: cfg.WithDefaults(), now: func() time.Time { return time.Now().UTC() }, gate: semaphore.NewWeighted(1)}, nil
 }
 func (s *Service) Config() Config { return s.cfg }
 func (s *Service) List(ctx context.Context, q ListQuery) (*storage.ExecutionListResult, error) {
@@ -307,8 +315,10 @@ func (s *Service) commit(ctx context.Context, records []*model.ExecutionRecord, 
 	if len(pending) == 0 {
 		return result, ctx.Err()
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.gate.Acquire(ctx, 1); err != nil {
+		return result, err
+	}
+	defer s.gate.Release(1)
 	if err := s.seed(ctx); err != nil {
 		return result, err
 	}
@@ -354,7 +364,7 @@ func allRows(ctx context.Context, st storage.Storage) ([]*model.ExecutionRecord,
 }
 
 // seed makes the counters exact, with one pass over the store, if they are not.
-// It expects mu held.
+// It expects the gate held.
 func (s *Service) seed(ctx context.Context) error {
 	if s.resumed.Swap(false) {
 		s.exact = false
@@ -410,8 +420,10 @@ func (s *Service) evict(ctx context.Context, tx storage.Storage, now time.Time) 
 // row, the rows or the bytes. An idle collector therefore neither scans the store
 // nor writes to it every tick.
 func (s *Service) Prune(ctx context.Context) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if err := s.gate.Acquire(ctx, 1); err != nil {
+		return 0, err
+	}
+	defer s.gate.Release(1)
 	if err := s.seed(ctx); err != nil {
 		return 0, err
 	}
