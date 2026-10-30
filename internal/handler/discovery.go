@@ -63,9 +63,10 @@ type HTTPDiscovery struct {
 //
 // requireAuth turns on per-agent bearer-token authentication on every sync:
 // the first sync of an unknown agent ID enrolls its token (trust on first
-// use), later ones must present it (constant-time verify). limiter bounds the
-// token checks of each (client IP, agent ID) pair, see verifyAgentToken;
-// resolver gives the client IP (nil trusts no proxy).
+// use, or only the token derived from the agent service's enrollment secret
+// when it has one), later ones must present it (constant-time verify). limiter
+// bounds the token checks of each (client IP, agent ID) pair, see
+// verifyAgentToken; resolver gives the client IP (nil trusts no proxy).
 func NewHTTPDiscovery(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, limiter *ratelimit.Limiter, resolver *clientip.Resolver, requireAuth bool) *HTTPDiscovery {
 	if agentSVC == nil {
 		panic(service.ErrNilService)
@@ -231,9 +232,10 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 // on the (client IP, agent ID) pair, so checks in flight count like failures:
 // it returns auth.ErrRateLimited while the failures plus the checks in flight
 // of the pair reach the limit. A missing or wrong token
-// (agent.ErrUnauthenticated) becomes a failure, and a missing one logs a WARN,
-// at most rate_attempts per window for the pair; every other outcome, a panic
-// included, releases the attempt.
+// (agent.ErrUnauthenticated, which includes a first-contact token other than
+// the one derived from the enrollment secret) becomes a failure, and a missing
+// one logs a WARN, at most rate_attempts per window for the pair; every other
+// outcome, a panic included, releases the attempt.
 func verifyAgentToken(ctx context.Context, logger zerolog.Logger, svc *agent.Service, limiter *ratelimit.Limiter, clientIP, agentID, token string) error {
 	if len(token) > model.AgentTokenMaxBytes {
 		return agent.ErrTokenTooLong

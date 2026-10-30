@@ -2,7 +2,10 @@ package agent
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 
 	"github.com/rs/zerolog"
@@ -23,19 +26,47 @@ var ErrTokenTooLong = errors.New("agent: token too long")
 
 // Service provides agent management operations.
 type Service struct {
-	logger zerolog.Logger
-	store  storage.Storage
+	logger       zerolog.Logger
+	store        storage.Storage
+	enrollSecret string
+}
+
+// Option configures a Service.
+type Option func(*Service)
+
+// MinEnrollSecretBytes is the shortest enrollment secret podium accepts.
+const MinEnrollSecretBytes = 32
+
+// EnrollToken returns the token an unknown agent ID must present to enroll
+// while an enrollment secret is set: the lowercase hex of HMAC-SHA256 of the
+// agent ID under the secret. `podium agent-token` prints it.
+func EnrollToken(secret, agentID string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(agentID))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// WithEnrollSecret closes enrollment: an unknown agent ID then enrolls only
+// with the token EnrollToken derives from secret for that ID. Agents that are
+// already enrolled are unaffected. An empty secret leaves enrollment to trust
+// on first use.
+func WithEnrollSecret(secret string) Option {
+	return func(s *Service) { s.enrollSecret = secret }
 }
 
 // New creates a new agent service.
-func New(store storage.Storage, logger zerolog.Logger) *Service {
+func New(store storage.Storage, logger zerolog.Logger, opts ...Option) *Service {
 	if store == nil {
 		panic("agent.Service: store is nil")
 	}
-	return &Service{
+	s := &Service{
 		logger: logger.With().Str("service", "agents").Logger(),
 		store:  store,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // List returns a page of agents matching the query.
@@ -62,12 +93,16 @@ func (s *Service) Get(ctx context.Context, id string) (*model.Agent, error) {
 	return s.store.GetAgent(ctx, id)
 }
 
-// VerifyOrEnrollToken implements trust-on-first-use bearer auth for an agent.
+// VerifyOrEnrollToken implements bearer auth for an agent: trust on first use,
+// or enrollment by derived token when an enrollment secret is set.
 //
 // First contact (no stored credential) enrolls the presented token, unless it
-// is longer than model.AgentTokenMaxBytes (ErrTokenTooLong). Every later sync
-// must present the same token (constant-time compare), whatever the length of
-// the stored one; a missing or wrong token returns ErrUnauthenticated. The
+// is longer than model.AgentTokenMaxBytes (ErrTokenTooLong). With an
+// enrollment secret, first contact enrolls only the token EnrollToken derives
+// for the agent ID (constant-time compare); any other returns ErrUnauthenticated
+// and stores nothing. Every later sync must present the stored token
+// (constant-time compare), whatever the length of the stored one and whether a
+// secret is set; a missing or wrong token returns ErrUnauthenticated. The
 // read-check-write runs inside one transaction so two concurrent
 // first-contacts can't both enroll and race.
 func (s *Service) VerifyOrEnrollToken(ctx context.Context, agentID, presented string) error {
@@ -89,6 +124,9 @@ func (s *Service) VerifyOrEnrollToken(ctx context.Context, agentID, presented st
 		case errors.Is(err, storage.ErrNotFound):
 			if len(presented) > model.AgentTokenMaxBytes {
 				return ErrTokenTooLong
+			}
+			if s.enrollSecret != "" && !hmac.Equal([]byte(presented), []byte(EnrollToken(s.enrollSecret, agentID))) {
+				return ErrUnauthenticated
 			}
 			cred, err := model.NewAgentCredential(agentID, presented)
 			if err != nil {

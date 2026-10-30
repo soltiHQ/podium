@@ -552,3 +552,94 @@ func TestTokenlessSyncWarns(t *testing.T) {
 		})
 	}
 }
+
+// With an enrollment secret an unknown agent ID enrolls only with the token
+// derived from it for that ID. Any other token is refused (HTTP 401, gRPC
+// Unauthenticated) and stores nothing, and each refusal counts as a failure of
+// the (client IP, agent ID) pair in the discovery limiter. Once enrolled, the
+// agent syncs with that token.
+func TestEnrollRequiresDerivedTokenWhenSecretSet(t *testing.T) {
+	const (
+		secret = "0123456789abcdef0123456789abcdef"
+		token1 = "ee91297d059304dd88e1c5650d195795e3fa9c921c419a61aced53e41a3c0058" // HMAC-SHA256(secret, "agent-1"), hex
+		token2 = "14202fea7ea2cc313572d5d8e8c424489c954421b0f6160ce9e07d27340644fc" // the same for "agent-2"
+	)
+	for _, tc := range []struct {
+		name string
+		sync func(svc *agent.Service, hub *event.Hub) func(id, token string) syncOutcome
+	}{
+		{"http", func(svc *agent.Service, hub *event.Hub) func(string, string) syncOutcome {
+			h := NewHTTPDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), nil, true)
+			return func(id, token string) syncOutcome {
+				body := `{"id":"` + id + `","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
+				switch code := syncHTTP(h, body, token).Code; code {
+				case http.StatusOK:
+					return synced
+				case http.StatusUnauthorized:
+					return unauthenticated
+				case http.StatusTooManyRequests:
+					return refused
+				default:
+					return syncOutcome(fmt.Sprintf("HTTP %d", code))
+				}
+			}
+		}},
+		{"grpc", func(svc *agent.Service, hub *event.Hub) func(string, string) syncOutcome {
+			g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), true)
+			return func(id, token string) syncOutcome {
+				ctx := context.Background()
+				if token != "" {
+					ctx = metadata.NewIncomingContext(ctx, metadata.Pairs("authorization", "Bearer "+token))
+				}
+				_, err := g.Sync(ctx, &discoverv1.SyncRequest{Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})
+				switch grpcstatus.Code(err) {
+				case codes.OK:
+					return synced
+				case codes.Unauthenticated:
+					return unauthenticated
+				case codes.ResourceExhausted:
+					return refused
+				default:
+					return syncOutcome(err.Error())
+				}
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			svc := agent.New(inmemory.New(), zerolog.Nop(), agent.WithEnrollSecret(secret))
+			hub := event.NewHub(zerolog.Nop())
+			defer hub.Close()
+			sync := tc.sync(svc, hub)
+
+			// No token, a made-up one and another agent's derived token.
+			for _, token := range []string{"", "made-up-token", token2} {
+				if got := sync("agent-1", token); got != unauthenticated {
+					t.Fatalf("agent-1 with token %q: %s, want unauthenticated", token, got)
+				}
+				assertNotRegistered(t, svc, "agent-1")
+			}
+
+			if got := sync("agent-1", token1); got != synced {
+				t.Fatalf("agent-1 with its derived token: %s, want synced", got)
+			}
+			if stored, err := svc.AgentToken(ctx, "agent-1"); err != nil || stored != token1 {
+				t.Fatalf("stored token of agent-1: %q %v, want its derived token", stored, err)
+			}
+			if got := sync("agent-1", token1); got != synced {
+				t.Fatalf("enrolled agent-1 syncing again: %s, want synced", got)
+			}
+
+			// Five refusals block the pair, even for the token that would enroll.
+			for i := range 5 {
+				if got := sync("agent-2", "made-up-token"); got != unauthenticated {
+					t.Fatalf("agent-2 bad token %d: %s, want unauthenticated", i+1, got)
+				}
+			}
+			if got := sync("agent-2", token2); got != refused {
+				t.Fatalf("agent-2 after five refusals: %s, want refused", got)
+			}
+			assertNotRegistered(t, svc, "agent-2")
+		})
+	}
+}

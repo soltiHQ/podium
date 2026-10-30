@@ -36,7 +36,7 @@ func TestAuthenticatedEventAndTaskLogStreamsShareLimitAndRelease(t *testing.T) {
 	cfg.Streams.SubscriberBuffer = 4
 	store := inmemory.New()
 	authModel := kit.New(store, cfg.Auth)
-	svc, err := initServices(store, authModel, cfg.History.Archive, logger)
+	svc, err := initServices(store, authModel, cfg.History.Archive, cfg.AgentAuth, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

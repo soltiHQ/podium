@@ -61,7 +61,9 @@ type services struct {
 	role       *role.Service
 }
 
-func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history.Config, logger zerolog.Logger) (services, error) {
+// initServices constructs the domain services. agentAuth gives the agent
+// service the enrollment secret that closes discovery to unknown agent IDs.
+func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history.Config, agentAuth config.AgentAuthConfig, logger zerolog.Logger) (services, error) {
 	historySVC, err := history.New(store, historyCfg)
 	if err != nil {
 		return services{}, err
@@ -71,7 +73,7 @@ func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history
 		access:     access.New(authModel, store, logger),
 		credential: credential.New(store, logger),
 		session:    session.New(store, logger),
-		agent:      agent.New(store, logger),
+		agent:      agent.New(store, logger, agent.WithEnrollSecret(agentAuth.EnrollSecret)),
 		spec:       spec.New(store, logger),
 		role:       role.New(store, logger),
 		user:       user.New(store, logger),
@@ -252,17 +254,18 @@ func cookieSecure(mode string, resolver *clientip.Resolver) func(*http.Request) 
 // warnOpenDiscovery logs who can register agents through the discovery
 // listeners. agent_auth.require authenticates enrolled agents only: the first
 // sync of an unknown agent ID enrolls its token and sets the endpoint podium
-// calls. Until enrollment tokens exist, only the network or client
-// certificates (tls.server.client_ca_file) keep other hosts out.
+// calls. Besides the network, only an enrollment secret
+// (SOLTI_AGENT_AUTH_ENROLL_SECRET) or client certificates
+// (tls.server.client_ca_file) keep other hosts out of enrollment.
 func warnOpenDiscovery(logger zerolog.Logger, cfg config.Config) {
 	switch {
 	case !cfg.AgentAuth.Require:
 		logger.Warn().Msg("agent authentication disabled: any host that reaches the discovery listeners can register agents")
-	case cfg.TLS.Server.ClientCAFile == "":
+	case cfg.AgentAuth.EnrollSecret == "" && cfg.TLS.Server.ClientCAFile == "":
 		logger.Warn().
 			Str("http_discovery_addr", cfg.HTTPDiscovery.Addr).
 			Str("grpc_addr", cfg.GRPC.Addr).
-			Msg("agent authentication covers enrolled agents only: the first sync of an unknown agent ID enrolls it and sets the endpoint podium calls, so keep the discovery listeners reachable only from agent networks or set tls.server.client_ca_file")
+			Msg("agent authentication covers enrolled agents only: the first sync of an unknown agent ID enrolls it and sets the endpoint podium calls, so set SOLTI_AGENT_AUTH_ENROLL_SECRET or tls.server.client_ca_file, or keep the discovery listeners reachable only from agent networks")
 	}
 }
 

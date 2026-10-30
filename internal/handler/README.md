@@ -163,9 +163,13 @@ Every event kind maps to a subject (`event.SubjectOf`):
 Both parse the agent heartbeat payload, call `model.NewAgentFrom`, then `agentSVC.Upsert`.
 
 With agent auth required, the first sync of an unknown agent ID enrolls the token it presents (trust on first use) and
-sets the endpoint podium calls; every later sync of that ID must present the same token. Until enrollment tokens exist,
-only the network or client certificates keep other hosts from enrolling new IDs (see `internal/config`, "Agent
-authentication"). A token over 1024 bytes (`model.AgentTokenMaxBytes`) is refused first, with HTTP 400
+sets the endpoint podium calls; every later sync of that ID must present the same token. With an enrollment secret
+(`SOLTI_AGENT_AUTH_ENROLL_SECRET`, held by the agent service as `agent.WithEnrollSecret`), the first sync enrolls only
+the token derived for that ID (`agent.EnrollToken`, printed by `podium agent-token`): any other token is an
+`ErrUnauthenticated` like a wrong one, so 401 / `Unauthenticated`, nothing stored, one failure for the limiter. Known IDs
+are checked against their stored token, secret or not. Without a secret, only the network or client certificates keep
+other hosts from enrolling new IDs (see `internal/config`, "Agent authentication"). A token over 1024 bytes
+(`model.AgentTokenMaxBytes`) is refused first, with HTTP 400
 `Agent token is too long.` / gRPC `InvalidArgument`, and counts as no failure; `VerifyOrEnrollToken` never enrolls one
 either, while stored credentials load whatever their length. Then each sync reserves an attempt on
 the pair (client IP, agent ID) before its token check (`verifyAgentToken`), so checks in flight count like failures; a
