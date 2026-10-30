@@ -168,6 +168,7 @@ const (
 	causeTooLarge = "page refused as too large even at limit 1"
 	causeBudget   = "turn budget used before the last page"
 	causeCursor   = "agent repeated a cursor"
+	causeSnapshot = "pages name different snapshots"
 	causeAnswer   = "page answered with an error"
 )
 
@@ -355,21 +356,25 @@ func (r *Runner) noteAgent(ctx context.Context, turn *agentTurn) {
 }
 
 // noteListing logs when the tasks of an agent that answers can no longer be
-// listed completely, with the cause, and when they can be again: once for each
-// change, not on every tick the listing stays as it was. A turn that listed
-// nothing, got no answer or was cancelled leaves the state as it was.
+// listed completely, with the cause, and when they can be again, naming the
+// latest cause: once for each change, not on every tick the listing stays as it
+// was. A cause that changes while the listing stays incomplete is kept for the
+// line that ends it, not logged. A turn that listed nothing, got no answer or was
+// cancelled leaves the state as it was.
 func (r *Runner) noteListing(turn *agentTurn) {
 	was, incomplete := r.incomplete[turn.agentID]
 	switch l := turn.listed; {
 	case l.complete && incomplete:
 		delete(r.incomplete, turn.agentID)
 		r.logger.Info().Str("agent_id", turn.agentID).Str("was", was).Msg("agent tasks listed completely again; its rollouts are observed")
-	case l.cause != "" && !incomplete:
+	case l.cause != "":
 		if r.incomplete == nil {
 			r.incomplete = make(map[string]string)
 		}
 		r.incomplete[turn.agentID] = l.cause
-		r.logger.Warn().Err(l.err).Str("agent_id", turn.agentID).Str("cause", l.cause).Msg("agent tasks cannot be listed completely; its rollouts are not observed")
+		if !incomplete {
+			r.logger.Warn().Err(l.err).Str("agent_id", turn.agentID).Str("cause", l.cause).Msg("agent tasks cannot be listed completely; its rollouts are not observed")
+		}
 	}
 }
 
@@ -759,15 +764,19 @@ const taskListLimit = 1000
 // down to one task, and the smaller limit holds for the rest of the turn. Only a
 // listing that reaches the last page is complete. One that stops short reports
 // false, and no task may be judged missing by it: the budget is used, a task is
-// too large to list, a page fails, the agent repeats a cursor or the tick is
-// cancelled. A page answers or goes unanswered as any call does, a refusal and an
-// error status included: the turn notes it, and turn.listed says why a listing is
+// too large to list, a page fails, the agent returns a cursor it returned before,
+// the pages name different snapshots (a resource version that differs from the
+// first one named; a page without one is let through) or the tick is cancelled.
+// A page answers or goes unanswered as any call does, a refusal and an error
+// status included: the turn notes it, and turn.listed says why a listing is
 // incomplete.
 func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agentTurn, start time.Time) (map[string]struct{}, bool) {
 	var (
-		tasks  = make(map[string]struct{})
-		cursor string
-		limit  = taskListLimit
+		tasks   = make(map[string]struct{})
+		cursors = make(map[string]struct{})
+		cursor  string
+		version string
+		limit   = taskListLimit
 	)
 	for call := 0; ; call++ {
 		if call > 0 && r.now().Sub(start) >= r.cfg.PushTimeout {
@@ -799,17 +808,25 @@ func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agent
 			turn.listed = listing{cause: causeAnswer, err: err}
 			return nil, false
 		}
+		if resp.ResourceVersion != "" {
+			if version != "" && resp.ResourceVersion != version {
+				turn.listed = listing{cause: causeSnapshot}
+				return nil, false
+			}
+			version = resp.ResourceVersion
+		}
 		for _, task := range resp.Tasks {
 			tasks[task.ID] = struct{}{}
 		}
-		switch resp.NextCursor {
-		case "":
+		if resp.NextCursor == "" {
 			turn.listed = listing{complete: true}
 			return tasks, true
-		case cursor:
+		}
+		if _, repeated := cursors[resp.NextCursor]; repeated {
 			turn.listed = listing{cause: causeCursor}
 			return nil, false
 		}
+		cursors[resp.NextCursor] = struct{}{}
 		cursor = resp.NextCursor
 	}
 }

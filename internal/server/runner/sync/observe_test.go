@@ -121,10 +121,11 @@ func TestObservePaginates(t *testing.T) {
 }
 
 // A listing that stops short says nothing about the tasks it did not reach.
-// Whatever stops it, the budget, a failed page, a cursor that loops or a
-// cancelled tick, no rollout is judged missing: not the task on a page it never
-// got, nor the one the agent lost. An agent that answers is logged once, with
-// the cause; one that goes silent or a tick that is cancelled say nothing.
+// Whatever stops it, the budget, a failed page, a cursor that comes back, pages
+// of different snapshots or a cancelled tick, no rollout is judged missing: not
+// the task on a page it never got, nor the one the agent lost. An agent that
+// answers is logged once, with the cause; one that goes silent or a tick that is
+// cancelled say nothing.
 func TestIncompleteListMarksNothingMissing(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -132,15 +133,19 @@ func TestIncompleteListMarksNothingMissing(t *testing.T) {
 		advance  time.Duration // moves the clock on each page
 		failAt   int           // the page that fails with err
 		err      error
-		repeat   bool   // every page names the same next cursor
-		cancelAt int    // the page during which the tick is cancelled
-		cause    string // the cause the warning names; none if empty
+		cursors  []string // the next cursor each page names, in turn
+		versions []string // the resource version each page names, in turn
+		cancelAt int      // the page during which the tick is cancelled
+		cause    string   // the cause the warning names; none if empty
 	}{
 		{name: "the budget is used", pages: 1, advance: defaultPushTimeout, cause: causeBudget},
 		{name: "a refused page uses the budget before it is asked again", pages: 1, advance: defaultPushTimeout, failAt: 1, err: tooLarge(), cause: causeBudget},
 		{name: "a page is answered with an error", pages: 2, failAt: 2, err: httpAnswer(proxy.ErrListTasks, 500, errkind.Internal), cause: causeAnswer},
 		{name: "a page is unanswered", pages: 2, failAt: 2, err: noAnswer(proxy.ErrListTasks)},
-		{name: "the cursor repeats", pages: 2, repeat: true, cause: causeCursor},
+		{name: "the cursor repeats", pages: 2, cursors: []string{"a", "a"}, cause: causeCursor},
+		{name: "the cursors cycle", pages: 3, cursors: []string{"a", "b", "a"}, cause: causeCursor},
+		{name: "the snapshot changes", pages: 2, versions: []string{"rv-1", "rv-2"}, cause: causeSnapshot},
+		{name: "the last page is of another snapshot", pages: 3, versions: []string{"rv-1", "rv-1", "rv-2"}, cause: causeSnapshot},
 		{name: "the tick is cancelled", pages: 1, cancelAt: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -159,8 +164,11 @@ func TestIncompleteListMarksNothingMissing(t *testing.T) {
 				if call == tc.cancelAt {
 					cancel()
 				}
-				if tc.repeat {
-					page.NextCursor = "stuck"
+				if call <= len(tc.cursors) {
+					page.NextCursor = tc.cursors[call-1]
+				}
+				if call <= len(tc.versions) {
+					page.ResourceVersion = tc.versions[call-1]
 				}
 				if call == tc.failAt {
 					return tc.err
@@ -186,6 +194,48 @@ func TestIncompleteListMarksNothingMissing(t *testing.T) {
 			warns := strings.Count(logs.String(), `"level":"warn"`)
 			if (tc.cause == "") != (warns == 0) || warns > 1 || !strings.Contains(logs.String(), tc.cause) {
 				t.Fatalf("logged %d warnings, want one naming %q or none: %s", warns, tc.cause, logs.String())
+			}
+		})
+	}
+}
+
+// Pages that name one snapshot complete the listing, and so do pages that name
+// none: an agent need not say which snapshot a page is of.
+func TestPagesOfOneSnapshotComplete(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		versions []string // the resource version each page names, in turn
+	}{
+		{"no versions", nil},
+		{"one version on every page", []string{"rv-1", "rv-1", "rv-1"}},
+		{"a page without a version", []string{"rv-1", "", "rv-1"}},
+		{"the first page without a version", []string{"", "rv-1", "rv-1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := &fakeProxy{}
+			r, s, _ := newFakeRunner(t, fp)
+			var logs bytes.Buffer
+			r.logger = zerolog.New(&logs)
+			holdN(fp, 2300)
+			fp.onList = func(_ context.Context, page *proxyv1.ListTasksResponse) error {
+				if call := len(fp.lists); call <= len(tc.versions) {
+					page.ResourceVersion = tc.versions[call-1]
+				}
+				return nil
+			}
+			kept := seedRollout(t, s, "sp-last", "agent-a", enum.RolloutIntentNoop, "task-2299")
+			lost := seedRollout(t, s, "sp-lost", "agent-a", enum.RolloutIntentNoop, "task-lost")
+
+			r.tick(context.Background())
+
+			if len(fp.lists) != 3 {
+				t.Fatalf("agent got %d list calls, want 3", len(fp.lists))
+			}
+			if !unchanged(t, s, kept) || !requeued(t, s, lost) {
+				t.Fatal("the listing was complete: want the lost task queued for a reinstall and the other rollout left alone")
+			}
+			if logs.Len() != 0 {
+				t.Fatalf("a listing that came whole logged: %s", logs.String())
 			}
 		})
 	}
@@ -347,7 +397,8 @@ func TestATaskTooLargeEvenAloneLeavesTheListingIncomplete(t *testing.T) {
 }
 
 // An agent whose tasks cannot be listed completely is logged when that begins,
-// with the cause, and when it ends, not on every tick it goes on.
+// with the cause, and when it ends, naming the latest cause: not on every tick it
+// goes on, nor when its cause changes meanwhile.
 func TestListingChangesAreLoggedOnce(t *testing.T) {
 	fp := &fakeProxy{}
 	r, s, _ := newFakeRunner(t, fp)
@@ -363,11 +414,22 @@ func TestListingChangesAreLoggedOnce(t *testing.T) {
 		t.Fatalf("two incomplete ticks logged %d warnings and %d infos, want 1 and 0, the warning naming %q: %s", logged("warn"), logged("info"), causeAnswer, logs.String())
 	}
 
+	// The cause changes while the listing stays incomplete: silently.
 	fp.listErr = nil
+	fp.onList = func(_ context.Context, page *proxyv1.ListTasksResponse) error {
+		page.NextCursor = "stuck"
+		return nil
+	}
+	r.tick(context.Background())
+	if logged("warn") != 1 || logged("info") != 0 {
+		t.Fatalf("a change of cause logged %d warnings and %d infos in all, want 1 and 0: %s", logged("warn"), logged("info"), logs.String())
+	}
+
+	fp.onList = nil
 	r.tick(context.Background())
 	r.tick(context.Background())
-	if logged("warn") != 1 || logged("info") != 1 {
-		t.Fatalf("a complete tick after them logged %d warnings and %d infos in all, want 1 and 1: %s", logged("warn"), logged("info"), logs.String())
+	if logged("warn") != 1 || logged("info") != 1 || !strings.Contains(logs.String(), `"was":"`+causeCursor+`"`) {
+		t.Fatalf("a complete tick after them logged %d warnings and %d infos in all, want 1 and 1, the info naming %q: %s", logged("warn"), logged("info"), causeCursor, logs.String())
 	}
 }
 
@@ -401,22 +463,34 @@ func TestListingStateForgetsAgentsWithoutRollouts(t *testing.T) {
 
 // A rollout that changes while its agent is being listed is left as the change
 // made it, though the listing lacks its task: the new intent decides what
-// happens to the task, and a rollout deleted meanwhile does not come back.
+// happens to the task, and a rollout deleted meanwhile does not come back. The
+// next tick does what the change asks: it deletes the task, applies the spec, or
+// makes no call.
 func TestObserveLeavesRolloutsChangedDuringTheListing(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		change func(*model.Rollout) // nil: the rollout is deleted
-		intent enum.RolloutIntent
+		name    string
+		change  func(*model.Rollout) // nil: the rollout is deleted
+		intent  enum.RolloutIntent
+		deletes []string // the tasks the next tick deletes
+		applies []string // the specs the next tick applies
 	}{
-		{"uninstall requested", func(ro *model.Rollout) { ro.SetIntent(enum.RolloutIntentUninstall); ro.MarkPending(1) }, enum.RolloutIntentUninstall},
-		{"deployed again", func(ro *model.Rollout) { ro.SetIntent(enum.RolloutIntentUpdate); ro.MarkPending(2) }, enum.RolloutIntentUpdate},
-		{"deleted", nil, 0},
+		{"uninstall requested", func(ro *model.Rollout) { ro.SetIntent(enum.RolloutIntentUninstall); ro.MarkPending(1) }, enum.RolloutIntentUninstall, []string{"task-lost"}, nil},
+		{"deployed again", func(ro *model.Rollout) { ro.SetIntent(enum.RolloutIntentUpdate); ro.MarkPending(2) }, enum.RolloutIntentUpdate, nil, []string{"sp-lost"}},
+		{"deleted", nil, 0, nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			fp := &fakeProxy{}
+			fp := &fakeProxy{applyResp: []string{"task-lost"}}
 			r, s, _ := newFakeRunner(t, fp)
 			ro := seedRollout(t, s, "sp-lost", "agent-a", enum.RolloutIntentNoop, "task-lost")
+			spec, err := s.GetSpec(ctx, "sp-lost")
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec.BumpGeneration() // what a deploy does, so that generation 2 can be applied
+			if err = s.UpsertSpec(ctx, spec); err != nil {
+				t.Fatal(err)
+			}
 			fp.onList = func(context.Context, *proxyv1.ListTasksResponse) error {
 				if tc.change == nil {
 					return s.DeleteRollout(ctx, ro.ID())
@@ -437,6 +511,13 @@ func TestObserveLeavesRolloutsChangedDuringTheListing(t *testing.T) {
 				t.Fatalf("rollout deleted during the listing came back: %v", err)
 			case tc.change != nil && (err != nil || after.Intent() != tc.intent || after.ActualTaskID() != "task-lost"):
 				t.Fatalf("rollout changed during the listing was rewritten: err=%v intent=%s task=%q", err, after.Intent(), after.ActualTaskID())
+			}
+
+			fp.onList = nil
+			r.tick(ctx)
+
+			if applies := specOf(fp.applies); !slices.Equal(fp.deletes, tc.deletes) || !slices.Equal(applies, tc.applies) {
+				t.Fatalf("next tick deleted %v and applied %v, want %v and %v", fp.deletes, applies, tc.deletes, tc.applies)
 			}
 		})
 	}
@@ -480,5 +561,32 @@ func TestPushesThatUseTheBudgetLeaveNoTimeToObserve(t *testing.T) {
 	}
 	if !unchanged(t, s, synced) {
 		t.Fatal("synced rollout changed though its agent was not listed")
+	}
+}
+
+// A page that comes back whole as its deadline passes is an answer: the listing
+// goes on, and what it shows is acted on. The turn's budget runs on a clock that
+// stands still, so that only the page's own deadline passes.
+func TestPageAnsweredAtItsDeadlineCounts(t *testing.T) {
+	fp := &fakeProxy{}
+	r, s, _ := newFakeRunner(t, fp)
+	now := time.Now()
+	r.clock = func() time.Time { return now }
+	r.cfg.PushTimeout = 20 * time.Millisecond
+	fp.onList = func(ctx context.Context, _ *proxyv1.ListTasksResponse) error {
+		<-ctx.Done()
+		return nil
+	}
+	kept := seedRollout(t, s, "sp-kept", "agent-a", enum.RolloutIntentNoop, "task-kept")
+	lost := seedRollout(t, s, "sp-lost", "agent-a", enum.RolloutIntentNoop, "task-lost")
+	fp.hold("task-kept")
+
+	r.tick(context.Background())
+
+	if !unchanged(t, s, kept) || !requeued(t, s, lost) {
+		t.Fatal("the page came back whole at its deadline: want the lost task queued for a reinstall and the other rollout left alone")
+	}
+	if b, ok := r.backoffs["agent-a"]; ok {
+		t.Fatalf("the agent answered, but is backed off: %+v", b)
 	}
 }

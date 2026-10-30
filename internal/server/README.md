@@ -163,15 +163,26 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   turn; the next turn starts at 1000 again. A synced rollout whose task is
   missing from the listing is queued for a reinstall, but only a complete
   listing shows a task missing. If the budget runs out, a page fails (a task
-  too large to list even alone included), or the agent returns the same cursor
-  twice in a row, no rollout is judged and none is touched, and the next tick
-  lists again from the first page, as a cursor holds only within a tick. So
-  every synced rollout of an agent is observed each tick when the agent's task
-  list can be listed within `push_timeout`, and an agent whose list cannot is
-  not observed. The runner logs when an agent's listing turns incomplete, a
-  warning that names the cause (a task too large to list, the budget used, a
-  repeated cursor, a page answered with an error), and when it turns complete
-  again, not on every tick. A synced rollout without a task makes no call.
+  too large to list even alone included), the agent returns a cursor it
+  returned before, or its pages name different snapshots (resource versions
+  that differ; a page without one is let through), no rollout is judged and
+  none is touched, and the next tick lists again from the first page, as a
+  cursor holds only within a tick. So every synced rollout of an agent is
+  observed each tick when, after the turn's pushes, the agent's task list can
+  be listed with the last page starting inside `push_timeout`; an agent whose
+  list cannot is not observed. A synced rollout without a task makes no call.
+- **Reinstalls are not bounded by `push_timeout`.** After a complete listing,
+  each rollout whose task is missing is queued for a reinstall by a write to
+  the local store, about 1 ms on the durable store. These writes make no agent
+  call, so the turn's budget does not stop them: an agent that lost all its
+  tasks has one write per rollout in one turn.
+- **A listing that cannot finish is logged when that changes.** When an
+  agent's listing turns incomplete, the runner logs one warning that names the
+  cause (a task too large to list, the budget used, a repeated cursor, pages of
+  different snapshots, a page answered with an error). When it turns complete
+  again, one info line names the latest cause. Neither is repeated on every
+  tick, and a cause that changes meanwhile is not logged. An agent that flips
+  between the two logs a pair of lines for each flip.
 - **An unanswered call ends the agent's turn.** A failed push records its
   failure on the rollout; an unanswered listing records nothing and only backs
   the agent off. The agent's other rollouts wait, untouched. An answer,

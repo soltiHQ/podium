@@ -387,6 +387,6 @@ most; what is left waits for the next tick, so an agent that answers slowly
 holds a tick for about one `push_timeout`, not one per rollout. The check that
 an agent still has its tasks is one listing of them, up to 1000 to a page (fewer
 when the agent's answer would be too large), and only a whole listing counts:
-an agent that cannot be listed within one `push_timeout` is not checked. Zero or
-negative values inherit the defaults shown. See `internal/server/README.md` for
-the scheduling.
+an agent that cannot be listed in what is left of one `push_timeout` after its
+pushes is not checked. Zero or negative values inherit the defaults shown. See
+`internal/server/README.md` for the scheduling.

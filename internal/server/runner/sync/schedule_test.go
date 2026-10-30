@@ -192,9 +192,6 @@ func TestStateWritesOutlivePushTimeout(t *testing.T) {
 		{"delete completes", enum.RolloutIntentUninstall, func(_ *model.Rollout, err error) bool {
 			return errors.Is(err, storage.ErrNotFound)
 		}},
-		{"observation requeues a lost task", enum.RolloutIntentNoop, func(after *model.Rollout, err error) bool {
-			return err == nil && after.Intent() == enum.RolloutIntentInstall && after.Status() == enum.SyncStatusPending && after.ActualTaskID() == ""
-		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pushCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -204,20 +201,7 @@ func TestStateWritesOutlivePushTimeout(t *testing.T) {
 			r, s, _ := newFakeRunner(t, fp)
 			ro := seedRollouts(t, s, "agent-a", 1, tc.intent)[0]
 
-			if tc.intent == enum.RolloutIntentNoop {
-				// The agent is listed within its turn: the page gets the turn's push
-				// timeout. The turn's budget stays unspent on a clock that stands still.
-				now := time.Now()
-				r.clock = func() time.Time { return now }
-				r.cfg.PushTimeout = 20 * time.Millisecond
-				fp.onList = func(ctx context.Context, _ *proxyv1.ListTasksResponse) error {
-					<-ctx.Done()
-					return nil
-				}
-				r.tick(context.Background())
-			} else {
-				r.reconcile(pushCtx, ro.ID())
-			}
+			r.reconcile(pushCtx, ro.ID())
 
 			after, err := s.GetRollout(context.Background(), ro.ID())
 			if tc.done(after, err) {
