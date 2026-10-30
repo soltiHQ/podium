@@ -252,3 +252,80 @@ func TestDeployIfMatchMismatchIs412(t *testing.T) {
 		}
 	}
 }
+
+// If-Match is read as RFC 9110 lists, over every If-Match header: Deploy goes
+// ahead when any listed strong tag names the current plan, quoted or bare, or
+// with "*" anywhere. A weak tag never matches, and empty list elements name
+// no plan.
+func TestDeployIfMatchLists(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		values func(stale, current string) []string
+		want   int
+	}{
+		{"stale then current", func(s, c string) []string { return []string{s + ", " + c} }, http.StatusNoContent},
+		{"current then stale", func(s, c string) []string { return []string{c + "," + s} }, http.StatusNoContent},
+		{"current in a second header", func(s, c string) []string { return []string{s, c} }, http.StatusNoContent},
+		{"bare current in a list", func(s, c string) []string { return []string{s + ", " + strings.Trim(c, `"`)} }, http.StatusNoContent},
+		{"empty elements around current", func(_, c string) []string { return []string{" , " + c + " ,"} }, http.StatusNoContent},
+		{"star after a stale tag", func(s, _ string) []string { return []string{s + ", *"} }, http.StatusNoContent},
+		{"star in a second header", func(s, _ string) []string { return []string{s, "*"} }, http.StatusNoContent},
+		{"stale tags only", func(s, _ string) []string { return []string{s + ", " + s, s} }, http.StatusPreconditionFailed},
+		{"current only weak", func(s, c string) []string { return []string{s + ", W/" + c} }, http.StatusPreconditionFailed},
+		{"current only weak, in a second header", func(s, c string) []string { return []string{s, "W/" + c} }, http.StatusPreconditionFailed},
+		{"empty elements only", func(_, _ string) []string { return []string{" , ,", ","} }, http.StatusPreconditionFailed},
+		{"stale and a blank header", func(s, _ string) []string { return []string{s, " "} }, http.StatusPreconditionFailed},
+		{"quoted star", func(_, _ string) []string { return []string{`"*"`} }, http.StatusPreconditionFailed},
+		{"current cut short", func(_, c string) []string { return []string{strings.TrimSuffix(c, `"`)} }, http.StatusPreconditionFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDeployFixture(t)
+			stale := f.etag(t)
+			f.agent(t, "agent-b")
+			current := f.etag(t)
+
+			w := f.deploy(t, tc.values(stale, current)...)
+			if w.Code != tc.want {
+				t.Fatalf("If-Match %q: %d %s, want %d", tc.values(stale, current), w.Code, w.Body.String(), tc.want)
+			}
+			wantAgents := []string{"agent-a", "agent-b"}
+			if tc.want != http.StatusNoContent {
+				wantAgents = []string{}
+			}
+			if got := f.rolloutAgents(t); !slices.Equal(got, wantAgents) {
+				t.Fatalf("If-Match %q: rollouts for %v, want %v", tc.values(stale, current), got, wantAgents)
+			}
+		})
+	}
+}
+
+// The parser behind TestDeployIfMatchLists: nil leaves Deploy unchecked, any
+// other list, an empty one included, names the plans Deploy accepts.
+func TestPlanTokensFromIfMatch(t *testing.T) {
+	for _, tc := range []struct {
+		values []string
+		want   []string
+	}{
+		{nil, nil},
+		{[]string{"*"}, nil},
+		{[]string{`"a"`, `"b", *`}, nil},
+		{[]string{`"a"`}, []string{"a"}},
+		{[]string{"a"}, []string{"a"}},
+		{[]string{`"a", "b"`, "c"}, []string{"a", "b", "c"}},
+		{[]string{`W/"a", "b"`, `W/c`}, []string{"b"}},
+		{[]string{""}, []string{}},
+		{[]string{" , ,"}, []string{}},
+		{[]string{`""`}, []string{""}},
+		{[]string{`"a`}, []string{}},
+		{[]string{`"*"`}, []string{"*"}},
+	} {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/specs/saved/deploy", nil)
+		for _, v := range tc.values {
+			r.Header.Add("If-Match", v)
+		}
+		got := planTokensFromIfMatch(r)
+		if (got == nil) != (tc.want == nil) || !slices.Equal(got, tc.want) {
+			t.Errorf("If-Match %q: %#v, want %#v", tc.values, got, tc.want)
+		}
+	}
+}

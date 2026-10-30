@@ -74,10 +74,12 @@ type AgentStore interface {
 	DeleteAgent(ctx context.Context, id string) error
 }
 
-// AgentCredentialStore persists per-agent bearer secrets learned at discovery
-// (trust-on-first-use). Keyed by agent ID — one credential per agent. The token
-// is raw (the control plane must present it on outbound calls), so it is never
-// surfaced to API/UI and never logged in clear.
+// AgentCredentialStore persists per-agent bearer secrets learned at discovery.
+// The first sync of an unknown agent ID enrolls one: the token it presents
+// (trust on first use), or, while an enrollment secret is set, only the token
+// derived from that secret for the ID. Keyed by agent ID — one credential per
+// agent. The token is raw (the control plane must present it on outbound
+// calls), so it is never surfaced to API/UI and never logged in clear.
 type AgentCredentialStore interface {
 	// UpsertAgentCredential stores or replaces an agent's credential.
 	//

@@ -232,9 +232,10 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 // on the (client IP, agent ID) pair, so checks in flight count like failures:
 // it returns auth.ErrRateLimited while the failures plus the checks in flight
 // of the pair reach the limit. A missing or wrong token
-// (agent.ErrUnauthenticated, which includes a first-contact token other than
-// the one derived from the enrollment secret) becomes a failure, and a missing
-// one logs a WARN, at most rate_attempts per window for the pair; every other
+// (agent.ErrUnauthenticated, which includes agent.ErrEnrollRefused, a
+// first-contact token other than the one derived from the enrollment secret)
+// becomes a failure. A missing token and a refused enrollment each log a WARN,
+// never the token, at most rate_attempts per window for the pair; every other
 // outcome, a panic included, releases the attempt.
 func verifyAgentToken(ctx context.Context, logger zerolog.Logger, svc *agent.Service, limiter *ratelimit.Limiter, clientIP, agentID, token string) error {
 	if len(token) > model.AgentTokenMaxBytes {
@@ -247,11 +248,19 @@ func verifyAgentToken(ctx context.Context, logger zerolog.Logger, svc *agent.Ser
 	defer attempt.Release() // a no-op once the attempt has failed
 
 	if token == "" {
-		// The SDK sends no token over plaintext unless told to.
-		logger.Warn().Str("agent_id", agentID).
-			Msg("agent sent no token: serve discovery over TLS so the SDK sends it, call allow_insecure_token_transport() in the SDK, or set agent_auth.require=false")
+		// The SDK sends no token over plaintext unless told to. With a secret,
+		// agent_auth.require=false fails validation: point to the token instead.
+		msg := "agent sent no token: serve discovery over TLS so the SDK sends it, call allow_insecure_token_transport() in the SDK, or set agent_auth.require=false"
+		if svc.EnrollSecretSet() {
+			msg = "agent sent no token: give it the token podium agent-token derives for its ID, and serve discovery over TLS so the SDK sends it, or call allow_insecure_token_transport() in the SDK"
+		}
+		logger.Warn().Str("agent_id", agentID).Msg(msg)
 	}
 	err = svc.VerifyOrEnrollToken(ctx, agentID, token)
+	if errors.Is(err, agent.ErrEnrollRefused) {
+		logger.Warn().Str("agent_id", agentID).Str("client_ip", clientIP).
+			Msg("enrollment refused: an unknown agent ID presented a token that is not the one derived for it from the enrollment secret; give the agent the token podium agent-token prints for its ID")
+	}
 	if errors.Is(err, agent.ErrUnauthenticated) {
 		attempt.Fail(time.Now())
 	}

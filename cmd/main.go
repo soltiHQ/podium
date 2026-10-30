@@ -71,15 +71,27 @@ func exitCode(runErr, shutdownErr error) int {
 	return 0
 }
 
-// agentToken runs "podium agent-token <agent-id>": it prints the token that
+// agentTokenUsage is the usage of "podium agent-token".
+const agentTokenUsage = "usage: podium agent-token [--] <agent-id>"
+
+// agentToken runs "podium agent-token [--] <agent-id>": it prints the token that
 // agent ID enrolls with while the enrollment secret is set, and a newline, and
 // returns the exit code. It reads the secret from config.EnrollSecretEnv only
 // and applies the checks of the server: the secret has at least
 // agent.MinEnrollSecretBytes bytes and the ID passes model.ValidateAgentID. A
 // failure prints one line to stderr, never the secret, and nothing to stdout.
+// A bare -h or --help prints the usage to stdout. "--" ends the options, for an
+// agent ID that starts with "-".
 func agentToken(args []string, stdout, stderr io.Writer) int {
+	switch {
+	case len(args) > 0 && args[0] == "--":
+		args = args[1:]
+	case len(args) == 1 && (args[0] == "-h" || args[0] == "--help"):
+		_, _ = fmt.Fprintf(stdout, "%s\nPrints the token <agent-id> enrolls with, derived from %s.\n", agentTokenUsage, config.EnrollSecretEnv)
+		return 0
+	}
 	if len(args) != 1 {
-		_, _ = fmt.Fprintln(stderr, "usage: podium agent-token <agent-id>")
+		_, _ = fmt.Fprintln(stderr, agentTokenUsage)
 		return 2
 	}
 	id := args[0]

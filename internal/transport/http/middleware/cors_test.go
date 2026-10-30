@@ -116,3 +116,20 @@ func TestCORSNoOriginPassesThrough(t *testing.T) {
 		t.Fatalf("Allow-Origin = %q, want empty (no Origin header)", got)
 	}
 }
+
+// By default a cross-origin client may read a placement's ETag and send it back
+// as If-Match on Deploy, next to the headers it could always use.
+func TestCORSDefaultsCarryTheDeployPrecondition(t *testing.T) {
+	h := corsHandler(CORSConfig{AllowOrigins: []string{"https://app.example.com"}})
+	r := httptest.NewRequest(http.MethodOptions, "/", nil)
+	r.Header.Set("Origin", "https://app.example.com")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if got, want := w.Header().Get("Access-Control-Allow-Headers"), "Authorization, Content-Type, X-Request-Id, If-Match"; got != want {
+		t.Fatalf("Allow-Headers = %q, want %q", got, want)
+	}
+	if got, want := w.Header().Get("Access-Control-Expose-Headers"), "X-Request-Id, ETag"; got != want {
+		t.Fatalf("Expose-Headers = %q, want %q", got, want)
+	}
+}

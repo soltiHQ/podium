@@ -210,6 +210,9 @@ func TestLoadEnrollSecretIsEnvOnly(t *testing.T) {
 			}
 			t.Setenv("CONFIG_PATH", path)
 			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+			// Only the file may set it here: envconfig reads both names.
+			t.Setenv("SOLTI_AGENT_AUTH_ENROLL_SECRET", "")
+			t.Setenv("ENROLL_SECRET", "")
 			cfg, err := load(nil)
 			if err != nil {
 				t.Fatal(err)

@@ -84,7 +84,7 @@ func TestDeployFreshTargetsInstall(t *testing.T) {
 	svc, store := mkService(t)
 	mkSpec(t, svc, store, "sp-1", []string{"agent-a", "agent-b"})
 
-	if err := svc.Deploy(context.Background(), "sp-1", ""); err != nil {
+	if err := svc.Deploy(context.Background(), "sp-1", nil); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 
@@ -106,14 +106,14 @@ func TestDeploySkipsAlreadySyncedAtSameGeneration(t *testing.T) {
 	svc, store := mkService(t)
 	mkSpec(t, svc, store, "sp-1", []string{"agent-a", "agent-b"})
 
-	_ = svc.Deploy(context.Background(), "sp-1", "")
+	_ = svc.Deploy(context.Background(), "sp-1", nil)
 
 	rA, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-a"))
 	rA.SetActualTaskID("sub-slot-1")
 	rA.MarkSynced(1)
 	_ = store.UpsertRollout(context.Background(), rA)
 
-	if err := svc.Deploy(context.Background(), "sp-1", ""); err != nil {
+	if err := svc.Deploy(context.Background(), "sp-1", nil); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 	rA2, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-a"))
@@ -134,7 +134,7 @@ func TestDeployQueuesUpdateForStaleRollout(t *testing.T) {
 	svc, store := mkService(t)
 	ts := mkSpec(t, svc, store, "sp-1", []string{"agent-a"})
 
-	_ = svc.Deploy(context.Background(), "sp-1", "")
+	_ = svc.Deploy(context.Background(), "sp-1", nil)
 	rA, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-a"))
 	rA.SetActualTaskID("sub-slot-1")
 	rA.MarkSynced(1)
@@ -145,7 +145,7 @@ func TestDeployQueuesUpdateForStaleRollout(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	_ = svc.Deploy(context.Background(), "sp-1", "")
+	_ = svc.Deploy(context.Background(), "sp-1", nil)
 
 	rA2, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-a"))
 	if rA2.Intent() != enum.RolloutIntentUpdate {
@@ -160,7 +160,7 @@ func TestDeployQueuesUninstallForRemovedTarget(t *testing.T) {
 	svc, store := mkService(t)
 	ts := mkSpec(t, svc, store, "sp-1", []string{"agent-a", "agent-b"})
 
-	_ = svc.Deploy(context.Background(), "sp-1", "")
+	_ = svc.Deploy(context.Background(), "sp-1", nil)
 	for _, ag := range []string{"agent-a", "agent-b"} {
 		r, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", ag))
 		r.SetActualTaskID("sub-" + ag)
@@ -170,7 +170,7 @@ func TestDeployQueuesUninstallForRemovedTarget(t *testing.T) {
 
 	ts.SetTargets([]string{"agent-a"})
 	_ = svc.Upsert(context.Background(), ts, 0)
-	_ = svc.Deploy(context.Background(), "sp-1", "")
+	_ = svc.Deploy(context.Background(), "sp-1", nil)
 
 	rB, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-b"))
 	if rB.Intent() != enum.RolloutIntentUninstall {
@@ -197,7 +197,7 @@ func TestDeleteFastPathWithoutRollouts(t *testing.T) {
 func TestDeleteSoftPathWithRollouts(t *testing.T) {
 	svc, store := mkService(t)
 	mkSpec(t, svc, store, "sp-1", []string{"agent-a"})
-	_ = svc.Deploy(context.Background(), "sp-1", "")
+	_ = svc.Deploy(context.Background(), "sp-1", nil)
 
 	r, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-a"))
 	r.SetActualTaskID("sub-x")
@@ -231,7 +231,7 @@ func TestDeleteSoftPathWithRollouts(t *testing.T) {
 func TestForceDeleteDropsSpecAndRollouts(t *testing.T) {
 	svc, store := mkService(t)
 	mkSpec(t, svc, store, "sp-1", []string{"agent-a", "agent-b"})
-	_ = svc.Deploy(context.Background(), "sp-1", "")
+	_ = svc.Deploy(context.Background(), "sp-1", nil)
 
 	for _, ag := range []string{"agent-a", "agent-b"} {
 		r, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", ag))
@@ -275,7 +275,7 @@ func TestDeployRejectsUnknownTargets(t *testing.T) {
 	}
 	_ = store.UpsertAgent(context.Background(), real)
 
-	err = svc.Deploy(context.Background(), "sp-1", "")
+	err = svc.Deploy(context.Background(), "sp-1", nil)
 	if err == nil {
 		t.Fatal("Deploy must fail when a target agent is missing")
 	}
@@ -296,7 +296,7 @@ func TestDeployRejectsUnknownTargets(t *testing.T) {
 func TestDeployAndDeleteAreSerialisedPerSpec(t *testing.T) {
 	svc, store := mkService(t)
 	mkSpec(t, svc, store, "sp-1", []string{"agent-a"})
-	_ = svc.Deploy(context.Background(), "sp-1", "")
+	_ = svc.Deploy(context.Background(), "sp-1", nil)
 
 	r, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-a"))
 	r.SetActualTaskID("sub-x")
@@ -306,7 +306,7 @@ func TestDeployAndDeleteAreSerialisedPerSpec(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(2)
-		go func() { defer wg.Done(); _ = svc.Deploy(context.Background(), "sp-1", "") }()
+		go func() { defer wg.Done(); _ = svc.Deploy(context.Background(), "sp-1", nil) }()
 		go func() { defer wg.Done(); _ = svc.Delete(context.Background(), "sp-1") }()
 	}
 	wg.Wait()
@@ -488,7 +488,7 @@ func TestPlanTokenIgnoresObservationTimes(t *testing.T) {
 func TestPlanTokenIgnoresSyncProgress(t *testing.T) {
 	svc, store, ts := mkTokenFixture(t)
 	ctx := context.Background()
-	if err := svc.Deploy(ctx, ts.ID(), ""); err != nil {
+	if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
 		t.Fatal(err)
 	}
 	pending := previewToken(t, svc, ts.ID())
@@ -518,11 +518,11 @@ func TestPlanTokenIgnoresCompletedUninstall(t *testing.T) {
 	svc, store, ts := mkTokenFixture(t)
 	ctx := context.Background()
 	addMatchingAgent(t, store, "agent-c")
-	if err := svc.Deploy(ctx, ts.ID(), ""); err != nil {
+	if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
 		t.Fatal(err)
 	}
 	changeAgent(t, store, "agent-c", func(a *model.Agent) { a.LabelAdd("env", "dev") })
-	if err := svc.Deploy(ctx, ts.ID(), ""); err != nil {
+	if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
 		t.Fatal(err)
 	}
 	r, err := store.GetRollout(ctx, model.RolloutID(ts.ID(), "agent-c"))
@@ -537,7 +537,7 @@ func TestPlanTokenIgnoresCompletedUninstall(t *testing.T) {
 	if got := previewToken(t, svc, ts.ID()); got != token {
 		t.Fatalf("a completed uninstall changed the token: %s → %s", token, got)
 	}
-	if err = svc.Deploy(ctx, ts.ID(), token); err != nil {
+	if err = svc.Deploy(ctx, ts.ID(), []string{token}); err != nil {
 		t.Fatalf("Deploy after a completed uninstall: %v", err)
 	}
 }
@@ -594,7 +594,7 @@ func TestPlanTokenCoversEveryInput(t *testing.T) {
 			})
 		}},
 		{name: "another deploy created the rollout", change: func(t *testing.T, svc *Service, _ *inmemory.Store, ts *model.Spec) {
-			if err := svc.Deploy(context.Background(), ts.ID(), ""); err != nil {
+			if err := svc.Deploy(context.Background(), ts.ID(), nil); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -671,7 +671,7 @@ func TestDeployRefusesChangedPlacement(t *testing.T) {
 			svc, store, ts := mkTokenFixture(t)
 			ctx := context.Background()
 			// agent-a already runs the spec, so a refused Deploy also must not queue its update.
-			if err := svc.Deploy(ctx, ts.ID(), ""); err != nil {
+			if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
 				t.Fatal(err)
 			}
 			r, _ := store.GetRollout(ctx, model.RolloutID(ts.ID(), "agent-a"))
@@ -687,7 +687,7 @@ func TestDeployRefusesChangedPlacement(t *testing.T) {
 
 			token := previewToken(t, svc, ts.ID())
 			tc.change(t, svc, store, ts)
-			if err := svc.Deploy(ctx, ts.ID(), token); !errors.Is(err, ErrPlacementChanged) {
+			if err := svc.Deploy(ctx, ts.ID(), []string{token}); !errors.Is(err, ErrPlacementChanged) {
 				t.Fatalf("Deploy of a changed placement: %v, want ErrPlacementChanged", err)
 			}
 
@@ -709,7 +709,7 @@ func TestDeployAcceptsUnchangedPlacement(t *testing.T) {
 	// agent-b is new (install) and agent-c left the selector but keeps its
 	// rollout (uninstall).
 	addMatchingAgent(t, store, "agent-c")
-	if err := svc.Deploy(ctx, ts.ID(), ""); err != nil {
+	if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
 		t.Fatal(err)
 	}
 	r, _ := store.GetRollout(ctx, model.RolloutID(ts.ID(), "agent-a"))
@@ -732,7 +732,7 @@ func TestDeployAcceptsUnchangedPlacement(t *testing.T) {
 		a.SetLastSeenAt(time.Now())
 		a.SetStaleAt(time.Now().Add(-time.Second))
 	})
-	if err := svc.Deploy(ctx, ts.ID(), token); err != nil {
+	if err := svc.Deploy(ctx, ts.ID(), []string{token}); err != nil {
 		t.Fatalf("Deploy of the previewed placement: %v", err)
 	}
 

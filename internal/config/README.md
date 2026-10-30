@@ -76,9 +76,11 @@ SDK agents send their token only over TLS unless the agent explicitly allows
 insecure token transport (`allow_insecure_token_transport()`). With `require:
 true`, a sync without a token is refused like a wrong one and logged at WARN
 with the agent ID and the three ways out: TLS, so the SDK sends its token; the
-SDK's insecure-token option; or `agent_auth.require: false`. The discovery
-limiter bounds these lines to `auth.rate_attempts` per `auth.rate_window` for
-each client IP and agent ID.
+SDK's insecure-token option; or `agent_auth.require: false`. With an
+enrollment secret set, the line names `podium agent-token` instead of
+`agent_auth.require: false`, which fails validation next to a secret. The
+discovery limiter bounds these lines to `auth.rate_attempts` per
+`auth.rate_window` for each client IP and agent ID.
 
 ```yaml
 agent_auth:
@@ -102,8 +104,10 @@ With the secret set, the first sync of an unknown agent ID enrolls only if its
 bearer token is the lowercase hex of HMAC-SHA256 of the agent ID under the
 secret (64 characters). Any other token, a missing one included, is refused
 like a wrong one: HTTP 401 / gRPC `Unauthenticated`, nothing is enrolled, and
-it counts as a failure of the discovery limiter (see "Rate limiting"). A token
-over 1024 bytes still gets the 400 above. Agents that are already enrolled are
+it counts as a failure of the discovery limiter (see "Rate limiting"). A wrong
+token is also logged at WARN with the agent ID and the client IP, never the
+token, bounded by the discovery limiter like the WARN for a missing token. A
+token over 1024 bytes still gets the 400 above. Agents that are already enrolled are
 unaffected: their stored token is compared as before, so the secret revokes
 nobody, and changing or removing it leaves them enrolled. No API resets a
 stored credential yet. In raft mode each replica reads its own environment:
@@ -124,11 +128,22 @@ calls to that agent. The SDK still sends it over TLS only, unless the agent
 opts in with `allow_insecure_token_transport()`. Agents never see the secret,
 only their own token: a leaked token lets nobody enroll another ID.
 
+Derive a token only for an agent ID that is not enrolled yet. An enrolled agent
+is checked against the token it enrolled with, so re-provisioning it with a
+derived token that differs (it enrolled before the secret was set, or under
+another secret) locks it out: every sync it makes gets 401, and no API resets a
+stored credential. That includes an agent that lifecycle deleted: deletion
+drops the agent row but keeps its credential, so the ID stays enrolled.
+Instead, keep the agent's existing token, or, if that token is lost, run the
+agent under a new agent ID and derive the token for that one.
+
 `podium agent-token <agent-id>` must come first among the arguments. It checks
 the ID like discovery does (1 to 128 bytes of `[A-Za-z0-9._-]`) and reads the
 secret from the environment only. It never prints the secret, and exits non-zero
 with one short line when the secret is missing or shorter than 32 bytes, or the
-ID is invalid. It needs no configuration file.
+ID is invalid. It needs no configuration file. A bare `-h` or `--help` prints
+the usage and exits 0; for an agent ID that starts with `-`, put `--` before
+it: `podium agent-token -- -h`.
 
 ## Client IPs and trusted proxies
 
@@ -200,7 +215,11 @@ cors:
 Each entry is an exact `scheme://host[:port]`, without a path; anything else
 fails configuration loading. A listed origin may also send mutations past the
 cross-origin check. `"*"` lets any origin read through CORS, but trusts none
-with a mutation, and cannot be combined with `allow_credentials`.
+with a mutation, and cannot be combined with `allow_credentials`. By default a
+preflight allows the request headers `Authorization`, `Content-Type`,
+`X-Request-Id` and `If-Match`, and responses expose `X-Request-Id` and `ETag`,
+so a client of another origin can read a placement's `ETag` and send it back as
+`If-Match` on Deploy. `allow_headers` and `expose_headers` replace these lists.
 
 ## Rate limiting
 

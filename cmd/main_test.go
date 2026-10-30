@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExitCodeReflectsRunAndCleanup(t *testing.T) {
@@ -103,6 +104,50 @@ func TestAgentTokenCommandRefusesBadInput(t *testing.T) {
 	}
 }
 
+// A bare -h or --help prints the usage to stdout and exits 0; with any other
+// argument it is no help request.
+func TestAgentTokenCommandHelp(t *testing.T) {
+	for _, flag := range []string{"-h", "--help"} {
+		t.Run(flag, func(t *testing.T) {
+			code, stdout, stderr := runAgentToken(t, "", true, flag)
+			if code != 0 || stderr != "" {
+				t.Fatalf("exit %d, stderr %q; want exit 0 and no stderr", code, stderr)
+			}
+			if !strings.HasPrefix(stdout, "usage: podium agent-token [--] <agent-id>\n") {
+				t.Fatalf("stdout %q, want the usage", stdout)
+			}
+		})
+	}
+	if code, stdout, _ := runAgentToken(t, enrollSecret, false, "-h", "agent-1"); code != 2 || stdout != "" {
+		t.Fatalf("-h with an agent ID: exit %d, stdout %q; want the usage error", code, stdout)
+	}
+}
+
+// "--" ends the options: the argument after it is the agent ID, even one that
+// looks like a flag. "--" alone names no agent.
+func TestAgentTokenCommandAcceptsDoubleDash(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"agent-1", []string{"--", "agent-1"}, "ee91297d059304dd88e1c5650d195795e3fa9c921c419a61aced53e41a3c0058"},
+		{"an agent named -h", []string{"--", "-h"}, "59a897d1df79f408eb013456a314522d9f4edee24d902870707bc9c0d9a7ea4e"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := runAgentToken(t, enrollSecret, false, tc.args...)
+			if code != 0 || stdout != tc.want+"\n" || stderr != "" {
+				t.Fatalf("exit %d, stdout %q, stderr %q; want exit 0 and stdout %q", code, stdout, stderr, tc.want+"\n")
+			}
+		})
+	}
+	for _, args := range [][]string{{"--"}, {"--", "agent-1", "agent-2"}} {
+		if code, stdout, stderr := runAgentToken(t, enrollSecret, false, args...); code != 2 || stdout != "" || strings.Count(stderr, "\n") != 1 {
+			t.Fatalf("args %q: exit %d, stdout %q, stderr %q; want the usage error", args, code, stdout, stderr)
+		}
+	}
+}
+
 // failingWriter fails every write, as a closed or full stdout does.
 type failingWriter struct{}
 
@@ -131,7 +176,10 @@ func TestAgentTokenSubcommandRunsBeforeConfigLoading(t *testing.T) {
 		main() // exits the process
 		return
 	}
-	command := exec.Command(os.Args[0], "-test.run=^TestAgentTokenSubcommandRunsBeforeConfigLoading$")
+	// The deadline only turns a child that hangs into a failure.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestAgentTokenSubcommandRunsBeforeConfigLoading$")
 	command.Env = append(os.Environ(),
 		childEnv+"=1",
 		"SOLTI_AGENT_AUTH_ENROLL_SECRET="+enrollSecret,

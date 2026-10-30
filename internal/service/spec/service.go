@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -250,10 +251,11 @@ func (s *Service) RolloutsBySpec(ctx context.Context, specID string) ([]*model.R
 // Deploying a spec flagged for deletion is rejected - the only valid transition from `DeletionRequested=true` is "finalized"
 // (rows drain, finalizer removes the spec).
 //
-// `expectedToken` is the plan token of the placement the caller reviewed (see [Service.PreviewPlacement]).
-// A non-empty token must equal the token of the plan recomputed inside the transaction, else Deploy writes nothing
-// and returns [ErrPlacementChanged]. Pass "" to deploy the current placement unchecked (API clients that never preview).
-func (s *Service) Deploy(ctx context.Context, specID, expectedToken string) error {
+// `planTokens` are the plan tokens of the placements the caller reviewed (see [Service.PreviewPlacement]). Unless it
+// is nil, the token of the plan recomputed inside the transaction must be one of them, else Deploy writes nothing and
+// returns [ErrPlacementChanged]; an empty list names no plan. Pass nil to deploy the current placement unchecked (API
+// clients that never preview).
+func (s *Service) Deploy(ctx context.Context, specID string, planTokens []string) error {
 	if specID == "" {
 		return storage.ErrInvalidArgument
 	}
@@ -275,7 +277,7 @@ func (s *Service) Deploy(ctx context.Context, specID, expectedToken string) erro
 		if err != nil {
 			return err
 		}
-		if expectedToken != "" && plan.Token != expectedToken {
+		if planTokens != nil && !slices.Contains(planTokens, plan.Token) {
 			return ErrPlacementChanged
 		}
 		missing, unsupported := blockedTargets(plan)

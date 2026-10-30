@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"fmt"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -18,6 +19,11 @@ import (
 // ErrUnauthenticated indicates an agent presented a missing or wrong bearer
 // token during discovery. Handlers map it to HTTP 401 / gRPC Unauthenticated.
 var ErrUnauthenticated = errors.New("agent: unauthenticated")
+
+// ErrEnrollRefused indicates an unknown agent ID presented a token other than
+// the one derived for it from the enrollment secret. It is an
+// ErrUnauthenticated, which handlers already map.
+var ErrEnrollRefused = fmt.Errorf("%w: not the enrollment token of this agent ID", ErrUnauthenticated)
 
 // ErrTokenTooLong indicates a bearer token over model.AgentTokenMaxBytes,
 // which discovery never enrolls. Handlers map it to HTTP 400 / gRPC
@@ -53,6 +59,9 @@ func EnrollToken(secret, agentID string) string {
 func WithEnrollSecret(secret string) Option {
 	return func(s *Service) { s.enrollSecret = secret }
 }
+
+// EnrollSecretSet reports whether an enrollment secret closes enrollment.
+func (s *Service) EnrollSecretSet() bool { return s.enrollSecret != "" }
 
 // New creates a new agent service.
 func New(store storage.Storage, logger zerolog.Logger, opts ...Option) *Service {
@@ -99,12 +108,12 @@ func (s *Service) Get(ctx context.Context, id string) (*model.Agent, error) {
 // First contact (no stored credential) enrolls the presented token, unless it
 // is longer than model.AgentTokenMaxBytes (ErrTokenTooLong). With an
 // enrollment secret, first contact enrolls only the token EnrollToken derives
-// for the agent ID (constant-time compare); any other returns ErrUnauthenticated
-// and stores nothing. Every later sync must present the stored token
-// (constant-time compare), whatever the length of the stored one and whether a
-// secret is set; a missing or wrong token returns ErrUnauthenticated. The
-// read-check-write runs inside one transaction so two concurrent
-// first-contacts can't both enroll and race.
+// for the agent ID (constant-time compare); any other returns
+// ErrEnrollRefused, an ErrUnauthenticated, and stores nothing. Every later
+// sync must present the stored token (constant-time compare), whatever the
+// length of the stored one and whether a secret is set; a missing or wrong
+// token returns ErrUnauthenticated. The read-check-write runs inside one
+// transaction so two concurrent first-contacts can't both enroll and race.
 func (s *Service) VerifyOrEnrollToken(ctx context.Context, agentID, presented string) error {
 	if agentID == "" {
 		return storage.ErrInvalidArgument
@@ -126,7 +135,7 @@ func (s *Service) VerifyOrEnrollToken(ctx context.Context, agentID, presented st
 				return ErrTokenTooLong
 			}
 			if s.enrollSecret != "" && !hmac.Equal([]byte(presented), []byte(EnrollToken(s.enrollSecret, agentID))) {
-				return ErrUnauthenticated
+				return ErrEnrollRefused
 			}
 			cred, err := model.NewAgentCredential(agentID, presented)
 			if err != nil {

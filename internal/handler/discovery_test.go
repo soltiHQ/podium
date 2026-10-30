@@ -497,12 +497,19 @@ func TestDiscoveryRejectsOverlongToken(t *testing.T) {
 }
 
 // A sync without a token while agent auth is required is refused and logged
-// at WARN with the agent ID and the ways out. Only attempts the limiter admits
-// log, so a pair logs at most rate_attempts lines per window.
+// at WARN with the agent ID and the ways out. With an enrollment secret the
+// ways out leave agent_auth.require=false aside, which fails validation next to
+// a secret, and point to podium agent-token instead. Only attempts the limiter
+// admits log, so a pair logs at most rate_attempts lines per window.
 func TestTokenlessSyncWarns(t *testing.T) {
-	const warning = "agent sent no token: serve discovery over TLS so the SDK sends it, " +
-		"call allow_insecure_token_transport() in the SDK, or set agent_auth.require=false"
-	for _, tc := range []struct {
+	const (
+		secret  = "0123456789abcdef0123456789abcdef"
+		warning = "agent sent no token: serve discovery over TLS so the SDK sends it, " +
+			"call allow_insecure_token_transport() in the SDK, or set agent_auth.require=false"
+		warningWithSecret = "agent sent no token: give it the token podium agent-token derives for its ID, " +
+			"and serve discovery over TLS so the SDK sends it, or call allow_insecure_token_transport() in the SDK"
+	)
+	for _, transport := range []struct {
 		name string
 		sync func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func() bool // reports a refused sync
 	}{
@@ -523,31 +530,144 @@ func TestTokenlessSyncWarns(t *testing.T) {
 			}
 		}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var logs bytes.Buffer
-			svc := agent.New(inmemory.New(), zerolog.Nop())
-			hub := event.NewHub(zerolog.Nop())
-			defer hub.Close()
-			sync := tc.sync(zerolog.New(&logs), svc, hub)
-			for i := range 8 {
-				if !sync() {
-					t.Fatalf("tokenless sync %d was not refused", i+1)
+		for _, tc := range []struct {
+			name    string
+			opts    []agent.Option
+			warning string
+		}{
+			{"no secret", nil, warning},
+			{"secret", []agent.Option{agent.WithEnrollSecret(secret)}, warningWithSecret},
+		} {
+			t.Run(transport.name+"/"+tc.name, func(t *testing.T) {
+				var logs bytes.Buffer
+				svc := agent.New(inmemory.New(), zerolog.Nop(), tc.opts...)
+				hub := event.NewHub(zerolog.Nop())
+				defer hub.Close()
+				sync := transport.sync(zerolog.New(&logs), svc, hub)
+				for i := range 8 {
+					if !sync() {
+						t.Fatalf("tokenless sync %d was not refused", i+1)
+					}
+				}
+				assertNotRegistered(t, svc, "agent-a")
+				warnings := 0
+				for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+					var entry struct {
+						Level   string `json:"level"`
+						AgentID string `json:"agent_id"`
+						Message string `json:"message"`
+					}
+					if json.Unmarshal(line, &entry) == nil && entry.Level == "warn" && entry.Message == tc.warning && entry.AgentID == "agent-a" {
+						warnings++
+					}
+				}
+				if warnings != 5 {
+					t.Fatalf("%d WARN lines %q for eight tokenless syncs, want 5 (rate_attempts):\n%s", warnings, tc.warning, logs.String())
+				}
+			})
+		}
+	}
+}
+
+// With an enrollment secret, an unknown agent ID that presents a token other
+// than the one derived for it is logged at WARN with the agent ID and the
+// client IP, never the token. Only attempts the limiter admits log, so a pair
+// logs at most rate_attempts lines per window. A known agent with a wrong token
+// and a sync without a token are no refused enrollment.
+func TestRefusedEnrollmentWarns(t *testing.T) {
+	const (
+		secret  = "0123456789abcdef0123456789abcdef"
+		token1  = "ee91297d059304dd88e1c5650d195795e3fa9c921c419a61aced53e41a3c0058" // HMAC-SHA256(secret, "agent-1"), hex
+		wrong   = "not-the-derived-token-of-this-agent"
+		warning = "enrollment refused: an unknown agent ID presented a token that is not the one derived for it from the enrollment secret; give the agent the token podium agent-token prints for its ID"
+	)
+	for _, transport := range []struct {
+		name string
+		ip   string
+		sync func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func(id, token string) syncOutcome
+	}{
+		{"http", "192.0.2.1", func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func(string, string) syncOutcome {
+			h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
+			return func(id, token string) syncOutcome {
+				body := `{"id":"` + id + `","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
+				switch code := syncHTTP(h, body, token).Code; code {
+				case http.StatusOK:
+					return synced
+				case http.StatusUnauthorized:
+					return unauthenticated
+				case http.StatusTooManyRequests:
+					return refused
+				default:
+					return syncOutcome(fmt.Sprintf("HTTP %d", code))
 				}
 			}
-			assertNotRegistered(t, svc, "agent-a")
+		}},
+		{"grpc", "203.0.113.9", func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func(string, string) syncOutcome {
+			g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), true)
+			return func(id, token string) syncOutcome {
+				ctx := peer.NewContext(context.Background(), &peer.Peer{Addr: &net.TCPAddr{IP: net.ParseIP("203.0.113.9"), Port: 40000}})
+				if token != "" {
+					ctx = metadata.NewIncomingContext(ctx, metadata.Pairs("authorization", "Bearer "+token))
+				}
+				_, err := g.Sync(ctx, &discoverv1.SyncRequest{Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})
+				switch grpcstatus.Code(err) {
+				case codes.OK:
+					return synced
+				case codes.Unauthenticated:
+					return unauthenticated
+				case codes.ResourceExhausted:
+					return refused
+				default:
+					return syncOutcome(err.Error())
+				}
+			}
+		}},
+	} {
+		t.Run(transport.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			svc := agent.New(inmemory.New(), zerolog.Nop(), agent.WithEnrollSecret(secret))
+			hub := event.NewHub(zerolog.Nop())
+			defer hub.Close()
+			sync := transport.sync(zerolog.New(&logs), svc, hub)
+
+			for i := range 8 {
+				if got := sync("agent-2", wrong); got != unauthenticated && got != refused {
+					t.Fatalf("agent-2 with a wrong token, attempt %d: %s", i+1, got)
+				}
+			}
+			// No refused enrollment: a sync without a token, and a known agent
+			// with a wrong token.
+			if got := sync("agent-3", ""); got != unauthenticated {
+				t.Fatalf("agent-3 without a token: %s, want unauthenticated", got)
+			}
+			if got := sync("agent-1", token1); got != synced {
+				t.Fatalf("agent-1 with its derived token: %s, want synced", got)
+			}
+			if got := sync("agent-1", wrong); got != unauthenticated {
+				t.Fatalf("enrolled agent-1 with a wrong token: %s, want unauthenticated", got)
+			}
+
+			if strings.Contains(logs.String(), wrong) {
+				t.Fatalf("the log holds the presented token:\n%s", logs.String())
+			}
 			warnings := 0
 			for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
 				var entry struct {
-					Level   string `json:"level"`
-					AgentID string `json:"agent_id"`
-					Message string `json:"message"`
+					Level    string `json:"level"`
+					AgentID  string `json:"agent_id"`
+					ClientIP string `json:"client_ip"`
+					Message  string `json:"message"`
 				}
-				if json.Unmarshal(line, &entry) == nil && entry.Level == "warn" && entry.Message == warning && entry.AgentID == "agent-a" {
-					warnings++
+				if json.Unmarshal(line, &entry) != nil || entry.Message != warning {
+					continue
 				}
+				if entry.Level != "warn" || entry.AgentID != "agent-2" || entry.ClientIP != transport.ip {
+					t.Fatalf("refused enrollment logged as %+v, want WARN for agent-2 from %s", entry, transport.ip)
+				}
+				warnings++
 			}
 			if warnings != 5 {
-				t.Fatalf("%d WARN lines for eight tokenless syncs, want 5 (rate_attempts):\n%s", warnings, logs.String())
+				t.Fatalf("%d WARN lines for eight refused enrollments, want 5 (rate_attempts):\n%s", warnings, logs.String())
 			}
 		})
 	}
