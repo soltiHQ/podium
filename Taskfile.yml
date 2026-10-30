@@ -126,6 +126,14 @@ tasks:
       - task: generate
       - task: golang:audit
 
+  ci/golang/bench:
+    desc: Run every Go benchmark once as a smoke check (not a performance gate)
+    cmds:
+      - task: generate
+      - task: golang:test
+        vars:
+          TEST_ARGS: -run='^$' -bench=. -benchtime=1x ./...
+
   ci/golang/build:
     desc: Build the binary for GOOS/GOARCH (linux/amd64 by default)
     cmds:

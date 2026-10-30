@@ -93,3 +93,60 @@ corrupt snapshots. Three-node local Raft validation exercises archive state
 through partition/rejoin and leader restart. Physical power loss, real device
 faults, sustained fleet load and deployment-specific backup recovery remain
 separate checks.
+
+## Performance
+
+The benchmarks cover this store and the scans that run on top of it. They are in
+`bench_test.go` here and in the history, lifecycle and spec service packages,
+and share one fixture, `internal/storage/storagetest`: 20 specs, N agents and
+optionally some history rows. An agent is a row with 6 metadata entries, 3
+labels and 2 runners, plus a credential and 3 rollouts, about 900 B in a
+snapshot. Run them in the Task container:
+
+```sh
+task golang:exec CMD='go test -run=^$ -bench=. -benchtime=2s ./internal/...'
+```
+
+`task ci/golang/bench` runs every benchmark once, so that they keep compiling
+and running. It is not a performance gate.
+
+This is the baseline of the design described above, where every transaction
+copies and rewrites the whole state. Each time is the p50 of one operation,
+taken as the median of 10 runs of `-benchtime=2s`. An authenticated heartbeat is
+two transactions: verify the token, then upsert the agent.
+`GetAgent during a write` is a read while another goroutine commits one-agent
+updates back to back.
+
+| agents | snapshot | no-op tx | 1-agent tx | auth heartbeat | GetAgent during a write |
+| -- | -- | -- | -- | -- | -- |
+| 100 | 94 KiB | 3.9 ms | 4.0 ms | 8.7 ms | 4.7 ms |
+| 1 000 | 881 KiB | 16 ms | 16 ms | 35 ms | 16 ms |
+| 5 000 | 4.3 MiB | 67 ms | 71 ms | 139 ms | 67 ms |
+
+The scans run at 5 000 agents, except `labels1000`, which has 1 000, and the
+history prune, which runs on a store of history rows alone. A prune finds
+nothing to remove, a tick finds nothing due and a preview writes nothing, so
+what they cost is the scan. In `LifecycleTick`, `stale10pct` means that 10% of
+the agents are past their staleness deadline. In `PlacementPreview`, `labels` is
+a spec that selects every agent by label and `explicit20` one that lists 20
+agents by ID. Each time is the mean of one operation, taken as the median of 10
+runs.
+
+| benchmark | time | allocated |
+| -- | -- | -- |
+| HistoryPrune/1000 | 0.70 ms | 0.5 MiB |
+| HistoryPrune/10000 | 47 ms | 52 MiB |
+| LifecycleTick/stale0 | 0.11 ms | 40 KiB |
+| LifecycleTick/stale10pct | 0.67 ms | 0.9 MiB |
+| LifecycleTick/stale100pct | 65 ms | 88 MiB |
+| PlacementPreview/explicit20 | 1.1 ms | 0.7 MiB |
+| PlacementPreview/labels1000 | 4.3 ms | 5.8 MiB |
+| PlacementPreview/labels5000 | 75 ms | 100 MiB |
+
+These numbers come from the `task golang:exec` container on a busy development
+machine, where the database file is on the container's overlay filesystem. A
+synchronous 4 KiB write takes about 1.7 ms there, so the 100-agent rows are
+mostly sync time, and a production disk will differ. Compare runs from the same
+machine and container only. Between the fastest and slowest of the 10 runs, most
+rows differ by 8% to 19%; rows of a few milliseconds or less can differ by up to
+about 50%.
