@@ -5,7 +5,8 @@ Backend-agnostic interfaces: domain and application layers depend only on these,
 ## Package map
 ```text
 storage/
-├── storage.go      store interfaces + aggregate Storage
+├── storage.go      store interfaces + aggregate Storage + optional Scanner
+├── scan.go         All* helpers: every row of a listing, in one pass when the store is a Scanner
 ├── error.go        sentinel errors (ErrNotFound, ErrConflict …)
 ├── pagination.go   ListResult[T], ListOptions, limits
 ├── filter.go       backend-agnostic filter markers (AgentFilter, RolloutFilter …)
@@ -13,6 +14,7 @@ storage/
 └── inmemory/
     ├── storage.go   Store — aggregates GenericStore instances, implements Storage
     ├── generic.go   GenericStore[T] — thread-safe CRUD for any domain.Entity[T]
+    ├── scan.go      Scanner for Store and for its transaction handle
     ├── filter.go    concrete filters with builder API (ByLabel, ByStatus, Query …)
     └── cursor.go    opaque base64 cursor encoding / decoding
 ```
@@ -61,6 +63,26 @@ All errors are compatible with `errors.Is()`.
 - **Cursor**: opaque base64 JSON token, backend-validated
 - **Limits**: 1 .. 500 (default 100)
 
+## Scanning
+`AllAgents`, `AllRollouts`, `AllSpecs` and `AllExecutions` return every row a filter matches.
+Draining a listing makes an in-process backend scan, clone and sort its whole store again for
+every page of 500, so a backend that holds its rows in process implements the optional `Scanner`
+interface, and the helpers use it:
+```text
+  AllAgents(ctx, store, filter)
+      store is a Scanner  ──→  ScanAgents     one pass: filter, clone the matches, sort once
+      any other store     ──→  CollectPages   ListAgents, page by page
+```
+
+- A scan returns what `CollectPages` returns: the same rows, in the listing order, as clones the caller owns
+- The filter runs once per row, not once per row per page
+- The rows are one consistent state, not one state per page
+- `inmemory.Store` and its transaction handle, `durable.Store` and `raft.Store` are Scanners; the
+  view that `raft.Store.WithTx` hands out is not, and is paged. A wrapper that embeds
+  `storage.Storage` hides the interface and gets the paged path too: forward the four `Scan*`
+  methods to keep the single pass
+- A page asked for with `Limit` and `Cursor`, as the API and the UI do, is unchanged
+
 ## Filter pattern
 Filters are **backend-specific**. The storage package declares empty marker interfaces (`AgentFilter`, `RolloutFilter` …).  
 Each backend provides concrete types with builder methods:
@@ -91,6 +113,7 @@ Thread-safe CRUD for any `domain.Entity[T]`:
   Get(id)        → clone   retrieve by ID
   GetMany(ids)   → clones  batch get, preserve order
   List(pred, opts) → page  snapshot → sort → cursor → slice
+  All(pred, less) → clones every match in one pass, sorted once (nil less = listing order)
   Delete(id)               remove by ID
 ```
 

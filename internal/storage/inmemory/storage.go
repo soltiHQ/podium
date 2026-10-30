@@ -74,14 +74,9 @@ func (s *state) GetAgent(ctx context.Context, id string) (*model.Agent, error) {
 }
 
 func (s *state) ListAgents(ctx context.Context, filter storage.AgentFilter, opts storage.ListOptions) (*storage.AgentListResult, error) {
-	var predicate func(*model.Agent) bool
-
-	if filter != nil {
-		f, ok := filter.(*AgentFilter)
-		if !ok {
-			return nil, storage.ErrInvalidArgument
-		}
-		predicate = f.Matches
+	predicate, err := agentPredicate(filter)
+	if err != nil {
+		return nil, err
 	}
 	return s.agents.List(ctx, predicate, opts)
 }
@@ -516,14 +511,9 @@ func (s *state) GetSpec(ctx context.Context, id string) (*model.Spec, error) {
 }
 
 func (s *state) ListSpecs(ctx context.Context, filter storage.SpecFilter, opts storage.ListOptions) (*storage.SpecListResult, error) {
-	var predicate func(*model.Spec) bool
-
-	if filter != nil {
-		f, ok := filter.(*SpecFilter)
-		if !ok {
-			return nil, storage.ErrInvalidArgument
-		}
-		predicate = f.Matches
+	predicate, err := specPredicate(filter)
+	if err != nil {
+		return nil, err
 	}
 	return s.specs.List(ctx, predicate, opts)
 }
@@ -546,14 +536,9 @@ func (s *state) GetRollout(ctx context.Context, id string) (*model.Rollout, erro
 }
 
 func (s *state) ListRollouts(ctx context.Context, filter storage.RolloutFilter, opts storage.ListOptions) (*storage.RolloutListResult, error) {
-	var predicate func(*model.Rollout) bool
-
-	if filter != nil {
-		f, ok := filter.(*RolloutFilter)
-		if !ok {
-			return nil, storage.ErrInvalidArgument
-		}
-		predicate = f.Matches
+	predicate, err := rolloutPredicate(filter)
+	if err != nil {
+		return nil, err
 	}
 	return s.rollouts.List(ctx, predicate, opts)
 }

@@ -132,16 +132,29 @@ a spec that selects every agent by label and `explicit20` one that lists 20
 agents by ID. Each time is the mean of one operation, taken as the median of 10
 runs.
 
-| benchmark | time | allocated |
-| -- | -- | -- |
-| HistoryPrune/1000 | 0.70 ms | 0.5 MiB |
-| HistoryPrune/10000 | 47 ms | 52 MiB |
-| LifecycleTick/stale0 | 0.11 ms | 40 KiB |
-| LifecycleTick/stale10pct | 0.67 ms | 0.9 MiB |
-| LifecycleTick/stale100pct | 65 ms | 88 MiB |
-| PlacementPreview/explicit20 | 1.1 ms | 0.7 MiB |
-| PlacementPreview/labels1000 | 4.3 ms | 5.8 MiB |
-| PlacementPreview/labels5000 | 75 ms | 100 MiB |
+| benchmark | baseline time | baseline allocated | single-pass time | single-pass allocated |
+| -- | -- | -- | -- | -- |
+| HistoryPrune/1000 | 0.70 ms | 0.5 MiB | 0.32 ms | 0.3 MiB |
+| HistoryPrune/10000 | 47 ms | 52 MiB | 2.2 ms | 2.6 MiB |
+| LifecycleTick/stale0 | 0.11 ms | 40 KiB | 0.10 ms | 40 KiB |
+| LifecycleTick/stale10pct | 0.67 ms | 0.9 MiB | 0.60 ms | 0.9 MiB |
+| LifecycleTick/stale100pct | 65 ms | 88 MiB | 5.8 ms | 8.7 MiB |
+| PlacementPreview/explicit20 | 1.1 ms | 0.7 MiB | 0.57 ms | 0.4 MiB |
+| PlacementPreview/labels1000 | 4.3 ms | 5.8 MiB | 2.7 ms | 4.0 MiB |
+| PlacementPreview/labels5000 | 75 ms | 100 MiB | 13 ms | 21 MiB |
+
+The baseline scans drain the store page by page: `storage.CollectPages` asks for
+pages of 500, and each page of an in-process store scanned, cloned and sorted all
+the rows that matched again, so k rows took k/500 passes. The single-pass columns
+are the same benchmarks once `storage.AllAgents` and its siblings take one pass from
+a store that implements `storage.Scanner`, as the in-memory, durable and Raft stores
+do; the durable store holds one read admission for the pass, not one per page. They
+are the median of 10 runs of `-benchtime=2s` like the baseline, and were taken right
+after a re-run of the baseline on the same machine, which came out 10% to 16% under
+the baseline columns. Against that re-run, `LifecycleTick/stale100pct` fell from
+58 ms to 5.8 ms (9.9x) and `HistoryPrune/10000` from 42 ms to 2.2 ms (19x). A scan
+of one page or less (`stale0`, `stale10pct`) was a single pass already and costs
+what it did.
 
 These numbers come from the `task golang:exec` container on a busy development
 machine, where the database file is on the container's overlay filesystem. A

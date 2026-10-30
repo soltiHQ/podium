@@ -32,6 +32,9 @@ func TestBuildStandaloneDurableAndEphemeral(t *testing.T) {
 			if isDurable != persistent {
 				t.Fatal("wrong standalone backend")
 			}
+			if _, ok := store.(storage.Scanner); !ok {
+				t.Fatalf("%T is not a storage.Scanner: every scan of it would page", store)
+			}
 			ctx := context.Background()
 			agent, _ := model.NewAgent("a1", "fixture", "http://fixture")
 			if err := store.UpsertAgent(ctx, agent); err != nil {

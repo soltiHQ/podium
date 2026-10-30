@@ -97,6 +97,10 @@ func TestReadMethodsRejectCanceledContext(t *testing.T) {
 		"rollouts":            func() error { _, e := s.ListRollouts(ctx, nil, storage.ListOptions{}); return e },
 		"execution":           func() error { _, e := s.GetExecution(ctx, "missing"); return e },
 		"executions":          func() error { _, e := s.ListExecutions(ctx, nil, storage.ListOptions{}); return e },
+		"agents-scan":         func() error { _, e := s.ScanAgents(ctx, nil); return e },
+		"rollouts-scan":       func() error { _, e := s.ScanRollouts(ctx, nil); return e },
+		"specs-scan":          func() error { _, e := s.ScanSpecs(ctx, nil); return e },
+		"executions-scan":     func() error { _, e := s.ScanExecutions(ctx, nil); return e },
 	}
 	for name, read := range cases {
 		t.Run(name, func(t *testing.T) {

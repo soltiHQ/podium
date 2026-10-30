@@ -205,13 +205,7 @@ func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts
 		return &storage.ListResult[T]{Items: []T{}, NextCursor: ""}, nil
 	}
 
-	sort.Slice(snapshot, func(i, j int) bool {
-		ti, tj := snapshot[i].CreatedAt().UnixNano(), snapshot[j].CreatedAt().UnixNano()
-		if ti != tj {
-			return ti > tj // DESC; use the same wall clock as persisted cursors
-		}
-		return snapshot[i].ID() < snapshot[j].ID()
-	})
+	sort.Slice(snapshot, func(i, j int) bool { return listLess(snapshot[i], snapshot[j]) })
 
 	start := 0
 	if opts.Cursor != "" {
@@ -250,6 +244,55 @@ func (s *GenericStore[T]) List(ctx context.Context, predicate func(T) bool, opts
 	}, nil
 }
 
+// All returns clones of the entities pred accepts, in one pass. Draining List
+// page by page scans, clones and sorts the store again for every page; All does
+// each once.
+//
+//   - A nil pred accepts every entity; otherwise pred runs once per entity, under the read lock.
+//   - The result is sorted once by less. A nil less is the order List uses (CreatedAt DESC, ID ASC),
+//     so All returns what draining List returns.
+//   - The result is nil when nothing matches, as when draining an empty List.
+//
+// All takes no context: the stores, which have one, call all.
+func (s *GenericStore[T]) All(pred func(T) bool, less func(a, b T) bool) []T {
+	out, _ := s.all(context.Background(), pred, less)
+	return out
+}
+
+// all is All for a caller with a context. Like List it looks at ctx every 1000
+// entities and, once ctx is done, stops and returns its error.
+func (s *GenericStore[T]) all(ctx context.Context, pred func(T) bool, less func(a, b T) bool) ([]T, error) {
+	s.mu.RLock()
+	out := make([]T, 0, len(s.data))
+	i := 0
+	for _, entity := range s.data {
+		if i%1000 == 0 {
+			if err := ctx.Err(); err != nil {
+				s.mu.RUnlock()
+				return nil, err
+			}
+		}
+		i++
+
+		if pred == nil || pred(entity) {
+			out = append(out, entity.Clone())
+		}
+	}
+	s.mu.RUnlock()
+
+	if len(out) == 0 {
+		return nil, nil
+	}
+	// The listing order is called directly, where a given less is an indirect call
+	// per comparison, and every caller but a test asks for the listing order.
+	if less == nil {
+		sort.Slice(out, func(i, j int) bool { return listLess(out[i], out[j]) })
+	} else {
+		sort.Slice(out, func(i, j int) bool { return less(out[i], out[j]) })
+	}
+	return out, nil
+}
+
 // Delete removes an entity by ID.
 //
 // Returns storage.ErrNotFound if the entity doesn't exist, storage.ErrInvalidArgument for empty IDs.
@@ -266,6 +309,16 @@ func (s *GenericStore[T]) Delete(_ context.Context, id string) error {
 	}
 	delete(s.data, id)
 	return nil
+}
+
+// listLess is the order of every listing: CreatedAt DESC, then ID ASC. CreatedAt is
+// compared in UnixNano, the clock persisted cursors use.
+func listLess[T domain.Entity[T]](a, b T) bool {
+	ta, tb := a.CreatedAt().UnixNano(), b.CreatedAt().UnixNano()
+	if ta != tb {
+		return ta > tb
+	}
+	return a.ID() < b.ID()
 }
 
 // findCursorPosition returns the index of the first item strictly after the cursor under ordering (CreatedAt DESC, ID ASC).
