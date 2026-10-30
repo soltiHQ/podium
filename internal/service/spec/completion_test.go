@@ -42,7 +42,7 @@ func TestLabelSelectorsUnionExplicitAndAllLabels(t *testing.T) {
 	ctx := context.Background()
 	ts := mkSpec(t, svc, s, "labels", []string{"explicit"})
 	for _, id := range []string{"match", "partial", "other"} {
-		a, _ := model.NewAgentFrom(model.AgentParams{ID: id, EndpointType: 2, APIVersion: 1})
+		a, _ := model.NewAgentFrom(model.AgentParams{ID: id, Endpoint: "http://127.0.0.1:8085", EndpointType: 2, APIVersion: 1})
 		a.LabelAdd("env", "prod")
 		if id == "match" {
 			a.LabelAdd("team", "ops")

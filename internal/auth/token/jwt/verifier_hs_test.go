@@ -273,3 +273,60 @@ func TestHSVerifier_SecretIsCopied(t *testing.T) {
 		t.Fatalf("expected verify success, got %v", err)
 	}
 }
+
+func TestJWTWithoutExpRejected(t *testing.T) {
+	ctx := context.Background()
+	clk := &fakeClock{t: time.Unix(800, 0)}
+	secret := []byte("secret-1")
+	claims := jwtlib.MapClaims{
+		"iss": "solti",
+		"aud": "control-plane",
+		"sub": "subj",
+		"uid": "user-1",
+		"sid": "sid",
+		"jti": "tid",
+		"iat": clk.Now().Unix(),
+		"nbf": clk.Now().Unix(),
+	}
+	raw, err := jwtlib.NewWithClaims(jwtlib.SigningMethodHS256, claims).SignedString(secret)
+	if err != nil {
+		t.Fatalf("SignedString: %v", err)
+	}
+	if _, err := NewHSVerifier("solti", "control-plane", secret, clk).Verify(ctx, raw); !errors.Is(err, auth.ErrInvalidToken) {
+		t.Fatalf("token without exp: %v, want ErrInvalidToken", err)
+	}
+}
+
+// Expiry and not-before allow 30 seconds of clock skew, and no more.
+func TestJWTTimeClaimsHaveThirtySecondLeeway(t *testing.T) {
+	ctx := context.Background()
+	const (
+		iss = "solti"
+		aud = "control-plane"
+	)
+	clk := &fakeClock{t: time.Unix(900, 0)}
+	secret := []byte("secret-1")
+	issuer := NewHSIssuer(secret, clk)
+	verifier := NewHSVerifier(iss, aud, secret, clk)
+	for _, tc := range []struct {
+		name     string
+		exp, nbf time.Duration // relative to now
+		want     error
+	}{
+		{"expired 20s ago", -20 * time.Second, -time.Minute, nil},
+		{"expired 40s ago", -40 * time.Second, -time.Minute, auth.ErrExpiredToken},
+		{"valid from 20s on", time.Minute, 20 * time.Second, nil},
+		{"valid from 40s on", time.Minute, 40 * time.Second, auth.ErrExpiredToken},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := baseIdentity(clk.Now(), iss, aud)
+			id.IssuedAt = clk.Now().Add(-time.Minute)
+			id.ExpiresAt = clk.Now().Add(tc.exp)
+			id.NotBefore = clk.Now().Add(tc.nbf)
+			_, err := verifier.Verify(ctx, mustIssue(t, issuer, id))
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Verify: %v, want %v", err, tc.want)
+			}
+		})
+	}
+}

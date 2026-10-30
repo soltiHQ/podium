@@ -22,6 +22,7 @@ const (
 	specsAdd    = enum.SpecsAdd
 	specsEdit   = enum.SpecsEdit
 	specsDeploy = enum.SpecsDeploy
+	specsDelete = enum.SpecsDelete
 )
 
 func permSet(id *identity.Identity) map[enum.Permission]struct{} {

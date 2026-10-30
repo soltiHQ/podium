@@ -1,85 +1,45 @@
 package ratelimit
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"net"
-	"net/http"
-	"strings"
+	"net/netip"
+
+	"github.com/soltiHQ/control-plane/domain/model"
 )
 
-// LoginKey builds a rate-limit key for an authentication attempt over HTTP.
-//
-// Format: "login:<subject>:<ip>:<ua_hash>".
-// Subject is lowercased and trimmed;
-// Empty subject yields "login::<ip>:<ua_hash>" so that anonymous floods (no subject) are still tracked per-IP.
-func LoginKey(r *http.Request, subject string) string {
-	subject = strings.TrimSpace(strings.ToLower(subject))
-
-	var (
-		ip  = RemoteIP(r)
-		uah = shortHash("")
-	)
-	if r != nil {
-		uah = shortHash(r.UserAgent())
-	}
-	if subject == "" {
-		return "login::" + ip + ":" + uah
-	}
-	return "login:" + subject + ":" + ip + ":" + uah
+// AccountKey is the login key of an account: "login:acct:<subject>".
+// The subject is normalized the way user storage normalizes it.
+func AccountKey(subject string) string {
+	return "login:acct:" + model.NormalizeSubject(subject)
 }
 
-// IPKey builds a rate-limit key for generic per-IP throttling.
-//
-// Format: "ip:<addr>".
-// Used by the generic HTTP middleware and gRPC interceptor to throttle requests by source address without involving authentication state.
-func IPKey(addr string) string {
-	return "ip:" + normalizeIP(addr)
+// DeviceKey is the login key of a known device, a browser with a valid device
+// cookie: "login:dev:<deviceID>".
+func DeviceKey(deviceID string) string {
+	return "login:dev:" + deviceID
 }
 
-// RemoteIP extracts the client IP from an HTTP request's RemoteAddr,
-// handling both "host:port" and bare-IP forms. Returns "unknown" on parse
-// failure — callers can rely on a non-empty string.
-func RemoteIP(r *http.Request) string {
-	if r == nil {
-		return "unknown"
-	}
-	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
-	if err == nil {
-		if parsed := net.ParseIP(host); parsed != nil {
-			return parsed.String()
-		}
-	}
-	if parsed := net.ParseIP(r.RemoteAddr); parsed != nil {
-		return parsed.String()
-	}
-	return "unknown"
+// LoginIPKey is the login key of a client IP: "login:ip:<network>".
+func LoginIPKey(ip string) string {
+	return "login:ip:" + network(ip)
 }
 
-// normalizeIP strips any :port suffix and returns the canonical form of
-// the IP. Unparseable input is returned verbatim.
-func normalizeIP(addr string) string {
-	addr = strings.TrimSpace(addr)
-	if addr == "" {
-		return "unknown"
-	}
-	if host, _, err := net.SplitHostPort(addr); err == nil {
-		if ip := net.ParseIP(host); ip != nil {
-			return ip.String()
-		}
-	}
-	if ip := net.ParseIP(addr); ip != nil {
-		return ip.String()
-	}
-	return addr
+// AgentKey is the discovery key of an agent ID synced from a client IP: "agent:<id>@<network>".
+func AgentKey(ip, agentID string) string {
+	return "agent:" + agentID + "@" + network(ip)
 }
 
-// shortHash hashes s with SHA-256 and returns the first 8 bytes as hex.
-// Used to fingerprint User-Agent strings compactly for composite keys.
-func shortHash(s string) string {
-	if s == "" {
-		return "none"
+// network is the part of a client IP that per-IP keys count: the address for
+// IPv4 (IPv4-mapped addresses are unmapped) and the /64 prefix for IPv6, since
+// one host usually controls a whole /64. Input that is not an IP is kept as is.
+func network(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
 	}
-	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:8])
+	a = a.Unmap().WithZone("")
+	if a.Is4() {
+		return a.String()
+	}
+	p, _ := a.Prefix(64) // cannot fail: an IPv6 address has 128 bits
+	return p.String()
 }

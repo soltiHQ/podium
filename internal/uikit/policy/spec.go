@@ -5,7 +5,7 @@ import "github.com/soltiHQ/control-plane/internal/auth/identity"
 // SpecDetail is a UI-oriented policy for the task spec detail page.
 //
 // It governs edit/deploy/delete actions shown on the detail view.
-// CanDelete reuses the specsEdit permission - there is no separate "delete" permission for task specs at the domain level.
+// CanDelete covers both delete and force delete; the API requires specsDelete for both.
 type SpecDetail struct {
 	CanEdit          bool
 	CanDeploy        bool
@@ -23,7 +23,7 @@ func BuildSpecDetail(id *identity.Identity) SpecDetail {
 	return SpecDetail{
 		CanEdit:          hasAny(perms, specsEdit),
 		CanDeploy:        hasAny(perms, specsDeploy),
-		CanDelete:        hasAny(perms, specsEdit),
+		CanDelete:        hasAny(perms, specsDelete),
 		CanViewPlacement: hasAny(perms, specsGet) && hasAny(perms, agentsGet),
 	}
 }

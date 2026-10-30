@@ -16,6 +16,11 @@ import (
 // token during discovery. Handlers map it to HTTP 401 / gRPC Unauthenticated.
 var ErrUnauthenticated = errors.New("agent: unauthenticated")
 
+// ErrTokenTooLong indicates a bearer token over model.AgentTokenMaxBytes,
+// which discovery never enrolls. Handlers map it to HTTP 400 / gRPC
+// InvalidArgument.
+var ErrTokenTooLong = errors.New("agent: token too long")
+
 // Service provides agent management operations.
 type Service struct {
 	logger zerolog.Logger
@@ -59,10 +64,12 @@ func (s *Service) Get(ctx context.Context, id string) (*model.Agent, error) {
 
 // VerifyOrEnrollToken implements trust-on-first-use bearer auth for an agent.
 //
-// First contact (no stored credential) enrolls the presented token. Every later
-// sync must present the same token (constant-time compare); a missing or wrong
-// token returns ErrUnauthenticated. The read-check-write runs inside one
-// transaction so two concurrent first-contacts can't both enroll and race.
+// First contact (no stored credential) enrolls the presented token, unless it
+// is longer than model.AgentTokenMaxBytes (ErrTokenTooLong). Every later sync
+// must present the same token (constant-time compare), whatever the length of
+// the stored one; a missing or wrong token returns ErrUnauthenticated. The
+// read-check-write runs inside one transaction so two concurrent
+// first-contacts can't both enroll and race.
 func (s *Service) VerifyOrEnrollToken(ctx context.Context, agentID, presented string) error {
 	if agentID == "" {
 		return storage.ErrInvalidArgument
@@ -80,6 +87,9 @@ func (s *Service) VerifyOrEnrollToken(ctx context.Context, agentID, presented st
 			}
 			return nil
 		case errors.Is(err, storage.ErrNotFound):
+			if len(presented) > model.AgentTokenMaxBytes {
+				return ErrTokenTooLong
+			}
 			cred, err := model.NewAgentCredential(agentID, presented)
 			if err != nil {
 				return err
@@ -91,9 +101,9 @@ func (s *Service) VerifyOrEnrollToken(ctx context.Context, agentID, presented st
 	})
 }
 
-// AgentToken returns the bearer token the control plane must present when
-// calling this agent, or "" if the agent has no credential yet (not enrolled,
-// or agent auth disabled). A missing credential is not an error.
+// AgentToken returns the bearer token enrolled for this agent, or "" if the
+// agent is not enrolled. A missing credential is not an error. The proxy pool
+// presents the token only when agent auth is required.
 func (s *Service) AgentToken(ctx context.Context, agentID string) (string, error) {
 	if agentID == "" {
 		return "", storage.ErrInvalidArgument

@@ -1,6 +1,7 @@
 package model
 
 import (
+	"strings"
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain"
@@ -43,6 +44,12 @@ func NewUser(id, subject string) (*User, error) {
 		roleIDs:     make([]string, 0),
 		permissions: make([]enum.Permission, 0),
 	}, nil
+}
+
+// NormalizeSubject returns subject the way users are stored and looked up:
+// without surrounding white space, in lower case.
+func NormalizeSubject(subject string) string {
+	return strings.ToLower(strings.TrimSpace(subject))
 }
 
 // ID returns the unique internal identifier of the user.

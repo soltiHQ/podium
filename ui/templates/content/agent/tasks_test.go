@@ -37,3 +37,17 @@ func TestInspectorIdentityKeepsDistinctTaskIncarnations(t *testing.T) {
 		t.Fatal("polling predicate targets a different inspector")
 	}
 }
+
+func TestInspectorTriggerQuotesTheInspectorIdentity(t *testing.T) {
+	agentID, uid := `a'b"c\d</script>`, "u\n\u2028'"
+	trigger := inspectorTrigger(agentID, uid)
+	want := `[document.getElementById("` + inspectorID(agentID, uid) + `").open]`
+	if !strings.HasSuffix(trigger, want) {
+		t.Fatalf("trigger %q does not end with %q", trigger, want)
+	}
+	for _, raw := range []string{"'", `\`, "<", "\n", "\u2028"} {
+		if strings.Contains(trigger, raw) {
+			t.Fatalf("trigger contains raw %q: %s", raw, trigger)
+		}
+	}
+}

@@ -83,3 +83,33 @@ func IsIssueKind(kind string) bool {
 	_, ok := issueKinds[kind]
 	return ok
 }
+
+// Subject is the kind of entity an event is about. The dashboard derives from
+// it which permission reads an event and which one dismisses an issue.
+type Subject uint8
+
+const (
+	// SubjectUnknown covers unknown kinds and kinds that can name any subject.
+	// Callers must require the permissions of every subject.
+	SubjectUnknown Subject = iota
+	SubjectAgent
+	SubjectSpec
+	// SubjectUser covers users, sessions and authentication.
+	SubjectUser
+)
+
+// SubjectOf classifies an event kind. IssueClosed is SubjectUnknown: a closed
+// issue can name an agent, a spec or a login subject.
+func SubjectOf(kind string) Subject {
+	switch kind {
+	case AgentConnected, AgentInactive, AgentDisconnected, AgentDeleted:
+		return SubjectAgent
+	case SpecCreated, SpecUpdated, SpecDeployed, SyncFailed:
+		return SubjectSpec
+	case UserCreated, UserUpdated, UserDeleted, UserPasswordChanged, UserStatusChanged,
+		SessionCreated, RateLimited:
+		return SubjectUser
+	default:
+		return SubjectUnknown
+	}
+}

@@ -12,12 +12,15 @@ import (
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 
 	discoverv1 "github.com/soltiHQ/control-plane/api/gen/solti/discover/v1"
 	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
 	"github.com/soltiHQ/control-plane/domain/enum"
+	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
+	"github.com/soltiHQ/control-plane/internal/bootstrap"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/cluster/discovery"
 	"github.com/soltiHQ/control-plane/internal/cluster/standalone"
@@ -38,6 +41,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/durable"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 	"github.com/soltiHQ/control-plane/internal/transport/grpc/interceptor"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
@@ -86,7 +90,7 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger) (storage.Storage, c
 	hub := event.NewHub(logger)
 	switch cfg.Backend {
 	case "", cluster.BackendStandalone:
-		if cfg.Standalone.Ephemeral {
+		if cfg.Ephemeral() {
 			logger.Warn().Msg("standalone.ephemeral=true: control-plane state will be lost on restart")
 			return inner, standalone.NewLeadership(), hub, nil, nil
 		}
@@ -145,6 +149,18 @@ func msToDuration(ms int) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
+// bootstrapOptions tells bootstrap where this node keeps its state, which is
+// where a generated administrator password goes: a file in the data directory,
+// or the log when the state is explicitly ephemeral. It also passes the
+// password the operator chose.
+func bootstrapOptions(cfg config.Config) bootstrap.Options {
+	return bootstrap.Options{
+		DataDir:       cfg.Cluster.DataDir(),
+		Ephemeral:     cfg.Cluster.Ephemeral(),
+		AdminPassword: cfg.BootstrapAdminPassword,
+	}
+}
+
 // readyForBootstrap distinguishes leader election from applied-state readiness.
 // Followers skip seeding; leaders must finish replay before reading seed data.
 func readyForBootstrap(ctx context.Context, leader cluster.Leadership, timeout time.Duration) (bool, error) {
@@ -182,13 +198,20 @@ func waitForLeader(ctx context.Context, l cluster.Leadership) bool {
 	}
 }
 
-func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership) (http.Handler, *loghub.Hub) {
+// buildMainHandler wires the UI and API listener. resolver gives client IPs to
+// the login limiter and the stream limiter, and tells the auth and device
+// cookies whether the client used HTTPS. The listener has no limit on failed authentication:
+// its tokens and session IDs cannot be guessed, and passwords go through the
+// login limiter. Cross-origin browser mutations are refused before any route.
+func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership, resolver *clientip.Resolver) (http.Handler, *loghub.Hub) {
 	var (
+		secure        = cookieSecure(cfg.Auth.CookieSecure, resolver)
 		logHub        = buildLogHub(logger, svc.agent, proxyPool, cfg.Streams)
-		streamLimit   = middleware.NewStreamLimiter(cfg.Streams.MaxPerIP)
+		streamLimit   = middleware.NewStreamLimiter(cfg.Streams.MaxPerIP, resolver)
 		apiHandler    = handler.NewAPI(logger, svc.user, svc.access, svc.session, svc.credential, svc.agent, svc.spec, svc.history, proxyPool, eventHub, logHub, streamLimit)
-		authMW        = middleware.Auth(authModel.Verifier, authModel.Session)
-		uiHandler     = handler.NewUI(logger, svc.access, svc.spec, eventHub)
+		authMW        = middleware.Auth(authModel.Verifier, authModel.Session, secure, logger)
+		optAuthMW     = middleware.OptionalAuth(authModel.Verifier, authModel.Session, secure, logger)
+		uiHandler     = handler.NewUI(logger, svc.access, svc.spec, eventHub, resolver, secure)
 		staticHandler = handler.NewStatic(logger)
 		logMW         = middleware.Logger(logger)
 		ridMW         = middleware.RequestID()
@@ -199,33 +222,71 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 		})
 	)
 	apiHandler.Routes(mux, authMW, permMW, ridMW, logMW)
-	uiHandler.Routes(mux, authMW, permMW)
+	uiHandler.Routes(mux, authMW, optAuthMW, permMW)
 	staticHandler.Routes(mux)
 
 	route.HandleFunc(mux, routepath.ApiEventStream, eventHub.SSEHandler(), ridMW, logMW, authMW, middleware.StreamLimit(streamLimit))
 
 	var h http.Handler = mux
+	h = middleware.CrossOrigin(cfg.CORS, logger)(h)
 	h = middleware.Negotiate(responder.NewJSON(), responder.NewHTML())(h)
 	h = middleware.Leader(leadership, middleware.LeaderOptions{
 		ForwardPort: addrPort(cfg.HTTP.Addr),
 		TargetTLS:   cfg.TLS.Server.Enabled(),
 	})(h)
-	h = middleware.RateLimit(authModel.Limiter)(h)
 	h = middleware.CORS(cfg.CORS)(h)
 	h = middleware.Recovery(logger)(h)
 	return h, logHub
 }
 
-func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, requireAuth bool, targetTLS bool) http.Handler {
+// cookieSecure decides whether the auth and device cookies of a response carry
+// the Secure attribute: always with auth.cookie_secure "always", otherwise when
+// the client used HTTPS, directly or through a trusted proxy.
+func cookieSecure(mode string, resolver *clientip.Resolver) func(*http.Request) bool {
+	always := mode == auth.CookieSecureAlways
+	return func(r *http.Request) bool {
+		return always || resolver.HTTPS(r)
+	}
+}
+
+// warnOpenDiscovery logs who can register agents through the discovery
+// listeners. agent_auth.require authenticates enrolled agents only: the first
+// sync of an unknown agent ID enrolls its token and sets the endpoint podium
+// calls. Until enrollment tokens exist, only the network or client
+// certificates (tls.server.client_ca_file) keep other hosts out.
+func warnOpenDiscovery(logger zerolog.Logger, cfg config.Config) {
+	switch {
+	case !cfg.AgentAuth.Require:
+		logger.Warn().Msg("agent authentication disabled: any host that reaches the discovery listeners can register agents")
+	case cfg.TLS.Server.ClientCAFile == "":
+		logger.Warn().
+			Str("http_discovery_addr", cfg.HTTPDiscovery.Addr).
+			Str("grpc_addr", cfg.GRPC.Addr).
+			Msg("agent authentication covers enrolled agents only: the first sync of an unknown agent ID enrolls it and sets the endpoint podium calls, so keep the discovery listeners reachable only from agent networks or set tls.server.client_ca_file")
+	}
+}
+
+// buildDiscoveryListeners wires the HTTP and gRPC discovery listeners around one
+// failure limiter: both count agent token failures per (client IP, agent ID), so
+// an agent has one budget whichever transport it uses.
+func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, cfg config.Config, resolver *clientip.Resolver, serverTLS *tls.Config) (http.Handler, *grpc.Server) {
+	limiter := kit.NewLimiter(cfg.Auth)
+	return buildDiscoveryHandler(logger, agentSVC, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), limiter, resolver, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled()),
+		buildGRPCServer(logger, agentSVC, eventHub, leadership, limiter, serverTLS, cfg.AgentAuth.Require)
+}
+
+// buildDiscoveryHandler wires the HTTP discovery listener. It has no per-IP
+// limit: the handler counts authentication failures per (client IP, agent ID)
+// in limiter, so agents behind one egress IP never block each other.
+func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, resolver *clientip.Resolver, requireAuth bool, targetTLS bool) http.Handler {
 	var (
-		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC, eventHub, requireAuth)
+		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC, eventHub, limiter, resolver, requireAuth)
 		mux           = http.NewServeMux()
 	)
 	mux.HandleFunc("/api/v1/discovery/sync", httpDiscovery.Sync)
 
 	var h http.Handler = mux
 	h = middleware.Leader(leadership, middleware.LeaderOptions{ForwardPort: httpPort, TargetTLS: targetTLS})(h)
-	h = middleware.RateLimit(limiter)(h)
 	h = middleware.Recovery(logger)(h)
 	h = middleware.Logger(logger)(h)
 	h = middleware.RequestID()(h)
@@ -261,7 +322,7 @@ func buildLogHub(logger zerolog.Logger, agentSVC *agent.Service, proxyPool *prox
 		}
 		return p.StreamTaskLogs(ctx, taskID)
 	}
-	return loghub.NewIdentity(open, loghub.Options{SubscriberBuffer: cfg.SubscriberBuffer})
+	return loghub.NewIdentity(open, loghub.Options{SubscriberBuffer: cfg.SubscriberBuffer, Logger: logger})
 }
 
 // addrPort extracts the port number from a listen address like ":8080" or
@@ -278,6 +339,9 @@ func addrPort(addr string) int {
 	return n
 }
 
+// buildGRPCServer wires the gRPC discovery listener. Like HTTP discovery, it
+// has no per-IP limit: the Sync handler counts authentication failures per
+// (peer IP, agent ID) in limiter.
 func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, limiter *ratelimit.Limiter, serverTLS *tls.Config, requireAuth bool) *grpc.Server {
 	// Write methods (must run on leader). Sync is the only agent-facing
 	// mutation; everything else is pure read.
@@ -287,18 +351,22 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *e
 	isWrite := func(full string) bool { _, ok := writeMethods[full]; return ok }
 
 	opts := []grpc.ServerOption{
+		// Same message and header caps as the HTTP sync; bounded streams, pings and idle connections.
+		grpc.MaxRecvMsgSize(handler.MaxSyncBytes),
+		grpc.MaxHeaderListSize(16 << 10),
+		grpc.MaxConcurrentStreams(256),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second}),
+		grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionIdle: 5 * time.Minute}),
 		grpc.ChainUnaryInterceptor(
 			interceptor.UnaryRecovery(logger),
 			interceptor.UnaryRequestID(),
 			interceptor.UnaryLogger(logger),
-			interceptor.UnaryRateLimit(limiter),
 			interceptor.UnaryLeader(leadership, interceptor.LeaderOptions{IsWrite: isWrite}),
 		),
 		grpc.ChainStreamInterceptor(
 			interceptor.StreamRecovery(logger),
 			interceptor.StreamRequestID(),
 			interceptor.StreamLogger(logger),
-			interceptor.StreamRateLimit(limiter),
 			interceptor.StreamLeader(leadership, interceptor.LeaderOptions{IsWrite: isWrite}),
 		),
 	}
@@ -308,7 +376,7 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *e
 
 	var (
 		srv           = grpc.NewServer(opts...)
-		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC, eventHub, requireAuth)
+		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC, eventHub, limiter, requireAuth)
 	)
 	discoverv1.RegisterDiscoverServiceServer(srv, grpcDiscovery)
 	return srv

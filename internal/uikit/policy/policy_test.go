@@ -5,6 +5,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
+	"github.com/soltiHQ/control-plane/internal/event"
 )
 
 func id(userID string, perms ...enum.Permission) *identity.Identity {
@@ -48,29 +49,42 @@ func TestBuildNav(t *testing.T) {
 
 func TestBuildUserDetail(t *testing.T) {
 	t.Run("nil identity is all-false", func(t *testing.T) {
-		if got := BuildUserDetail(nil, "target"); got != (UserDetail{}) {
+		if got := BuildUserDetail(nil, "target", true); got != (UserDetail{}) {
 			t.Fatalf("BuildUserDetail(nil) = %+v, want zero", got)
 		}
 	})
 
-	t.Run("other user: edit/roles/delete follow permissions", func(t *testing.T) {
-		got := BuildUserDetail(id("admin", usersEdit, usersDelete), "victim")
-		want := UserDetail{IsSelf: false, CanEdit: true, CanEditRoles: true, CanDelete: true}
+	t.Run("other user within the ceiling: actions follow permissions", func(t *testing.T) {
+		got := BuildUserDetail(id("admin", usersEdit, usersDelete), "victim", true)
+		want := UserDetail{IsSelf: false, CanEdit: true, CanEditRoles: true, CanDelete: true, CanRevokeSessions: true}
 		if got != want {
 			t.Fatalf("BuildUserDetail(other) = %+v, want %+v", got, want)
 		}
 	})
 
+	t.Run("other user above the ceiling: no actions", func(t *testing.T) {
+		if got := BuildUserDetail(id("manager", usersEdit, usersDelete), "admin", false); got != (UserDetail{}) {
+			t.Fatalf("BuildUserDetail(stronger user) = %+v, want zero", got)
+		}
+	})
+
 	t.Run("self-guard: cannot delete or change own roles even with permission", func(t *testing.T) {
-		got := BuildUserDetail(id("me", usersEdit, usersDelete), "me")
+		got := BuildUserDetail(id("me", usersEdit, usersDelete), "me", true)
 		want := UserDetail{
-			IsSelf:       true,
-			CanEdit:      true,  // editing own profile is allowed
-			CanEditRoles: false, // forced off when self
-			CanDelete:    false, // forced off when self
+			IsSelf:            true,
+			CanEdit:           true,  // editing own profile is allowed
+			CanEditRoles:      false, // forced off when self
+			CanDelete:         false, // forced off when self
+			CanRevokeSessions: true,  // own sessions
 		}
 		if got != want {
 			t.Fatalf("BuildUserDetail(self) = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("without users:edit nothing is editable", func(t *testing.T) {
+		if got := BuildUserDetail(id("viewer", usersGet), "other", true); got != (UserDetail{}) {
+			t.Fatalf("BuildUserDetail(viewer) = %+v, want zero", got)
 		}
 	})
 }
@@ -93,11 +107,14 @@ func TestBuildSpecDetail(t *testing.T) {
 	}
 
 	got := BuildSpecDetail(id("u1", specsEdit))
-	if !got.CanEdit || !got.CanDelete {
-		t.Fatalf("specsEdit should grant CanEdit and CanDelete, got %+v", got)
+	if !got.CanEdit || got.CanDelete {
+		t.Fatalf("specsEdit should grant CanEdit but not CanDelete, got %+v", got)
 	}
 	if got.CanDeploy {
 		t.Fatalf("CanDeploy = true without specsDeploy, want false")
+	}
+	if got = BuildSpecDetail(id("u1", specsDelete)); !got.CanDelete || got.CanEdit {
+		t.Fatalf("specsDelete should grant CanDelete only, got %+v", got)
 	}
 
 	if got = BuildSpecDetail(id("u1", specsDeploy)); !got.CanDeploy {
@@ -122,5 +139,31 @@ func TestArchiveNavigationRequiresAgentRead(t *testing.T) {
 	}
 	if !BuildNav(id("reader", agentsGet)).ShowHistory || !BuildAgentDetail(id("reader", agentsGet)).CanViewHistory {
 		t.Fatal("agent read missing archive navigation")
+	}
+}
+
+func TestBuildDashboardCanDismiss(t *testing.T) {
+	if BuildDashboard(nil).CanDismiss(event.AgentInactive) {
+		t.Fatal("nil identity can dismiss")
+	}
+	for _, tc := range []struct {
+		perms []enum.Permission
+		kind  string
+		want  bool
+	}{
+		{[]enum.Permission{agentsEdit}, event.AgentInactive, true},
+		{[]enum.Permission{agentsEdit}, event.AgentDisconnected, true},
+		{[]enum.Permission{agentsEdit}, event.AgentDeleted, true},
+		{[]enum.Permission{agentsGet, specsGet, usersGet}, event.AgentInactive, false},
+		{[]enum.Permission{specsEdit}, event.SyncFailed, true},
+		{[]enum.Permission{agentsEdit, usersEdit}, event.SyncFailed, false},
+		{[]enum.Permission{usersEdit}, event.RateLimited, true},
+		{[]enum.Permission{agentsEdit, specsEdit}, event.RateLimited, false},
+		{[]enum.Permission{agentsEdit, specsEdit}, "not_a_kind", false},
+		{[]enum.Permission{agentsEdit, specsEdit, usersEdit}, "not_a_kind", true},
+	} {
+		if got := BuildDashboard(id("viewer", tc.perms...)).CanDismiss(tc.kind); got != tc.want {
+			t.Errorf("%v dismiss %s = %v, want %v", tc.perms, tc.kind, got, tc.want)
+		}
 	}
 }

@@ -15,20 +15,20 @@ func TestReconnectResetsFailedRetryBudgetButHeartbeatDoesNot(t *testing.T) {
 	ctx := context.Background()
 	s := inmemory.New()
 	svc := New(s, zerolog.New(io.Discard))
-	a, _ := model.NewAgentFrom(model.AgentParams{ID: "a", EndpointType: 2, APIVersion: 1, UptimeSeconds: 100})
+	a, _ := model.NewAgentFrom(model.AgentParams{ID: "a", Endpoint: "http://127.0.0.1:8085", EndpointType: 2, APIVersion: 1, UptimeSeconds: 100})
 	_ = svc.Upsert(ctx, a)
 	ro, _ := model.NewRollout("spec", "a", 3)
 	for i := 0; i < 5; i++ {
 		ro.MarkFailed("offline")
 	}
 	_ = s.UpsertRollout(ctx, ro)
-	heartbeat, _ := model.NewAgentFrom(model.AgentParams{ID: "a", EndpointType: 2, APIVersion: 1, UptimeSeconds: 101})
+	heartbeat, _ := model.NewAgentFrom(model.AgentParams{ID: "a", Endpoint: "http://127.0.0.1:8085", EndpointType: 2, APIVersion: 1, UptimeSeconds: 101})
 	_ = svc.Upsert(ctx, heartbeat)
 	got, _ := s.GetRollout(ctx, ro.ID())
 	if got.Attempts() != 5 {
 		t.Fatal("ordinary heartbeat reset retry budget")
 	}
-	restart, _ := model.NewAgentFrom(model.AgentParams{ID: "a", EndpointType: 2, APIVersion: 1, UptimeSeconds: 1})
+	restart, _ := model.NewAgentFrom(model.AgentParams{ID: "a", Endpoint: "http://127.0.0.1:8085", EndpointType: 2, APIVersion: 1, UptimeSeconds: 1})
 	if err := svc.Upsert(ctx, restart); err != nil {
 		t.Fatal(err)
 	}

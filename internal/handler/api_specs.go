@@ -54,8 +54,8 @@ func (a *API) SpecsRouter(w http.ResponseWriter, r *http.Request) {
 		route.Subroute{Action: "", Method: http.MethodPut, Perm: enum.SpecsEdit, Fn: func(w http.ResponseWriter, r *http.Request, m httpctx.RenderMode, id string) {
 			a.specUpsert(w, r, m, id, modeUpdate)
 		}},
-		route.Subroute{Action: "", Method: http.MethodDelete, Perm: enum.SpecsEdit, Fn: a.specDelete},
-		route.Subroute{Action: "force", Method: http.MethodDelete, Perm: enum.SpecsEdit, Fn: a.specForceDelete},
+		route.Subroute{Action: "", Method: http.MethodDelete, Perm: enum.SpecsDelete, Fn: a.specDelete},
+		route.Subroute{Action: "force", Method: http.MethodDelete, Perm: enum.SpecsDelete, Fn: a.specForceDelete},
 		route.Subroute{Action: "deploy", Method: http.MethodPost, Perm: enum.SpecsDeploy, Fn: a.specDeploy},
 		route.Subroute{Action: "sync", Method: http.MethodGet, Perm: enum.SpecsGet, Fn: a.specRollouts},
 		route.Subroute{Action: "placement", Method: http.MethodGet, Perm: enum.SpecsGet, Fn: a.specPlacement},
@@ -123,7 +123,7 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		err = json.Unmarshal(raw, &fields)
 	}
 	if err != nil {
-		response.BadRequest(w, r, mode)
+		badBody(w, r, mode, err)
 		return
 	}
 

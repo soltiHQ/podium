@@ -4,7 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
+
+	"github.com/soltiHQ/control-plane/ui/templates/jsexpr"
 )
 
 // kvRow is a single key-value pair for the labels editor.
@@ -33,6 +34,7 @@ func kvEditorData(labels map[string]string) string {
 
 // kvSubmitExpr builds the Alpine submit expression that collects rows into
 // a flat { key: value } object, sends PUT, then triggers the given event.
+// action and triggerEvent are embedded as string literals.
 func kvSubmitExpr(action string, triggerEvent string) string {
 	return fmt.Sprintf(
 		`if(submitting) return;
@@ -45,7 +47,7 @@ func kvSubmitExpr(action string, triggerEvent string) string {
  if (k) body[k] = r.value;
 		}
 		submitting=true;
- fetch('%s', {
+ fetch(%s, {
 			method: 'PUT',
 			headers: {
 				'Content-Type': 'application/json', 'Accept':'application/json',
@@ -56,10 +58,10 @@ func kvSubmitExpr(action string, triggerEvent string) string {
 			if (r.status === 401) { window.location.href='/login'; return; }
  if (r.ok) {
 				show = false;
-				htmx.trigger(document.body, '%s');
+				htmx.trigger(document.body, %s);
  } else { try {const d=await r.json();error=d.message || 'Labels could not be saved.';} catch {error='Labels could not be saved. Retry when the server is available.';} }
  }).catch(() => {error='Connection failed. Your changes are retained.';}).finally(() => submitting = false)`,
-		action,
-		strings.ReplaceAll(triggerEvent, "'", "\\'"),
+		jsexpr.String(action),
+		jsexpr.String(triggerEvent),
 	)
 }

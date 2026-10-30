@@ -6,12 +6,12 @@ import (
 
 	"github.com/felixge/httpsnoop"
 	"github.com/rs/zerolog"
-	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
 
 	"github.com/soltiHQ/control-plane/internal/transportctx"
 )
 
-// Logger returns middleware that logs every completed request.
+// Logger returns middleware that logs every completed request. It never logs
+// cookies: the session_id cookie authenticates a refresh.
 func Logger(logger zerolog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -35,9 +35,6 @@ func Logger(logger zerolog.Logger) func(http.Handler) http.Handler {
 
 			if rid, ok := transportctx.RequestID(r.Context()); ok {
 				evt = evt.Str("request_id", rid)
-			}
-			if sid, err := httpcookie.GetSessionID(r); err == nil {
-				evt = evt.Str("session_id", sid.Value)
 			}
 			if reason := transportctx.TryError(r.Context()); reason != "" {
 				evt = evt.Str("error", reason)

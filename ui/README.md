@@ -10,6 +10,15 @@ color, radius and elevation tokens live in `static/css/app.css` and
 - `templates/`: HTML components and typed presentation models. Permission
   controls come from `internal/uikit/policy`; every API action independently
   enforces authorization.
+- `templates/jsexpr`: how a Go string enters an Alpine or HTMX expression.
+  templ HTML-escapes attributes, but the browser decodes them before Alpine
+  evaluates them as code, so `fetch('%s')` lets a quote in an agent ID, name or
+  label inject statements. Write `fetch(%s)` with `jsexpr.String(value)`, which
+  renders a double-quoted literal with quotes, `<`, `>`, `&` and line
+  separators escaped. Slices and maps go through `json.Marshal`. Identifiers
+  (Alpine data keys) cannot be quoted and must be compile-time constants.
+  `TestNoValuePastedBetweenQuotes` fails on a quoted format verb or a value
+  joined at a quote in the templates and their Go builders.
 - `static/js/spec-builder.js`: spec editing state, exact argument/environment
   round trips, validation, cursor-based agent selection, and submit recovery.
   It serializes the current protobuf JSON workload shape. It also exports its
@@ -57,6 +66,9 @@ stored selectors.
 
 Fetch forms ask for `Accept: application/json` even when using HTMX redirect
 headers. API negotiation honors that header so error messages remain readable.
+A fetch that sends a JSON body declares `Content-Type: application/json`: the
+API answers any other body type with 415. The server refuses mutations from
+another origin with 403, and logout is a POST form in the navigation bar.
 HTMX confirmation dialogs close after success and retain errors after failure.
 
 The task list passes exact slot filters to the agent before pagination and uses

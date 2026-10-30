@@ -10,8 +10,12 @@ package loghub
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog"
 
 	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
 )
@@ -34,6 +38,8 @@ type Options struct {
 	SubscriberBuffer int
 	// OpenTimeout bounds establishment without limiting a healthy stream lifetime.
 	OpenTimeout time.Duration
+	// Logger records recovered source panics. The zero value discards them.
+	Logger zerolog.Logger
 }
 
 // Hub multiplexes one backing log stream per (agentID, taskID) over N
@@ -142,6 +148,7 @@ func (h *Hub) SubscribeIdentity(ctx context.Context, agentID, taskID, taskUID st
 }
 
 func (s *source) openSource() {
+	defer s.recoverPanic()
 	timer := time.AfterFunc(s.hub.opts.OpenTimeout, s.cancel)
 	stream, err := s.hub.open(s.ctx, s.key.agentID, s.key.taskID, s.key.taskUID)
 	timer.Stop()
@@ -157,6 +164,23 @@ func (s *source) openSource() {
 		return
 	}
 	s.pump(stream)
+}
+
+// recoverPanic keeps a panic in the source goroutine (the open func or the
+// pump) from crashing the process. The source shuts down: waiting subscribers
+// get ErrSourceClosed and attached subscribers see their channel close.
+func (s *source) recoverPanic() {
+	rec := recover()
+	if rec == nil {
+		return
+	}
+	s.hub.opts.Logger.Error().
+		Str("agent_id", s.key.agentID).
+		Str("task_id", s.key.taskID).
+		Str("panic", fmt.Sprintf("%v", rec)).
+		Bytes("stack", debug.Stack()).
+		Msg("log source panic recovered")
+	s.shutdown()
 }
 
 // Close stops established and opening streams and rejects new subscriptions.

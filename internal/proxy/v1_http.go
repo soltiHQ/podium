@@ -138,7 +138,10 @@ func (p *httpProxyV1) ApplyTask(ctx context.Context, sub TaskSubmission) (string
 	}
 	u := p.taskURL(sub.Spec.GetMetadata().GetName(), "")
 	if pre := sub.Preconditions; pre != nil {
-		parsed, _ := url.Parse(u)
+		parsed, err := url.Parse(u)
+		if err != nil {
+			return "", fmt.Errorf("%w: %v", ErrBadEndpointURL, err)
+		}
 		q := parsed.Query()
 		if pre.Uid != nil {
 			q.Set("uid", *pre.Uid)
@@ -197,7 +200,10 @@ func (p *httpProxyV1) writeTask(ctx context.Context, name string, cancel bool) e
 		suffix = "/cancel"
 		method = http.MethodPost
 	}
-	parsed, _ := url.Parse(p.taskURL(name, suffix))
+	parsed, err := url.Parse(p.taskURL(name, suffix))
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrBadEndpointURL, err)
+	}
 	q := parsed.Query()
 	q.Set("uid", task.Task.UID)
 	parsed.RawQuery = q.Encode()
@@ -263,7 +269,10 @@ func (p *httpProxyV1) StreamTaskLogsForUID(ctx context.Context, name, uid string
 	if uid == "" {
 		return nil, fmt.Errorf("%w: missing task UID", ErrStreamTaskLogs)
 	}
-	parsed, _ := url.Parse(p.taskURL(name, "/logs"))
+	parsed, err := url.Parse(p.taskURL(name, "/logs"))
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBadEndpointURL, err)
+	}
 	q := parsed.Query()
 	q.Set("taskUid", uid)
 	parsed.RawQuery = q.Encode()

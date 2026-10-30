@@ -8,6 +8,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
@@ -57,15 +58,45 @@ func (s *Service) GetBySubject(ctx context.Context, subject string) (*model.User
 	return s.store.GetUserBySubject(ctx, subject)
 }
 
-// Delete a user by ID.
-func (s *Service) Delete(ctx context.Context, id string) error {
+// CanManage reports whether actor may act on target under the target ceiling
+// (CheckTarget). It reads outside a transaction, so it only decides what the
+// UI offers; the mutations check again inside their own transaction.
+func (s *Service) CanManage(ctx context.Context, actor *identity.Identity, target *model.User) (bool, error) {
+	switch err := CheckTarget(ctx, s.store, actor, target); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrPermissionCeiling):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// Delete removes a user on behalf of actor, cascading sessions → verifiers →
+// credentials → user. Another user may be deleted only when actor holds all
+// of that user's permissions (ErrPermissionCeiling), and the last enabled user
+// with every permission cannot be deleted (ErrLastAdmin).
+func (s *Service) Delete(ctx context.Context, actor *identity.Identity, id string) error {
 	if id == "" {
 		return storage.ErrInvalidArgument
 	}
 
 	var credCount int
 	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
-		if err := tx.DeleteSessionsByUser(ctx, id); err != nil {
+		target, err := tx.GetUser(ctx, id)
+		switch {
+		case errors.Is(err, storage.ErrNotFound):
+			target = nil // the cascade below still clears what the user left behind
+		case err != nil:
+			return err
+		}
+		if err = CheckTarget(ctx, tx, actor, target); err != nil {
+			return err
+		}
+		if err = keepAdmin(ctx, tx, target, nil); err != nil {
+			return err
+		}
+		if err = tx.DeleteSessionsByUser(ctx, id); err != nil {
 			return err
 		}
 		creds, err := tx.ListCredentialsByUser(ctx, id)
@@ -97,13 +128,89 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-// Upsert creates or replaces a user.
+// SetDisabled disables or enables a user on behalf of actor and returns the
+// stored user. Another user may be changed only when actor holds all of that
+// user's permissions (ErrPermissionCeiling), and the last enabled user with
+// every permission cannot be disabled (ErrLastAdmin).
+func (s *Service) SetDisabled(ctx context.Context, actor *identity.Identity, id string, disabled bool) (*model.User, error) {
+	if id == "" {
+		return nil, storage.ErrInvalidArgument
+	}
+
+	var out *model.User
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		current, err := tx.GetUser(ctx, id)
+		if err != nil {
+			return err
+		}
+		if err = CheckTarget(ctx, tx, actor, current); err != nil {
+			return err
+		}
+		next := current.Clone()
+		if disabled {
+			next.Disable()
+		} else {
+			next.Enable()
+		}
+		if err = keepAdmin(ctx, tx, current, next); err != nil {
+			return err
+		}
+		out = next
+		return tx.UpsertUser(ctx, next)
+	})
+	if err != nil {
+		return nil, err
+	}
+	s.logger.Debug().Str("user_id", id).Bool("disabled", disabled).Msg("user status changed")
+	return out, nil
+}
+
+// Create stores a new user on behalf of actor. Every permission the user
+// gets, directly or through its roles, must be held by actor
+// (ErrPermissionCeiling). An existing ID is storage.ErrAlreadyExists.
+func (s *Service) Create(ctx context.Context, actor *identity.Identity, u *model.User) error {
+	return s.save(ctx, u, func(tx storage.Storage, existing *model.User) error {
+		if existing != nil {
+			return storage.ErrAlreadyExists
+		}
+		return checkGrant(ctx, tx, actor, u)
+	})
+}
+
+// Update replaces an existing user on behalf of actor. Another user may be
+// updated only when actor holds all of that user's permissions, the result
+// may hold only permissions actor holds (ErrPermissionCeiling), and an
+// enabled user with every permission must remain (ErrLastAdmin).
+func (s *Service) Update(ctx context.Context, actor *identity.Identity, u *model.User) error {
+	return s.save(ctx, u, func(tx storage.Storage, existing *model.User) error {
+		if existing == nil {
+			return storage.ErrNotFound
+		}
+		if err := CheckTarget(ctx, tx, actor, existing); err != nil {
+			return err
+		}
+		if err := checkGrant(ctx, tx, actor, u); err != nil {
+			return err
+		}
+		return keepAdmin(ctx, tx, existing, u)
+	})
+}
+
+// Upsert creates or replaces a user without actor checks. It is for trusted
+// internal callers such as bootstrap; request handlers use Create, Update,
+// SetDisabled and Delete.
 func (s *Service) Upsert(ctx context.Context, u *model.User) error {
+	return s.save(ctx, u, nil)
+}
+
+// save normalizes and stores u. check, when set, runs inside the transaction
+// with the stored user (nil when there is none) before the write.
+func (s *Service) save(ctx context.Context, u *model.User, check func(tx storage.Storage, existing *model.User) error) error {
 	if u == nil {
 		return storage.ErrInvalidArgument
 	}
 
-	subject := strings.TrimSpace(strings.ToLower(u.Subject()))
+	subject := model.NormalizeSubject(u.Subject())
 	if subject == "" {
 		return domain.ErrInvalidSubject
 	}
@@ -127,6 +234,18 @@ func (s *Service) Upsert(ctx context.Context, u *model.User) error {
 		}
 		if ids := u.RoleIDsAll(); len(ids) > 0 {
 			if _, err := tx.GetRoles(ctx, ids); err != nil {
+				return err
+			}
+		}
+		if check != nil {
+			existing, err := tx.GetUser(ctx, u.ID())
+			switch {
+			case errors.Is(err, storage.ErrNotFound):
+				existing = nil
+			case err != nil:
+				return err
+			}
+			if err = check(tx, existing); err != nil {
 				return err
 			}
 		}

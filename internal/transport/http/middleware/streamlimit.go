@@ -4,24 +4,27 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
+	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 )
 
 // StreamLimiter caps the number of concurrent long-lived streams per IP.
 // Unlike the failure-based [ratelimit.Limiter], it counts in-flight connections,
 // not the error rate - appropriate for SSE/streaming endpoints where a single client legitimately holds the connection open.
 type StreamLimiter struct {
-	max int
+	max      int
+	resolver *clientip.Resolver
 
 	mu     sync.Mutex
 	counts map[string]int
 }
 
 // NewStreamLimiter builds a limiter with the given per-IP cap. max <= 0 disables limiting (always Acquire returns true).
-func NewStreamLimiter(max int) *StreamLimiter {
+// [StreamLimit] takes the client IP from resolver; a nil resolver trusts no proxy.
+func NewStreamLimiter(max int, resolver *clientip.Resolver) *StreamLimiter {
 	return &StreamLimiter{
-		max:    max,
-		counts: make(map[string]int),
+		max:      max,
+		resolver: resolver,
+		counts:   make(map[string]int),
 	}
 }
 
@@ -55,14 +58,14 @@ func (l *StreamLimiter) Release(ip string) {
 }
 
 // StreamLimit wraps a streaming handler with a per-IP concurrency cap.
-// Use on long-lived endpoints (SSE log tail, watches) - for short request/response RPCs the failure-based [RateLimit] middleware fits better.
+// Use on long-lived endpoints (SSE log tail, watches).
 func StreamLimit(limiter *StreamLimiter) func(http.Handler) http.Handler {
 	if limiter == nil {
 		return func(next http.Handler) http.Handler { return next }
 	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := ratelimit.IPKey(r.RemoteAddr)
+			ip := limiter.resolver.IP(r)
 			if !limiter.Acquire(ip) {
 				http.Error(w, "too many concurrent streams", http.StatusTooManyRequests)
 				return

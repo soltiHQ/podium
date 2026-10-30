@@ -8,10 +8,11 @@ import (
 	"github.com/rs/zerolog"
 )
 
-const (
-	clientBufSize    = 16
-	defaultMaxEvents = 100
-)
+const clientBufSize = 16
+
+// RingSize is how many recent activity events, and apart from them how many
+// issues, a Hub keeps.
+const RingSize = 100
 
 // Writer routes mutating hub operations (Notify, Record, DeleteIssues)
 // through an external transport (Raft, Kafka, etc.) so every replica sees
@@ -47,8 +48,8 @@ func NewHub(logger zerolog.Logger) *Hub {
 	return &Hub{
 		logger:  logger,
 		clients: make(map[uint64]chan string),
-		events:  NewRing[Record](defaultMaxEvents),
-		issues:  NewRing[Record](defaultMaxEvents),
+		events:  NewRing[Record](RingSize),
+		issues:  NewRing[Record](RingSize),
 	}
 }
 

@@ -166,6 +166,50 @@ func Forbidden(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) 
 	})
 }
 
+// ForbiddenMsg renders a 403 response with a custom message.
+func ForbiddenMsg(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, msg string) {
+	transportctx.SetError(r.Context(), msg)
+	httpctx.Responder(r.Context()).Respond(w, r, http.StatusForbidden, &responder.View{
+		Data: errorBody{
+			Code:      http.StatusForbidden,
+			Message:   msg,
+			RequestID: transportctx.TryRequestID(r.Context()),
+		},
+		Component: func(m httpctx.RenderMode) templ.Component {
+			if m == httpctx.RenderPage {
+				return renderErrorPage(
+					http.StatusForbidden,
+					"Forbidden",
+					msg,
+				)
+			}
+			return nil
+		}(mode),
+	})
+}
+
+// UnsupportedMediaType renders a 415 response with a custom message.
+func UnsupportedMediaType(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, msg string) {
+	transportctx.SetError(r.Context(), msg)
+	httpctx.Responder(r.Context()).Respond(w, r, http.StatusUnsupportedMediaType, &responder.View{
+		Data: errorBody{
+			Code:      http.StatusUnsupportedMediaType,
+			Message:   msg,
+			RequestID: transportctx.TryRequestID(r.Context()),
+		},
+		Component: func(m httpctx.RenderMode) templ.Component {
+			if m == httpctx.RenderPage {
+				return renderErrorPage(
+					http.StatusUnsupportedMediaType,
+					"Unsupported media type",
+					msg,
+				)
+			}
+			return nil
+		}(mode),
+	})
+}
+
 // Unauthorized renders a 401 response.
 func Unauthorized(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
 	transportctx.SetError(r.Context(), "unauthorized")

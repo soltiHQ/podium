@@ -8,6 +8,7 @@ import (
 	"github.com/soltiHQ/control-plane/ui/templates/component/button"
 	"github.com/soltiHQ/control-plane/ui/templates/component/form"
 	"github.com/soltiHQ/control-plane/ui/templates/component/visual"
+	"github.com/soltiHQ/control-plane/ui/templates/jsexpr"
 )
 
 // BuilderPage renders the full-page split-panel spec builder. Pass
@@ -316,6 +317,8 @@ templ builderSection(label string) {
 }
 
 // builderField renders a single text input bound to Alpine.js via x-model.
+// id is pasted into Alpine as an identifier, so it must be a constant
+// identifier, never data.
 templ builderField(id string, label string, placeholder string, required bool) {
 	<div>
 		<label for={ id } class={ form.LabelClass }>{ label }</label>
@@ -331,8 +334,8 @@ templ builderField(id string, label string, placeholder string, required bool) {
 templ presetButton(preset string, label string) {
 	<button type="button"
 		class="px-3 py-1.5 text-xs rounded-full border transition-colors"
-		x-bind:class={ "backoff_preset === '" + preset + "' ? 'bg-primary/10 border-primary text-primary' : 'border-border text-muted hover:text-fg'" }
-		x-on:click={ "applyPreset('" + preset + "')" }>{ label }</button>
+		x-bind:class={ "backoff_preset === " + jsexpr.String(preset) + " ? 'bg-primary/10 border-primary text-primary' : 'border-border text-muted hover:text-fg'" }
+		x-on:click={ "applyPreset(" + jsexpr.String(preset) + ")" }>{ label }</button>
 }
 
 // subprocessModeChip renders a toggle between Command and Script modes
@@ -341,8 +344,8 @@ templ presetButton(preset string, label string) {
 templ subprocessModeChip(mode string, label string) {
 	<button type="button"
 		class="px-3 py-1.5 text-xs rounded-full border transition-colors"
-		x-bind:class={ "subprocess_mode === '" + mode + "' ? 'bg-primary/10 border-primary text-primary' : 'border-border text-muted hover:text-fg'" }
-		x-on:click={ "subprocess_mode = '" + mode + "'" }>{ label }</button>
+		x-bind:class={ "subprocess_mode === " + jsexpr.String(mode) + " ? 'bg-primary/10 border-primary text-primary' : 'border-border text-muted hover:text-fg'" }
+		x-on:click={ "subprocess_mode = " + jsexpr.String(mode) }>{ label }</button>
 }
 
 // agentMultiSelect renders the agent multi-select dropdown.
@@ -374,7 +377,9 @@ templ agentMultiSelect() {
 	</div>
 }
 
-// kvEditor renders a dynamic key-value pair editor.
+// kvEditor renders a dynamic key-value pair editor. rowsVar is pasted into
+// Alpine expressions as an identifier, so it must be a constant identifier,
+// never data.
 templ kvEditor(rowsVar string) {
 	<div class="space-y-2">
 		<template x-for={ "(" + kvIterExpr(rowsVar) } :key="idx">

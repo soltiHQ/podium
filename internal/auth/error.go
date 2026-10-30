@@ -46,4 +46,10 @@ var (
 	// ErrRateLimited indicates that the operation is temporarily blocked
 	// due to too many failed attempts for the given key.
 	ErrRateLimited = errors.New("auth: rate limited")
+	// ErrRateLimitReached is joined to the error of a failed attempt that
+	// blocked its key: later attempts get ErrRateLimited until the block ends.
+	ErrRateLimitReached = errors.New("auth: rate limit reached")
+	// ErrWeakPassword indicates that a new password breaks the password
+	// policy: fewer than 12 characters or more than 72 bytes.
+	ErrWeakPassword = errors.New("auth: weak password")
 )

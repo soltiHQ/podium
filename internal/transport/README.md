@@ -20,6 +20,7 @@ transport/
 │   └── route/         middleware chaining + REST dispatch (Resource, Router)
 │
 ├── httpctx/           HTTP-only request context (Responder, RenderMode)
+├── clientip/          client IP + HTTPS detection behind trusted proxies
 ├── tlsconf/           PEM config → *tls.Config (server + client, mTLS)
 └── errkind/           domain/agent error → Kind (shared by both transports)
 ```
@@ -28,16 +29,25 @@ transport/
 
 ### HTTP
 
+Main listener (`app.buildMainHandler`), outermost first:
+
 ```text
   Browser / API client
         │
         ▼
-  RequestID   ── installs request id + error slot (outermost, owns the slot)
-   Logger     ── reads the slot back after the handler returns
-    Negotiate ── picks the Responder (JSON vs HTML), stores it in ctx
-     
-  Auth / RequirePermission (per route)
-    handler/api.go | ui.go
+  Recovery       ── turns a panic into 503
+   CORS          ── answers preflights, adds the CORS headers
+    Leader       ── raft only: forwards writes to the leader
+     Negotiate   ── picks the Responder (JSON vs HTML), stores it in ctx
+      CrossOrigin ── refuses cross-origin browser mutations: 403 through that Responder.
+                     It runs before any route, so a refusal gets no request id and no
+                     access-log line; CrossOrigin logs it at WARN instead.
+       mux
+        │  per route:
+  RequestID      ── installs request id + error slot (API routes and the event stream only)
+   Logger        ── reads the slot back after the handler returns (same routes)
+    Auth / OptionalAuth / RequirePermission  ── 503 when credentials cannot be checked, logged at ERROR
+     handler/api.go | ui.go
         ├─ success → response.OK(w, r, mode, &View{Data: dto, Component: tmpl})
         │              └─ Responder from ctx → JSON (json.Marshal + sec headers)
         │                                    or HTML (templ.Render + CSP)
@@ -53,7 +63,7 @@ only the negotiated `Responder` is stored in context.
 ```text
   gRPC client
         ▼
-  UnaryRecovery → UnaryRequestID → UnaryLogger → UnaryRateLimit → UnaryLeader
+  UnaryRecovery → UnaryRequestID → UnaryLogger → UnaryLeader
         │   (UnaryAuth / UnaryRequirePermission exist but are not chained yet)
         ▼
   handler/discovery.go (GRPCDiscovery)
@@ -64,6 +74,23 @@ only the negotiated `Responder` is stored in context.
                        ├─ attaches requestID as errdetails.RequestInfo
                        └─ sets the error slot → UnaryLogger appends it
 ```
+
+## Client IP
+
+`clientip.Resolver` decides who the client of an HTTP request is (`trusted_proxies`, see `internal/config`):
+- `IP(r)` - the TCP peer; when the peer is a trusted proxy, the right-most `X-Forwarded-For` entry that is not itself trusted.
+- `HTTPS(r)` - direct TLS, or `X-Forwarded-Proto: https` from a trusted proxy. With `auth.cookie_secure: auto` it decides
+  whether the auth and device cookies are `Secure`; `app` builds that decision once and hands it to every cookie writer.
+
+RFC 7239 `Forwarded` is not supported. The login limiter, `middleware.StreamLimit` and HTTP discovery take the client IP from the resolver.
+gRPC requests carry no forwarding headers: gRPC discovery uses the peer address.
+
+## Rate limits
+
+- The main listener has no limit on failed authentication: its tokens and session IDs cannot be guessed, and passwords go through the login limiter (`internal/auth`).
+- Discovery has no per-IP limit. Both Sync handlers reserve an attempt per (client IP, agent ID) before the token check, in one shared limiter, so checks in flight and failures count
+  together and across HTTP and gRPC, and one agent with a stale token never blocks the other agents behind its egress IP. HTTP answers 429, gRPC `ResourceExhausted`.
+- `middleware.StreamLimit` caps concurrent streams per client IP.
 
 ## Error model (shared)
 

@@ -1,8 +1,9 @@
 // Package kit is the composition root for the authentication subsystem.
 //
 // It wires together independently-developed pieces (JWT issuance/verification,
-// session service, RBAC resolver, password provider, login rate limiter) into
-// a single [Auth] aggregate ready for use by HTTP/transport layers.
+// session service, RBAC resolver, password provider, login rate limiter,
+// device cookies) into a single [Auth] aggregate ready for use by
+// HTTP/transport layers.
 //
 // Kit lives in a sub-package because providers under internal/auth/providers/*
 // import the parent internal/auth package for sentinel errors; placing the
@@ -12,6 +13,7 @@ package kit
 import (
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth"
+	"github.com/soltiHQ/control-plane/internal/auth/devicecookie"
 	"github.com/soltiHQ/control-plane/internal/auth/providers"
 	passwordprovider "github.com/soltiHQ/control-plane/internal/auth/providers/password"
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
@@ -27,14 +29,32 @@ type Auth struct {
 	// Clock used by token issuance and verification.
 	Clock token.Clock
 
-	// Limiter tracks failed login attempts and enforces temporary blocking.
+	// Limiter counts failed logins, and logins in flight, per account and
+	// per client IP, or per known device. Discovery gets its own instance
+	// from [NewLimiter].
 	Limiter *ratelimit.Limiter
+
+	// Devices issues and checks device cookies, which let a browser that
+	// logged in before count its login attempts apart from the account.
+	Devices *devicecookie.Signer
 
 	// Session provides login, refresh, and revoke operations.
 	Session *session.Service
 
 	// Verifier validates incoming access tokens.
 	Verifier *jwt.HSVerifier
+}
+
+// NewLimiter returns a failure limiter configured from cfg: rate_attempts
+// failures, each within rate_window of the previous one, block a key for
+// rate_window.
+func NewLimiter(cfg auth.Config) *ratelimit.Limiter {
+	cfg = cfg.WithDefaults()
+	return ratelimit.New(ratelimit.Config{
+		MaxAttempts: cfg.RateAttempts,
+		Window:      cfg.RateWindow,
+		BlockWindow: cfg.RateWindow,
+	})
 }
 
 // New constructs a fully wired authentication stack.
@@ -70,9 +90,7 @@ func New(store storage.Storage, cfg auth.Config) *Auth {
 				enum.Password: passwordprovider.New(store),
 			},
 		),
-		Limiter: ratelimit.New(ratelimit.Config{
-			MaxAttempts: cfg.RateAttempts,
-			BlockWindow: cfg.RateWindow,
-		}),
+		Limiter: NewLimiter(cfg),
+		Devices: devicecookie.NewSigner(secretb),
 	}
 }

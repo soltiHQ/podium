@@ -8,6 +8,13 @@ import (
 
 var _ domain.Entity[*AgentCredential] = (*AgentCredential)(nil)
 
+// AgentTokenMaxBytes caps the bearer token discovery accepts and enrolls. The
+// store copies and syncs its whole state on every write, so a few huge tokens
+// would slow down or exhaust the control plane. The cap applies to tokens
+// agents send, never to stored credentials: one an older version stored with
+// a longer token still loads.
+const AgentTokenMaxBytes = 1024
+
 // AgentCredential is the per-agent bearer secret the control plane learns at
 // discovery (trust-on-first-use) and reuses to authenticate outbound calls to
 // that agent. Keyed by agent ID — one credential per agent.
@@ -23,7 +30,9 @@ type AgentCredential struct {
 	token   string
 }
 
-// NewAgentCredential binds a raw token to an agent.
+// NewAgentCredential binds a raw token to an agent. It also rebuilds stored
+// credentials, so it accepts a token of any length; enrollment applies
+// AgentTokenMaxBytes before it.
 func NewAgentCredential(agentID, token string) (*AgentCredential, error) {
 	if agentID == "" {
 		return nil, domain.ErrEmptyID

@@ -81,3 +81,23 @@ The pool shares HTTP connections and caches gRPC connections per endpoint.
 `Close` releases both. `agentError` translates HTTP/gRPC status into the shared
 `errkind` boundary while preserving operation and transport errors for
 `errors.Is`. Request deadlines come from the caller context.
+
+## Endpoints and credentials
+
+`Pool.Get` validates the endpoint again with `model.ValidateAgentEndpoint`, so
+an agent stored before validation existed gets `ErrBadEndpointURL` instead of a
+client. HTTP endpoints are `http(s)://host[:port][/base/path]` with no userinfo,
+query or fragment. A reverse-proxy base path is absolute, has no empty, `.` or
+`..` segments and must not need percent-encoding (`%2F`, `%2E` and the like are
+rejected, not decoded). The task API path is appended to it after the trailing
+`/` is trimmed: `https://gw.example.com/agents/a1/` calls
+`https://gw.example.com/agents/a1/apis/solti.io/v1/tasks`.
+
+gRPC endpoints are `host:port` without a path; the `http://`/`https://` prefix
+and trailing `/` tolerated by `normalizeGrpcTarget` are also accepted, and TLS
+still comes from `tls.client`. The pool dials `dns:///host:port`, so a host
+named after a grpc-go resolver scheme (`unix:1`) is still a TCP host.
+
+The stored bearer token is sent only when `agent_auth.require` is true. The
+HTTP client does not follow redirects: a 3xx answer fails the call as
+`ErrUnexpectedStatus`.

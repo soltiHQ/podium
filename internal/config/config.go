@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/kelseyhightower/envconfig"
 	"gopkg.in/yaml.v3"
@@ -21,6 +22,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
 	syncrunner "github.com/soltiHQ/control-plane/internal/server/runner/sync"
 	"github.com/soltiHQ/control-plane/internal/service/history"
+	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/transport/tlsconf"
 	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
@@ -41,10 +43,15 @@ type TLSConfig struct {
 // AgentAuthConfig controls bearer-token authentication between agents and the
 // control plane — one switch for both directions.
 //
-// When Require is true: discovery enrolls each agent's token on first contact
-// (trust-on-first-use) and verifies it on every subsequent sync, rejecting
-// mismatches; outbound proxy calls present the stored token. When false, no
-// token is verified inbound and none is sent outbound. Orthogonal to TLS.
+// When Require is true (the default), enrolled agents are authenticated: the
+// first sync of an unknown agent ID enrolls its token (trust on first use) and
+// sets the endpoint podium calls, every later sync must present that token,
+// and outbound proxy calls present it. It does not keep other hosts from
+// enrolling new agent IDs: until enrollment tokens exist, the discovery
+// listeners must be reachable only from agent networks or require client
+// certificates, and startup warns when no client CA is set. When false, no
+// token is verified inbound and none is sent outbound, and startup logs a
+// warning. Orthogonal to TLS.
 type AgentAuthConfig struct {
 	Require bool `yaml:"require" envconfig:"REQUIRE"`
 }
@@ -71,6 +78,17 @@ type Config struct {
 	Streams       middleware.StreamsConfig `yaml:"streams"        envconfig:"STREAMS"`
 	TLS           TLSConfig                `yaml:"tls"            envconfig:"TLS"`
 	AgentAuth     AgentAuthConfig          `yaml:"agent_auth"     envconfig:"AGENT_AUTH"`
+
+	// TrustedProxies lists the reverse proxies (IP addresses or CIDR prefixes)
+	// whose X-Forwarded-For and X-Forwarded-Proto headers are believed.
+	// Empty by default: the TCP peer is the client.
+	TrustedProxies []string `yaml:"trusted_proxies" envconfig:"TRUSTED_PROXIES"`
+
+	// BootstrapAdminPassword is the initial password of the administrator the
+	// first start creates (env SOLTI_BOOTSTRAP_ADMIN_PASSWORD). It is never read
+	// from YAML, so config files stay free of it. Empty means bootstrap
+	// generates a password.
+	BootstrapAdminPassword string `yaml:"-" envconfig:"BOOTSTRAP_ADMIN_PASSWORD"`
 }
 
 // Default returns the default development configuration.
@@ -83,16 +101,14 @@ func Default() Config {
 		HTTP:          httpserver.Config{Name: "http", Addr: ":8080"},
 		HTTPDiscovery: httpserver.Config{Name: "http-discovery", Addr: ":8082"},
 		GRPC:          grpcserver.Config{Name: "grpc-discovery", Addr: ":50051"},
-		Auth:          auth.Config{}, // JWTSecret must be supplied externally
-		CORS: middleware.CORSConfig{
-			AllowOrigins: []string{"*"},
-		},
-		Cluster: cluster.DefaultConfig(),
-		History: HistoryConfig{Archive: history.DefaultConfig(), Collector: historyrunner.DefaultConfig()},
+		Auth:          auth.Config{CookieSecure: auth.CookieSecureAuto}, // JWTSecret must be supplied externally
+		Cluster:       cluster.DefaultConfig(),
+		History:       HistoryConfig{Archive: history.DefaultConfig(), Collector: historyrunner.DefaultConfig()},
 		Streams: middleware.StreamsConfig{
 			MaxPerIP:         10,
 			SubscriberBuffer: 64,
 		},
+		AgentAuth: AgentAuthConfig{Require: true},
 	}
 }
 
@@ -119,14 +135,23 @@ func (c Config) Validate() error {
 	if err := c.TLS.Client.Validate(); err != nil {
 		return fmt.Errorf("config.tls.client: %w", err)
 	}
+	if _, err := clientip.New(c.TrustedProxies); err != nil {
+		return fmt.Errorf("config.trusted_proxies: %w", err)
+	}
 	return nil
 }
 
 // Load reads configuration in priority order: defaults → YAML file → ENV.
+// The YAML file comes from the --config flag or CONFIG_PATH.
 // Refuses to return a Config that fails [Config.Validate].
 func Load() (Config, error) {
+	return load(os.Args[1:])
+}
+
+// load is [Load] with the command-line arguments passed in.
+func load(args []string) (Config, error) {
 	var (
-		path = configPath()
+		path = configPath(args)
 		cfg  = Default()
 	)
 	if path != "" {
@@ -137,18 +162,23 @@ func Load() (Config, error) {
 	if err := envconfig.Process(envPrefix, &cfg); err != nil {
 		return Config{}, fmt.Errorf("config: env: %w", err)
 	}
+	// The env value is split on commas only, so "10.0.0.1, 10.0.0.2" leaves a space.
+	for i, proxy := range cfg.TrustedProxies {
+		cfg.TrustedProxies[i] = strings.TrimSpace(proxy)
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("config: %w", err)
 	}
 	return cfg, nil
 }
 
-// configPath returns the config file path from --config flag or CONFIG_PATH env.
-func configPath() string {
+// configPath returns the config file path from the --config flag in args or the
+// CONFIG_PATH env. A flag error is reported on stderr by the FlagSet itself.
+func configPath(args []string) string {
 	var path string
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	fs.StringVar(&path, "config", "", "path to YAML config file")
-	_ = fs.Parse(os.Args[1:])
+	_ = fs.Parse(args)
 
 	if path != "" {
 		return path

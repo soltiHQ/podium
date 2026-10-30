@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
@@ -56,7 +58,7 @@ func TestAuthChecksRevocationAndCurrentPermissionsBeforeHandler(t *testing.T) {
 		}
 		w.WriteHeader(204)
 	})
-	handler := Auth(fixtureVerifier{&identity.Identity{UserID: "u", SessionID: "s", Permissions: []enum.Permission{enum.UsersDelete}}}, svc)(next)
+	handler := Auth(fixtureVerifier{&identity.Identity{UserID: "u", SessionID: "s", Permissions: []enum.Permission{enum.UsersDelete}}}, svc, notSecure, zerolog.Nop())(next)
 	request := func() int {
 		r := httptest.NewRequest(http.MethodGet, "/api/test", nil)
 		r.Header.Set("Authorization", "Bearer valid")

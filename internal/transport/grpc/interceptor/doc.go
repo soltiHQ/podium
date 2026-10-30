@@ -6,9 +6,8 @@
 //   - UnaryRequirePermission guards RPCs by checking identity permissions.
 //   - UnaryLogger            structured request/response logging with zerolog.
 //   - UnaryRecovery          catches panics and returns codes.Internal to the client.
-//   - UnaryRateLimit         per-IP failure-based throttle (codes.ResourceExhausted).
 //   - UnaryLeader            rejects write RPCs on followers with codes.Unavailable + x-leader.
 //
 // Streaming counterparts (long-lived RPCs: log tail, watches):
-//   - StreamRequestID, StreamLogger, StreamRecovery, StreamRateLimit, StreamLeader.
+//   - StreamRequestID, StreamLogger, StreamRecovery, StreamLeader.
 package interceptor

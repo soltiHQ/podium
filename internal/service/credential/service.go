@@ -10,7 +10,9 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	authcred "github.com/soltiHQ/control-plane/internal/auth/credentials"
+	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/service"
+	"github.com/soltiHQ/control-plane/internal/service/user"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
@@ -78,10 +80,32 @@ func (s *Service) Delete(ctx context.Context, req DeleteRequest) error {
 	return nil
 }
 
-// SetPassword creates or replaces password auth material for a user.
+// SetPassword creates or replaces password auth material for a user without
+// actor checks; the password policy still applies (auth.ErrWeakPassword). It
+// is for trusted internal callers such as bootstrap; request handlers use
+// SetPasswordAs.
 func (s *Service) SetPassword(ctx context.Context, req SetPasswordRequest) error {
+	return s.setPassword(ctx, req, nil)
+}
+
+// SetPasswordAs sets a user's password on behalf of actor. Setting another
+// user's password requires actor to hold every permission of that user
+// (user.ErrPermissionCeiling).
+func (s *Service) SetPasswordAs(ctx context.Context, actor *identity.Identity, req SetPasswordRequest) error {
+	return s.setPassword(ctx, req, func(tx storage.Storage, u *model.User) error {
+		return user.CheckTarget(ctx, tx, actor, u)
+	})
+}
+
+// setPassword stores the password, which must pass the password policy
+// (auth.ErrWeakPassword). check, when set, runs inside the transaction with
+// the target user before anything is written.
+func (s *Service) setPassword(ctx context.Context, req SetPasswordRequest, check func(tx storage.Storage, u *model.User) error) error {
 	if req.UserID == "" || req.Password == "" {
 		return auth.ErrInvalidRequest
+	}
+	if err := authcred.CheckPasswordPolicy(req.Password); err != nil {
+		return err
 	}
 
 	var credID string
@@ -92,6 +116,11 @@ func (s *Service) SetPassword(ctx context.Context, req SetPasswordRequest) error
 		}
 		if u == nil {
 			return auth.ErrInvalidRequest
+		}
+		if check != nil {
+			if err = check(tx, u); err != nil {
+				return err
+			}
 		}
 		if u.Disabled() {
 			return auth.ErrUserDisabled

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -579,4 +580,45 @@ func TestInvalidSpecConfigDoesNotPublishOrPersist(t *testing.T) {
 		t.Fatalf("failed candidate visible: %v", err)
 	}
 	assertReopen(t, s, dir, before)
+}
+
+// A credential that an older version stored with a token over the 1024-byte
+// enrollment cap still restores: the cap applies when discovery enrolls a
+// token, so it must never keep podium from starting.
+func TestStoredLongAgentTokenStillRestores(t *testing.T) {
+	s, dir := newTestStore(t)
+	populate(t, s)
+	_ = s.Close()
+	token := strings.Repeat("t", 4096)
+	db, err := bolt.Open(filepath.Join(dir, FileName), 0o600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(stateBucket)
+		var msg raftv1.Snapshot
+		if err := proto.Unmarshal(b.Get(snapshotKey), &msg); err != nil {
+			return err
+		}
+		msg.AgentCredentials[0].Token = token
+		data, err := proto.Marshal(&msg)
+		if err != nil {
+			return err
+		}
+		return putSnapshot(b, data)
+	})
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restored, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open with a stored 4096-byte token: %v", err)
+	}
+	defer func() { _ = restored.Close() }()
+	c, err := restored.GetAgentCredential(context.Background(), "a1")
+	if err != nil || c.Token() != token {
+		t.Fatalf("restored credential: %v, want the 4096-byte token", err)
+	}
 }

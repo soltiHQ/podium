@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 
@@ -144,14 +145,16 @@ func (a *API) Routes(mux *http.ServeMux, auth route.BaseMW, _ route.PermMW, comm
 	route.HandleFunc(mux, routepath.ApiRoles, a.Roles, append(common, auth)...)
 }
 
-// Permissions handles GET /api/v1/permissions.
+// Permissions handles GET /api/v1/permissions: the permissions the caller may
+// grant, which feed the user edit form.
 func (a *API) Permissions(w http.ResponseWriter, r *http.Request) {
 	route.Resource(w, r, "",
 		route.Endpoint{Method: http.MethodGet, Perm: enum.UsersEdit, Fn: a.permissionsList},
 	)
 }
 
-// Roles handles GET /api/v1/roles.
+// Roles handles GET /api/v1/roles: the roles the caller may grant, which feed
+// the user edit form.
 func (a *API) Roles(w http.ResponseWriter, r *http.Request) {
 	route.Resource(w, r, "",
 		route.Endpoint{Method: http.MethodGet, Perm: enum.UsersEdit, Fn: a.rolesList},
@@ -159,11 +162,15 @@ func (a *API) Roles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) permissionsList(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
-	perms := a.accessSVC.GetPermissions()
-
-	items := make([]string, 0, len(perms))
+	var (
+		viewer = a.identity(r)
+		perms  = a.accessSVC.GetPermissions()
+		items  = make([]string, 0, len(perms))
+	)
 	for _, p := range perms {
-		items = append(items, wire.PermissionToREST(p))
+		if user.CanGrant(viewer, p) {
+			items = append(items, wire.PermissionToREST(p))
+		}
 	}
 	response.OK(w, r, mode, &responder.View{
 		Data: restv1.ListPermissionsResponse{Items: items},
@@ -178,7 +185,13 @@ func (a *API) rolesList(w http.ResponseWriter, r *http.Request, mode httpctx.Ren
 		return
 	}
 
-	items := mapSlice(roles, wire.RoleToREST)
+	viewer := a.identity(r)
+	items := make([]restv1.Role, 0, len(roles))
+	for _, role := range roles {
+		if role != nil && user.CanGrant(viewer, role.PermissionsAll()...) {
+			items = append(items, wire.RoleToREST(role))
+		}
+	}
 	response.OK(w, r, mode, &responder.View{
 		Data: restv1.ListRolesResponse{Items: items},
 	})
@@ -198,9 +211,17 @@ func (a *API) actor(r *http.Request) string {
 	return "unknown"
 }
 
-// decodeJSON reads and decodes a JSON request body into v.
+// errNotJSON reports a request body that is not declared as application/json.
+var errNotJSON = errors.New("request body is not declared as application/json")
+
+// decodeJSON reads and decodes a JSON request body into v. The body must be
+// declared as application/json (errNotJSON): an HTML form on another site
+// cannot send that type, and a script there only after a CORS preflight.
 func decodeJSON[T any](r *http.Request) (T, error) {
 	var v T
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+		return v, errNotJSON
+	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, (2<<20)+1))
 	if err != nil {
 		return v, err
@@ -217,6 +238,16 @@ func decodeJSON[T any](r *http.Request) (T, error) {
 		return v, errors.New("request body must contain one JSON value")
 	}
 	return v, nil
+}
+
+// badBody answers a decodeJSON error: 415 for a body not declared as JSON,
+// 400 for anything else.
+func badBody(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, err error) {
+	if errors.Is(err, errNotJSON) {
+		response.UnsupportedMediaType(w, r, mode, "Content-Type must be application/json.")
+		return
+	}
+	response.BadRequest(w, r, mode)
 }
 
 // queryInt reads a query parameter as int, returning fallback if absent or invalid.

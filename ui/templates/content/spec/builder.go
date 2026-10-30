@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
+	"github.com/soltiHQ/control-plane/ui/templates/jsexpr"
 )
 
 // backoffPreset defines a named backoff configuration preset.
@@ -39,11 +40,10 @@ var presets = []backoffPreset{
 //     base64-encoded (UTF-8 bytes) on the wire.
 func builderXData(agentsEndpoint, seedJSON string) string {
 	presetsJSON, _ := json.Marshal(presets)
-	endpointJSON, _ := json.Marshal(agentsEndpoint)
 	if seedJSON == "" {
 		seedJSON = "null"
 	}
-	return fmt.Sprintf("soltiSpecBuilder(%s,%s,%s)", seedJSON, presetsJSON, endpointJSON)
+	return fmt.Sprintf("soltiSpecBuilder(%s,%s,%s)", seedJSON, presetsJSON, jsexpr.String(agentsEndpoint))
 }
 
 // builderSeed renders a Spec DTO as a JSON literal suitable for
@@ -68,7 +68,5 @@ func builderInitExpr() string { return "loadAgents()" }
 
 // Conflicts and failures keep the form intact for recovery.
 func builderSubmitExpr(endpoint, method string) string {
-	e, _ := json.Marshal(endpoint)
-	m, _ := json.Marshal(method)
-	return fmt.Sprintf("submit(%s,%s)", e, m)
+	return fmt.Sprintf("submit(%s,%s)", jsexpr.String(endpoint), jsexpr.String(method))
 }

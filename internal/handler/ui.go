@@ -9,15 +9,16 @@ import (
 	"github.com/a-h/templ"
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
+	"github.com/soltiHQ/control-plane/domain/model"
 	wire "github.com/soltiHQ/control-plane/domain/wire"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
-	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/http/route"
@@ -32,16 +33,29 @@ import (
 	pageUser "github.com/soltiHQ/control-plane/ui/templates/page/user"
 )
 
+const (
+	// maxLoginBodyBytes caps the login form body.
+	maxLoginBodyBytes = 16 << 10
+	// maxLoginSubjectBytes caps the login subject.
+	maxLoginSubjectBytes = 256
+)
+
 // UI handlers
 type UI struct {
 	accessSVC *access.Service
 	specSVC   *spec.Service
 	hub       *event.Hub
+	resolver  *clientip.Resolver
+	secure    func(*http.Request) bool
 	logger    zerolog.Logger
 }
 
 // NewUI creates a new UI handler.
-func NewUI(logger zerolog.Logger, accessSVC *access.Service, specSVC *spec.Service, hub *event.Hub) *UI {
+//
+// resolver gives the client IP of login attempts; nil trusts no proxy. secure
+// decides whether the auth and device cookies that login and logout write
+// carry the Secure attribute.
+func NewUI(logger zerolog.Logger, accessSVC *access.Service, specSVC *spec.Service, hub *event.Hub, resolver *clientip.Resolver, secure func(*http.Request) bool) *UI {
 	if accessSVC == nil {
 		panic(service.ErrNilService)
 	}
@@ -51,18 +65,24 @@ func NewUI(logger zerolog.Logger, accessSVC *access.Service, specSVC *spec.Servi
 	if hub == nil {
 		panic(event.ErrNilHub)
 	}
+	if secure == nil {
+		panic("handler.NewUI: nil cookie policy")
+	}
 	return &UI{
 		logger:    logger.With().Str("handler", "ui").Logger(),
 		accessSVC: accessSVC,
 		specSVC:   specSVC,
 		hub:       hub,
+		resolver:  resolver,
+		secure:    secure,
 	}
 }
 
-// Routes registers UI routes.
-func (u *UI) Routes(mux *http.ServeMux, auth route.BaseMW, perm route.PermMW, common ...route.BaseMW) {
+// Routes registers UI routes. optionalAuth guards logout, which also clears
+// the cookies of a caller whose session has already ended.
+func (u *UI) Routes(mux *http.ServeMux, auth, optionalAuth route.BaseMW, perm route.PermMW, common ...route.BaseMW) {
 	route.HandleFunc(mux, routepath.PageLogin, u.Login, common...)
-	route.HandleFunc(mux, routepath.PageLogout, u.Logout, append(common, auth)...)
+	route.HandleFunc(mux, routepath.PageLogout, u.Logout, append(common, optionalAuth)...)
 
 	route.HandleFunc(mux, routepath.PageUsers, u.Users, append(common, auth)...)
 	route.HandleFunc(mux, routepath.PageUserInfo, u.UserDetail, append(common, auth, perm(enum.UsersGet))...)
@@ -80,6 +100,10 @@ func (u *UI) Routes(mux *http.ServeMux, auth route.BaseMW, perm route.PermMW, co
 }
 
 // Login handles GET/POST /login.
+//
+// A successful login sets the auth cookies and a new device cookie that only
+// /login receives. The device cookie a login attempt sends back lets it count
+// its failures apart from the account (see access.Service.Login).
 func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 	mode := httpctx.ModeFromRequest(r)
 
@@ -105,6 +129,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 		response.NotAllowed(w, r, mode)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxLoginBodyBytes)
 	if err := r.ParseForm(); err != nil {
 		response.BadRequest(w, r, mode)
 		return
@@ -114,45 +139,72 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 		subject  = r.FormValue("subject")
 		password = r.FormValue("password")
 		redirect = safeLoginRedirect(r.FormValue("redirect"))
-		rateKey  = ratelimit.LoginKey(r, subject)
 	)
+	if len(subject) > maxLoginSubjectBytes {
+		response.BadRequestMsg(w, r, mode, "Username is too long.")
+		return
+	}
 	if redirect == "" {
 		redirect = routepath.PageHome
 	}
+	var device string
+	if c, err := httpcookie.GetDevice(r); err == nil {
+		device = c.Value
+	}
 	id, res, err := u.accessSVC.Login(r.Context(), access.LoginRequest{
-		Subject:  subject,
-		Password: password,
-		RateKey:  rateKey,
+		Subject:      subject,
+		Password:     password,
+		ClientIP:     u.resolver.IP(r),
+		DeviceCookie: device,
 	})
+	// Logs and events name the account as stored, however the subject was typed.
+	account := model.NormalizeSubject(subject)
+	if errors.Is(err, auth.ErrRateLimitReached) {
+		// Recorded once per block; the refused attempts that follow record nothing.
+		u.hub.Record(event.RateLimited, event.Payload{
+			ID: account, Name: account, By: "auth",
+		})
+	}
 	if err != nil {
 		switch {
 		case errors.Is(err, auth.ErrRateLimited):
-			u.hub.Record(event.RateLimited, event.Payload{
-				ID: subject, Name: subject, By: "auth",
-			})
 			response.AuthRateLimit(w, r, mode)
 			return
 		case errors.Is(err, auth.ErrInvalidCredentials),
-			errors.Is(err, auth.ErrInvalidRequest):
+			errors.Is(err, auth.ErrInvalidRequest),
+			errors.Is(err, auth.ErrUnauthorized):
+			// A user without permissions (ErrUnauthorized) gets the answer to a
+			// wrong password, which tells nothing about the password.
+			if errors.Is(err, auth.ErrUnauthorized) {
+				u.logger.Warn().Str("subject", account).Msg("login refused: the user has no permissions")
+			}
 			transportctx.SetError(r.Context(), "invalid credentials")
 			http.Redirect(w, r, routepath.PageLogin+"?error=Invalid+username+or+password&redirect="+url.QueryEscape(redirect), http.StatusSeeOther)
 			return
 		default:
-			u.logger.Error().Err(err).Str("subject", subject).Msg("login error")
+			u.logger.Error().Err(err).Str("subject", account).Msg("login error")
 			http.Redirect(w, r, routepath.PageLogin+"?error=Something+went+wrong", http.StatusFound)
 			return
 		}
 	}
 
-	u.logger.Info().Str("subject", subject).Msg("login success")
+	u.logger.Info().Str("subject", account).Msg("login success")
 	u.hub.Record(event.SessionCreated, event.Payload{
 		ID: id.UserID, Name: id.Name, By: "auth",
 	})
-	httpcookie.SetAuth(w, r, res.AccessToken, res.RefreshToken, res.SessionID)
+	secure := u.secure(r)
+	httpcookie.SetAuth(w, secure, res.AccessToken, res.RefreshToken, res.SessionID)
+	httpcookie.SetDevice(w, secure, routepath.PageLogin, res.DeviceCookie)
 	http.Redirect(w, r, redirect, http.StatusFound)
 }
 
-// Logout handles GET/POST /logout.
+// Logout handles POST /logout.
+//
+// It revokes the session of the authenticated caller, never the one the
+// session_id cookie names, then clears the auth cookies and redirects to the
+// login page; a caller without valid credentials only gets the cookies
+// cleared. When the revoke fails the session lives on, so the answer is 503
+// and the cookies stay.
 func (u *UI) Logout(w http.ResponseWriter, r *http.Request) {
 	mode := httpctx.ModeFromRequest(r)
 
@@ -160,17 +212,21 @@ func (u *UI) Logout(w http.ResponseWriter, r *http.Request) {
 		response.NotFound(w, r, mode)
 		return
 	}
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+	if r.Method != http.MethodPost {
 		response.NotAllowed(w, r, mode)
 		return
 	}
-	if c, err := httpcookie.GetSessionID(r); err == nil && c != nil && c.Value != "" {
-		_ = u.accessSVC.Logout(r.Context(), access.LogoutRequest{SessionID: c.Value})
+	if id, ok := transportctx.Identity(r.Context()); ok {
+		if err := u.accessSVC.Logout(r.Context(), access.LogoutRequest{SessionID: id.SessionID}); err != nil {
+			u.logger.Error().Err(err).Str("user_id", id.UserID).Msg("logout failed")
+			response.Unavailable(w, r, mode)
+			return
+		}
+		u.logger.Info().Str("user_id", id.UserID).Msg("logout")
 	}
 
-	u.logger.Info().Msg("logout")
-	httpcookie.DeleteAuth(w, r)
-	http.Redirect(w, r, routepath.PageLogin, http.StatusFound)
+	httpcookie.DeleteAuth(w, u.secure(r))
+	http.Redirect(w, r, routepath.PageLogin, http.StatusSeeOther)
 }
 
 // Main handle GET /.

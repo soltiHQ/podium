@@ -3,6 +3,7 @@ package home
 import (
 	"fmt"
 
+	"github.com/soltiHQ/control-plane/internal/uikit/policy"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
 	"github.com/soltiHQ/control-plane/internal/uikit/timeformat"
 	"github.com/soltiHQ/control-plane/internal/event"
@@ -31,7 +32,8 @@ type DashboardStats struct {
 }
 
 // Dashboard renders the dashboard with a stats bar, issues feed, and activity feed.
-templ Dashboard(stats DashboardStats) {
+// The handler passes only the issues and events the viewer may read.
+templ Dashboard(stats DashboardStats, p policy.Dashboard) {
 	<div
 		id="dashboard-results"
 		hx-get={ routepath.ApiDashboard }
@@ -49,7 +51,7 @@ templ Dashboard(stats DashboardStats) {
 					<h2 class={ visual.SectionTitle }>Issues</h2>
 				</div>
 				<div class="flex-1 overflow-y-auto px-3 py-3">
-					@IssueTable(stats.Issues)
+					@IssueTable(stats.Issues, p)
 				</div>
 			</div>
 
@@ -86,8 +88,9 @@ templ statsBar(stats DashboardStats) {
 	</div>
 }
 
-// IssueTable renders grouped issue rows with count badges and close buttons.
-templ IssueTable(issues []IssueGroup) {
+// IssueTable renders grouped issue rows with count badges and, where the
+// viewer may dismiss the issue, close buttons.
+templ IssueTable(issues []IssueGroup, p policy.Dashboard) {
 	if len(issues) == 0 {
 		@status.NoIssues("No issues")
 	} else {
@@ -107,13 +110,15 @@ templ IssueTable(issues []IssueGroup) {
 						<span class="text-xs text-muted tabular-nums whitespace-nowrap ml-auto shrink-0">
 							{ timeformat.Relative(g.Time) }
 						</span>
-						<button
-							class="text-muted hover:text-danger transition-colors shrink-0 -mr-1 cursor-pointer"
-							hx-delete={ issueDeleteURL(g) }
-							hx-swap="none"
-						>
-							@asset.Icon("close")
-						</button>
+						if p.CanDismiss(g.Kind) {
+							<button
+								class="text-muted hover:text-danger transition-colors shrink-0 -mr-1 cursor-pointer"
+								hx-delete={ issueDeleteURL(g) }
+								hx-swap="none"
+							>
+								@asset.Icon("close")
+							</button>
+						}
 					</div>
 				</div>
 			}

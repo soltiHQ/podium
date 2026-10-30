@@ -19,20 +19,30 @@ Each `Build*` function takes an `identity.Identity` and returns a struct of bool
 identity.Identity
        │
        ▼
-  BuildNav(id)                       → Nav          (sidebar: ShowUsers, ShowAgents, CanAddUser…)
-  BuildUserDetail(id, targetUserID)  → UserDetail   (detail page: CanEdit, CanEditRoles, CanDelete + IsSelf guard)
-  BuildAgentDetail(id)               → AgentDetail  (detail page: CanEditLabels…)
-  BuildSpecDetail(id)                → SpecDetail   (detail page: CanEdit, CanDelete, CanDeploy…)
+  BuildNav(id)                                   → Nav          (sidebar: ShowUsers, ShowAgents, CanAddUser…)
+  BuildUserDetail(id, targetUserID, manageable)  → UserDetail   (detail page: CanEdit, CanEditRoles, CanDelete,
+                                                                  CanRevokeSessions + IsSelf guard and target ceiling)
+  BuildAgentDetail(id)                           → AgentDetail  (detail page: CanEditLabels…)
+  BuildSpecDetail(id)                            → SpecDetail   (detail page: CanEdit, CanDelete, CanDeploy…)
+  BuildDashboard(id)                             → Dashboard    (issue list: CanDismiss(kind))
 ```
+
+The flags mirror the API rules: another user's actions need every permission that user holds (`manageable` is the
+user service's own decision), spec delete needs `taskspecs:delete`, and an issue is dismissed with the edit permission
+of its subject. The user edit form's role and permission options come from the API, which lists only what the viewer
+may grant.
 
 ## routepath
 All URL constants in one place — pages (`Page*`) and API endpoints (`Api*`).
-Path-builder functions append entity IDs:
+Path-builder functions append entity IDs, each escaped as one path segment, so an ID can never add a query or a fragment, or break out of the HTML attribute or JavaScript string the URL ends up in:
 
 ```go
 routepath.PageUserInfoByID("abc")  // → "/users/info/abc"
 routepath.ApiAgentTasks("xyz")     // → "/api/v1/agents/xyz/tasks"
+routepath.ApiAgentLabels("a/b c")  // → "/api/v1/agents/a%2Fb%20c/labels"
 ```
+
+Handlers route on the decoded `r.URL.Path`, where an escaped `/` is a separator again, so an ID that contains `/` is not supported; agent IDs and ksuids cannot contain one. Any other ID reaches its handler unchanged. Never build an entity URL with `+ id`; add a helper here.
 
 ## timeformat
 Human-readable time formatting helpers used by templ templates.

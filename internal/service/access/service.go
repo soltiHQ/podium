@@ -2,6 +2,7 @@ package access
 
 import (
 	"context"
+	"errors"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -9,6 +10,7 @@ import (
 	iauth "github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
+	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
@@ -28,6 +30,12 @@ func New(authSvc *kit.Auth, store storage.Storage, logger zerolog.Logger) *Servi
 	if store == nil {
 		panic("access.Service: nil storage")
 	}
+	if authSvc.Limiter == nil {
+		panic("access.Service: nil login limiter")
+	}
+	if authSvc.Devices == nil {
+		panic("access.Service: nil device cookie signer")
+	}
 	return &Service{
 		logger: logger.With().Str("service", "access").Logger(),
 		auth:   authSvc,
@@ -36,35 +44,68 @@ func New(authSvc *kit.Auth, store storage.Storage, logger zerolog.Logger) *Servi
 }
 
 // Login authenticates a user and returns issued tokens and identity.
+//
+// The subject is normalized once, the way user storage normalizes it, for the
+// limiter, the device cookie and the password check alike. An attempt with a
+// device cookie valid for the subject comes from a known device and counts on
+// its device key alone; any other attempt counts on its account key and on its
+// client IP key. Before the password check, the attempt reserves a slot on its
+// keys, so attempts in flight count like failures: an attempt is refused with
+// ErrRateLimited while, for any of its keys, failures plus attempts in flight
+// reach the limit. A failure is recorded on the keys only for a wrong subject
+// or password (ErrInvalidCredentials) and for the right password of a user
+// without permissions (ErrUnauthorized), whose answer must not tell it apart
+// from a wrong one; the failure that blocks one of the keys comes back joined
+// with ErrRateLimitReached. Any other error, such as a storage outage,
+// releases the slots. A successful login resets the device key of a known
+// device, or else the account key, never the client IP, and returns a new
+// device cookie.
 func (s *Service) Login(ctx context.Context, req LoginRequest) (*identity.Identity, LoginResult, error) {
-	if req.Subject == "" || req.Password == "" {
+	subject := model.NormalizeSubject(req.Subject)
+	if subject == "" || req.Password == "" {
 		return nil, LoginResult{}, iauth.ErrInvalidRequest
 	}
 
-	s.logger.Debug().Str("subject", req.Subject).Msg("login attempt")
-
 	now := s.auth.Clock.Now()
-	if s.auth.Limiter != nil && req.RateKey != "" {
-		if err := s.auth.Limiter.Check(req.RateKey, now); err != nil {
+	reset := ratelimit.AccountKey(subject)
+	keys := []string{reset, ratelimit.LoginIPKey(req.ClientIP)}
+	deviceID, known := s.auth.Devices.Verify(req.DeviceCookie, subject, now)
+	if known {
+		reset = ratelimit.DeviceKey(deviceID)
+		keys = []string{reset}
+	}
+	s.logger.Debug().Str("subject", subject).Bool("known_device", known).Msg("login attempt")
+
+	attempt, err := s.auth.Limiter.Reserve(now, keys...)
+	if err != nil {
+		return nil, LoginResult{}, err
+	}
+	// Frees the slots if Session.Login panics; a no-op once the attempt has ended.
+	defer attempt.Release()
+
+	pair, id, err := s.auth.Session.Login(ctx, enum.Password, subject, req.Password)
+	if err != nil {
+		if !errors.Is(err, iauth.ErrInvalidCredentials) && !errors.Is(err, iauth.ErrUnauthorized) {
+			attempt.Release()
 			return nil, LoginResult{}, err
 		}
-	}
-
-	pair, id, err := s.auth.Session.Login(ctx, enum.Password, req.Subject, req.Password)
-	if err != nil {
-		if s.auth.Limiter != nil && req.RateKey != "" {
-			s.auth.Limiter.RecordFailure(req.RateKey, now)
+		if attempt.Fail(s.auth.Clock.Now()) {
+			err = errors.Join(err, iauth.ErrRateLimitReached)
 		}
 		return nil, LoginResult{}, err
 	}
-	if s.auth.Limiter != nil && req.RateKey != "" {
-		s.auth.Limiter.Reset(req.RateKey)
+	attempt.Release()
+	s.auth.Limiter.Reset(reset)
+	device, err := s.auth.Devices.Issue(subject, s.auth.Clock.Now())
+	if err != nil {
+		return nil, LoginResult{}, err
 	}
-	s.logger.Info().Str("subject", req.Subject).Str("user_id", id.UserID).Msg("login success")
+	s.logger.Info().Str("subject", subject).Str("user_id", id.UserID).Msg("login success")
 	return id, LoginResult{
 		AccessToken:  pair.AccessToken,
 		RefreshToken: pair.RefreshToken,
 		SessionID:    id.SessionID,
+		DeviceCookie: device,
 	}, nil
 }
 
