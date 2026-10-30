@@ -117,7 +117,8 @@ func (t *Tx) DeleteSessionsByUser(ctx context.Context, userID string) error {
 	if err != nil {
 		return err
 	}
-	t.sessions.removeAll(inBase, func(s *model.Session) bool { return s.UserID() == userID })
-	t.record(&raftv1.Op{Op: &raftv1.Op_SessionDeleteByUser{SessionDeleteByUser: userID}})
+	if t.sessions.removeAll(inBase, func(s *model.Session) bool { return s.UserID() == userID }) {
+		t.record(&raftv1.Op{Op: &raftv1.Op_SessionDeleteByUser{SessionDeleteByUser: userID}})
+	}
 	return nil
 }

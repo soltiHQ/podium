@@ -144,6 +144,55 @@ func TestOverlayRefusesWhatApplyRefuses(t *testing.T) {
 	}
 }
 
+// TestOverlayBulkDeleteOfNothingRecordsNothing runs, for each bulk delete, a
+// transaction whose only call is one that matches no row, committed or written:
+// it records nothing, so Empty tells a transaction that changes nothing. A bulk
+// delete that matches only a row the transaction wrote still records its operation.
+func TestOverlayBulkDeleteOfNothingRecordsNothing(t *testing.T) {
+	ctx := t.Context()
+	base := seeded(t)
+	for _, tc := range []struct {
+		name  string
+		bulk  func(tx storage.Storage) error // matches no committed row
+		write func(tx storage.Storage) error // writes a row bulk matches
+	}{
+		{
+			"DeleteSessionsByUser",
+			func(tx storage.Storage) error { return tx.DeleteSessionsByUser(ctx, "user-f") },
+			func(tx storage.Storage) error {
+				return tx.CreateSession(ctx, session(t, "sess-a", "user-f", "cred-b", 1))
+			},
+		},
+		{
+			"DeleteVerifierByCredential",
+			func(tx storage.Storage) error { return tx.DeleteVerifierByCredential(ctx, "cred-d") },
+			func(tx storage.Storage) error { return tx.UpsertVerifier(ctx, verifier(t, "ver-d", "cred-d", 1)) },
+		},
+		{
+			"DeleteRolloutsBySpec",
+			func(tx storage.Storage) error { return tx.DeleteRolloutsBySpec(ctx, "spec-f") },
+			func(tx storage.Storage) error { return tx.UpsertRollout(ctx, rollout(t, "spec-f", "agent-a", 1)) },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := overlay.New(base)
+			if err := tc.bulk(tx); err != nil {
+				t.Fatal(err)
+			}
+			if !tx.Empty() || len(tx.Ops()) != 0 {
+				t.Fatalf("a bulk delete that matches nothing recorded %d operations", len(tx.Ops()))
+			}
+			own := overlay.New(base)
+			if err := errors.Join(tc.write(own), tc.bulk(own)); err != nil {
+				t.Fatal(err)
+			}
+			if n := len(own.Ops()); n != 2 {
+				t.Fatalf("a bulk delete of a row the transaction wrote left %d operations, want the write and the delete", n)
+			}
+		})
+	}
+}
+
 // TestOverlayOpsReplayToWhatItRead commits a transaction that writes every kind of
 // row as the state machine does, by applying its operations to the base, and then
 // reads from the base what the transaction read. The operations are those of the

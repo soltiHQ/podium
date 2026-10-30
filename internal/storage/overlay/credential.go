@@ -108,7 +108,8 @@ func (t *Tx) DeleteVerifierByCredential(ctx context.Context, credentialID string
 	case !errors.Is(err, storage.ErrNotFound):
 		return err
 	}
-	t.verifiers.removeAll(inBase, func(v *model.Verifier) bool { return v.CredentialID() == credentialID })
-	t.record(&raftv1.Op{Op: &raftv1.Op_VerifierDeleteByCred{VerifierDeleteByCred: credentialID}})
+	if t.verifiers.removeAll(inBase, func(v *model.Verifier) bool { return v.CredentialID() == credentialID }) {
+		t.record(&raftv1.Op{Op: &raftv1.Op_VerifierDeleteByCred{VerifierDeleteByCred: credentialID}})
+	}
 	return nil
 }

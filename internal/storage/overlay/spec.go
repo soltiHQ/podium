@@ -89,7 +89,8 @@ func (t *Tx) DeleteRolloutsBySpec(ctx context.Context, specID string) error {
 	if err != nil {
 		return err
 	}
-	t.rollouts.removeAll(inBase, func(r *model.Rollout) bool { return r.SpecID() == specID })
-	t.record(&raftv1.Op{Op: &raftv1.Op_RolloutDeleteBySpec{RolloutDeleteBySpec: specID}})
+	if t.rollouts.removeAll(inBase, func(r *model.Rollout) bool { return r.SpecID() == specID }) {
+		t.record(&raftv1.Op{Op: &raftv1.Op_RolloutDeleteBySpec{RolloutDeleteBySpec: specID}})
+	}
 	return nil
 }

@@ -35,7 +35,9 @@ var (
 // nothing and leaves the transaction as it was. Deleting a row the transaction does
 // not see is such a write: it gives ErrNotFound, as the stores do. A bulk delete
 // deletes the rows it matches when it is called, the transaction's own included,
-// and not the rows written after it.
+// and not the rows written after it; one that matches none records nothing, since
+// the base does not change and the operations apply in order. So a transaction
+// that changes nothing is Empty.
 //
 // The base must not change while the transaction runs: the caller serializes the
 // transaction with every writer of the base. A Tx is not safe for concurrent use.
@@ -155,21 +157,26 @@ func (w *writes[T]) remove(ctx context.Context, id string, base func(context.Con
 	return nil
 }
 
-// removeAll deletes in the transaction every row it sees that match accepts. base
-// holds the rows of the base that match accepts; a row among them that the
-// transaction wrote is judged by what it wrote instead.
-func (w *writes[T]) removeAll(base []T, match func(T) bool) {
+// removeAll deletes in the transaction every row it sees that match accepts, and
+// reports whether there was one. base holds the rows of the base that match
+// accepts; a row among them that the transaction wrote is judged by what it wrote
+// instead.
+func (w *writes[T]) removeAll(base []T, match func(T) bool) bool {
 	var deleted T
+	removed := false
 	for id, row := range w.rows {
 		if row != deleted && match(row) {
 			w.rows[id] = deleted
+			removed = true
 		}
 	}
 	for _, row := range base {
 		if !w.written(row.ID()) {
 			w.drop(row.ID())
+			removed = true
 		}
 	}
+	return removed
 }
 
 // own returns clones of the rows the transaction wrote, and did not delete since,

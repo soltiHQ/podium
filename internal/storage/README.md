@@ -105,7 +105,7 @@ interface, and the helpers use it:
 - A write the state machine would refuse fails in the transaction and records nothing. Deleting a
   row the transaction does not see gives `ErrNotFound`, as the stores do
 - A bulk delete removes the rows it matches when it is called, the transaction's own included,
-  and not the rows written after it
+  and not the rows written after it. One that matches none records nothing, so `Empty` is exact
 
 ## Filter pattern
 Filters are **backend-specific**. The storage package declares empty marker interfaces (`AgentFilter`, `RolloutFilter` …).  
