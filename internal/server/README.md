@@ -101,5 +101,8 @@ by how long they have been silent. `hb` is the heartbeat the agent reported, or
 - **Deletion forgets labels.** Deleting an agent drops its row, and with it the
   labels operators set on it. An agent that syncs again later is created anew,
   without them. `delete_after` is a floor: no agent is deleted sooner, whatever
-  `delete_multiplier` says; the multiplier decides only for slow heartbeats or a
-  large multiplier.
+  `delete_multiplier` says. A reported heartbeat is capped at 1h, so with the
+  defaults (multiplier 10, `delete_after` 24h) the multiplier threshold is at
+  most 10h and never beats the floor. It wins only with a `default_heartbeat`
+  above 2.4h (for agents that report none), or a `delete_multiplier` above 24
+  at the 1h cap.

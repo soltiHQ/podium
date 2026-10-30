@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +26,17 @@ type heartbeatBeforeTx struct {
 
 func (s *heartbeatBeforeTx) WithTx(ctx context.Context, fn func(storage.Storage) error) error {
 	_ = s.UpsertAgent(ctx, s.fresh)
+	return s.Storage.WithTx(ctx, fn)
+}
+
+// txCounter counts the transactions opened through it.
+type txCounter struct {
+	storage.Storage
+	txs atomic.Int64
+}
+
+func (s *txCounter) WithTx(ctx context.Context, fn func(storage.Storage) error) error {
+	s.txs.Add(1)
 	return s.Storage.WithTx(ctx, fn)
 }
 
@@ -130,6 +142,14 @@ func (f *fixture) kinds() []string {
 	return out
 }
 
+// expectKinds fails unless exactly the given event kinds were recorded, oldest first.
+func (f *fixture) expectKinds(t *testing.T, when string, want []string) {
+	t.Helper()
+	if got := f.kinds(); !slices.Equal(got, want) {
+		t.Fatalf("%s: events = %v, want %v", when, got, want)
+	}
+}
+
 // step is what must hold a while after the runner started; events lists every kind recorded by then.
 type step struct {
 	after  time.Duration
@@ -146,9 +166,7 @@ func (f *fixture) walk(t *testing.T, steps []step) {
 		f.r.tick(context.Background())
 		when := fmt.Sprintf("%v after start", s.after)
 		f.expect(t, when, s.status, s.gone)
-		if got := f.kinds(); !slices.Equal(got, s.events) {
-			t.Fatalf("%s: events = %v, want %v", when, got, s.events)
-		}
+		f.expectKinds(t, when, s.events)
 	}
 }
 
@@ -214,6 +232,79 @@ func TestDeleteAfterIsAFloor(t *testing.T) {
 			f.expect(t, "after a tick", tc.status, tc.gone)
 		})
 	}
+}
+
+// Long after the start, the silence must still run from the agent's last sync, not from the start.
+func TestSteadyStateSilenceRunsFromTheLastSync(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		silence time.Duration
+		status  enum.AgentStatus
+		events  []string
+	}{
+		{"31s is still active", 31 * time.Second, enum.AgentStatusActive, nil},
+		{"61s is inactive", 61 * time.Second, enum.AgentStatusInactive, []string{event.AgentInactive}},
+		{"10m is disconnected, not deleted", 10 * time.Minute, enum.AgentStatusDisconnected, []string{event.AgentDisconnected}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, Config{})
+			f.r.startedAt = f.now.Add(-72 * time.Hour)
+			f.put(t, f.now.Add(-tc.silence), 30*time.Second, enum.AgentStatusActive)
+			f.r.tick(context.Background())
+			f.expect(t, "after a tick", tc.status, false)
+			f.expectKinds(t, "after a tick", tc.events)
+		})
+	}
+}
+
+// A scanned agent with nothing due must not open a transaction: on the durable store each one clones, marshals and
+// fsyncs the whole state under the lock that sync's Upsert shares.
+func TestTickOpensNoTransactionForAgentsWithNothingDue(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		up        time.Duration // how long the runner has been up; 0 = no grace
+		silence   time.Duration
+		persisted enum.AgentStatus
+		txs       int64
+	}{
+		{"one heartbeat missed", 0, 31 * time.Second, enum.AgentStatusActive, 0},
+		{"already inactive, not yet disconnected", 0, 100 * time.Second, enum.AgentStatusInactive, 0},
+		{"already disconnected, below the delete threshold", 0, 10 * time.Minute, enum.AgentStatusDisconnected, 0},
+		{"inside the restart grace", 10 * time.Second, 2 * time.Hour, enum.AgentStatusActive, 0},
+		{"inactive is due", 0, 61 * time.Second, enum.AgentStatusActive, 1},
+		{"deletion is due", 0, 25 * time.Hour, enum.AgentStatusDisconnected, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, Config{})
+			counter := &txCounter{Storage: f.store}
+			f.r.store = counter
+			if tc.up > 0 {
+				f.r.startedAt = f.now.Add(-tc.up)
+			}
+			f.put(t, f.now.Add(-tc.silence), 30*time.Second, tc.persisted)
+			f.r.tick(context.Background())
+			if got := counter.txs.Load(); got != tc.txs {
+				t.Fatalf("transactions = %d, want %d", got, tc.txs)
+			}
+		})
+	}
+}
+
+// The decision is made again on the re-read agent: a status that moved on since the scan is never lowered.
+func TestReconcileDecidesAgainOnTheReReadAgent(t *testing.T) {
+	f := newFixture(t, Config{})
+	ctx := context.Background()
+	f.put(t, f.now.Add(-61*time.Second), 30*time.Second, enum.AgentStatusActive) // the scan sees inactive due
+	scanned, err := f.store.GetAgent(ctx, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := scanned.Clone()
+	moved.SetStatus(enum.AgentStatusDisconnected)
+	f.r.store = &heartbeatBeforeTx{Storage: f.store, fresh: moved}
+	f.r.reconcile(ctx, f.now, scanned)
+	f.expect(t, "after reconcile", enum.AgentStatusDisconnected, false)
+	f.expectKinds(t, "after reconcile", nil)
 }
 
 // The grace exists only if New starts it: the tests above set startedAt by hand.
