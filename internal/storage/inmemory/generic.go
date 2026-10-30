@@ -22,28 +22,13 @@ func NewGenericStore[T domain.Entity[T]]() *GenericStore[T] {
 	return &GenericStore[T]{data: make(map[string]T)}
 }
 
-func validateEntity[T domain.Entity[T]](entity T) error {
-	var zero T
-	if any(entity) == any(zero) {
-		return storage.ErrInvalidArgument
-	}
-
-	if entity.ID() == "" {
-		return storage.ErrInvalidArgument
-	}
-	if entity.CreatedAt().IsZero() {
-		return storage.ErrInvalidArgument
-	}
-	return nil
-}
-
 // Create inserts a new entity and fails if it already exists.
 //
 // The entity is deep-cloned before storage to prevent external mutations.
 // Returns storage.ErrInvalidArgument if the entity has empty ID or violates storage invariants.
 // Returns storage.ErrAlreadyExists if the ID already exists.
 func (s *GenericStore[T]) Create(_ context.Context, entity T) error {
-	if err := validateEntity(entity); err != nil {
+	if err := storage.ValidateEntity(entity); err != nil {
 		return err
 	}
 	id := entity.ID()
@@ -80,7 +65,7 @@ func (s *GenericStore[T]) Update(_ context.Context, id string, fn func(cur T) (T
 		return err
 	}
 
-	if err = validateEntity(next); err != nil {
+	if err = storage.ValidateEntity(next); err != nil {
 		return err
 	}
 	if next.ID() != id {
@@ -96,7 +81,7 @@ func (s *GenericStore[T]) Update(_ context.Context, id string, fn func(cur T) (T
 // The entity is deep-cloned before storage to prevent external mutations.
 // Returns storage.ErrInvalidArgument if the entity violates storage invariants.
 func (s *GenericStore[T]) Upsert(_ context.Context, entity T) error {
-	if err := validateEntity(entity); err != nil {
+	if err := storage.ValidateEntity(entity); err != nil {
 		return err
 	}
 

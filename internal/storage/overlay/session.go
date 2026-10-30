@@ -70,7 +70,7 @@ func (t *Tx) RotateRefreshAt(ctx context.Context, sessionID string, newHash []by
 	if err := cur.RotateRefreshAt(hash, expiresAt, at); err != nil {
 		return err
 	}
-	if err := valid(cur); err != nil {
+	if err := storage.ValidateEntity(cur); err != nil {
 		return err
 	}
 	t.sessions.put(cur)
@@ -93,7 +93,7 @@ func (t *Tx) RevokeSession(ctx context.Context, sessionID string, revokedAt time
 	if err := cur.Revoke(revocation(msg)); err != nil {
 		return err
 	}
-	if err := valid(cur); err != nil {
+	if err := storage.ValidateEntity(cur); err != nil {
 		return err
 	}
 	t.sessions.put(cur)

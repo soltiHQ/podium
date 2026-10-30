@@ -195,22 +195,13 @@ func (w *writes[T]) own(match func(T) bool) []T {
 }
 
 // decoded checks a row as the state machine checks the operation that writes it:
-// row and err are what decoding the operation returned, and the store then refuses
-// a row with no ID or no creation time.
+// row and err are what decoding the operation returned, and the store then checks
+// the row with storage.ValidateEntity.
 func decoded[T entity[T]](row T, err error) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", storage.ErrInvalidArgument, err)
 	}
-	return valid(row)
-}
-
-// valid refuses a row the stores refuse: nil, or one with no ID or no creation time.
-func valid[T entity[T]](row T) error {
-	var zero T
-	if row == zero || row.ID() == "" || row.CreatedAt().IsZero() {
-		return storage.ErrInvalidArgument
-	}
-	return nil
+	return storage.ValidateEntity(row)
 }
 
 // unique returns, as a clone the caller owns, the one row the transaction sees under
@@ -271,35 +262,33 @@ func matcher[T any](filter any) (func(T) bool, error) {
 // merged returns base, rows of the base in the listing order, as the transaction
 // sees them: without the rows it wrote or deleted, and with its own rows that match
 // accepts, each in its place in the listing order. A nil match accepts every row.
-// It is nil when no row is left, as a scan is.
+// It leaves base as it is: when the transaction wrote no row of the kind, it
+// returns base itself, and otherwise a new slice. It is nil when no row is left, as
+// a scan is.
 func merged[T entity[T]](base []T, w *writes[T], match func(T) bool) []T {
-	kept := base
-	if len(w.rows) > 0 {
-		kept = base[:0]
-		for _, row := range base {
-			if !w.written(row.ID()) {
-				kept = append(kept, row)
-			}
-		}
-	}
-	own := w.own(match)
-	if len(own) == 0 {
-		if len(kept) == 0 {
+	if len(w.rows) == 0 {
+		if len(base) == 0 {
 			return nil
 		}
-		return kept
+		return base
 	}
+	own := w.own(match)
 	sort.Slice(own, func(i, j int) bool { return listLess(own[i], own[j]) })
-	out := make([]T, 0, len(kept)+len(own))
-	for len(kept) > 0 && len(own) > 0 {
-		if listLess(own[0], kept[0]) {
-			out, own = append(out, own[0]), own[1:]
-		} else {
-			out, kept = append(out, kept[0]), kept[1:]
+	out := make([]T, 0, len(base)+len(own))
+	for _, row := range base {
+		if w.written(row.ID()) {
+			continue
 		}
+		for len(own) > 0 && listLess(own[0], row) {
+			out, own = append(out, own[0]), own[1:]
+		}
+		out = append(out, row)
 	}
-	out = append(out, kept...)
-	return append(out, own...)
+	out = append(out, own...)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // listLess is the listing order of storage.ListOptions: CreatedAt DESC, then ID
@@ -312,14 +301,14 @@ func listLess[T entity[T]](a, b T) bool {
 	return a.ID() < b.ID()
 }
 
-// list is a listing of the transaction: the page opts asks for of the rows scan
+// list is a listing of the transaction: the page opts asks for of the rows source
 // returns, which are in the listing order. A page holds clones of its rows only.
-func list[T entity[T]](opts storage.ListOptions, scan func() ([]T, error)) (*storage.ListResult[T], error) {
+func list[T entity[T]](opts storage.ListOptions, source func() ([]T, error)) (*storage.ListResult[T], error) {
 	after, err := decodeCursor(opts.Cursor)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := scan()
+	rows, err := source()
 	if err != nil {
 		return nil, err
 	}

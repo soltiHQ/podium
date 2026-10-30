@@ -10,6 +10,7 @@ storage/
 ├── error.go        sentinel errors (ErrNotFound, ErrConflict …)
 ├── pagination.go   ListResult[T], ListOptions, limits
 ├── filter.go       backend-agnostic filter markers (AgentFilter, RolloutFilter …)
+├── validate.go     ValidateEntity — the row check the in-memory store and the overlay share
 │
 ├── inmemory/
 │   ├── storage.go   Store — aggregates GenericStore instances, implements Storage

@@ -318,6 +318,28 @@ func readYourWrites() []rywCase {
 			},
 		},
 
+		{
+			"ListUsers/filtered", "ListUsers",
+			func(t *testing.T, tx storage.Storage) error {
+				ctx := t.Context()
+				b := user(t, "user-b", "sub-b", 3)
+				b.Disable()
+				return errors.Join(
+					tx.UpsertUser(ctx, user(t, "user-a", "sub-a", 1)),
+					tx.UpsertUser(ctx, b),
+				)
+			},
+			func(t *testing.T, tx storage.Storage) error {
+				rows, err := paged(func(o storage.ListOptions) (*storage.UserListResult, error) {
+					return tx.ListUsers(t.Context(), inmemory.NewUserFilter().ByDisabled(false), o)
+				})
+				if err != nil {
+					return err
+				}
+				return sameIDs(rows, "user-f", "user-a", "user-d")
+			},
+		},
+
 		// Roles.
 		{
 			"GetRole/created", "GetRole",
@@ -405,6 +427,30 @@ func readYourWrites() []rywCase {
 			},
 		},
 
+		{
+			"ListRoles/filtered", "ListRoles",
+			func(t *testing.T, tx storage.Storage) error {
+				ctx := t.Context()
+				b := role(t, "role-b", "viewer", 3)
+				if err := b.Rename("observer"); err != nil {
+					return err
+				}
+				return errors.Join(
+					tx.UpsertRole(ctx, role(t, "role-a", "viewer", 1)),
+					tx.UpsertRole(ctx, b),
+				)
+			},
+			func(t *testing.T, tx storage.Storage) error {
+				rows, err := paged(func(o storage.ListOptions) (*storage.RoleListResult, error) {
+					return tx.ListRoles(t.Context(), inmemory.NewRoleFilter().ByName("viewer"), o)
+				})
+				if err != nil {
+					return err
+				}
+				return sameIDs(rows, "role-a")
+			},
+		},
+
 		// Credentials.
 		{
 			"GetCredential/created", "GetCredential",
@@ -443,6 +489,19 @@ func readYourWrites() []rywCase {
 				}
 				c, err := tx.GetCredentialByUserAndAuth(t.Context(), "user-d", enum.APIKey)
 				return isRow(c, err, "cred-g")
+			},
+		},
+		{
+			"GetCredentialByUserAndAuth/user changed", "GetCredentialByUserAndAuth",
+			func(t *testing.T, tx storage.Storage) error {
+				return tx.UpsertCredential(t.Context(), credential(t, "cred-d", "user-d", enum.APIKey, 1))
+			},
+			func(t *testing.T, tx storage.Storage) error {
+				if err := missing(tx.GetCredentialByUserAndAuth(t.Context(), "user-b", enum.APIKey)); err != nil {
+					return fmt.Errorf("old user: %w", err)
+				}
+				c, err := tx.GetCredentialByUserAndAuth(t.Context(), "user-d", enum.APIKey)
+				return isRow(c, err, "cred-d")
 			},
 		},
 		{
@@ -562,6 +621,50 @@ func readYourWrites() []rywCase {
 			},
 		},
 
+		{
+			"GetVerifierByCredential/moved", "GetVerifierByCredential",
+			func(t *testing.T, tx storage.Storage) error {
+				return tx.UpsertVerifier(t.Context(), verifier(t, "ver-b", "cred-x", 3))
+			},
+			func(t *testing.T, tx storage.Storage) error {
+				if err := missing(tx.GetVerifierByCredential(t.Context(), "cred-b")); err != nil {
+					return fmt.Errorf("old credential: %w", err)
+				}
+				v, err := tx.GetVerifierByCredential(t.Context(), "cred-x")
+				return isRow(v, err, "ver-b")
+			},
+		},
+		{
+			"GetVerifier/bulk delete of the old key after a move", "GetVerifier",
+			func(t *testing.T, tx storage.Storage) error {
+				ctx := t.Context()
+				return errors.Join(
+					tx.UpsertVerifier(ctx, verifier(t, "ver-b", "cred-x", 3)),
+					tx.DeleteVerifierByCredential(ctx, "cred-b"),
+				)
+			},
+			func(t *testing.T, tx storage.Storage) error {
+				v, err := tx.GetVerifier(t.Context(), "ver-b")
+				if err != nil {
+					return fmt.Errorf("the moved verifier: %w", err)
+				}
+				return field("credential of ver-b", v.CredentialID(), "cred-x")
+			},
+		},
+		{
+			"GetVerifier/bulk delete of the new key after a move", "GetVerifier",
+			func(t *testing.T, tx storage.Storage) error {
+				ctx := t.Context()
+				return errors.Join(
+					tx.UpsertVerifier(ctx, verifier(t, "ver-b", "cred-x", 3)),
+					tx.DeleteVerifierByCredential(ctx, "cred-x"),
+				)
+			},
+			func(t *testing.T, tx storage.Storage) error {
+				return missing(tx.GetVerifier(t.Context(), "ver-b"))
+			},
+		},
+
 		// Sessions.
 		{
 			"GetSession/created", "GetSession",
@@ -633,6 +736,48 @@ func readYourWrites() []rywCase {
 					return err
 				}
 				return field("refresh hash of sess-d", string(rows[4].RefreshHash()), "rotated")
+			},
+		},
+		{
+			"ListSessionsByUser/moved", "ListSessionsByUser",
+			func(t *testing.T, tx storage.Storage) error {
+				ctx := t.Context()
+				return errors.Join(
+					tx.DeleteSession(ctx, "sess-b"),
+					tx.CreateSession(ctx, session(t, "sess-b", "user-d", "cred-g", 3)),
+				)
+			},
+			func(t *testing.T, tx storage.Storage) error {
+				ctx := t.Context()
+				lists := func() error {
+					was, err := tx.ListSessionsByUser(ctx, "user-b")
+					if err != nil {
+						return err
+					}
+					if err := sameIDs(was, "sess-f", "sess-d"); err != nil {
+						return fmt.Errorf("old user: %w", err)
+					}
+					now, err := tx.ListSessionsByUser(ctx, "user-d")
+					if err != nil {
+						return err
+					}
+					return sameIDs(now, "sess-b", "sess-g")
+				}
+				if err := lists(); err != nil {
+					return err
+				}
+				// The old user's bulk delete must not reach the moved session.
+				if err := tx.DeleteSessionsByUser(ctx, "user-b"); err != nil {
+					return err
+				}
+				now, err := tx.ListSessionsByUser(ctx, "user-d")
+				if err != nil {
+					return err
+				}
+				if err := sameIDs(now, "sess-b", "sess-g"); err != nil {
+					return fmt.Errorf("after the old user's bulk delete: %w", err)
+				}
+				return nil
 			},
 		},
 		{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/storage/overlay"
+	"github.com/soltiHQ/control-plane/internal/storage/storagetest"
 )
 
 func seeded(t *testing.T) *inmemory.Store {
@@ -146,15 +148,19 @@ func TestOverlayRefusesWhatApplyRefuses(t *testing.T) {
 
 // TestOverlayBulkDeleteOfNothingRecordsNothing runs, for each bulk delete, a
 // transaction whose only call is one that matches no row, committed or written:
-// it records nothing, so Empty tells a transaction that changes nothing. A bulk
-// delete that matches only a row the transaction wrote still records its operation.
+// it records nothing, so Empty tells a transaction that changes nothing. Nor does
+// a bulk delete record anything once the transaction has deleted, one by one,
+// every committed row it matches. A bulk delete that matches only a row the
+// transaction wrote still records its operation.
 func TestOverlayBulkDeleteOfNothingRecordsNothing(t *testing.T) {
 	ctx := t.Context()
 	base := seeded(t)
 	for _, tc := range []struct {
-		name  string
-		bulk  func(tx storage.Storage) error // matches no committed row
-		write func(tx storage.Storage) error // writes a row bulk matches
+		name       string
+		none       func(tx storage.Storage) error // matches no committed row
+		write      func(tx storage.Storage) error // writes a row none matches
+		deleteEach func(tx storage.Storage) error // deletes every committed row bulk matches
+		bulk       func(tx storage.Storage) error // matches committed rows
 	}{
 		{
 			"DeleteSessionsByUser",
@@ -162,32 +168,57 @@ func TestOverlayBulkDeleteOfNothingRecordsNothing(t *testing.T) {
 			func(tx storage.Storage) error {
 				return tx.CreateSession(ctx, session(t, "sess-a", "user-f", "cred-b", 1))
 			},
+			func(tx storage.Storage) error {
+				return errors.Join(tx.DeleteSession(ctx, "sess-b"), tx.DeleteSession(ctx, "sess-d"), tx.DeleteSession(ctx, "sess-f"))
+			},
+			func(tx storage.Storage) error { return tx.DeleteSessionsByUser(ctx, "user-b") },
 		},
 		{
 			"DeleteVerifierByCredential",
 			func(tx storage.Storage) error { return tx.DeleteVerifierByCredential(ctx, "cred-d") },
 			func(tx storage.Storage) error { return tx.UpsertVerifier(ctx, verifier(t, "ver-d", "cred-d", 1)) },
+			func(tx storage.Storage) error { return tx.DeleteVerifier(ctx, "ver-b") },
+			func(tx storage.Storage) error { return tx.DeleteVerifierByCredential(ctx, "cred-b") },
 		},
 		{
 			"DeleteRolloutsBySpec",
 			func(tx storage.Storage) error { return tx.DeleteRolloutsBySpec(ctx, "spec-f") },
 			func(tx storage.Storage) error { return tx.UpsertRollout(ctx, rollout(t, "spec-f", "agent-a", 1)) },
+			func(tx storage.Storage) error {
+				return errors.Join(
+					tx.DeleteRollout(ctx, model.RolloutID("spec-b", "agent-b")),
+					tx.DeleteRollout(ctx, model.RolloutID("spec-b", "agent-d")),
+					tx.DeleteRollout(ctx, model.RolloutID("spec-b", "agent-f")),
+				)
+			},
+			func(tx storage.Storage) error { return tx.DeleteRolloutsBySpec(ctx, "spec-b") },
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := overlay.New(base)
-			if err := tc.bulk(tx); err != nil {
+			if err := tc.none(tx); err != nil {
 				t.Fatal(err)
 			}
 			if !tx.Empty() || len(tx.Ops()) != 0 {
 				t.Fatalf("a bulk delete that matches nothing recorded %d operations", len(tx.Ops()))
 			}
 			own := overlay.New(base)
-			if err := errors.Join(tc.write(own), tc.bulk(own)); err != nil {
+			if err := errors.Join(tc.write(own), tc.none(own)); err != nil {
 				t.Fatal(err)
 			}
 			if n := len(own.Ops()); n != 2 {
 				t.Fatalf("a bulk delete of a row the transaction wrote left %d operations, want the write and the delete", n)
+			}
+			gone := overlay.New(base)
+			if err := tc.deleteEach(gone); err != nil {
+				t.Fatal(err)
+			}
+			each := len(gone.Ops())
+			if err := tc.bulk(gone); err != nil {
+				t.Fatal(err)
+			}
+			if n := len(gone.Ops()) - each; n != 0 {
+				t.Fatalf("a bulk delete of rows the transaction had deleted one by one recorded %d operations", n)
 			}
 		})
 	}
@@ -239,6 +270,9 @@ func TestOverlayOpsReplayToWhatItRead(t *testing.T) {
 		}},
 		{"SessionRevoke", func() error { return tx.RevokeSession(ctx, "sess-g", minute(5)) }},
 		{"SessionDelete", func() error { return tx.DeleteSession(ctx, "sess-f") }},
+		// sess-b moves to user-d, out of reach of the bulk delete of user-b.
+		{"SessionDelete", func() error { return tx.DeleteSession(ctx, "sess-b") }},
+		{"SessionCreate", func() error { return tx.CreateSession(ctx, session(t, "sess-b", "user-d", "cred-g", 3)) }},
 		{"SessionDeleteByUser", func() error { return tx.DeleteSessionsByUser(ctx, "user-b") }},
 		{"SessionCreate", func() error { return tx.CreateSession(ctx, session(t, "sess-c", "user-b", "cred-b", 2)) }},
 		{"SpecUpsert", func() error { return tx.UpsertSpec(ctx, spec(t, "spec-a", 1)) }},
@@ -286,6 +320,84 @@ func TestOverlayOpsReplayToWhatItRead(t *testing.T) {
 			t.Errorf("%s: the commit holds a row the transaction did not read", key)
 		}
 	}
+}
+
+// TestOverlayScansMatchReplayedCommit replays the operations of a transaction onto
+// a copy of its base, as a commit does, and compares each scan of the copy with
+// the same scan of the transaction: rows, order and fields. The transaction holds
+// the writes of fleetWrites over 600 rows: creates tied with committed rows,
+// updates that move rows into and out of a filter, deletes and bulk deletes.
+func TestOverlayScansMatchReplayedCommit(t *testing.T) {
+	ctx := t.Context()
+	const rows = 600
+	base := inmemory.New()
+	if err := storagetest.Seed(ctx, base, storagetest.Fixture{Agents: rows, HistoryRows: rows}); err != nil {
+		t.Fatal(err)
+	}
+	tx := overlay.New(base)
+	if err := fleetWrites(t, tx); err != nil {
+		t.Fatal(err)
+	}
+	commit := inmemory.New()
+	commit.RestoreFromSnapshot(base.SnapshotForRaft())
+	if err := commit.WithTx(ctx, func(dst storage.Storage) error { return overlay.ApplyOps(ctx, dst, tx.Ops()) }); err != nil {
+		t.Fatal(err)
+	}
+
+	agents := func(region string) storage.AgentFilter {
+		return inmemory.NewAgentFilter().ByLabel("region", region)
+	}
+	rollouts := func(spec string) storage.RolloutFilter {
+		return commit.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: spec})
+	}
+	specs := func(q string) storage.SpecFilter {
+		return commit.BuildSpecFilter(storage.SpecQueryCriteria{Query: q})
+	}
+	runs := func(c storage.ExecutionQueryCriteria) storage.ExecutionFilter {
+		return commit.BuildExecutionFilter(c)
+	}
+	if err := errors.Join(
+		// Agent 30 moved into eu-west and agent 40 out of it, into mars.
+		sameAsCommit(ctx, "agents", tx.ScanAgents, commit.ScanAgents, agents("eu-west"), agents("mars"), agents("pluto")),
+		// Spec 3 lost every rollout to a bulk delete.
+		sameAsCommit(ctx, "rollouts", tx.ScanRollouts, commit.ScanRollouts, rollouts(storagetest.SpecID(0)), rollouts(storagetest.SpecID(3))),
+		// Spec 12 was renamed out of job-1, and the new spec 20 is in it.
+		sameAsCommit(ctx, "specs", tx.ScanSpecs, commit.ScanSpecs, specs("job-1"), specs("renamed"), specs("no-such-job")),
+		sameAsCommit(ctx, "executions", tx.ScanExecutions, commit.ScanExecutions,
+			runs(storage.ExecutionQueryCriteria{Statuses: []string{"failed"}}),
+			runs(storage.ExecutionQueryCriteria{AgentID: storagetest.AgentID(1)}),
+			runs(storage.ExecutionQueryCriteria{AgentID: "no-such-agent"})),
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// sameAsCommit compares a scan of the transaction with the same scan of the
+// committed copy, for every row and for each filter. The last filter must match no
+// row of the commit, and every other one some.
+func sameAsCommit[T, F any](ctx context.Context, kind string, tx, commit func(context.Context, F) ([]T, error), filters ...F) error {
+	var every F
+	for i, f := range append([]F{every}, filters...) {
+		got, err := tx(ctx, f)
+		if err != nil {
+			return fmt.Errorf("%s, filter %d: the transaction's scan: %w", kind, i, err)
+		}
+		want, err := commit(ctx, f)
+		if err != nil {
+			return fmt.Errorf("%s, filter %d: the commit's scan: %w", kind, i, err)
+		}
+		if last := i == len(filters); last != (len(want) == 0) {
+			return fmt.Errorf("%s, filter %d: the commit holds %d matching rows; the case proves nothing", kind, i, len(want))
+		}
+		if !reflect.DeepEqual(got, want) {
+			n := 0
+			for n < min(len(got), len(want)) && reflect.DeepEqual(got[n], want[n]) {
+				n++
+			}
+			return fmt.Errorf("%s, filter %d: the transaction scans %d rows and the commit %d, first apart at %d", kind, i, len(got), len(want), n)
+		}
+	}
+	return nil
 }
 
 func ignoreNotFound(err error) error {
