@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
 	"github.com/soltiHQ/control-plane/domain/model"
@@ -128,4 +129,47 @@ func httpTestManifest(t *testing.T, name string) *taskv1.TaskManifest {
 	}
 	m.Metadata.Name = name
 	return m
+}
+
+// A 2xx body that the deadline cuts off, or that is not JSON, keeps its cause
+// visible to errors.Is and errors.As: the sync runner tells an agent that stopped
+// answering from one that answered badly.
+func TestHttpProxyV1_Request_KeepsBodyErrorCauses(t *testing.T) {
+	t.Run("body cut by the deadline", func(t *testing.T) {
+		release := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"metadata":`))
+			w.(http.Flusher).Flush()
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		}))
+		defer srv.Close()
+		defer close(release)
+		p := &httpProxyV1{endpoint: srv.URL, client: srv.Client()}
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+
+		_, err := p.GetTask(ctx, "my-task")
+		if !errors.Is(err, ErrDecode) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("GetTask = %v, want a decode error that is context.DeadlineExceeded", err)
+		}
+	})
+	t.Run("malformed body", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"metadata":`))
+		}))
+		defer srv.Close()
+		p := &httpProxyV1{endpoint: srv.URL, client: srv.Client()}
+
+		_, err := p.GetTask(context.Background(), "my-task")
+		var syntaxErr *json.SyntaxError
+		if !errors.Is(err, ErrDecode) || !errors.As(err, &syntaxErr) {
+			t.Fatalf("GetTask = %v, want a decode error carrying the JSON syntax error", err)
+		}
+	})
 }

@@ -38,15 +38,21 @@ func (p *deadlineProxy) ApplyTask(ctx context.Context, sub proxy.TaskSubmission)
 }
 
 // gatedProxy is an agent that accepts calls and never answers: each call blocks
-// until the test opens gate or the call's context ends.
+// until the test opens gate or the call's context ends. A call signals entered,
+// when set, without blocking.
 type gatedProxy struct {
 	fakeProxy
-	gate  chan struct{}
-	calls atomic.Int32
+	gate    chan struct{}
+	entered chan struct{}
+	calls   atomic.Int32
 }
 
 func (g *gatedProxy) wait(ctx context.Context) error {
 	g.calls.Add(1)
+	select {
+	case g.entered <- struct{}{}:
+	default:
+	}
 	select {
 	case <-g.gate:
 		return errors.New("gate opened")
@@ -81,29 +87,37 @@ func httpAnswer(op error, code int, kind errkind.Kind) error {
 	return agentErr{kind: kind, err: fmt.Errorf("%w: %w: %d", op, proxy.ErrUnexpectedStatus, code)}
 }
 
+// seedRollout stores the rollout of specID on agentID. An uninstall or an
+// observation (Noop) has a task on the agent; an empty task makes the uninstall
+// local only.
+func seedRollout(t *testing.T, s storage.Storage, specID, agentID string, intent enum.RolloutIntent, task string) *model.Rollout {
+	t.Helper()
+	seedSpecAndAgent(t, s, specID, agentID)
+	ro, err := model.NewRollout(specID, agentID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	switch intent {
+	case enum.RolloutIntentUninstall:
+		ro.SetActualTaskID(task)
+		ro.SetIntent(enum.RolloutIntentUninstall)
+	case enum.RolloutIntentNoop:
+		ro.SetActualTaskID(task)
+		ro.MarkSynced(1)
+	}
+	if err := s.UpsertRollout(context.Background(), ro); err != nil {
+		t.Fatal(err)
+	}
+	return ro
+}
+
 // seedRollouts gives agentID n rollouts with one intent, each for its own spec.
 func seedRollouts(t *testing.T, s storage.Storage, agentID string, n int, intent enum.RolloutIntent) []*model.Rollout {
 	t.Helper()
 	out := make([]*model.Rollout, 0, n)
 	for i := range n {
 		specID := fmt.Sprintf("%s-sp%d", agentID, i)
-		seedSpecAndAgent(t, s, specID, agentID)
-		ro, err := model.NewRollout(specID, agentID, 1)
-		if err != nil {
-			t.Fatal(err)
-		}
-		switch intent {
-		case enum.RolloutIntentUninstall:
-			ro.SetActualTaskID("task-" + specID)
-			ro.SetIntent(enum.RolloutIntentUninstall)
-		case enum.RolloutIntentNoop:
-			ro.SetActualTaskID("task-" + specID)
-			ro.MarkSynced(1)
-		}
-		if err := s.UpsertRollout(context.Background(), ro); err != nil {
-			t.Fatal(err)
-		}
-		out = append(out, ro)
+		out = append(out, seedRollout(t, s, specID, agentID, intent, "task-"+specID))
 	}
 	return out
 }
@@ -265,8 +279,11 @@ func TestUnreachableAgentSkipsRemainingRollouts(t *testing.T) {
 		{"apply got no response", install, agentErr{errkind.Internal, fmt.Errorf("%w: %w: dial tcp 10.0.0.7:8085: connect: connection refused", proxy.ErrApplyTask, proxy.ErrRequest)}, true},
 		{"apply deadline exceeded", install, agentErr{errkind.DeadlineExceeded, fmt.Errorf("%w: rpc error: code = DeadlineExceeded", proxy.ErrApplyTask)}, true},
 		{"apply context deadline exceeded", install, agentErr{errkind.Internal, fmt.Errorf("%w: %w", proxy.ErrApplyTask, context.DeadlineExceeded)}, true},
-		{"apply connection refused", install, fmt.Errorf("%w: %w", proxy.ErrApplyTask, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}), true},
-		{"apply connection reset", install, fmt.Errorf("%w: %w", proxy.ErrApplyTask, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}), true},
+		// Neither proxy keeps a *net.OpError in the chain (HTTP flattens it into
+		// ErrRequest, gRPC into a status): these two rows pin the defensive
+		// net.Error fallback. A refused HTTP connection is "apply got no response".
+		{"net.Error fallback: connection refused", install, fmt.Errorf("%w: %w", proxy.ErrApplyTask, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}), true},
+		{"net.Error fallback: connection reset", install, fmt.Errorf("%w: %w", proxy.ErrApplyTask, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}), true},
 		{"delete got no response", uninstall, agentErr{errkind.Internal, fmt.Errorf("%w: %w: EOF", proxy.ErrDeleteTask, proxy.ErrRequest)}, true},
 		{"observation got no response", observe, agentErr{errkind.Internal, fmt.Errorf("%w: %w: EOF", proxy.ErrGetTask, proxy.ErrRequest)}, true},
 		{"apply answered 503", install, httpAnswer(proxy.ErrApplyTask, 503, errkind.Unavailable), false},
@@ -418,5 +435,228 @@ func TestRetryDueBacksOff(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// noAnswer is what the HTTP proxy returns when a request gets no response.
+func noAnswer(op error) error {
+	return agentErr{kind: errkind.Internal, err: fmt.Errorf("%w: %w: dial tcp 10.0.0.7:8085: connect: connection refused", op, proxy.ErrRequest)}
+}
+
+// An agent's pushes go before its observations: an agent that stopped answering
+// still has its older pending work attempted and recorded.
+func TestPushesGoBeforeObservations(t *testing.T) {
+	fp := &fakeProxy{applyErr: []error{noAnswer(proxy.ErrApplyTask)}, getErr: noAnswer(proxy.ErrGetTask)}
+	r, s, _ := newFakeRunner(t, fp)
+	pending := seedRollout(t, s, "sp-old", "agent-a", enum.RolloutIntentInstall, "")
+	pending.SetCreatedAt(time.Now().Add(-time.Hour)) // listed after the newer synced rollout
+	if err := s.UpsertRollout(context.Background(), pending); err != nil {
+		t.Fatal(err)
+	}
+	_ = seedRollout(t, s, "sp-new", "agent-a", enum.RolloutIntentNoop, "task-new")
+
+	r.tick(context.Background())
+
+	if len(fp.applies) != 1 || len(fp.gets) != 0 {
+		t.Fatalf("applies=%d observations=%d, want the push attempted first and alone", len(fp.applies), len(fp.gets))
+	}
+	after, err := s.GetRollout(context.Background(), pending.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status() != enum.SyncStatusFailed || after.Attempts() != 1 {
+		t.Fatalf("pending push not recorded: status=%s attempts=%d", after.Status(), after.Attempts())
+	}
+}
+
+// A tick cancelled during a call (shutdown, lost leadership) records no failure
+// and does not hold the agent back.
+func TestCancelledTickRecordsNothing(t *testing.T) {
+	hung := &gatedProxy{gate: make(chan struct{}), entered: make(chan struct{}, 1)}
+	t.Cleanup(func() { close(hung.gate) })
+	r, s, hub := newFakeRunner(t, &fakeProxy{})
+	r.pool = &fakePool{agents: map[string]proxy.AgentProxy{"http://agent-a": hung}}
+	ro := seedRollouts(t, s, "agent-a", 1, enum.RolloutIntentInstall)[0]
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.tick(ctx)
+	}()
+	select {
+	case <-hung.entered:
+		cancel()
+	case <-time.After(10 * time.Second):
+		t.Fatal("agent never called")
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("cancelled tick did not finish")
+	}
+
+	after, err := s.GetRollout(context.Background(), ro.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status() != enum.SyncStatusPending || after.Attempts() != 0 || !after.UpdatedAt().Equal(ro.UpdatedAt()) {
+		t.Fatalf("cancelled push recorded: status=%s attempts=%d error=%q", after.Status(), after.Attempts(), after.Error())
+	}
+	if events := hub.RecentEvents(event.RingSize); len(events) != 0 {
+		t.Fatalf("cancelled push recorded events: %+v", events)
+	}
+
+	r.cfg.PushTimeout = 50 * time.Millisecond
+	r.tick(context.Background())
+	if calls := hung.calls.Load(); calls != 2 {
+		t.Fatalf("agent got %d calls, want 2: a cancelled tick must not hold it back", calls)
+	}
+}
+
+// An agent that leaves a call unanswered is not called again until its backoff
+// passes: 10s, then doubling. Other agents keep their every-tick work.
+func TestUnreachableAgentBacksOff(t *testing.T) {
+	hung := &gatedProxy{gate: make(chan struct{})}
+	t.Cleanup(func() { close(hung.gate) })
+	healthy := &fakeProxy{}
+	r, s, _ := newFakeRunner(t, &fakeProxy{})
+	r.cfg.PushTimeout = 50 * time.Millisecond
+	r.pool = &fakePool{agents: map[string]proxy.AgentProxy{"http://agent-a": hung, "http://agent-b": healthy}}
+	seedRollouts(t, s, "agent-a", 2, enum.RolloutIntentNoop)
+	seedRollouts(t, s, "agent-b", 1, enum.RolloutIntentNoop)
+	start := time.Now()
+	now := start
+	r.clock = func() time.Time { return now }
+
+	for _, step := range []struct {
+		at    time.Duration
+		calls int32 // calls to the hung agent so far
+	}{
+		{0, 1},                                // unanswered: backoff 10s
+		{10*time.Second - time.Nanosecond, 1}, // held back
+		{10 * time.Second, 2},                 // unanswered again: backoff 20s
+		{30*time.Second - time.Nanosecond, 2}, // held back
+		{30 * time.Second, 3},                 // due again
+	} {
+		now = start.Add(step.at)
+		r.tick(context.Background())
+		if calls := hung.calls.Load(); calls != step.calls {
+			t.Fatalf("at %v: hung agent got %d calls, want %d", step.at, calls, step.calls)
+		}
+	}
+	if len(healthy.gets) != 5 {
+		t.Fatalf("healthy agent observed %d times in 5 ticks, want 5", len(healthy.gets))
+	}
+}
+
+// Any answer from the agent, an error status included, clears its backoff: the
+// next unanswered call starts again at 10s.
+func TestAnsweredCallResetsAgentBackoff(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		answer error
+	}{
+		{"success", nil},
+		{"error answer", httpAnswer(proxy.ErrGetTask, 500, errkind.Internal)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := &fakeProxy{}
+			r, s, _ := newFakeRunner(t, fp)
+			seedRollouts(t, s, "agent-a", 1, enum.RolloutIntentNoop)
+			start := time.Now()
+			now := start
+			r.clock = func() time.Time { return now }
+			tickAt := func(at time.Duration, reply error) {
+				now = start.Add(at)
+				fp.getErr = reply
+				r.tick(context.Background())
+			}
+
+			tickAt(0, noAnswer(proxy.ErrGetTask))                              // backoff 10s
+			tickAt(10*time.Second, tc.answer)                                  // answered: cleared
+			tickAt(10*time.Second, noAnswer(proxy.ErrGetTask))                 // backoff 10s again, not 20s
+			tickAt(20*time.Second-time.Nanosecond, noAnswer(proxy.ErrGetTask)) // held back
+			tickAt(20*time.Second, noAnswer(proxy.ErrGetTask))                 // due again
+
+			if len(fp.gets) != 4 {
+				t.Fatalf("agent observed %d times, want 4: an answer must clear its backoff", len(fp.gets))
+			}
+		})
+	}
+}
+
+// An uninstall of a task the agent never got needs no call: it neither waits
+// behind the agent's other work nor for the agent's backoff.
+func TestLocalUninstallRunsWhileAgentBackedOff(t *testing.T) {
+	fp := &fakeProxy{getErr: noAnswer(proxy.ErrGetTask)}
+	r, s, _ := newFakeRunner(t, fp)
+	start := time.Now()
+	now := start
+	r.clock = func() time.Time { return now }
+	first := seedRollout(t, s, "sp-gone", "agent-a", enum.RolloutIntentUninstall, "")
+	first.SetCreatedAt(start.Add(-time.Hour)) // listed after the synced rollout
+	if err := s.UpsertRollout(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	_ = seedRollout(t, s, "sp-live", "agent-a", enum.RolloutIntentNoop, "task-live")
+
+	r.tick(context.Background()) // the observation goes unanswered: the agent backs off
+	if _, err := s.GetRollout(context.Background(), first.ID()); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("local uninstall waited behind the unanswered observation: %v", err)
+	}
+
+	now = start.Add(5 * time.Second)
+	second := seedRollout(t, s, "sp-gone-too", "agent-a", enum.RolloutIntentUninstall, "")
+	r.tick(context.Background())
+	if _, err := s.GetRollout(context.Background(), second.ID()); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("local uninstall waited for the agent's backoff: %v", err)
+	}
+
+	now = start.Add(6 * time.Second) // the local uninstall was no answer: still backed off
+	r.tick(context.Background())
+	if len(fp.gets) != 1 {
+		t.Fatalf("backed-off agent observed %d times, want 1", len(fp.gets))
+	}
+}
+
+// An answer earlier in the same turn counts too: the unanswered call after it
+// starts the backoff at 10s again.
+func TestAnswerEarlierInTurnResetsAgentBackoff(t *testing.T) {
+	fp := &fakeProxy{applyResp: []string{"task-new"}, getErr: noAnswer(proxy.ErrGetTask)}
+	r, s, _ := newFakeRunner(t, fp)
+	start := time.Now()
+	now := start
+	r.clock = func() time.Time { return now }
+	_ = seedRollout(t, s, "sp-live", "agent-a", enum.RolloutIntentNoop, "task-live")
+
+	r.tick(context.Background()) // unanswered: backoff 10s
+	_ = seedRollout(t, s, "sp-new", "agent-a", enum.RolloutIntentInstall, "")
+	now = start.Add(10 * time.Second)
+	r.tick(context.Background()) // the push is answered, the observation is not: backoff 10s, not 20s
+	now = start.Add(20 * time.Second)
+	r.tick(context.Background())
+
+	if len(fp.applies) != 1 || len(fp.gets) != 3 {
+		t.Fatalf("applies=%d observations=%d, want 1 and 3: the answer must reset the count", len(fp.applies), len(fp.gets))
+	}
+}
+
+// The backoff of an agent whose rollouts are all gone is forgotten.
+func TestBackoffForgetsAgentsWithoutRollouts(t *testing.T) {
+	fp := &fakeProxy{getErr: noAnswer(proxy.ErrGetTask)}
+	r, s, _ := newFakeRunner(t, fp)
+	ro := seedRollout(t, s, "sp-live", "agent-a", enum.RolloutIntentNoop, "task-live")
+
+	r.tick(context.Background())
+	if len(r.backoffs) != 1 {
+		t.Fatalf("unanswered agent not backed off: %v", r.backoffs)
+	}
+	if err := s.DeleteRollout(context.Background(), ro.ID()); err != nil {
+		t.Fatal(err)
+	}
+	r.tick(context.Background())
+	if len(r.backoffs) != 0 {
+		t.Fatalf("backoff of an agent without rollouts kept: %v", r.backoffs)
 	}
 }

@@ -283,7 +283,8 @@ sync:
 
 A failed rollout is pushed again after `tick_interval` × 2^(attempts−1), at
 most 5 minutes; after `max_retries` failures it waits until its agent
-reconnects or the spec is deployed again. Each agent's rollouts go one after
-another, so an agent that does not answer holds one of the `max_concurrency`
-slots for one `push_timeout` per tick. Zero or negative values inherit the
+reconnects or the spec is deployed again. An agent that leaves a call
+unanswered holds one of the `max_concurrency` slots for one `push_timeout`,
+then gets no call until its own backoff passes: the same schedule, counted in
+unanswered calls and kept in memory. Zero or negative values inherit the
 defaults shown. See `internal/server/README.md` for the scheduling.

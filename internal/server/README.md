@@ -108,26 +108,37 @@ by how long they have been silent. `hb` is the heartbeat the agent reported, or
   at the 1h cap.
 
 ### Sync runner
-Each tick reconciles the due rollouts: install, update, uninstall, or a check
-that an installed task still exists on its agent. A rollout is due unless it
-failed. A failed rollout is pushed again only after a backoff that doubles
-with each failure:
+Each tick reconciles the due rollouts: install, update, uninstall, or an
+observation that checks an installed task still exists on its agent. Failing
+work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s, 40s, …):
 
-| Failed attempts   | Next push after                                                |
-|-------------------|----------------------------------------------------------------|
-| 1, 2, 3, …        | `tick_interval` × 2^(attempts−1), at most 5m: 10s, 20s, 40s, … |
-| `max_retries` (5) | never: it waits for its agent to reconnect or a new Deploy     |
+| Backoff | n counts                                       | Until it passes           |
+|---------|------------------------------------------------|---------------------------|
+| Rollout | failed pushes of the rollout                   | the rollout is not pushed |
+| Agent   | unanswered calls since the agent last answered | no call goes to the agent |
 
+- **Rollout backoff.** It comes from the attempts and the last push stored with
+  the rollout. After `max_retries` (5) failures the rollout waits for its agent
+  to reconnect or a new Deploy.
+- **Agent backoff.** A call gets no answer when the push timeout passes, the
+  request gets no response, or the connection is refused or reset. Any answer,
+  an error status included, clears the backoff. It lives in memory: a restart
+  clears it, and an agent that comes back waits out what is left of it, at
+  most 5m.
 - **One worker per agent.** At most `max_concurrency` (4) agents are worked on
   at once. An agent's rollouts go one after another, each with its own
-  `push_timeout` (15s).
-- **An unreachable agent costs one push timeout per tick.** A call that gets no
-  answer (the push timeout passes, the request gets no response, the connection
-  is refused or reset) ends the agent's turn: a failed push is recorded for its
-  rollout, and the agent's other rollouts wait, untouched, for the next tick. An
-  answer, whatever its status, does not end the turn. A refused gRPC connection
-  does not end it either: gRPC reports it as `Unavailable`, which agents also
-  answer with. Such calls fail fast, and each rollout records its own failure.
-- **Failures are always recorded.** State writes get their own 5s budget instead
-  of what is left of the push timeout, so a push that used up its timeout still
-  records the status, the attempt and the `sync_failed` event.
+  `push_timeout` (15s): first the uninstalls of tasks the agent never got
+  (they need no call and run even while the agent backs off), then pushes,
+  then observations, so an observation never holds back a push.
+- **An unanswered call ends the agent's turn.** A failed push records its
+  failure on the rollout; a failed observation records nothing and only backs
+  the agent off. The agent's other rollouts wait, untouched. An answer,
+  whatever its status, does not end the turn. Nor does a refused gRPC
+  connection: gRPC reports it as `Unavailable`, which agents also answer with.
+  Such calls fail fast and do not back the agent off; each rollout records its
+  own failure.
+- **Push failures are recorded even after the push timeout.** State writes get
+  their own 5s budget instead of what is left of the push timeout, so a push
+  that used up its timeout still records the status, the attempt and the
+  `sync_failed` event. A tick cancelled by shutdown or lost leadership records
+  nothing.

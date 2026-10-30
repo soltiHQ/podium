@@ -1,10 +1,12 @@
 package sync
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -38,6 +40,18 @@ type Runner struct {
 	logger zerolog.Logger
 	store  storage.Storage
 	cfg    Config
+
+	// clock replaces time.Now in tests; nil means time.Now.
+	clock func() time.Time
+	// backoffs holds back the calls to agents that left calls unanswered. It
+	// lives in memory only and is used by the tick goroutine only.
+	backoffs map[string]agentBackoff
+}
+
+// agentBackoff holds back the calls to one agent.
+type agentBackoff struct {
+	failures int       // unanswered calls since the agent last answered
+	until    time.Time // no call to the agent before this
 }
 
 // New creates a sync runner.
@@ -71,15 +85,67 @@ func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.P
 	return r, nil
 }
 
+func (r *Runner) now() time.Time {
+	if r.clock != nil {
+		return r.clock()
+	}
+	return time.Now()
+}
+
 func (r *Runner) tick(ctx context.Context) {
 	r.reconcileRollouts(ctx)
 	r.finalizeDeletedSpecs(ctx)
 }
 
+// Stages order an agent's rollouts in a tick: an observation never ends the
+// agent's turn ahead of its pushes, and an uninstall that needs no call never
+// waits for the agent.
+const (
+	stageLocal   = iota // uninstall of a task the agent never got: no call
+	stagePush           // install, update, uninstall
+	stageObserve        // check that an installed task still exists
+)
+
+func stage(ss *model.Rollout) int {
+	switch {
+	case ss.Intent() == enum.RolloutIntentUninstall && ss.ActualTaskID() == "":
+		return stageLocal
+	case ss.Intent() == enum.RolloutIntentNoop:
+		return stageObserve
+	default:
+		return stagePush
+	}
+}
+
+// outcome is what reconciling a rollout learned about its agent.
+type outcome int
+
+const (
+	noCall     outcome = iota // the agent was not called
+	answered                  // the agent answered, an error status included
+	unanswered                // a call got no answer
+)
+
+// called sorts a finished agent call by unreachable.
+func called(ctx context.Context, err error) outcome {
+	if unreachable(ctx, err) {
+		return unanswered
+	}
+	return answered
+}
+
+// agentTurn is one agent's work in a tick, and what its worker learned.
+type agentTurn struct {
+	agentID  string
+	rollouts []string  // in stage order
+	answered bool      // the agent answered a call
+	silentAt time.Time // when a call went unanswered; zero if none did
+}
+
 // reconcileRollouts dispatches every due rollout by intent, one worker per agent.
-// A worker takes its agent's rollouts in order, each within its own PushTimeout,
-// and stops at the first call the agent leaves unanswered: a hung agent holds one
-// worker slot for one PushTimeout per tick.
+// A worker takes its agent's rollouts in stage order, each within its own
+// PushTimeout, and stops at the first call the agent leaves unanswered. The
+// agent's calls then back off; uninstalls that need no call go on regardless.
 func (r *Runner) reconcileRollouts(ctx context.Context) {
 	items, err := storage.AllRollouts(ctx, r.store, nil)
 	if err != nil {
@@ -87,55 +153,101 @@ func (r *Runner) reconcileRollouts(ctx context.Context) {
 		return
 	}
 
-	var (
-		now     = time.Now()
-		agents  []string
-		byAgent = make(map[string][]string)
-	)
+	now := r.now()
+	listed := make(map[string]bool)
+	due := make([]*model.Rollout, 0, len(items))
 	for _, ss := range items {
-		if ss == nil || !retryDue(ss, now, r.cfg) {
+		if ss == nil {
 			continue
 		}
-		if _, ok := byAgent[ss.AgentID()]; !ok {
-			agents = append(agents, ss.AgentID())
+		listed[ss.AgentID()] = true
+		if retryDue(ss, now, r.cfg) && (stage(ss) == stageLocal || !now.Before(r.backoffs[ss.AgentID()].until)) {
+			due = append(due, ss)
 		}
-		byAgent[ss.AgentID()] = append(byAgent[ss.AgentID()], ss.ID())
+	}
+	// The backoff of an agent without rollouts holds nothing back.
+	for agentID := range r.backoffs {
+		if !listed[agentID] {
+			delete(r.backoffs, agentID)
+		}
+	}
+	slices.SortStableFunc(due, func(a, b *model.Rollout) int { return cmp.Compare(stage(a), stage(b)) })
+
+	var turns []*agentTurn
+	byAgent := make(map[string]*agentTurn)
+	for _, ss := range due {
+		turn, ok := byAgent[ss.AgentID()]
+		if !ok {
+			turn = &agentTurn{agentID: ss.AgentID()}
+			byAgent[ss.AgentID()] = turn
+			turns = append(turns, turn)
+		}
+		turn.rollouts = append(turn.rollouts, ss.ID())
 	}
 
 	var g errgroup.Group
 	g.SetLimit(r.cfg.MaxConcurrency)
 
-	for _, agentID := range agents {
+	for _, turn := range turns {
 		if ctx.Err() != nil {
 			break
 		}
-		rolloutIDs := byAgent[agentID]
 		g.Go(func() error {
-			r.reconcileAgent(ctx, agentID, rolloutIDs)
+			r.reconcileAgent(ctx, turn)
 			return nil
 		})
 	}
 	_ = g.Wait()
+	for _, turn := range turns {
+		r.noteAgent(turn)
+	}
 }
 
-// reconcileAgent reconciles one agent's rollouts in order. After a call the agent
-// left unanswered, its remaining rollouts stay untouched until the next tick.
-func (r *Runner) reconcileAgent(ctx context.Context, agentID string, rolloutIDs []string) {
-	for i, rolloutID := range rolloutIDs {
+// reconcileAgent works through one agent's turn. The first call the agent leaves
+// unanswered ends it: every rollout after that one needs the agent.
+func (r *Runner) reconcileAgent(ctx context.Context, turn *agentTurn) {
+	for _, rolloutID := range turn.rollouts {
 		if ctx.Err() != nil {
 			return
 		}
 		pushCtx, cancel := context.WithTimeout(ctx, r.cfg.PushTimeout)
-		answered := r.reconcile(pushCtx, rolloutID)
+		result := r.reconcile(pushCtx, rolloutID)
 		cancel()
-		if !answered {
-			r.logger.Debug().
-				Str("agent_id", agentID).
-				Str("rid", rolloutID).
-				Int("skipped", len(rolloutIDs)-i-1).
-				Msg("agent unreachable; its other rollouts wait for the next tick")
+		if ctx.Err() != nil {
+			return // a cancelled tick says nothing about the agent
+		}
+		switch result {
+		case answered:
+			turn.answered = true
+		case unanswered:
+			turn.silentAt = r.now()
 			return
 		}
+	}
+}
+
+// noteAgent updates the agent's backoff after its turn. An answered call clears
+// it. A call left unanswered holds the agent's calls back for backoff(n), n being
+// the unanswered calls since the agent last answered.
+func (r *Runner) noteAgent(turn *agentTurn) {
+	switch {
+	case !turn.silentAt.IsZero():
+		failures := 1
+		if !turn.answered {
+			failures += r.backoffs[turn.agentID].failures
+		}
+		if r.backoffs == nil {
+			r.backoffs = make(map[string]agentBackoff)
+		}
+		until := turn.silentAt.Add(r.cfg.backoff(failures))
+		r.backoffs[turn.agentID] = agentBackoff{failures: failures, until: until}
+		r.logger.Debug().
+			Str("agent_id", turn.agentID).
+			Int("failures", failures).
+			Time("until", until).
+			Msg("agent unreachable; its calls wait for the backoff")
+	case turn.answered:
+		delete(r.backoffs, turn.agentID)
 	}
 }
 
@@ -150,12 +262,11 @@ func retryDue(r *model.Rollout, now time.Time, cfg Config) bool {
 }
 
 // reconcile loads the rollout fresh (to pick up any changes since tick started) and dispatches by intent.
-// It returns false only when a call to the agent went unanswered.
-func (r *Runner) reconcile(ctx context.Context, rolloutID string) bool {
+func (r *Runner) reconcile(ctx context.Context, rolloutID string) outcome {
 	ss, err := r.store.GetRollout(ctx, rolloutID)
 	if err != nil {
 		r.logger.Warn().Err(err).Str("rid", rolloutID).Msg("reconcile: load rollout failed")
-		return true
+		return noCall
 	}
 
 	switch ss.Intent() {
@@ -166,34 +277,34 @@ func (r *Runner) reconcile(ctx context.Context, rolloutID string) bool {
 	case enum.RolloutIntentNoop:
 		return r.observe(ctx, ss)
 	}
-	return true
+	return noCall
 }
 
-func (r *Runner) reconcileUninstall(ctx context.Context, ss *model.Rollout) bool {
+func (r *Runner) reconcileUninstall(ctx context.Context, ss *model.Rollout) outcome {
 	if ss.ActualTaskID() == "" {
 		if err := r.completeUninstall(ctx, ss); err != nil {
 			r.logger.Error().Err(err).Str("rid", ss.ID()).Msg("reconcile/uninstall: delete rollout failed")
-			return true
+			return noCall
 		}
 		r.hub.Notify(event.RefreshSpecs)
-		return true
+		return noCall
 	}
 
 	ap, ok := r.getProxy(ctx, ss)
 	if !ok {
-		return true
+		return noCall
 	}
 
 	r.captureBeforeDelete(ctx, ss, ap)
 
 	if err := ap.DeleteTask(ctx, ss.ActualTaskID()); err != nil && !isNotFound(err) {
 		r.markFailed(ctx, ss, "delete task: "+err.Error())
-		return !unreachable(ctx, err)
+		return called(ctx, err)
 	}
 
 	if err := r.completeUninstall(ctx, ss); err != nil {
 		r.logger.Error().Err(err).Str("rid", ss.ID()).Msg("reconcile/uninstall: delete rollout failed")
-		return true
+		return answered
 	}
 	r.logger.Info().
 		Str("rid", ss.ID()).
@@ -201,20 +312,20 @@ func (r *Runner) reconcileUninstall(ctx context.Context, ss *model.Rollout) bool
 		Str("agent_id", ss.AgentID()).
 		Msg("rollout uninstalled")
 	r.hub.Notify(event.RefreshSpecs)
-	return true
+	return answered
 }
 
-func (r *Runner) reconcileSubmit(ctx context.Context, ss *model.Rollout) bool {
+func (r *Runner) reconcileSubmit(ctx context.Context, ss *model.Rollout) outcome {
 	ts, ap, protoSpec, ok := r.prepareSubmit(ctx, ss)
 	if !ok {
-		return true
+		return noCall
 	}
 
 	wasInstalled := ss.ActualTaskID() != ""
 	newID, err := ap.ApplyTask(ctx, proxy.TaskSubmission{Spec: protoSpec})
 	if err != nil {
 		r.markFailed(ctx, ss, "apply task: "+err.Error())
-		return !unreachable(ctx, err)
+		return called(ctx, err)
 	}
 
 	r.completeSubmit(ctx, ss, ts.Generation(), newID)
@@ -229,7 +340,7 @@ func (r *Runner) reconcileSubmit(ctx context.Context, ss *model.Rollout) bool {
 		Str("task_id", newID).
 		Int("generation", ts.Generation()).
 		Msgf("rollout %s", verb)
-	return true
+	return answered
 }
 
 // prepareSubmit loads spec + agent + proxy + proto conversion.
@@ -410,6 +521,11 @@ func (r *Runner) completeUninstall(ctx context.Context, attempted *model.Rollout
 }
 
 func (r *Runner) markFailed(ctx context.Context, attempted *model.Rollout, errMsg string) {
+	// A cancelled tick (shutdown, lost leadership) is no failure of the rollout.
+	// An expired push deadline is DeadlineExceeded and is recorded.
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return
+	}
 	ctx, cancel := writeContext(ctx)
 	defer cancel()
 	changed := false
@@ -465,26 +581,26 @@ func unreachable(ctx context.Context, err error) bool {
 
 // observe detects lost agent state after restart, without rotating terminal tasks
 // that still exist. Recovery reuses the stable manifest name and current intent.
-// It returns false when the agent left the call unanswered.
-func (r *Runner) observe(ctx context.Context, attempted *model.Rollout) bool {
+// An unanswered call records nothing on the rollout.
+func (r *Runner) observe(ctx context.Context, attempted *model.Rollout) outcome {
 	if attempted.ActualTaskID() == "" {
-		return true
+		return noCall
 	}
 	ag, err := r.store.GetAgent(ctx, attempted.AgentID())
 	if err != nil {
-		return true
+		return noCall
 	}
 	token, err := r.agentToken(ctx, ag.ID())
 	if err != nil {
-		return true
+		return noCall
 	}
 	ap, err := r.pool.Get(ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
 	if err != nil {
-		return true
+		return noCall
 	}
 	_, err = ap.GetTask(ctx, attempted.ActualTaskID())
 	if !isNotFound(err) {
-		return !unreachable(ctx, err)
+		return called(ctx, err)
 	}
 	writeCtx, cancel := writeContext(ctx)
 	defer cancel()
@@ -512,7 +628,7 @@ func (r *Runner) observe(ctx context.Context, attempted *model.Rollout) bool {
 	if changed {
 		r.hub.Notify(event.RefreshSpecs)
 	}
-	return true
+	return answered
 }
 
 // captureBeforeDelete records only already terminal observations. It neither
