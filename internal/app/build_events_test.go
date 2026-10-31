@@ -50,8 +50,11 @@ func TestHubOptionsKeepTheDefaultWindowForZero(t *testing.T) {
 
 // The app builds its hub with the window of events.coalesce: the trailing
 // delivery of a burst comes at the end of that window, and not of the default.
+// The window is short and the deadline is half the default one, so a slow machine
+// has 450 ms to spare, and a hub on the default window misses the deadline by
+// 500 ms.
 func TestNewWiresTheConfiguredEventCoalesceWindow(t *testing.T) {
-	const window = 200 * time.Millisecond
+	const window = 50 * time.Millisecond
 	cfg := config.Default()
 	cfg.Cluster.Standalone.Ephemeral = true
 	cfg.Auth.JWTSecret = strings.Repeat("event-coalesce-test-secret", 2)

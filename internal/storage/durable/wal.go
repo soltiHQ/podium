@@ -85,7 +85,8 @@ func decodeEntry(index uint64, entry []byte) ([]byte, error) {
 
 // applyCommand applies the command of log entry index to dst: the decode and the
 // ApplyOps the Raft state machine runs on a committed entry. A replay applies each
-// entry with it; a commit runs the same two steps around the read lock.
+// entry with it; a commit runs the same two steps, the decode in commit and the
+// ApplyOps in apply, which holds mu exclusively.
 func applyCommand(ctx context.Context, dst storage.Storage, index uint64, command []byte) error {
 	cmd, err := overlay.DecodeCommand(command)
 	if err != nil {

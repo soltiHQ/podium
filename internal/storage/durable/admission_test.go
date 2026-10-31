@@ -189,7 +189,11 @@ func TestCloseWaitsForActiveCommitAndIsIdempotent(t *testing.T) {
 }
 
 // Close waits for a snapshot the background snapshotter is writing, which then
-// commits whole.
+// commits whole, and leaves the snapshotter stopped. The snapshot stalls after
+// bbolt committed it, where bbolt's own Close has nothing to wait for: what holds
+// Close back is its own wait, for the writer the snapshot holds and for the
+// snapshotter. Both wait for the snapshot, but only the second ends the
+// snapshotter, so the test checks that too.
 func TestCloseWaitsForSnapshot(t *testing.T) {
 	var (
 		entered     = make(chan struct{})
@@ -200,7 +204,7 @@ func TestCloseWaitsForSnapshot(t *testing.T) {
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 	defer unblock()
 	s, dir := newTestStore(t, WithSnapshotThreshold(1), withHooks(hooks{snapshot: func(p snapshotPoint) {
-		if p == snapshotWritten {
+		if p == snapshotCommitted {
 			enteredOnce.Do(func() { close(entered) })
 			<-release
 		}
@@ -221,6 +225,11 @@ func TestCloseWaitsForSnapshot(t *testing.T) {
 	unblock()
 	if err := <-closed; err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case <-s.snapshotter.done:
+	default:
+		t.Fatal("Close returned with the snapshotter still running")
 	}
 	if l := readLayout(t, dir); !bytes.Equal(l.snapshotIndex, uint64Bytes(1)) || len(l.log) != 0 {
 		t.Fatalf("snapshot index %x, log %v, want the snapshot at entry 1 and no log", l.snapshotIndex, l.log)

@@ -9,7 +9,7 @@ import (
 const DefaultCoalesce = time.Second
 
 // ErrNegativeCoalesce indicates a negative [Config.Coalesce].
-var ErrNegativeCoalesce = errors.New("coalesce must not be negative")
+var ErrNegativeCoalesce = errors.New("event: coalesce must not be negative")
 
 // Config configures the event hub. Zero values keep the defaults.
 type Config struct {

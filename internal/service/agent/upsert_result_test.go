@@ -163,3 +163,82 @@ func TestUpsertFailureReportsNothing(t *testing.T) {
 		t.Fatalf("Upsert with the store down = %+v, %v, want nothing and ErrUnavailable", got, err)
 	}
 }
+
+// failingUpsert runs transactions on the store it wraps, but fails the write of the
+// agent inside them: by then the callback has worked out what the sync changed,
+// and has the result in hand.
+type failingUpsert struct {
+	storage.Storage
+	err    error
+	writes int // the agent writes that failed
+}
+
+func (f *failingUpsert) WithTx(ctx context.Context, fn func(storage.Storage) error) error {
+	return f.Storage.WithTx(ctx, func(tx storage.Storage) error {
+		return fn(failingTx{Storage: tx, failed: f})
+	})
+}
+
+type failingTx struct {
+	storage.Storage
+	failed *failingUpsert
+}
+
+func (f failingTx) UpsertAgent(context.Context, *model.Agent) error {
+	f.failed.writes++
+	return f.failed.err
+}
+
+// A sync whose agent write fails inside the transaction reports nothing, though
+// the callback had found that the sync changed something before the write: that a
+// new agent is visible and reconnected, that a renamed one is visible. The row is
+// not stored.
+func TestUpsertFailureInsideTheTransactionReportsNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stored bool // the agent has a row before the sync
+		sync   func(*model.AgentParams)
+	}{
+		{name: "new agent"},
+		{name: "renamed agent", stored: true, sync: func(p *model.AgentParams) { p.Name = "Renamed" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := inmemory.New()
+			if tc.stored {
+				first, err := model.NewAgentFrom(syncParams(100))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = New(store, zerolog.Nop()).Upsert(ctx, first); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p := syncParams(130)
+			if tc.sync != nil {
+				tc.sync(&p)
+			}
+			next, err := model.NewAgentFrom(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			failing := &failingUpsert{Storage: store, err: storage.ErrUnavailable}
+
+			got, err := New(failing, zerolog.Nop()).Upsert(ctx, next)
+
+			if failing.writes != 1 {
+				t.Fatalf("the agent write failed %d times, want once: the callback must reach it", failing.writes)
+			}
+			if !errors.Is(err, storage.ErrUnavailable) || got != (UpsertResult{}) {
+				t.Fatalf("Upsert = %+v, %v, want nothing and ErrUnavailable", got, err)
+			}
+			stored, err := store.GetAgent(ctx, "agent-a")
+			switch {
+			case tc.stored && (err != nil || stored.UptimeSeconds() != 100):
+				t.Fatalf("the failed sync changed the stored row: %v", err)
+			case !tc.stored && !errors.Is(err, storage.ErrNotFound):
+				t.Fatalf("the failed sync stored a row: %v", err)
+			}
+		})
+	}
+}

@@ -50,19 +50,24 @@ func TestSubjectOfClassifiesEveryKind(t *testing.T) {
 // "Event kinds" block.
 func declaredKinds(t *testing.T) []string {
 	t.Helper()
-	return declaredConsts(t, "Event kinds")
+	return declaredConsts(t, `the "Event kinds" block`, func(gen *ast.GenDecl, _ string) bool {
+		return gen.Doc != nil && strings.HasPrefix(gen.Doc.Text(), "Event kinds")
+	})
 }
 
-// declaredRefreshKinds returns the values of the constants in event.go's
-// "Refresh triggers" block.
+// declaredRefreshKinds returns the values of the constants in event.go whose
+// names start with Refresh, wherever in the file they are declared.
 func declaredRefreshKinds(t *testing.T) []string {
 	t.Helper()
-	return declaredConsts(t, "Refresh triggers")
+	return declaredConsts(t, "the Refresh constants", func(_ *ast.GenDecl, name string) bool {
+		return strings.HasPrefix(name, "Refresh")
+	})
 }
 
-// declaredConsts returns the values of the constants in the block of event.go
-// whose doc comment starts with doc.
-func declaredConsts(t *testing.T, doc string) []string {
+// declaredConsts returns the values of the string constants of event.go that
+// pick selects, by the declaration they are in and their name. what says what is
+// picked, for the failure when nothing is.
+func declaredConsts(t *testing.T, what string, pick func(gen *ast.GenDecl, name string) bool) []string {
 	t.Helper()
 	f, err := parser.ParseFile(token.NewFileSet(), "event.go", nil, parser.ParseComments)
 	if err != nil {
@@ -71,14 +76,21 @@ func declaredConsts(t *testing.T, doc string) []string {
 	var kinds []string
 	for _, decl := range f.Decls {
 		gen, ok := decl.(*ast.GenDecl)
-		if !ok || gen.Tok != token.CONST || gen.Doc == nil || !strings.HasPrefix(gen.Doc.Text(), doc) {
+		if !ok || gen.Tok != token.CONST {
 			continue
 		}
 		for _, spec := range gen.Specs {
-			for _, value := range spec.(*ast.ValueSpec).Values {
-				lit, ok := value.(*ast.BasicLit)
+			spec := spec.(*ast.ValueSpec)
+			for i, name := range spec.Names {
+				if !pick(gen, name.Name) {
+					continue
+				}
+				if i >= len(spec.Values) {
+					t.Fatalf("event kind %s has no value of its own", name.Name)
+				}
+				lit, ok := spec.Values[i].(*ast.BasicLit)
 				if !ok {
-					t.Fatalf("event kind %v is not a string literal", value)
+					t.Fatalf("event kind %s is not a string literal", name.Name)
 				}
 				kind, err := strconv.Unquote(lit.Value)
 				if err != nil {
@@ -89,7 +101,7 @@ func declaredConsts(t *testing.T, doc string) []string {
 		}
 	}
 	if len(kinds) == 0 {
-		t.Fatalf("no %q constant block in event.go", doc)
+		t.Fatalf("no constants in event.go for %s", what)
 	}
 	return kinds
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/snapshot"
 	bolt "go.etcd.io/bbolt"
+	bolterrors "go.etcd.io/bbolt/errors"
 )
 
 func newTestStore(t *testing.T, opts ...Option) (*Store, string) {
@@ -481,7 +482,7 @@ func TestInvalidExistingFileIsPreserved(t *testing.T) {
 		want string
 	}{
 		{nil, "is empty and holds no state (a crash while the first start creates it can leave it so): if this deployment never started, move the file aside and start again; otherwise restore a backup"},
-		{[]byte("not a bbolt database"), ""},
+		{[]byte("not a bbolt database"), "durable: open database: " + bolterrors.ErrInvalid.Error()},
 	} {
 		data := test.data
 		t.Run(fmt.Sprintf("size-%d", len(data)), func(t *testing.T) {

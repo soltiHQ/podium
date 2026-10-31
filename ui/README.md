@@ -118,9 +118,9 @@ The event stream carries refresh pulses, not data: `agent_update`,
 `spec_update`, `dashboard_update`, `user_update` and `session_update`. A pulse
 makes the pages that listen for it fetch again. The pages poll as well, so one
 that misses a pulse is still refreshed: every 60 seconds for the agents list,
-the task list, the dashboard and the placement of a spec, every 3 minutes for an
-agent's detail, as `triggers` sets. Discovery sends `agent_update` only when a
-sync gives the pages something new, not on every heartbeat:
+an agent's detail and its task list, the dashboard and the placement of a spec,
+as `triggers` sets. Discovery sends `agent_update` only when a sync gives the
+pages something new, not on every heartbeat:
 
 - the agent is new, or its status, name, endpoint, labels or capabilities
   changed;

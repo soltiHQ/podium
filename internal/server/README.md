@@ -178,9 +178,10 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   without a task makes no call.
 - **Reinstalls are not bounded by `push_timeout`.** After a complete listing,
   each rollout whose task is missing is queued for a reinstall by a write to
-  the local store, about 1 ms on the durable store. These writes make no agent
-  call, so the turn's budget does not stop them: an agent that lost all its
-  tasks has one write per rollout in one turn.
+  the store, about 1 ms on the durable store; in raft mode each write is a
+  replicated commit. These writes make no agent call, so the turn's budget does
+  not stop them: an agent that lost all its tasks has one write per rollout in
+  one turn.
 - **A listing that cannot finish is logged when that changes.** When an
   agent's listing turns incomplete, the runner logs one warning that names the
   cause (a task too large to list, the budget used, a repeated cursor, pages of

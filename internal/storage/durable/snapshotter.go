@@ -46,7 +46,8 @@ func (s *Store) startSnapshotter() {
 			case <-ctx.Done():
 				return
 			case <-s.snapshotter.wake:
-				// A failed snapshot fails the store, whose next call reports it.
+				// A failed snapshot fails the store: its failure handler hears why, once,
+				// and its next call returns the reason.
 				_ = s.snapshotIfDue(ctx)
 			}
 		}

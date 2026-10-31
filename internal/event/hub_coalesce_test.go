@@ -2,8 +2,11 @@ package event
 
 import (
 	"context"
+	"math/rand/v2"
+	"runtime"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -331,5 +334,89 @@ func TestHubWithoutWindowDeliversEveryNotification(t *testing.T) {
 				t.Fatalf("%d of 10 pulses delivered at once, want all", n)
 			}
 		})
+	}
+}
+
+// notify, the timer callback and Close race on real timers, which a synctest
+// bubble cannot make them do: several goroutines notify, the windows are a few
+// hundred microseconds so that trailing deliveries keep firing, and Close comes at
+// a random point, with the notifiers still going for a moment after it. Whoever
+// wins, nothing panics (a send on a closed channel would), every client's channel
+// is closed, and no trailing delivery is left waiting on a timer. Run under -race,
+// it checks the locking as well.
+func TestHubCoalescerNotifyTimerAndCloseRace(t *testing.T) {
+	const (
+		rounds    = 150
+		notifiers = 6
+	)
+	kinds := []string{RefreshAgents, RefreshSpecs, RefreshUsers}
+	var panics atomic.Int64
+	survive := func() {
+		if recover() != nil {
+			panics.Add(1)
+		}
+	}
+
+	hubs := make([]*Hub, 0, rounds)
+	for round := range rounds {
+		h := newTestHub(WithCoalesce(100*time.Microsecond + rand.N(400*time.Microsecond)))
+		hubs = append(hubs, h)
+		// The timer callback delivers on its own goroutine: a panic there would end
+		// the test binary, so count it instead.
+		deliver := h.coalesce.deliver
+		h.coalesce.deliver = func(kind string) {
+			defer survive()
+			deliver(kind)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		clients := h.Subscribe(ctx)
+		clientEnded := make(chan struct{})
+		go func() {
+			defer close(clientEnded)
+			for range clients {
+			}
+		}()
+
+		var (
+			stop atomic.Bool
+			wg   sync.WaitGroup
+		)
+		for i := range notifiers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer survive()
+				for !stop.Load() {
+					h.Notify(kinds[i%len(kinds)])
+					runtime.Gosched()
+				}
+			}()
+		}
+		time.Sleep(rand.N(1500 * time.Microsecond))
+		h.Close()
+		time.Sleep(rand.N(200 * time.Microsecond))
+		stop.Store(true)
+		wg.Wait()
+		cancel()
+
+		select {
+		case <-clientEnded:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("round %d: Close left a client's channel open", round)
+		}
+		if n := pendingTimers(h); n != 0 {
+			t.Fatalf("round %d: %d trailing deliveries still wait on a timer after Close", round, n)
+		}
+	}
+
+	// A timer that Close missed would have fired by now, and would show here.
+	time.Sleep(5 * time.Millisecond)
+	for round, h := range hubs {
+		if n := pendingTimers(h); n != 0 {
+			t.Errorf("round %d: %d timers pending after Close, long after their window", round, n)
+		}
+	}
+	if n := panics.Load(); n != 0 {
+		t.Fatalf("%d panics while notify, the timer callback and Close raced", n)
 	}
 }
