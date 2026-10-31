@@ -242,6 +242,31 @@ task golang:exec CMD='go test -run=^$ -bench=. -benchtime=2s ./internal/...'
 `task ci/golang/bench` runs every benchmark once, so that they keep compiling
 and running. It is not a performance gate.
 
+### Final (P2a)
+
+The final column is the median of 5 runs of `-benchtime=1s` from one session,
+2026-10-31 00:53 to 00:57 UTC at commit `48b9ebb`, a p50 where the row says so
+and the mean of one operation otherwise; the baseline is from an earlier session
+on the same container type, the run before this work (Task 1) or, for a row
+marked † that Task 1 did not have, the "before" of its own table, so a † factor
+is better read in that table.
+
+| benchmark | Task 1 baseline | final | factor |
+| -- | -- | -- | -- |
+| no-op tx p50, 5 000 agents | 67 ms | < 0.1 µs | > 670 000x |
+| 1-agent tx p50, 5 000 agents | 71 ms | 0.86 ms | 83x |
+| auth heartbeat p50, 5 000 agents | 139 ms | 0.87 ms | 160x |
+| auth heartbeat commits/op, 5 000 agents | 2 (two transactions) | 1.000 | 2.0x |
+| GetAgent during writes p50, 5 000 agents | 67 ms | 0.83 µs | 80 000x |
+| ListPage | 5.99 ms / 8.7 MiB † | 0.70 ms / 0.21 MiB | 8.5x |
+| Snapshot, 5 000 agents | - | 54 ms | - |
+| LifecycleTick/stale100pct | 65 ms / 88 MiB | 6.1 ms / 8.7 MiB | 11x |
+| HistoryPrune/10000/durable/idle | 47 ms / 52 MiB | 18 ns / 0 B | 2 600 000x |
+| HistoryPrune/10000/raft/idle | 2.22 ms / 2.6 MiB † | 18 ns / 0 B | 120 000x |
+| HistoryPrune/10000/durable/due | 7.6 ms / 5.5 MiB † | 4.3 ms / 2.8 MiB | 1.8x |
+| HistoryPrune/10000/raft/due | 9.7 ms / 6.0 MiB † | 6.7 ms / 3.2 MiB | 1.5x |
+| PlacementPreview/labels5000 | 75 ms / 100 MiB | 14 ms / 21 MiB | 5.3x |
+
 ### Transactions and reads
 
 "Before" is the single-blob design, where every transaction copied and rewrote
@@ -272,7 +297,8 @@ writes` is a read while another goroutine commits one-agent updates back to back
   log in one commit) takes 3.1 ms at 100 agents, 13 ms at 1 000 and 56 ms at
   5 000, the mean of one operation, median of 5 runs. It runs once per threshold
   of commits, or 16 MiB of them, in the background; transactions wait for it,
-  reads do not.
+  reads do not. The final session took 4.0 ms, 12 ms and 54 ms, the 100-agent
+  runs from 2.9 to 5.5 ms.
 - `HistoryPrune/10000/durable/due`, a retention pass that removes 100 rows in a
   transaction that scans 10 000, went from 30.4 ms, measured in an earlier
   session with the overlay and before the log, to 9.4 ms (5.8 MB allocated), the
@@ -343,13 +369,15 @@ in the history package's `bench_test.go`: `idle` is a pass over 10 000 rows
 within every limit, and `due` adds 100 rows that fall past retention before each
 pass, which removes them in one transaction. "Before" is the pass that scanned
 the archive to decide, "after" the pass that consults the counters, both in the
-same session on the same machine. Each cell is the time and the memory allocated
+same session on the same machine, except that the two `idle` "after" cells come
+from the final session (see Final (P2a)), measured again after a semaphore
+replaced a mutex on that path. Each cell is the time and the memory allocated
 by one operation, the median of 5 runs of `-benchtime=1s`.
 
 | benchmark | before | after |
 | -- | -- | -- |
-| HistoryPrune/10000/durable/idle | 2.21 ms / 2.6 MiB | 11 ns / 0 B |
-| HistoryPrune/10000/raft/idle | 2.22 ms / 2.6 MiB | 12 ns / 0 B |
+| HistoryPrune/10000/durable/idle | 2.21 ms / 2.6 MiB | 18 ns / 0 B |
+| HistoryPrune/10000/raft/idle | 2.22 ms / 2.6 MiB | 18 ns / 0 B |
 | HistoryPrune/10000/durable/due | 7.6 ms / 5.5 MiB | 5.7 ms / 2.8 MiB |
 | HistoryPrune/10000/raft/due | 9.7 ms / 6.0 MiB | 8.1 ms / 3.2 MiB |
 
@@ -360,7 +388,11 @@ by one operation, the median of 5 runs of `-benchtime=1s`.
   the node takes leadership, since another node may have written meanwhile.
   Between those, a capture scans only if it crosses a limit.
 - The durable `due` pass took 9.4 ms in the session of the first table above and
-  7.6 ms in this one, so read a factor against its own "before".
+  7.6 ms in this one, so read a factor against its own "before". The final
+  session took the `due` passes at 4.3 ms (durable) and 6.7 ms (raft), 24% and
+  18% under their "after" cells and with the same memory. The code of the passes
+  has changed since only by that semaphore, so the difference is most likely the
+  session.
 
 ### Conditions
 
