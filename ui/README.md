@@ -131,12 +131,14 @@ A heartbeat that moves only the time of the sync and the uptime sends nothing,
 so `Last heartbeat` and `Uptime` show their latest value after the next poll or
 pulse. Without this, a fleet would make every open agents, dashboard and spec
 page fetch again, and each spec page compute its placement again, on every
-heartbeat. The hub also coalesces the pulses of a kind (`events.coalesce`,
-default 1 second, see `internal/config`): the first goes out at once, and those
-that follow within the window arrive as one pulse at its end, so a burst of
-changes refreshes a page twice and its last change is never lost. The keepalive
-and the access re-check of the streams above are not pulses and are never
-delayed.
+heartbeat. The sync runner sends `agent_update` too, with `spec_update`, when it
+applies a push, finishes an uninstall or queues a lost task for a reinstall, so
+an open agent page follows a deploy without waiting for its poll. The hub also
+coalesces the pulses of a kind (`events.coalesce`, default 1 second, see
+`internal/config`): the first goes out at once, and those that follow within the
+window arrive as one pulse at its end, so a burst of changes refreshes a page
+twice and its last change is never lost. The keepalive and the access re-check
+of the streams above are not pulses and are never delayed.
 
 Execution history shows partial capture from periodic agent polling. It can
 miss attempts removed between polls and is bounded by retention policy. Each

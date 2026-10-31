@@ -457,7 +457,7 @@ func (r *Runner) reconcileUninstall(ctx context.Context, ss *model.Rollout) outc
 		Str("spec_id", ss.SpecID()).
 		Str("agent_id", ss.AgentID()).
 		Msg("rollout uninstalled")
-	r.hub.Notify(event.RefreshSpecs)
+	r.notifyTaskChange()
 	return answered
 }
 
@@ -598,6 +598,17 @@ func (r *Runner) finalizeDeletedSpecs(ctx context.Context) {
 	}
 }
 
+// notifyTaskChange tells the pages of specs, and the pages of an agent's tasks and
+// detail, that a rollout changed in a way they show: a push applied, an uninstall
+// done or a lost task queued for a reinstall. The agent pages listen for
+// agent_update besides their poll, and discovery no longer sends it on every
+// heartbeat. The hub coalesces the pulses of a kind, so a burst of them costs the
+// pages two fetches.
+func (r *Runner) notifyTaskChange() {
+	r.hub.Notify(event.RefreshSpecs)
+	r.hub.Notify(event.RefreshAgents)
+}
+
 // writeContext gives a state write its own stateWriteTimeout budget. It keeps the
 // push context's values but not its cancellation, so the outcome of a call that
 // used up the push deadline is still written.
@@ -638,7 +649,7 @@ func (r *Runner) completeSubmit(ctx context.Context, attempted *model.Rollout, g
 		r.logger.Error().Err(err).Str("rid", attempted.ID()).Msg("complete submit failed")
 		return
 	}
-	r.hub.Notify(event.RefreshSpecs)
+	r.notifyTaskChange()
 }
 
 func (r *Runner) completeUninstall(ctx context.Context, attempted *model.Rollout) error {
@@ -904,7 +915,7 @@ func (r *Runner) recoverMissing(ctx context.Context, rolloutID string, tasks map
 		r.logger.Warn().Err(err).Str("rid", attempted.ID()).Msg("observe: recovery failed")
 	}
 	if changed {
-		r.hub.Notify(event.RefreshSpecs)
+		r.notifyTaskChange()
 	}
 }
 
