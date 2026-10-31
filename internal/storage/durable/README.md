@@ -28,6 +28,14 @@ out, are rejected without resetting state. No existing permissions are changed;
 the one change to existing data is the migration of a single-blob file, below.
 The existing event hub remains transient; this does not persist event/SSE history.
 
+## Upgrading
+
+The first start of this version on a `podium.db` that an earlier version wrote
+migrates it, once, from the single-blob layout to format 2, and earlier
+versions refuse the migrated file. So stop Podium and copy `podium.db` first: a
+cold backup. Then start the new version, which migrates the file and logs one
+warning. Rolling back needs that copy.
+
 ## Log and snapshots
 
 The file holds three bbolt buckets, format 2:

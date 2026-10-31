@@ -55,6 +55,9 @@ type Store struct {
 	reported bool
 	// onFailure is the failure handler of WithFailureHandler, or nil.
 	onFailure func(error)
+	// migrated is whether Open migrated a single-blob file. Open sets it before it
+	// returns, and nothing changes it.
+	migrated bool
 
 	// The log, guarded by writer: the last committed entry, the entry the
 	// snapshot holds the state at, and the bytes of the entries past it.
@@ -177,6 +180,12 @@ func Open(dataDir string, opts ...Option) (*Store, error) {
 	s.startSnapshotter()
 	return s, nil
 }
+
+// Migrated reports whether Open migrated a database file of the single-blob layout
+// (format 1) to the log layout (format 2). Earlier versions refuse the migrated
+// file, so a caller that is told it was should say so: rolling back needs a copy
+// of the file made before the migration.
+func (s *Store) Migrated() bool { return s.migrated }
 
 // WithTx runs fn on a transaction over the published state, then appends the
 // operations it recorded to the log as one entry, which bbolt syncs, and applies

@@ -115,6 +115,11 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger, hubOpts ...event.Op
 			hub.Close()
 			return nil, nil, nil, nil, err
 		}
+		if store.Migrated() {
+			// Once: the migrated file is in format 2 from here on.
+			logger.Warn().Str("data_dir", cfg.Standalone.DataDir).
+				Msgf("standalone durable storage migrated %s from single-blob to format 2: older versions refuse the migrated file, so rolling back needs a copy made before this start", durable.FileName)
+		}
 		logger.Info().Str("data_dir", cfg.Standalone.DataDir).Msg("standalone durable storage restored")
 		return store, standalone.NewLeadership(), hub, func() {
 			if err := store.Close(); err != nil {

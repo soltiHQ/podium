@@ -1,9 +1,12 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -60,6 +63,51 @@ func TestBuildStandaloneDurableAndEphemeral(t *testing.T) {
 				t.Fatalf("ephemeral restart: %v", err)
 			}
 		})
+	}
+}
+
+// The first start on a single-blob file logs the migration once, at WARN, with the
+// data directory, the new format and the fact that older versions refuse the file.
+// The next start finds a file in format 2 and logs no such warning.
+func TestBuildClusterLogsTheMigrationOnce(t *testing.T) {
+	fixture, err := os.ReadFile("../storage/durable/testdata/single-blob.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, durable.FileName), fixture, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := cluster.DefaultConfig()
+	cfg.Standalone.DataDir = dir
+
+	for _, start := range []struct {
+		name  string
+		warns int
+	}{{"first start", 1}, {"second start", 0}} {
+		var logs bytes.Buffer
+		_, _, hub, shutdown, err := buildCluster(cfg, zerolog.New(&logs))
+		if err != nil {
+			t.Fatalf("%s: %v", start.name, err)
+		}
+		hub.Close()
+		shutdown()
+
+		out := logs.String()
+		if warns := strings.Count(out, `"level":"warn"`); warns != start.warns {
+			t.Fatalf("%s logged %d warnings, want %d: %s", start.name, warns, start.warns, out)
+		}
+		if start.warns == 0 {
+			continue
+		}
+		for _, want := range []string{dir, "single-blob", "format 2", "older versions refuse the migrated file"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("%s: the warning lacks %q: %s", start.name, want, out)
+			}
+		}
 	}
 }
 

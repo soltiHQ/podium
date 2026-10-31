@@ -109,7 +109,7 @@ func putSnapshot(bucket *bolt.Bucket, blob []byte) error {
 // A file bbolt initialized and never committed to, which a crash during its
 // creation leaves, is initialized; a single-blob file is migrated. Either takes one
 // bbolt transaction, which leaves the file as it was unless it commits. restore
-// reports whether it initialized the file.
+// reports whether it initialized the file, and sets migrated if it migrated it.
 func (s *Store) restore() (bool, error) {
 	var (
 		buckets []string
@@ -134,7 +134,9 @@ func (s *Store) restore() (bool, error) {
 	case len(buckets) == 0:
 		err = fmt.Errorf("database has no bucket after %d transactions", txID)
 	case slices.Equal(buckets, []string{string(legacyBucket)}):
-		err = s.db.Update(s.migrate)
+		if err = s.db.Update(s.migrate); err == nil {
+			s.migrated = true
+		}
 	case !slices.Equal(buckets, logLayout):
 		err = fmt.Errorf("unknown database layout with buckets %q", buckets)
 	}

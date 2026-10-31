@@ -112,6 +112,45 @@ func TestOpenMigratesSingleBlobStore(t *testing.T) {
 	}
 }
 
+// Open says whether it migrated the file, so that its caller can warn: a
+// single-blob file is migrated once. The migrated file is in format 2, and so is
+// a new one, and opening either reports nothing.
+func TestOpenReportsOnlyAMigration(t *testing.T) {
+	dir := singleBlobStore(t)
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.Migrated() {
+		t.Error("Open of the single-blob fixture did not report the migration")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Migrated() {
+		t.Error("Open of the migrated file, which is in format 2, reported a migration")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh, err := Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Migrated() {
+		t.Error("Open of a new directory reported a migration")
+	}
+	if err := fresh.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A single-blob file that does not check out stops Open before the migration,
 // which leaves the file as it was.
 func TestOpenRejectsCorruptSingleBlobStore(t *testing.T) {
