@@ -109,8 +109,10 @@ func committed(s *Store) uint64 {
 }
 
 // BenchmarkHeartbeat is the heartbeat of an enrolled agent as discovery runs
-// it: verify the token, which writes nothing while it matches, then upsert the
-// agent. It reports the commits a heartbeat makes.
+// it: verify the token, which writes nothing while it matches, read the stored
+// agent, which discovery needs for its events, then upsert the agent. It
+// reports the commits a heartbeat makes, and how many heartbeats tell the UI to
+// refresh: none, since these change nothing an operator watches.
 func BenchmarkHeartbeat(b *testing.B) {
 	for _, n := range fleetSizes {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
@@ -118,6 +120,7 @@ func BenchmarkHeartbeat(b *testing.B) {
 			svc := agent.New(s, zerolog.Nop())
 			ctx := context.Background()
 			first := committed(s)
+			refreshes := 0
 			b.ReportAllocs()
 			measure(b, func(i int) error {
 				// The payload is built per heartbeat, as discovery does. An agent
@@ -131,9 +134,17 @@ func BenchmarkHeartbeat(b *testing.B) {
 				if err = svc.VerifyOrEnrollToken(ctx, p.ID, storagetest.AgentToken(i%n)); err != nil {
 					return err
 				}
-				return svc.Upsert(ctx, a)
+				if _, err = svc.Get(ctx, p.ID); err != nil {
+					return err
+				}
+				res, err := svc.Upsert(ctx, a)
+				if res.Visible || res.Reconnected {
+					refreshes++
+				}
+				return err
 			})
 			b.ReportMetric(float64(committed(s)-first)/float64(b.N), "commits/op")
+			b.ReportMetric(float64(refreshes)/float64(b.N), "refreshes/op")
 		})
 	}
 }

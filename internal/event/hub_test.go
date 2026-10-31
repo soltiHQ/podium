@@ -8,8 +8,8 @@ import (
 	"github.com/rs/zerolog"
 )
 
-func newTestHub() *Hub {
-	return NewHub(zerolog.Nop())
+func newTestHub(opts ...Option) *Hub {
+	return NewHub(zerolog.Nop(), opts...)
 }
 
 func TestHub_NotifyDeliversToSubscribers(t *testing.T) {

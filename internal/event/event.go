@@ -34,7 +34,8 @@ type Record struct {
 //   - *Created / *Updated / …      → persisted activity-feed entries (Record).
 //
 // Values are the on-the-wire HX-Trigger names; templates reference them through
-// the htmx package, which aliases these constants.
+// the htmx package, which aliases these constants. A pulse stands for every one
+// it follows, so a [Hub] may coalesce them, see [WithCoalesce].
 const (
 	RefreshDashboard = "dashboard_update"
 	RefreshAgents    = "agent_update"
@@ -42,6 +43,24 @@ const (
 	RefreshUsers     = "user_update"
 	RefreshSessions  = "session_update"
 )
+
+// refreshKinds are the kinds of the refresh triggers above: add a new trigger
+// here too, or the hub delivers each of its pulses. TestIsRefreshKind checks it.
+var refreshKinds = map[string]struct{}{
+	RefreshDashboard: {},
+	RefreshAgents:    {},
+	RefreshSpecs:     {},
+	RefreshUsers:     {},
+	RefreshSessions:  {},
+}
+
+// IsRefreshKind reports whether the event kind is a refresh trigger. Only these
+// are idempotent pulses that a [Hub] may coalesce: any other kind it delivers
+// as it comes.
+func IsRefreshKind(kind string) bool {
+	_, ok := refreshKinds[kind]
+	return ok
+}
 
 // Event kinds for the dashboard activity feed.
 const (

@@ -335,6 +335,21 @@ capture time, not by reading the archive: the collector scans it only when a
 limit is crossed. A node that takes leadership counts it again once, since
 another node may have written to it. A row ages from the time it was captured.
 
+## Event stream
+
+```yaml
+events:
+  coalesce: 1s    # env SOLTI_EVENTS_COALESCE
+```
+
+`events.coalesce` (default 1s) is the window in which the event hub coalesces the refresh pulses it sends to the
+browsers' event streams (`agent_update`, `spec_update`, `dashboard_update`, `user_update`, `session_update`): per kind,
+the first pulse after a quiet period goes out at once and the pulses that follow within the window become one trailing
+delivery at its end, so a burst reaches a browser as two pulses, and its last change is never lost. It is also the
+longest a pulse can wait. Zero keeps the default; a negative value fails configuration loading. The keepalive and
+the access re-check of the stream are not pulses and are not delayed. In raft mode each replica coalesces for its own
+browsers. See `internal/event/README.md`.
+
 ## Agent lifecycle
 
 ```yaml

@@ -60,7 +60,7 @@ type App struct {
 // the leader. Returned [App] is ready to [Run]. Caller must call [Shutdown]
 // to release deferred resources (Raft node, proxy pool, event hub).
 func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, error) {
-	store, leadership, eventHub, raftShutdown, err := buildCluster(cfg.Cluster, logger)
+	store, leadership, eventHub, raftShutdown, err := buildCluster(cfg.Cluster, logger, hubOptions(cfg)...)
 	if err != nil {
 		return nil, err
 	}

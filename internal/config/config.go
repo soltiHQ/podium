@@ -16,6 +16,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/cluster"
+	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/server"
 	"github.com/soltiHQ/control-plane/internal/server/runner/grpcserver"
 	historyrunner "github.com/soltiHQ/control-plane/internal/server/runner/history"
@@ -111,6 +112,7 @@ type Config struct {
 	Auth          auth.Config              `yaml:"auth"           envconfig:"AUTH"`
 	CORS          middleware.CORSConfig    `yaml:"cors"           envconfig:"CORS"`
 	Cluster       cluster.Config           `yaml:"cluster"        envconfig:"CLUSTER"`
+	Events        event.Config             `yaml:"events"         envconfig:"EVENTS"`
 	Streams       middleware.StreamsConfig `yaml:"streams"        envconfig:"STREAMS"`
 	TLS           TLSConfig                `yaml:"tls"            envconfig:"TLS"`
 	AgentAuth     AgentAuthConfig          `yaml:"agent_auth"     envconfig:"AGENT_AUTH"`
@@ -139,6 +141,7 @@ func Default() Config {
 		GRPC:          grpcserver.Config{Name: "grpc-discovery", Addr: ":50051"},
 		Auth:          auth.Config{CookieSecure: auth.CookieSecureAuto}, // JWTSecret must be supplied externally
 		Cluster:       cluster.DefaultConfig(),
+		Events:        event.DefaultConfig(),
 		History:       HistoryConfig{Archive: history.DefaultConfig(), Collector: historyrunner.DefaultConfig()},
 		Streams: middleware.StreamsConfig{
 			MaxPerIP:         10,
@@ -158,6 +161,9 @@ func (c Config) Validate() error {
 	}
 	if err := c.Cluster.Validate(); err != nil {
 		return fmt.Errorf("config.cluster: %w", err)
+	}
+	if err := c.Events.Validate(); err != nil {
+		return fmt.Errorf("config.events: %w", err)
 	}
 	if err := c.Auth.Validate(); err != nil {
 		return fmt.Errorf("config.auth: %w", err)

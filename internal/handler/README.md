@@ -173,7 +173,13 @@ Every event kind maps to a subject (`event.SubjectOf`):
 | HTTP      | POST               | `/api/v1/discovery/sync`       |
 | gRPC      | `DiscoverService/Sync` | proto-defined                |
 
-Both parse the agent heartbeat payload, call `model.NewAgentFrom`, then `agentSVC.Upsert`.
+Both parse the agent heartbeat payload, call `model.NewAgentFrom`, then `agentSVC.Upsert`. The upsert reports what
+the sync changed in the stored row (`agent.UpsertResult`), and discovery sends the `agent_update` refresh pulse only
+when the sync gave the UI pages something new: a **visible change**, that is, a new agent or a different status, name,
+endpoint, labels or capabilities, or a **reconnect**, that is, a new agent, an agent that was not active, or one that
+reports less uptime than its stored row (`model.Agent.ReconnectedSince`, the rule that also re-arms failed rollouts).
+A heartbeat that moves only the time of the sync and the uptime sends none. The hub coalesces the pulses it does send
+(`events.coalesce`).
 
 With agent auth required, the first sync of an unknown agent ID enrolls the token it presents (trust on first use) and
 sets the endpoint podium calls; every later sync of that ID must present the same token. With an enrollment secret

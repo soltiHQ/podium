@@ -1,6 +1,8 @@
 package model
 
 import (
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain"
@@ -205,6 +207,26 @@ func (a *Agent) MarkStatus(s enum.AgentStatus) {
 // sync makes an agent active, so the first clause means it synced again.
 func (a *Agent) ReconnectedSince(status enum.AgentStatus, uptimeSeconds int64) bool {
 	return (status != enum.AgentStatusActive && a.status == enum.AgentStatusActive) || a.uptimeSeconds < uptimeSeconds
+}
+
+// ChangedVisiblySince reports whether this row of the agent differs from an
+// earlier row in a field operators watch and a sync can change: status, name,
+// endpoint, labels or capabilities. The sync time, the uptime and the heartbeat
+// interval move with every sync, so they are no change. With no earlier row,
+// the agent is new, which is a change.
+func (a *Agent) ChangedVisiblySince(earlier *Agent) bool {
+	return earlier == nil ||
+		a.status != earlier.status ||
+		a.name != earlier.name ||
+		a.endpoint != earlier.endpoint ||
+		!maps.Equal(a.labels, earlier.labels) ||
+		!slices.EqualFunc(a.capabilities, earlier.capabilities, RunnerCapability.equal)
+}
+
+// equal reports whether two runners advertise the same name, labels and
+// workloads, in the same order.
+func (c RunnerCapability) equal(o RunnerCapability) bool {
+	return c.Name == o.Name && maps.Equal(c.Labels, o.Labels) && slices.Equal(c.Workloads, o.Workloads)
 }
 
 // SetStatus restores the agent's status WITHOUT bumping UpdatedAt.

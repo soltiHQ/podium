@@ -50,6 +50,20 @@ func TestSubjectOfClassifiesEveryKind(t *testing.T) {
 // "Event kinds" block.
 func declaredKinds(t *testing.T) []string {
 	t.Helper()
+	return declaredConsts(t, "Event kinds")
+}
+
+// declaredRefreshKinds returns the values of the constants in event.go's
+// "Refresh triggers" block.
+func declaredRefreshKinds(t *testing.T) []string {
+	t.Helper()
+	return declaredConsts(t, "Refresh triggers")
+}
+
+// declaredConsts returns the values of the constants in the block of event.go
+// whose doc comment starts with doc.
+func declaredConsts(t *testing.T, doc string) []string {
+	t.Helper()
 	f, err := parser.ParseFile(token.NewFileSet(), "event.go", nil, parser.ParseComments)
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +71,7 @@ func declaredKinds(t *testing.T) []string {
 	var kinds []string
 	for _, decl := range f.Decls {
 		gen, ok := decl.(*ast.GenDecl)
-		if !ok || gen.Tok != token.CONST || gen.Doc == nil || !strings.HasPrefix(gen.Doc.Text(), "Event kinds") {
+		if !ok || gen.Tok != token.CONST || gen.Doc == nil || !strings.HasPrefix(gen.Doc.Text(), doc) {
 			continue
 		}
 		for _, spec := range gen.Specs {
@@ -75,7 +89,23 @@ func declaredKinds(t *testing.T) []string {
 		}
 	}
 	if len(kinds) == 0 {
-		t.Fatal(`no "Event kinds" constant block in event.go`)
+		t.Fatalf("no %q constant block in event.go", doc)
 	}
 	return kinds
+}
+
+// Every refresh trigger is a refresh kind, so that Notify coalesces it; no
+// activity kind and no other string is.
+func TestIsRefreshKind(t *testing.T) {
+	for _, kind := range declaredRefreshKinds(t) {
+		if !IsRefreshKind(kind) {
+			t.Errorf("IsRefreshKind(%q) = false: add the trigger to refreshKinds", kind)
+		}
+	}
+	others := append(declaredKinds(t), "", "not_a_kind", "Agent_Update", "agent_update ")
+	for _, kind := range others {
+		if IsRefreshKind(kind) {
+			t.Errorf("IsRefreshKind(%q) = true, want false", kind)
+		}
+	}
 }
