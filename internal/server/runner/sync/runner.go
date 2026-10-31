@@ -160,16 +160,19 @@ type agentTurn struct {
 type listing struct {
 	complete bool
 	cause    string // why not, when the agent answered and the listing still failed
-	err      error  // the agent's answer behind the cause, if it was an error
+	err      error  // what lies behind the cause, if there is more to say: the agent's error, or the numbers
 }
 
 // Why the tasks of an agent that answers cannot be listed completely.
 const (
-	causeTooLarge = "page refused as too large even at limit 1"
-	causeBudget   = "turn budget used before the last page"
-	causeCursor   = "agent repeated a cursor"
-	causeSnapshot = "pages name different snapshots"
-	causeAnswer   = "page answered with an error"
+	causeTooLarge   = "page refused as too large even at limit 1"
+	causeBudget     = "turn budget used before the last page"
+	causeCursor     = "agent repeated a cursor"
+	causeSnapshot   = "pages name different snapshots"
+	causeAnswer     = "page answered with an error"
+	causeMoreTasks  = "agent returned more tasks than asked"
+	causeLongCursor = "agent returned a cursor that is too long"
+	causeListSize   = "listing too large"
 )
 
 // reconcileRollouts dispatches every due rollout by intent, one worker per agent.
@@ -756,6 +759,18 @@ func (r *Runner) observeAgent(ctx context.Context, turn *agentTurn, start time.T
 // taskListLimit is the page size a listing starts at: the most an agent serves.
 const taskListLimit = 1000
 
+// What an agent may make a listing cost, whatever it answers. A page with more
+// tasks than were asked for, or a cursor longer than maxCursorBytes, is an answer
+// no agent gives. A listing that would hold more than maxListedTasks task IDs, or
+// take more than maxListedPages calls, refused pages included, is not followed
+// further: the runner keeps neither without bound. Each leaves the listing
+// incomplete, see listTasks.
+const (
+	maxCursorBytes = 4096
+	maxListedTasks = 65536
+	maxListedPages = 1024
+)
+
 // listTasks lists every task of the turn's agent, a page at a time and with no
 // filter, so that a task is there whatever its phase, as it was to GetTask. Each
 // page is a call of its own, within PushTimeout, and starts only while the turn is
@@ -764,12 +779,14 @@ const taskListLimit = 1000
 // down to one task, and the smaller limit holds for the rest of the turn. Only a
 // listing that reaches the last page is complete. One that stops short reports
 // false, and no task may be judged missing by it: the budget is used, a task is
-// too large to list, a page fails, the agent returns a cursor it returned before,
-// the pages name different snapshots (a resource version that differs from the
-// first one named; a page without one is let through) or the tick is cancelled.
-// A page answers or goes unanswered as any call does, a refusal and an error
-// status included: the turn notes it, and turn.listed says why a listing is
-// incomplete.
+// too large to list, a page fails, a page holds more tasks than it was asked for,
+// a cursor is longer than maxCursorBytes, the listing would hold more than
+// maxListedTasks task IDs or take more than maxListedPages calls (a refused page
+// is a call), the agent returns a cursor it returned before, the pages name
+// different snapshots (a resource version that differs from the first one named;
+// a page without one is let through) or the tick is cancelled. A page answers or
+// goes unanswered as any call does, a refusal and an error status included: the
+// turn notes it, and turn.listed says why a listing is incomplete.
 func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agentTurn, start time.Time) (map[string]struct{}, bool) {
 	var (
 		tasks   = make(map[string]struct{})
@@ -779,6 +796,10 @@ func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agent
 		limit   = taskListLimit
 	)
 	for call := 0; ; call++ {
+		if call >= maxListedPages {
+			turn.listed = listing{cause: causeListSize, err: fmt.Errorf("more than %d pages", maxListedPages)}
+			return nil, false
+		}
 		if call > 0 && r.now().Sub(start) >= r.cfg.PushTimeout {
 			turn.listed = listing{cause: causeBudget}
 			return nil, false
@@ -815,8 +836,20 @@ func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agent
 			}
 			version = resp.ResourceVersion
 		}
+		if len(resp.Tasks) > limit {
+			turn.listed = listing{cause: causeMoreTasks, err: fmt.Errorf("%d tasks for a limit of %d", len(resp.Tasks), limit)}
+			return nil, false
+		}
+		if len(resp.NextCursor) > maxCursorBytes {
+			turn.listed = listing{cause: causeLongCursor, err: fmt.Errorf("a cursor of %d bytes, over %d", len(resp.NextCursor), maxCursorBytes)}
+			return nil, false
+		}
 		for _, task := range resp.Tasks {
 			tasks[task.ID] = struct{}{}
+			if len(tasks) > maxListedTasks {
+				turn.listed = listing{cause: causeListSize, err: fmt.Errorf("more than %d task IDs", maxListedTasks)}
+				return nil, false
+			}
 		}
 		if resp.NextCursor == "" {
 			turn.listed = listing{complete: true}
