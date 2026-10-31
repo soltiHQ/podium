@@ -101,6 +101,32 @@ func overfull(_ int, asked proxy.TaskFilter) ([]string, string, error) {
 	return names, "", nil
 }
 
+// heavyNames are task names that add up to size bytes: task-000000, then names of a
+// mebibyte, the last of what is left.
+func heavyNames(size int) []string {
+	names := []string{taskName(0)}
+	left := size - len(names[0])
+	for i := 1; left > 0; i++ {
+		n := min(left, 1<<20)
+		prefix := strconv.Itoa(i) + "-"
+		names = append(names, prefix+strings.Repeat("x", n-len(prefix)))
+		left -= n
+	}
+	return names
+}
+
+// serves is an agent that holds the named tasks and serves per of them to a page.
+func serves(names []string, per int) servePage {
+	return func(_ int, asked proxy.TaskFilter) ([]string, string, error) {
+		from := startOf(asked)
+		to := min(from+per, len(names))
+		if to == len(names) {
+			return names[from:to], "", nil
+		}
+		return names[from:to], cursorAt(to), nil
+	}
+}
+
 // boundsRun is a runner over an agent that serves pages as a test says, with the
 // rollouts of tasks the agent holds and the rollout of one it lost.
 type boundsRun struct {
@@ -132,10 +158,11 @@ func (b *boundsRun) logged(level string) int {
 }
 
 // A listing is bounded in what one page may hold, in the length of a cursor, in the
-// task IDs it keeps and in the calls it takes, refused pages included. An agent
-// that breaks a bound is answering, so it is not backed off; but its listing is
-// incomplete, and nothing is judged by it: not the task on the first page, nor the
-// one the agent lost. One warning names the cause.
+// task IDs it keeps and their bytes, and in the calls it takes, refused pages
+// included. An agent that breaks a bound is answering, so it is not backed off; but
+// its listing is incomplete, and nothing is judged by it: not the task on the first
+// page, nor the one the agent lost. One warning names the cause, and no task ID: an
+// ID can be as long as a page.
 func TestListingsThatBreakABoundJudgeNothing(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -156,6 +183,7 @@ func TestListingsThatBreakABoundJudgeNothing(t *testing.T) {
 		{"a fresh cursor on every page, forever", freshCursors, 1024, causeListSize},
 		{"fresh tasks on every page, three times the bound", held(3*65536, 1000), 66, causeListSize},
 		{"65537 tasks", held(65537, 1000), 66, causeListSize},
+		{"one byte of task IDs over the bound, across pages", serves(heavyNames(maxListedIDBytes+1), 3), 11, causeListSize},
 		{"1025 pages", held(1025, 1), 1024, causeListSize},
 		{"refused pages are pages", refusesAllButOne, 1024, causeListSize},
 	} {
@@ -181,14 +209,18 @@ func TestListingsThatBreakABoundJudgeNothing(t *testing.T) {
 			if warns := b.logged("warn"); warns != 1 || !strings.Contains(b.logs.String(), tc.cause) {
 				t.Fatalf("logged %d warnings, want one naming %q: %s", warns, tc.cause, b.logs.String())
 			}
+			if size := b.logs.Len(); size > 1<<10 {
+				t.Fatalf("one warning took %d bytes of log: is a task ID in it?", size)
+			}
 		})
 	}
 }
 
-// The bounds are inclusive: 65536 task IDs, 1024 calls and a cursor of 4096 bytes
-// are listed whole, and a task missing from them is found, as in any complete
-// listing. The last task is among those kept, so none was cut off.
+// The bounds are inclusive: 65536 task IDs, 32 MiB of them, 1024 calls and a cursor
+// of 4096 bytes are listed whole, and a task missing from them is found, as in any
+// complete listing. The last task is among those kept, so none was cut off.
 func TestListingsAtTheirBoundsAreComplete(t *testing.T) {
+	heavy := heavyNames(maxListedIDBytes)
 	for _, tc := range []struct {
 		name  string
 		page  servePage
@@ -196,6 +228,7 @@ func TestListingsAtTheirBoundsAreComplete(t *testing.T) {
 		last  string // the last task the agent lists
 	}{
 		{"65536 tasks", held(65536, 1000), 66, taskName(65535)},
+		{"32 MiB of task IDs", serves(heavy, 3), 11, heavy[len(heavy)-1]},
 		{"1024 pages", held(1024, 1), 1024, taskName(1023)},
 		{"a cursor of 4096 bytes", func(call int, _ proxy.TaskFilter) ([]string, string, error) {
 			if call == 1 {

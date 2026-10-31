@@ -13,8 +13,8 @@
 //     A page starts at 1000 tasks. One that the proxy refuses as too large is asked again from the same cursor
 //     with half the limit, down to one task. The runner also bounds what an agent can make a listing cost: a
 //     page that holds more tasks than it was asked for, or names a cursor longer than 4096 bytes, is refused,
-//     and a listing that would hold more than 65536 task IDs or take more than 1024 calls, refused pages
-//     included, is not followed further. Only a complete listing shows a task missing: if the turn's budget
+//     and a listing that would hold more than 65536 task IDs or 32 MiB of them, or take more than 1024 calls,
+//     refused pages included, stops. Only a complete listing shows a task missing: if the turn's budget
 //     runs out, a task is too large to list even alone, a page fails or is refused, the listing passes a
 //     bound, the agent returns a cursor it returned before, or its pages name different snapshots (resource
 //     versions that differ; a page without one is let through), no rollout is judged and the next tick lists

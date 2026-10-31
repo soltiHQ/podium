@@ -163,8 +163,8 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   turn; the next turn starts at 1000 again. The listing is bounded, whatever
   the agent answers: a page with more tasks than it was asked for, or a cursor
   over 4096 bytes, is refused, and a listing that would hold more than 65536
-  task IDs or take more than 1024 calls, refused pages included, is not
-  followed further. A synced rollout whose task is missing from the listing is
+  task IDs or 32 MiB of them, or take more than 1024 calls, refused pages
+  included, stops. A synced rollout whose task is missing from the listing is
   queued for a reinstall, but only a complete listing shows a task missing. If
   the budget runs out, a page fails or is refused (a task too large to list
   even alone included), the listing passes a bound, the agent returns a cursor

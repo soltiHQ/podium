@@ -772,14 +772,16 @@ const taskListLimit = 1000
 
 // What an agent may make a listing cost, whatever it answers. A page with more
 // tasks than were asked for, or a cursor longer than maxCursorBytes, is an answer
-// no agent gives. A listing that would hold more than maxListedTasks task IDs, or
-// take more than maxListedPages calls, refused pages included, is not followed
-// further: the runner keeps neither without bound. Each leaves the listing
-// incomplete, see listTasks.
+// no agent gives. A listing that would hold more than maxListedTasks task IDs or
+// maxListedIDBytes bytes of them, or take more than maxListedPages calls, refused
+// pages included, is not followed further: the runner keeps neither without bound,
+// and a task ID has no length limit of its own, so the count alone does not bound
+// the bytes. Each leaves the listing incomplete, see listTasks.
 const (
-	maxCursorBytes = 4096
-	maxListedTasks = 65536
-	maxListedPages = 1024
+	maxCursorBytes   = 4096
+	maxListedTasks   = 65536
+	maxListedIDBytes = 32 << 20
+	maxListedPages   = 1024
 )
 
 // listTasks lists every task of the turn's agent, a page at a time and with no
@@ -792,12 +794,13 @@ const (
 // false, and no task may be judged missing by it: the budget is used, a task is
 // too large to list, a page fails, a page holds more tasks than it was asked for,
 // a cursor is longer than maxCursorBytes, the listing would hold more than
-// maxListedTasks task IDs or take more than maxListedPages calls (a refused page
-// is a call), the agent returns a cursor it returned before, the pages name
-// different snapshots (a resource version that differs from the first one named;
-// a page without one is let through) or the tick is cancelled. A page answers or
-// goes unanswered as any call does, a refusal and an error status included: the
-// turn notes it, and turn.listed says why a listing is incomplete.
+// maxListedTasks task IDs or maxListedIDBytes bytes of them, or take more than
+// maxListedPages calls (a refused page is a call), the agent returns a cursor it
+// returned before, the pages name different snapshots (a resource version that
+// differs from the first one named; a page without one is let through) or the tick
+// is cancelled. A page answers or goes unanswered as any call does, a refusal and
+// an error status included: the turn notes it, and turn.listed says why a listing
+// is incomplete.
 func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agentTurn, start time.Time) (map[string]struct{}, bool) {
 	var (
 		tasks   = make(map[string]struct{})
@@ -805,6 +808,7 @@ func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agent
 		cursor  string
 		version string
 		limit   = taskListLimit
+		idBytes int
 	)
 	for call := 0; ; call++ {
 		if call >= maxListedPages {
@@ -857,8 +861,13 @@ func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agent
 		}
 		for _, task := range resp.Tasks {
 			tasks[task.ID] = struct{}{}
+			idBytes += len(task.ID) // per occurrence: an agent that repeats an ID is charged again
 			if len(tasks) > maxListedTasks {
 				turn.listed = listing{cause: causeListSize, err: fmt.Errorf("more than %d task IDs", maxListedTasks)}
+				return nil, false
+			}
+			if idBytes > maxListedIDBytes {
+				turn.listed = listing{cause: causeListSize, err: fmt.Errorf("more than %d bytes of task IDs", maxListedIDBytes)}
 				return nil, false
 			}
 		}

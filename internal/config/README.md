@@ -403,5 +403,6 @@ holds a tick for about one `push_timeout`, not one per rollout. The check that
 an agent still has its tasks is one listing of them, up to 1000 to a page (fewer
 when the agent's answer would be too large), and only a whole listing counts:
 an agent whose last page cannot start inside what is left of one `push_timeout`
-after its pushes is not checked. Zero or negative values inherit the defaults
-shown. See `internal/server/README.md` for the scheduling.
+after its pushes, or whose listing passes the bounds in the server README (65536
+task IDs, 32 MiB of them, 1024 calls), is not checked. Zero or negative values
+inherit the defaults shown. See `internal/server/README.md` for the scheduling.
