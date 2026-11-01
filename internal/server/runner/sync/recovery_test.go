@@ -74,14 +74,15 @@ func TestDeleteCompletionPreservesReaddedTarget(t *testing.T) {
 }
 
 func TestObservationRecoversAgentRestart(t *testing.T) {
-	fp := &fakeProxy{getErr: agentNotFound{}}
+	fp := &fakeProxy{}
+	fp.hold("survivor") // the restarted agent lost the rollout's task, not every task
 	r, s, _ := newFakeRunner(t, fp)
 	ts := seedSpecAndAgent(t, s, "restart", "agent")
 	ro, _ := model.NewRollout(ts.ID(), "agent", 1)
 	ro.SetActualTaskID("lost")
 	ro.MarkSynced(1)
 	_ = s.UpsertRollout(context.Background(), ro)
-	r.reconcile(context.Background(), ro.ID())
+	r.tick(context.Background())
 	after, _ := s.GetRollout(context.Background(), ro.ID())
 	if after.Intent() != enum.RolloutIntentInstall || after.Status() != enum.SyncStatusPending || after.ActualTaskID() != "" {
 		t.Fatal("lost agent task not queued for recovery")

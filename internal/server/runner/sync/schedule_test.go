@@ -67,7 +67,7 @@ func (g *gatedProxy) ApplyTask(ctx context.Context, _ proxy.TaskSubmission) (str
 
 func (g *gatedProxy) DeleteTask(ctx context.Context, _ string) error { return g.wait(ctx) }
 
-func (g *gatedProxy) GetTask(ctx context.Context, _ string) (*proxyv1.GetTaskResponse, error) {
+func (g *gatedProxy) ListTasks(ctx context.Context, _ proxy.TaskFilter) (*proxyv1.ListTasksResponse, error) {
 	return nil, g.wait(ctx)
 }
 
@@ -118,6 +118,15 @@ func seedRollouts(t *testing.T, s storage.Storage, agentID string, n int, intent
 	for i := range n {
 		specID := fmt.Sprintf("%s-sp%d", agentID, i)
 		out = append(out, seedRollout(t, s, specID, agentID, intent, "task-"+specID))
+	}
+	return out
+}
+
+// taskIDs lists the tasks the rollouts have on their agents.
+func taskIDs(rollouts []*model.Rollout) []string {
+	out := make([]string, 0, len(rollouts))
+	for _, ro := range rollouts {
+		out = append(out, ro.ActualTaskID())
 	}
 	return out
 }
@@ -183,15 +192,12 @@ func TestStateWritesOutlivePushTimeout(t *testing.T) {
 		{"delete completes", enum.RolloutIntentUninstall, func(_ *model.Rollout, err error) bool {
 			return errors.Is(err, storage.ErrNotFound)
 		}},
-		{"observation requeues a lost task", enum.RolloutIntentNoop, func(after *model.Rollout, err error) bool {
-			return err == nil && after.Intent() == enum.RolloutIntentInstall && after.Status() == enum.SyncStatusPending && after.ActualTaskID() == ""
-		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pushCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 			defer cancel()
 			atDeadline := func() { <-pushCtx.Done() }
-			fp := &fakeProxy{applyResp: []string{"task-new"}, getErr: agentNotFound{}, onApply: atDeadline, onDelete: atDeadline, onGet: atDeadline}
+			fp := &fakeProxy{applyResp: []string{"task-new"}, onApply: atDeadline, onDelete: atDeadline}
 			r, s, _ := newFakeRunner(t, fp)
 			ro := seedRollouts(t, s, "agent-a", 1, tc.intent)[0]
 
@@ -267,9 +273,11 @@ func TestHungAgentDoesNotStallOthers(t *testing.T) {
 
 // A call the agent never answered ends that agent's turn for the tick: the
 // attempted rollout records the failure and the agent's other rollouts stay
-// untouched. An answer, 4xx and 5xx included, does not end it.
+// untouched. An answer, 4xx and 5xx included, does not end it. The observations
+// are one listing, which has no rollouts to skip: see
+// TestListErrorsKeepTheObservationClasses.
 func TestUnreachableAgentSkipsRemainingRollouts(t *testing.T) {
-	install, uninstall, observe := enum.RolloutIntentInstall, enum.RolloutIntentUninstall, enum.RolloutIntentNoop
+	install, uninstall := enum.RolloutIntentInstall, enum.RolloutIntentUninstall
 	for _, tc := range []struct {
 		name    string
 		intent  enum.RolloutIntent
@@ -287,7 +295,6 @@ func TestUnreachableAgentSkipsRemainingRollouts(t *testing.T) {
 		{"net.Error: connection refused", install, fmt.Errorf("%w: %w", proxy.ErrApplyTask, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}), true},
 		{"net.Error: connection reset mid-body", install, fmt.Errorf("%w: %w: %w", proxy.ErrApplyTask, proxy.ErrDecode, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}), true},
 		{"delete got no response", uninstall, agentErr{errkind.Internal, fmt.Errorf("%w: %w: EOF", proxy.ErrDeleteTask, proxy.ErrRequest)}, true},
-		{"observation got no response", observe, agentErr{errkind.Internal, fmt.Errorf("%w: %w: EOF", proxy.ErrGetTask, proxy.ErrRequest)}, true},
 		{"apply answered 503", install, httpAnswer(proxy.ErrApplyTask, 503, errkind.Unavailable), false},
 		{"apply answered 500", install, httpAnswer(proxy.ErrApplyTask, 500, errkind.Internal), false},
 		{"apply answered 404", install, httpAnswer(proxy.ErrApplyTask, 404, errkind.NotFound), false},
@@ -295,20 +302,18 @@ func TestUnreachableAgentSkipsRemainingRollouts(t *testing.T) {
 		{"apply answered grpc resource exhausted", install, agentErr{errkind.Unavailable, fmt.Errorf("%w: rpc error: code = ResourceExhausted desc = retained task limit reached", proxy.ErrApplyTask)}, false},
 		{"apply answer malformed", install, agentErr{errkind.Internal, fmt.Errorf("%w: %w: unexpected end of JSON input", proxy.ErrApplyTask, proxy.ErrDecode)}, false},
 		{"delete answered 500", uninstall, httpAnswer(proxy.ErrDeleteTask, 500, errkind.Internal), false},
-		{"observation answered 500", observe, httpAnswer(proxy.ErrGetTask, 500, errkind.Internal), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fp := &fakeProxy{
 				applyErr:  []error{tc.err, tc.err, tc.err},
 				deleteErr: []error{tc.err, tc.err, tc.err},
-				getErr:    tc.err,
 			}
 			r, s, _ := newFakeRunner(t, fp)
 			seeded := seedRollouts(t, s, "agent-a", 3, tc.intent)
 
 			r.tick(context.Background())
 
-			calls := len(fp.applies) + len(fp.deletes) + len(fp.gets)
+			calls := len(fp.applies) + len(fp.deletes)
 			want := len(seeded)
 			if tc.skipped {
 				want = 1
@@ -316,11 +321,7 @@ func TestUnreachableAgentSkipsRemainingRollouts(t *testing.T) {
 			if calls != want {
 				t.Fatalf("agent got %d calls, want %d", calls, want)
 			}
-			// A failed push records the attempt; a failed observation records nothing.
-			wantFailed := calls
-			if tc.intent == observe {
-				wantFailed = 0
-			}
+			// A failed push records the attempt.
 			failed, untouched := 0, 0
 			for _, ro := range seeded {
 				after, err := s.GetRollout(context.Background(), ro.ID())
@@ -334,8 +335,8 @@ func TestUnreachableAgentSkipsRemainingRollouts(t *testing.T) {
 					failed++
 				}
 			}
-			if failed != wantFailed || untouched != len(seeded)-wantFailed {
-				t.Fatalf("failed=%d untouched=%d, want %d and %d", failed, untouched, wantFailed, len(seeded)-wantFailed)
+			if failed != calls || untouched != len(seeded)-calls {
+				t.Fatalf("failed=%d untouched=%d, want %d and %d", failed, untouched, calls, len(seeded)-calls)
 			}
 		})
 	}
@@ -448,7 +449,7 @@ func noAnswer(op error) error {
 // An agent's pushes go before its observations: an agent that stopped answering
 // still has its older pending work attempted and recorded.
 func TestPushesGoBeforeObservations(t *testing.T) {
-	fp := &fakeProxy{applyErr: []error{noAnswer(proxy.ErrApplyTask)}, getErr: noAnswer(proxy.ErrGetTask)}
+	fp := &fakeProxy{applyErr: []error{noAnswer(proxy.ErrApplyTask)}, listErr: noAnswer(proxy.ErrListTasks)}
 	r, s, _ := newFakeRunner(t, fp)
 	pending := seedRollout(t, s, "sp-old", "agent-a", enum.RolloutIntentInstall, "")
 	pending.SetCreatedAt(time.Now().Add(-time.Hour)) // listed after the newer synced rollout
@@ -459,8 +460,8 @@ func TestPushesGoBeforeObservations(t *testing.T) {
 
 	r.tick(context.Background())
 
-	if len(fp.applies) != 1 || len(fp.gets) != 0 {
-		t.Fatalf("applies=%d observations=%d, want the push attempted first and alone", len(fp.applies), len(fp.gets))
+	if len(fp.applies) != 1 || len(fp.lists) != 0 {
+		t.Fatalf("applies=%d observations=%d, want the push attempted first and alone", len(fp.applies), len(fp.lists))
 	}
 	after, err := s.GetRollout(context.Background(), pending.ID())
 	if err != nil {
@@ -526,7 +527,7 @@ func TestUnreachableAgentBacksOff(t *testing.T) {
 	r.cfg.PushTimeout = 50 * time.Millisecond
 	r.pool = &fakePool{agents: map[string]proxy.AgentProxy{"http://agent-a": hung, "http://agent-b": healthy}}
 	seedRollouts(t, s, "agent-a", 2, enum.RolloutIntentNoop)
-	seedRollouts(t, s, "agent-b", 1, enum.RolloutIntentNoop)
+	healthy.hold(taskIDs(seedRollouts(t, s, "agent-b", 1, enum.RolloutIntentNoop))...)
 	start := time.Now()
 	now := start
 	r.clock = func() time.Time { return now }
@@ -547,8 +548,8 @@ func TestUnreachableAgentBacksOff(t *testing.T) {
 			t.Fatalf("at %v: hung agent got %d calls, want %d", step.at, calls, step.calls)
 		}
 	}
-	if len(healthy.gets) != 5 {
-		t.Fatalf("healthy agent observed %d times in 5 ticks, want 5", len(healthy.gets))
+	if len(healthy.lists) != 5 {
+		t.Fatalf("healthy agent observed %d times in 5 ticks, want 5", len(healthy.lists))
 	}
 }
 
@@ -560,29 +561,29 @@ func TestAnsweredCallResetsAgentBackoff(t *testing.T) {
 		answer error
 	}{
 		{"success", nil},
-		{"error answer", httpAnswer(proxy.ErrGetTask, 500, errkind.Internal)},
+		{"error answer", httpAnswer(proxy.ErrListTasks, 500, errkind.Internal)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fp := &fakeProxy{}
 			r, s, _ := newFakeRunner(t, fp)
-			seedRollouts(t, s, "agent-a", 1, enum.RolloutIntentNoop)
+			fp.hold(taskIDs(seedRollouts(t, s, "agent-a", 1, enum.RolloutIntentNoop))...)
 			start := time.Now()
 			now := start
 			r.clock = func() time.Time { return now }
 			tickAt := func(at time.Duration, reply error) {
 				now = start.Add(at)
-				fp.getErr = reply
+				fp.listErr = reply
 				r.tick(context.Background())
 			}
 
-			tickAt(0, noAnswer(proxy.ErrGetTask))                              // backoff 10s
-			tickAt(10*time.Second, tc.answer)                                  // answered: cleared
-			tickAt(10*time.Second, noAnswer(proxy.ErrGetTask))                 // backoff 10s again, not 20s
-			tickAt(20*time.Second-time.Nanosecond, noAnswer(proxy.ErrGetTask)) // held back
-			tickAt(20*time.Second, noAnswer(proxy.ErrGetTask))                 // due again
+			tickAt(0, noAnswer(proxy.ErrListTasks))                              // backoff 10s
+			tickAt(10*time.Second, tc.answer)                                    // answered: cleared
+			tickAt(10*time.Second, noAnswer(proxy.ErrListTasks))                 // backoff 10s again, not 20s
+			tickAt(20*time.Second-time.Nanosecond, noAnswer(proxy.ErrListTasks)) // held back
+			tickAt(20*time.Second, noAnswer(proxy.ErrListTasks))                 // due again
 
-			if len(fp.gets) != 4 {
-				t.Fatalf("agent observed %d times, want 4: an answer must clear its backoff", len(fp.gets))
+			if len(fp.lists) != 4 {
+				t.Fatalf("agent observed %d times, want 4: an answer must clear its backoff", len(fp.lists))
 			}
 		})
 	}
@@ -591,7 +592,7 @@ func TestAnsweredCallResetsAgentBackoff(t *testing.T) {
 // An uninstall of a task the agent never got needs no call: it neither waits
 // behind the agent's other work nor for the agent's backoff.
 func TestLocalUninstallRunsWhileAgentBackedOff(t *testing.T) {
-	fp := &fakeProxy{getErr: noAnswer(proxy.ErrGetTask)}
+	fp := &fakeProxy{listErr: noAnswer(proxy.ErrListTasks)}
 	r, s, _ := newFakeRunner(t, fp)
 	start := time.Now()
 	now := start
@@ -617,15 +618,15 @@ func TestLocalUninstallRunsWhileAgentBackedOff(t *testing.T) {
 
 	now = start.Add(6 * time.Second) // the local uninstall was no answer: still backed off
 	r.tick(context.Background())
-	if len(fp.gets) != 1 {
-		t.Fatalf("backed-off agent observed %d times, want 1", len(fp.gets))
+	if len(fp.lists) != 1 {
+		t.Fatalf("backed-off agent observed %d times, want 1", len(fp.lists))
 	}
 }
 
 // An answer earlier in the same turn counts too: the unanswered call after it
 // starts the backoff at 10s again.
 func TestAnswerEarlierInTurnResetsAgentBackoff(t *testing.T) {
-	fp := &fakeProxy{applyResp: []string{"task-new"}, getErr: noAnswer(proxy.ErrGetTask)}
+	fp := &fakeProxy{applyResp: []string{"task-new"}, listErr: noAnswer(proxy.ErrListTasks)}
 	r, s, _ := newFakeRunner(t, fp)
 	start := time.Now()
 	now := start
@@ -639,14 +640,14 @@ func TestAnswerEarlierInTurnResetsAgentBackoff(t *testing.T) {
 	now = start.Add(20 * time.Second)
 	r.tick(context.Background())
 
-	if len(fp.applies) != 1 || len(fp.gets) != 3 {
-		t.Fatalf("applies=%d observations=%d, want 1 and 3: the answer must reset the count", len(fp.applies), len(fp.gets))
+	if len(fp.applies) != 1 || len(fp.lists) != 3 {
+		t.Fatalf("applies=%d observations=%d, want 1 and 3: the answer must reset the count", len(fp.applies), len(fp.lists))
 	}
 }
 
 // The backoff of an agent whose rollouts are all gone is forgotten.
 func TestBackoffForgetsAgentsWithoutRollouts(t *testing.T) {
-	fp := &fakeProxy{getErr: noAnswer(proxy.ErrGetTask)}
+	fp := &fakeProxy{listErr: noAnswer(proxy.ErrListTasks)}
 	r, s, _ := newFakeRunner(t, fp)
 	ro := seedRollout(t, s, "sp-live", "agent-a", enum.RolloutIntentNoop, "task-live")
 

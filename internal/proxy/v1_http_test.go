@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 
 	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/transport/errkind"
 )
 
 // httpProxyV1.ApplyTask must return the TaskId from ApplyTaskResponse.
@@ -172,4 +174,42 @@ func TestHttpProxyV1_Request_KeepsBodyErrorCauses(t *testing.T) {
 			t.Fatalf("GetTask = %v, want a decode error carrying the JSON syntax error", err)
 		}
 	})
+}
+
+// A body over the cap fails as a decode error that says it was too large, so that
+// a caller can ask for less. A malformed body does not say it.
+func TestHttpProxyV1_ListTasks_TagsABodyOverTheCap(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		body   func(w io.Writer)
+		tagged bool
+	}{
+		{"body over the cap", func(w io.Writer) {
+			_, _ = w.Write([]byte(`{"items":[],"pad":"`))
+			_, _ = w.Write(bytes.Repeat([]byte("a"), maxAgentResponseBytes))
+			_, _ = w.Write([]byte(`"}`))
+		}, true},
+		{"malformed body", func(w io.Writer) { _, _ = w.Write([]byte(`{"items":`)) }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				tc.body(w)
+			}))
+			defer srv.Close()
+			p := &httpProxyV1{endpoint: srv.URL, client: srv.Client()}
+
+			_, err := p.ListTasks(context.Background(), TaskFilter{Limit: 1000})
+
+			if !errors.Is(err, ErrListTasks) || !errors.Is(err, ErrDecode) {
+				t.Fatalf("ListTasks = %v, want a list tasks decode error", err)
+			}
+			if got := errors.Is(err, ErrResponseTooLarge); got != tc.tagged {
+				t.Fatalf("ErrResponseTooLarge = %v, want %v: %v", got, tc.tagged, err)
+			}
+			if kind := errkind.Classify(err); kind != errkind.Internal {
+				t.Fatalf("kind = %v, want Internal: tagging must not change the classification", kind)
+			}
+		})
+	}
 }

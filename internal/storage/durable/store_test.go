@@ -19,13 +19,13 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/snapshot"
 	bolt "go.etcd.io/bbolt"
-	"google.golang.org/protobuf/proto"
+	bolterrors "go.etcd.io/bbolt/errors"
 )
 
-func newTestStore(t *testing.T) (*Store, string) {
+func newTestStore(t *testing.T, opts ...Option) (*Store, string) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "state")
-	s, err := Open(dir)
+	s, err := Open(dir, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,11 +331,16 @@ func TestConcurrentWritersAndReaders(t *testing.T) {
 	assertReopen(t, s, dir, snapshotBytes(t, s))
 }
 
+// A read during a transaction neither waits for it nor sees its write, and a read
+// after its rollback does not see the write either.
 func TestUncommittedCandidateIsNotVisible(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 	changed := make(chan struct{})
 	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
 	txDone := make(chan error, 1)
 	go func() {
 		txDone <- s.WithTx(ctx, func(tx storage.Storage) error {
@@ -356,19 +361,15 @@ func TestUncommittedCandidateIsNotVisible(t *testing.T) {
 		if !errors.Is(err, storage.ErrNotFound) {
 			t.Fatalf("uncommitted candidate observed: %v", err)
 		}
-	case <-time.After(20 * time.Millisecond):
+	case <-time.After(2 * time.Second):
+		t.Fatal("a read waited for the transaction")
 	}
-	close(release)
+	unblock()
 	if err := <-txDone; err == nil {
 		t.Fatal("expected rollback")
 	}
-	select {
-	case err := <-readDone:
-		if !errors.Is(err, storage.ErrNotFound) {
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("reader stuck after rollback")
+	if _, err := s.GetAgent(ctx, "uncommitted"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("rolled back candidate observed: %v", err)
 	}
 }
 
@@ -416,55 +417,44 @@ func TestProcessLockAndPrivatePermissions(t *testing.T) {
 	}
 }
 
+// A file of the log layout whose snapshot, meta or buckets do not check out fails
+// Open, which leaves it as it was. The snapshot holds the populated state.
 func TestCorruptStateIsRejectedWithoutReset(t *testing.T) {
 	tests := []struct {
 		name    string
 		corrupt func(*bolt.Tx) error
 	}{
-		{"checksum", func(tx *bolt.Tx) error { return tx.Bucket(stateBucket).Put(checksumKey, []byte("bad checksum")) }},
-		{"header", func(tx *bolt.Tx) error {
-			b := tx.Bucket(stateBucket)
-			var msg raftv1.Snapshot
-			if err := proto.Unmarshal(b.Get(snapshotKey), &msg); err != nil {
-				return err
-			}
-			msg.Header.Version = 99
-			data, err := proto.Marshal(&msg)
-			if err != nil {
-				return err
-			}
-			return putSnapshot(b, data)
+		{"checksum", func(tx *bolt.Tx) error { return tx.Bucket(snapshotBucket).Put(checksumKey, []byte("bad checksum")) }},
+		{"header", rewriteBlob(snapshotBucket, blobKey, func(msg *raftv1.Snapshot) { msg.Header.Version = 99 })},
+		{"duplicate id", rewriteBlob(snapshotBucket, blobKey, func(msg *raftv1.Snapshot) { msg.Agents = append(msg.Agents, msg.Agents[0]) })},
+		{"missing snapshot", func(tx *bolt.Tx) error { return tx.Bucket(snapshotBucket).Delete(blobKey) }},
+		{"format", func(tx *bolt.Tx) error { return tx.Bucket(metaBucket).Put(formatKey, uint64Bytes(3)) }},
+		{"snapshot index", func(tx *bolt.Tx) error { return tx.Bucket(metaBucket).Put(snapshotIndexKey, []byte{1}) }},
+		{"missing bucket", func(tx *bolt.Tx) error { return tx.DeleteBucket(metaBucket) }},
+		{"unknown bucket", func(tx *bolt.Tx) error {
+			_, err := tx.CreateBucket([]byte("other"))
+			return err
 		}},
-		{"duplicate id", func(tx *bolt.Tx) error {
-			b := tx.Bucket(stateBucket)
-			var msg raftv1.Snapshot
-			if err := proto.Unmarshal(b.Get(snapshotKey), &msg); err != nil {
-				return err
+		// No bucket at all is a fresh file only before its first commit.
+		{"every bucket deleted", func(tx *bolt.Tx) error {
+			for _, name := range [][]byte{logBucket, metaBucket, snapshotBucket} {
+				if err := tx.DeleteBucket(name); err != nil {
+					return err
+				}
 			}
-			msg.Agents = append(msg.Agents, msg.Agents[0])
-			data, err := proto.Marshal(&msg)
-			if err != nil {
-				return err
-			}
-			return putSnapshot(b, data)
+			return nil
 		}},
-		{"missing snapshot", func(tx *bolt.Tx) error { return tx.Bucket(stateBucket).Delete(snapshotKey) }},
-		{"missing bucket", func(tx *bolt.Tx) error { return tx.DeleteBucket(stateBucket) }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			s, dir := newTestStore(t)
 			populate(t, s)
+			if err := s.writeSnapshot(context.Background()); err != nil {
+				t.Fatal(err)
+			}
 			_ = s.Close()
+			mutateFile(t, dir, test.corrupt)
 			path := filepath.Join(dir, FileName)
-			db, err := bolt.Open(path, 0o600, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := db.Update(test.corrupt); err != nil {
-				t.Fatal(err)
-			}
-			_ = db.Close()
 			before, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)
@@ -484,17 +474,34 @@ func TestCorruptStateIsRejectedWithoutReset(t *testing.T) {
 	}
 }
 
+// A file that is not a database is refused and kept. A zero-byte one, which a
+// crash during the first start can leave, gets an error that says what to do.
 func TestInvalidExistingFileIsPreserved(t *testing.T) {
-	for _, data := range [][]byte{nil, []byte("not a bbolt database")} {
+	for _, test := range []struct {
+		data []byte
+		want string
+	}{
+		{nil, "is empty and holds no state (a crash while the first start creates it can leave it so): if this deployment never started, move the file aside and start again; otherwise restore a backup"},
+		{[]byte("not a bbolt database"), "durable: open database: " + bolterrors.ErrInvalid.Error()},
+	} {
+		data := test.data
 		t.Run(fmt.Sprintf("size-%d", len(data)), func(t *testing.T) {
-			dir := t.TempDir()
+			// t.TempDir is not private, which Open refuses before it looks at the file.
+			dir := filepath.Join(t.TempDir(), "state")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			path := filepath.Join(dir, FileName)
 			if err := os.WriteFile(path, data, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if restored, err := Open(dir); err == nil {
+			restored, err := Open(dir)
+			if err == nil {
 				_ = restored.Close()
 				t.Fatal("invalid database accepted")
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Open: %v, want an error that says %q", err, test.want)
 			}
 			after, err := os.ReadFile(path)
 			if err != nil {
@@ -542,23 +549,50 @@ func TestAcknowledgedWritesSurviveProcessExit(t *testing.T) {
 	}
 }
 
-func TestCandidateDoesNotAliasPreviousState(t *testing.T) {
+// A transaction works on clones: the published state keeps its row until the
+// commit, after a rollback, and against later changes to the row the caller wrote.
+func TestTransactionDoesNotAliasPublishedState(t *testing.T) {
 	s, _ := newTestStore(t)
 	populate(t, s)
-	old := s.inner
 	ctx := context.Background()
-	if err := s.WithTx(ctx, func(tx storage.Storage) error {
-		a, err := tx.GetAgent(ctx, "a1")
+	published := func() string {
+		a, err := s.inner.GetAgent(ctx, "a1")
 		if err != nil {
-			return err
+			t.Fatal(err)
 		}
-		a.SetOS("darwin")
-		return tx.UpsertAgent(ctx, a)
-	}); err != nil {
-		t.Fatal(err)
+		return a.OS()
 	}
-	if a, err := old.GetAgent(ctx, "a1"); err != nil || a.OS() != "linux" {
-		t.Fatal("candidate mutated previous snapshot")
+	rollback := errors.New("rollback")
+	var written *model.Agent
+	for _, commit := range []bool{false, true} {
+		err := s.WithTx(ctx, func(tx storage.Storage) error {
+			a, err := tx.GetAgent(ctx, "a1")
+			if err != nil {
+				return err
+			}
+			a.SetOS("darwin")
+			if err := tx.UpsertAgent(ctx, a); err != nil {
+				return err
+			}
+			if os := published(); os != "linux" {
+				t.Errorf("an uncommitted write reached the published state: %s", os)
+			}
+			written = a
+			if !commit {
+				return rollback
+			}
+			return nil
+		})
+		if commit && err != nil || !commit && !errors.Is(err, rollback) {
+			t.Fatal(err)
+		}
+		if want := map[bool]string{false: "linux", true: "darwin"}[commit]; published() != want {
+			t.Fatalf("published OS after commit=%v: %s, want %s", commit, published(), want)
+		}
+	}
+	written.SetOS("plan9")
+	if published() != "darwin" {
+		t.Fatal("the row the caller wrote aliases the published state")
 	}
 }
 
@@ -583,42 +617,44 @@ func TestInvalidSpecConfigDoesNotPublishOrPersist(t *testing.T) {
 }
 
 // A credential that an older version stored with a token over the 1024-byte
-// enrollment cap still restores: the cap applies when discovery enrolls a
-// token, so it must never keep podium from starting.
+// enrollment cap still restores, from a single-blob file or a snapshot: the cap
+// applies when discovery enrolls a token, so it must never keep podium from
+// starting.
 func TestStoredLongAgentTokenStillRestores(t *testing.T) {
-	s, dir := newTestStore(t)
-	populate(t, s)
-	_ = s.Close()
 	token := strings.Repeat("t", 4096)
-	db, err := bolt.Open(filepath.Join(dir, FileName), 0o600, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(stateBucket)
-		var msg raftv1.Snapshot
-		if err := proto.Unmarshal(b.Get(snapshotKey), &msg); err != nil {
-			return err
-		}
-		msg.AgentCredentials[0].Token = token
-		data, err := proto.Marshal(&msg)
-		if err != nil {
-			return err
-		}
-		return putSnapshot(b, data)
-	})
-	_ = db.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	restored, err := Open(dir)
-	if err != nil {
-		t.Fatalf("open with a stored 4096-byte token: %v", err)
-	}
-	defer func() { _ = restored.Close() }()
-	c, err := restored.GetAgentCredential(context.Background(), "a1")
-	if err != nil || c.Token() != token {
-		t.Fatalf("restored credential: %v, want the 4096-byte token", err)
+	setToken := func(msg *raftv1.Snapshot) { msg.AgentCredentials[0].Token = token }
+	for _, test := range []struct {
+		name  string
+		store func(t *testing.T) string
+	}{
+		{"single blob", func(t *testing.T) string {
+			dir := singleBlobStore(t)
+			mutateFile(t, dir, rewriteBlob(legacyBucket, legacySnapshotKey, setToken))
+			return dir
+		}},
+		{"snapshot", func(t *testing.T) string {
+			s, dir := newTestStore(t)
+			populate(t, s)
+			if err := s.writeSnapshot(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			mutateFile(t, dir, rewriteBlob(snapshotBucket, blobKey, setToken))
+			return dir
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			restored, err := Open(test.store(t))
+			if err != nil {
+				t.Fatalf("open with a stored 4096-byte token: %v", err)
+			}
+			defer func() { _ = restored.Close() }()
+			c, err := restored.GetAgentCredential(context.Background(), "a1")
+			if err != nil || c.Token() != token {
+				t.Fatalf("restored credential: %v, want the 4096-byte token", err)
+			}
+		})
 	}
 }

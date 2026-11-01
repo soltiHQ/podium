@@ -3,7 +3,6 @@ package durable
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -12,7 +11,6 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/snapshot"
-	bolt "go.etcd.io/bbolt"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -83,12 +81,14 @@ func TestDurableExecutionRestartRollbackAndNoCascade(t *testing.T) {
 	}
 }
 
+// A single-blob file of snapshot version 2 migrates to a version 3 snapshot with no
+// archive and its nine groups unchanged; the archive then joins the log, and the
+// next snapshot.
 func TestDurableSnapshotV2UpgradePreservesNineGroups(t *testing.T) {
-	s, dir := newTestStore(t)
+	s, _ := newTestStore(t)
 	ctx := context.Background()
 	populate(t, s)
-	before := s.inner.SnapshotForRaft()
-	data, err := snapshot.Marshal(before)
+	data, err := snapshot.Marshal(s.inner.SnapshotForRaft())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,12 +101,7 @@ func TestDurableSnapshotV2UpgradePreservesNineGroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.db.Update(func(tx *bolt.Tx) error { return putSnapshot(tx.Bucket(stateBucket), data) }); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
+	dir := singleBlobFile(t, data)
 	again, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -126,27 +121,34 @@ func TestDurableSnapshotV2UpgradePreservesNineGroups(t *testing.T) {
 	if !proto.Equal(&msg, &got) {
 		t.Fatal("v2 migration changed existing entity fields")
 	}
+	if err := again.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var migrated raftv1.Snapshot
+	if err := proto.Unmarshal(readLayout(t, dir).blob, &migrated); err != nil {
+		t.Fatal(err)
+	}
+	if migrated.GetHeader().GetVersion() != 3 || len(migrated.GetExecutions()) != 0 {
+		t.Fatalf("the snapshot right after the migration is version %d with %d records, want version 3 with none", migrated.GetHeader().GetVersion(), len(migrated.GetExecutions()))
+	}
+	again, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := again.UpsertExecution(ctx, durableArchiveRow(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := again.writeSnapshot(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := again.Close(); err != nil {
 		t.Fatal(err)
 	}
-	db, err := bolt.Open(filepath.Join(dir, FileName), 0o600, nil)
-	if err != nil {
+	var saved raftv1.Snapshot
+	if err := proto.Unmarshal(readLayout(t, dir).blob, &saved); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = db.Close() }()
-	if err := db.View(func(tx *bolt.Tx) error {
-		var saved raftv1.Snapshot
-		if err := proto.Unmarshal(tx.Bucket(stateBucket).Get(snapshotKey), &saved); err != nil {
-			return err
-		}
-		if saved.GetHeader().GetVersion() != 3 || len(saved.GetExecutions()) != 1 {
-			t.Fatal("nextwrite did not upgrade")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
+	if saved.GetHeader().GetVersion() != 3 || len(saved.GetExecutions()) != 1 {
+		t.Fatal("the snapshot after the archive write is not version 3 with the archive")
 	}
 }

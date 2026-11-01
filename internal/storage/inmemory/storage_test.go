@@ -56,6 +56,12 @@ func TestStore_Agents_List_FilterTypeValidation(t *testing.T) {
 	if !errors.Is(err, storage.ErrInvalidArgument) {
 		t.Fatalf("expected ErrInvalidArgument, err=%v", err)
 	}
+
+	// A nil *AgentFilter is of the right type but is no filter: it would panic when asked to match.
+	_, err = s.ListAgents(ctx, (*AgentFilter)(nil), storage.ListOptions{})
+	if !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("expected ErrInvalidArgument for a nil *AgentFilter, err=%v", err)
+	}
 }
 
 func TestStore_Users_CRUD_AndGetBySubject(t *testing.T) {

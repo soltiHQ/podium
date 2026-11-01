@@ -483,6 +483,27 @@ type TxStore interface {
 	WithTx(ctx context.Context, fn func(tx Storage) error) error
 }
 
+// Scanner is an optional capability of a Storage that keeps its rows in process:
+// it returns every row a filter matches in a single pass, where a listing yields
+// them one page at a time and re-reads the store for each. The All* helpers use it
+// when the store implements it and drain the listing otherwise, so a store without
+// it, or behind a wrapper that does not forward it, is only slower.
+//
+// A scan returns what CollectPages over the matching List method returns: the same
+// rows, in the order of ListOptions, as clones the caller owns, and nil when none
+// matches. Unlike pages read one by one, its rows are one consistent state.
+//
+// Returns, for each method:
+//   - ErrInvalidArgument if the filter was not built by this backend.
+//   - ErrUnavailable if the backend is temporarily unavailable.
+//   - The error of ctx once ctx is done.
+type Scanner interface {
+	ScanAgents(ctx context.Context, filter AgentFilter) ([]*model.Agent, error)
+	ScanRollouts(ctx context.Context, filter RolloutFilter) ([]*model.Rollout, error)
+	ScanSpecs(ctx context.Context, filter SpecFilter) ([]*model.Spec, error)
+	ScanExecutions(ctx context.Context, filter ExecutionFilter) ([]*model.ExecutionRecord, error)
+}
+
 // Storage aggregates all storage capabilities for domain entities.
 type Storage interface {
 	ExecutionStore

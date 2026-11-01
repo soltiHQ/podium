@@ -29,15 +29,35 @@ func (s *heartbeatBeforeTx) WithTx(ctx context.Context, fn func(storage.Storage)
 	return s.Storage.WithTx(ctx, fn)
 }
 
-// txCounter counts the transactions opened through it.
+// txCounter counts the transactions opened through it. Embedding storage.Storage
+// hides the optional storage.Scanner of the store behind it, so it forwards the
+// scans: a tick through it then scans in one pass, as it does on the store itself.
 type txCounter struct {
 	storage.Storage
 	txs atomic.Int64
 }
 
+var _ storage.Scanner = (*txCounter)(nil)
+
 func (s *txCounter) WithTx(ctx context.Context, fn func(storage.Storage) error) error {
 	s.txs.Add(1)
 	return s.Storage.WithTx(ctx, fn)
+}
+
+func (s *txCounter) ScanAgents(ctx context.Context, f storage.AgentFilter) ([]*model.Agent, error) {
+	return storage.AllAgents(ctx, s.Storage, f)
+}
+
+func (s *txCounter) ScanRollouts(ctx context.Context, f storage.RolloutFilter) ([]*model.Rollout, error) {
+	return storage.AllRollouts(ctx, s.Storage, f)
+}
+
+func (s *txCounter) ScanSpecs(ctx context.Context, f storage.SpecFilter) ([]*model.Spec, error) {
+	return storage.AllSpecs(ctx, s.Storage, f)
+}
+
+func (s *txCounter) ScanExecutions(ctx context.Context, f storage.ExecutionFilter) ([]*model.ExecutionRecord, error) {
+	return storage.AllExecutions(ctx, s.Storage, f)
 }
 
 func TestFreshHeartbeatNotOverwrittenByStaleTick(t *testing.T) {

@@ -15,6 +15,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/wire"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"github.com/soltiHQ/control-plane/internal/storage/overlay"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -32,7 +33,7 @@ func clockSession(t *testing.T) *model.Session {
 
 func clockCommand(t *testing.T, op *raftv1.Op) []byte {
 	t.Helper()
-	data, err := encodeCommand([]*raftv1.Op{op})
+	data, err := overlay.EncodeCommand([]*raftv1.Op{op})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,9 +175,9 @@ func TestFSMSessionClockExplicitReplaySnapshot(t *testing.T) {
 }
 
 func TestFSMSessionClockLegacyReplaySnapshot(t *testing.T) {
-	for _, version := range []byte{2, commandVersion} {
+	for _, version := range []byte{2, overlay.CommandVersion} {
 		for _, unset := range []bool{false, true} {
-			name := map[byte]string{2: "version2", commandVersion: "current"}[version] + map[bool]string{false: "-previous", true: "-unset"}[unset]
+			name := map[byte]string{2: "version2", overlay.CommandVersion: "current"}[version] + map[bool]string{false: "-previous", true: "-unset"}[unset]
 			t.Run(name, func(t *testing.T) {
 				original := clockSession(t)
 				if unset {
@@ -191,10 +192,10 @@ func TestFSMSessionClockLegacyReplaySnapshot(t *testing.T) {
 				seed.ExpiresAtPresent = false
 				seed.RevokedAtPresent = false
 				create := clockCommand(t, &raftv1.Op{Op: &raftv1.Op_SessionCreate{SessionCreate: seed}})
-				create[len(commandMagic)] = version
+				create[len(overlay.CommandMagic)] = version
 				applyClockCommand(t, f, create, 1)
 				mutation := clockCommand(t, &raftv1.Op{Op: &raftv1.Op_SessionRotateRefresh{SessionRotateRefresh: &raftv1.SessionRotateRefreshMsg{Id: original.ID(), RefreshHash: []byte("legacy-rotation"), ExpiresAtNs: original.ExpiresAt().Add(time.Hour).UnixNano()}}})
-				mutation[len(commandMagic)] = version
+				mutation[len(overlay.CommandMagic)] = version
 				applyClockCommand(t, f, mutation, 2)
 				restored, restoredStore, got := restoreSessionClock(t, f, original.ID())
 				if !got.UpdatedAt().Equal(original.UpdatedAt()) {
@@ -221,7 +222,7 @@ func TestSessionTxReadOwnMutations(t *testing.T) {
 	if err := inner.CreateSession(ctx, original); err != nil {
 		t.Fatal(err)
 	}
-	view := newTxView(inner)
+	view := overlay.New(inner)
 	at := time.Unix(0, 0).UTC()
 	newExpiry := original.ExpiresAt().Add(time.Hour)
 	if err := view.RotateRefreshAt(ctx, original.ID(), []byte("overlay-rotation"), newExpiry, at); err != nil {
@@ -234,7 +235,7 @@ func TestSessionTxReadOwnMutations(t *testing.T) {
 	if !bytes.Equal(rotated.RefreshHash(), []byte("overlay-rotation")) || !rotated.ExpiresAt().Equal(newExpiry) || !rotated.UpdatedAt().Equal(at) {
 		t.Fatal("rotation missing from transaction read")
 	}
-	if view.ops[0].GetSessionRotateRefresh().UpdatedAtNs == nil || view.ops[0].GetSessionRotateRefresh().GetUpdatedAtNs() != 0 {
+	if view.Ops()[0].GetSessionRotateRefresh().UpdatedAtNs == nil || view.Ops()[0].GetSessionRotateRefresh().GetUpdatedAtNs() != 0 {
 		t.Fatal("explicit epoch omitted from recorded command")
 	}
 	rotated.SetUpdatedAt(at.Add(time.Hour))
@@ -269,7 +270,7 @@ func TestSessionTxReadOwnMutations(t *testing.T) {
 	}
 	// The exact recorded operations produce the same state as the read overlay.
 	f := NewFSM(inner, nil)
-	data, err := encodeCommand(view.ops)
+	data, err := overlay.EncodeCommand(view.Ops())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +291,7 @@ func TestSessionTxRejectedMutationsRecordNoOperations(t *testing.T) {
 	if err := inner.CreateSession(ctx, original); err != nil {
 		t.Fatal(err)
 	}
-	view := newTxView(inner)
+	view := overlay.New(inner)
 	tests := []struct {
 		name string
 		call func() error
@@ -307,8 +308,12 @@ func TestSessionTxRejectedMutationsRecordNoOperations(t *testing.T) {
 			if err := tc.call(); !errors.Is(err, tc.want) {
 				t.Fatalf("got %v want %v", err, tc.want)
 			}
-			if len(view.ops) != 0 || len(view.sessions) != 0 {
-				t.Fatal("rejected mutation recorded an operation or overlay")
+			if !view.Empty() {
+				t.Fatal("rejected mutation recorded an operation")
+			}
+			got, err := view.GetSession(ctx, original.ID())
+			if err != nil || !proto.Equal(wire.SessionToProto(original), wire.SessionToProto(got)) {
+				t.Fatal("rejected mutation changed the session the transaction reads", err)
 			}
 		})
 	}

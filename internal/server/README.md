@@ -76,6 +76,12 @@ Both follow the same pattern:
 3. `Stop` closes a signal channel; safe for multiple calls
 4. `tick()` lists entities, filters actionable ones, applies transitions
 
+A tick runner is built on `runner/base`, which ticks only while this replica
+leads. `base.Runner.OnLeader(fn)` registers a function to run each time the
+replica takes leadership, before the first tick of that term. The sync runner and
+the history collector use it to tell the history service that another replica
+may have written history in the meantime.
+
 ### Lifecycle runner
 Each tick takes the agents whose next-heartbeat deadline has passed (or was
 never set) and moves them along `active → inactive → disconnected → deleted`
@@ -115,8 +121,9 @@ by how long they have been silent. `hb` is the heartbeat the agent reported, or
 
 ### Sync runner
 Each tick reconciles the due rollouts: install, update, uninstall, or an
-observation that checks an installed task still exists on its agent. Failing
-work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s, 40s, …):
+observation that checks the tasks installed on an agent still exist there.
+Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
+40s, …):
 
 | Backoff | n counts                                       | Until it passes           |
 |---------|------------------------------------------------|---------------------------|
@@ -141,16 +148,50 @@ work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s, 40s, …):
   `push_timeout` (15s): first the uninstalls of tasks the agent never got
   (they need no call and run even while the agent backs off), then pushes,
   ordered by last failure (rollouts that never failed first, then the oldest
-  failure), then observations, so an observation never holds back a push.
+  failure), then the observation, so an observation never holds back a push.
 - **A turn gets `push_timeout` of wall time.** Once an agent's turn in a tick
   has used `push_timeout`, it starts no more calls. The call under way
   finishes, so an agent that answers slowly, but within `push_timeout`, holds
   a tick for about one `push_timeout` plus one call, however many rollouts it
   has. What is left waits for the next tick and records nothing.
-  Observations go on where the agent's last turn stopped, so every synced
-  rollout is observed in turn.
+- **One listing observes all of an agent's rollouts.** The observation is a
+  listing of the agent's tasks, with no filter, instead of a call per rollout.
+  Each page is a call like any other and starts only while the turn is within
+  its budget. A page starts at 1000 tasks. One that the proxy refuses as too
+  large (an answer over 4 MiB) is asked again from the same cursor with half
+  the limit, down to one task, and the smaller limit holds for the rest of the
+  turn; the next turn starts at 1000 again. The listing is bounded, whatever
+  the agent answers: a page with more tasks than it was asked for, or a cursor
+  over 4096 bytes, is refused, and a listing that would hold more than 65536
+  task IDs or 32 MiB of them, or take more than 1024 calls, refused pages
+  included, stops. A synced rollout whose task is missing from the listing is
+  queued for a reinstall, but only a complete listing shows a task missing. If
+  the budget runs out, a page fails or is refused (a task too large to list
+  even alone included), the listing passes a bound, the agent returns a cursor
+  it returned before, or its pages name different snapshots (resource
+  versions that differ; a page without one is let through), no rollout is
+  judged and none is touched, and the next tick lists again from the first
+  page, as a cursor holds only within a tick. So every synced rollout of an
+  agent is observed each tick when, after the turn's pushes, the agent's task
+  list can be listed within those bounds, with the last page starting inside
+  `push_timeout`; an agent whose list cannot is not observed. A synced rollout
+  without a task makes no call.
+- **Reinstalls are not bounded by `push_timeout`.** After a complete listing,
+  each rollout whose task is missing is queued for a reinstall by a write to
+  the store, about 1 ms on the durable store; in raft mode each write is a
+  replicated commit. These writes make no agent call, so the turn's budget does
+  not stop them: an agent that lost all its tasks has one write per rollout in
+  one turn.
+- **A listing that cannot finish is logged when that changes.** When an
+  agent's listing turns incomplete, the runner logs one warning that names the
+  cause (a task too large to list, the budget used, a repeated cursor, pages of
+  different snapshots, a page answered with an error, a page with more tasks
+  than asked, a cursor that is too long, a listing over the bounds). When it
+  turns complete again, one info line names the latest cause. Neither is
+  repeated on every tick, and a cause that changes meanwhile is not logged. An
+  agent that flips between the two logs a pair of lines for each flip.
 - **An unanswered call ends the agent's turn.** A failed push records its
-  failure on the rollout; a failed observation records nothing and only backs
+  failure on the rollout; an unanswered listing records nothing and only backs
   the agent off. The agent's other rollouts wait, untouched. An answer,
   whatever its status, does not end the turn. Nor does a refused gRPC
   connection: gRPC reports it as `Unavailable`, which agents also answer with.

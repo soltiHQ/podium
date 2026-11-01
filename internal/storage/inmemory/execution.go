@@ -29,6 +29,20 @@ func (f *ExecutionFilter) Matches(e *model.ExecutionRecord) bool {
 	return true
 }
 
+// executionPredicate resolves the filter of a listing or a scan to its predicate.
+// A nil filter accepts every record; one built by another backend, or a nil
+// *ExecutionFilter, is rejected.
+func executionPredicate(filter storage.ExecutionFilter) (func(*model.ExecutionRecord) bool, error) {
+	if filter == nil {
+		return nil, nil
+	}
+	typed, ok := filter.(*ExecutionFilter)
+	if !ok || typed == nil {
+		return nil, storage.ErrInvalidArgument
+	}
+	return typed.Matches, nil
+}
+
 func (s *state) BuildExecutionFilter(c storage.ExecutionQueryCriteria) storage.ExecutionFilter {
 	c.Statuses = append([]string(nil), c.Statuses...)
 	return &ExecutionFilter{criteria: c}
@@ -69,13 +83,9 @@ func (s *state) ListExecutions(ctx context.Context, f storage.ExecutionFilter, o
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	var pred func(*model.ExecutionRecord) bool
-	if f != nil {
-		typed, ok := f.(*ExecutionFilter)
-		if !ok || typed == nil {
-			return nil, storage.ErrInvalidArgument
-		}
-		pred = typed.Matches
+	pred, err := executionPredicate(f)
+	if err != nil {
+		return nil, err
 	}
 	return s.executions.List(ctx, pred, o)
 }

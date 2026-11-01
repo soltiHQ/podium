@@ -165,22 +165,31 @@ func (s *Service) AgentToken(ctx context.Context, agentID string) (string, error
 	return c.Token(), nil
 }
 
-// Upsert an agent.
-func (s *Service) Upsert(ctx context.Context, m *model.Agent) error {
+// Upsert an agent. The row keeps its creation time, the labels that the control
+// plane owns and, when the sync reports none, its heartbeat interval.
+//
+// The result says what the sync changed in the row: see UpsertResult. It is
+// judged inside the transaction, against the row the sync replaces, and is zero
+// when the sync fails. A reconnected agent also gets its failed rollouts back
+// to pending.
+func (s *Service) Upsert(ctx context.Context, m *model.Agent) (UpsertResult, error) {
 	if m == nil {
-		return storage.ErrInvalidArgument
+		return UpsertResult{}, storage.ErrInvalidArgument
 	}
 
-	var existed bool
-	var reconnected bool
+	var (
+		res     UpsertResult
+		existed bool
+	)
 	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		res, existed = UpsertResult{}, false
 		existing, err := tx.GetAgent(ctx, m.ID())
 		switch {
 		case err == nil:
 			existed = true
 			// m comes from a sync, so it is active: a reconnect is an
 			// existing row that was not, or an uptime that went down.
-			reconnected = m.ReconnectedSince(existing.Status(), existing.UptimeSeconds())
+			res.Reconnected = m.ReconnectedSince(existing.Status(), existing.UptimeSeconds())
 			m.SetCreatedAt(existing.CreatedAt())
 			for k, v := range existing.LabelsAll() {
 				m.LabelAdd(k, v)
@@ -188,8 +197,9 @@ func (s *Service) Upsert(ctx context.Context, m *model.Agent) error {
 			if m.HeartbeatInterval() == 0 && existing.HeartbeatInterval() > 0 {
 				m.SetHeartbeatInterval(existing.HeartbeatInterval())
 			}
+			res.Visible = m.ChangedVisiblySince(existing)
 		case errors.Is(err, storage.ErrNotFound):
-			reconnected = true
+			res = UpsertResult{Visible: true, Reconnected: true}
 		default:
 			return err
 		}
@@ -199,7 +209,7 @@ func (s *Service) Upsert(ctx context.Context, m *model.Agent) error {
 		if err := tx.UpsertAgent(ctx, m); err != nil {
 			return err
 		}
-		if reconnected {
+		if res.Reconnected {
 			rollouts, err := storage.AllRollouts(ctx, tx, tx.BuildRolloutFilter(storage.RolloutQueryCriteria{AgentID: m.ID()}))
 			if err != nil {
 				return err
@@ -224,15 +234,17 @@ func (s *Service) Upsert(ctx context.Context, m *model.Agent) error {
 		return nil
 	})
 	if err != nil {
-		return err
+		return UpsertResult{}, err
 	}
 
 	s.logger.Debug().
 		Str("agent_id", m.ID()).
 		Bool("existed", existed).
+		Bool("visible", res.Visible).
+		Bool("reconnected", res.Reconnected).
 		Str("heartbeat", m.HeartbeatInterval().String()).
 		Msg("agent upserted")
-	return nil
+	return res, nil
 }
 
 // PatchLabels replaces labels for an agent.

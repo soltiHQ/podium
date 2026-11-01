@@ -25,6 +25,10 @@ type ExecutionStore interface {
 	DeleteExecution(context.Context, string) error
 }
 
+// AllExecutions returns every record the filter matches, as AllRollouts does rollouts.
 func AllExecutions(ctx context.Context, s ExecutionStore, f ExecutionFilter) ([]*model.ExecutionRecord, error) {
+	if sc, ok := s.(Scanner); ok {
+		return sc.ScanExecutions(ctx, f)
+	}
 	return CollectPages(ctx, func(o ListOptions) (*ExecutionListResult, error) { return s.ListExecutions(ctx, f, o) })
 }

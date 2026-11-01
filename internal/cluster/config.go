@@ -29,11 +29,18 @@ type Config struct {
 // DefaultStandaloneDataDir is relative to the process working directory.
 const DefaultStandaloneDataDir = "data/podium"
 
+// DefaultStandaloneSnapshotThreshold is the number of log entries after which the
+// durable store writes a snapshot and truncates its log.
+const DefaultStandaloneSnapshotThreshold = 4096
+
 // StandaloneConfig configures persistent single-node storage.
 // Ephemeral explicitly opts into volatile development state and ignores DataDir.
+// SnapshotThreshold is the number of log entries that starts a snapshot; zero
+// keeps the default.
 type StandaloneConfig struct {
-	Ephemeral bool   `yaml:"ephemeral" envconfig:"EPHEMERAL"`
-	DataDir   string `yaml:"data_dir" envconfig:"DATA_DIR"`
+	Ephemeral         bool   `yaml:"ephemeral" envconfig:"EPHEMERAL"`
+	DataDir           string `yaml:"data_dir" envconfig:"DATA_DIR"`
+	SnapshotThreshold int    `yaml:"snapshot_threshold" envconfig:"SNAPSHOT_THRESHOLD"`
 }
 
 // RaftConfig parametrises the raft backend.
@@ -56,16 +63,23 @@ type DiscoveryConfig struct {
 
 // DefaultConfig returns a standalone config.
 func DefaultConfig() Config {
-	return Config{Backend: BackendStandalone, Standalone: StandaloneConfig{DataDir: DefaultStandaloneDataDir}}
+	return Config{Backend: BackendStandalone, Standalone: StandaloneConfig{
+		DataDir:           DefaultStandaloneDataDir,
+		SnapshotThreshold: DefaultStandaloneSnapshotThreshold,
+	}}
 }
 
 // Validate requires a persistent standalone location unless ephemeral mode is
 // explicitly selected. Ephemeral takes precedence over a default/yaml/env path.
+// A negative snapshot threshold is refused.
 func (c Config) Validate() error {
 	switch c.Backend {
 	case "", BackendStandalone:
 		if !c.Ephemeral() && strings.TrimSpace(c.Standalone.DataDir) == "" {
 			return fmt.Errorf("standalone.data_dir is required unless standalone.ephemeral is explicitly true")
+		}
+		if c.Standalone.SnapshotThreshold < 0 {
+			return fmt.Errorf("standalone.snapshot_threshold must not be negative")
 		}
 	case BackendRaft:
 	default:

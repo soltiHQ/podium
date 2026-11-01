@@ -107,3 +107,72 @@ func TestStartTwice(t *testing.T) {
 	}
 	_ = r.Stop(context.Background())
 }
+
+// terms is a Leadership that leads for a fixed number of terms, each ended by end.
+type terms struct {
+	n      int
+	mu     sync.Mutex
+	cancel context.CancelFunc
+}
+
+func (*terms) AmLeader() bool        { return true }
+func (*terms) CurrentLeader() string { return "" }
+
+func (l *terms) WhenLeader(ctx context.Context, fn func(context.Context) error) error {
+	for range l.n {
+		term, cancel := context.WithCancel(ctx)
+		l.mu.Lock()
+		l.cancel = cancel
+		l.mu.Unlock()
+		err := fn(term)
+		cancel()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (l *terms) end() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.cancel()
+}
+
+func TestOnLeaderRunsBeforeTheFirstTickOfEachTerm(t *testing.T) {
+	leadership := &terms{n: 3}
+	var events []string
+	r := base.New("test", time.Millisecond, leadership, discardLogger(), func(context.Context) {
+		events = append(events, "tick")
+		leadership.end()
+	})
+	r.OnLeader(func() { events = append(events, "leader") })
+
+	done := make(chan error, 1)
+	go func() { done <- r.Start(context.Background()) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return after the last term")
+	}
+
+	// Each term opens with the hook and ticks at least once after it.
+	if len(events) < 6 || events[0] != "leader" {
+		t.Fatalf("events %v", events)
+	}
+	hooks := 0
+	for i, event := range events {
+		if event == "leader" {
+			hooks++
+			if i+1 == len(events) || events[i+1] != "tick" {
+				t.Fatalf("a term ended without a tick: %v", events)
+			}
+		}
+	}
+	if hooks != 3 {
+		t.Fatalf("hook ran %d times in 3 terms: %v", hooks, events)
+	}
+}

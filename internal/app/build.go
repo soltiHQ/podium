@@ -80,26 +80,45 @@ func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history
 	}, nil
 }
 
+// hubOptions are the options of the event hub that cfg asks for. A zero
+// events.coalesce keeps the default window, so the hub is never silently left
+// without one.
+func hubOptions(cfg config.Config) []event.Option {
+	return []event.Option{event.WithCoalesce(cfg.Events.WithDefaults().Coalesce)}
+}
+
 // buildCluster assembles the storage + leadership + event-hub trio declared
 // by cfg. In raft mode the hub is also wired to replicate mutations through
-// the Raft log. Returns the store/leadership/hub the rest of the app uses,
+// the Raft log. hubOpts configure the hub, before the Raft node can apply the
+// first event to it. Returns the store/leadership/hub the rest of the app uses,
 // plus a shutdown function for the storage resources (nil for ephemeral standalone).
-func buildCluster(cfg cluster.Config, logger zerolog.Logger) (storage.Storage, cluster.Leadership, *event.Hub, func(), error) {
+func buildCluster(cfg cluster.Config, logger zerolog.Logger, hubOpts ...event.Option) (storage.Storage, cluster.Leadership, *event.Hub, func(), error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("cluster: %w", err)
 	}
 	inner := inmemory.New()
-	hub := event.NewHub(logger)
+	hub := event.NewHub(logger, hubOpts...)
 	switch cfg.Backend {
 	case "", cluster.BackendStandalone:
 		if cfg.Ephemeral() {
 			logger.Warn().Msg("standalone.ephemeral=true: control-plane state will be lost on restart")
 			return inner, standalone.NewLeadership(), hub, nil, nil
 		}
-		store, err := durable.Open(cfg.Standalone.DataDir)
+		store, err := durable.Open(cfg.Standalone.DataDir,
+			durable.WithSnapshotThreshold(cfg.Standalone.SnapshotThreshold),
+			durable.WithFailureHandler(func(err error) {
+				logger.Error().Err(err).Str("data_dir", cfg.Standalone.DataDir).
+					Msg("standalone durable storage failed: reads and writes fail until restart")
+			}),
+		)
 		if err != nil {
 			hub.Close()
 			return nil, nil, nil, nil, err
+		}
+		if store.Migrated() {
+			// Once: the migrated file is in format 2 from here on.
+			logger.Warn().Str("data_dir", cfg.Standalone.DataDir).
+				Msgf("standalone durable storage migrated %s from single-blob to format 2: older versions refuse the migrated file, so rolling back needs a copy made before this start", durable.FileName)
 		}
 		logger.Info().Str("data_dir", cfg.Standalone.DataDir).Msg("standalone durable storage restored")
 		return store, standalone.NewLeadership(), hub, func() {

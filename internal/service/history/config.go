@@ -6,6 +6,8 @@ import (
 )
 
 // Config bounds retained terminal observations, independently of SDK retention.
+// Retention ages a row from the time it was captured, not from the finish time the
+// agent reported, which may be off by a clock.
 // MaxBytes charges ExecutionRecord.SizeBytes; it is not disk or RSS accounting.
 type Config struct {
 	Retention  time.Duration `yaml:"retention" envconfig:"RETENTION"`

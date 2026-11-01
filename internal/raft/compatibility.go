@@ -9,6 +9,7 @@ import (
 
 	hraft "github.com/hashicorp/raft"
 	boltdb "github.com/hashicorp/raft-boltdb/v2"
+	"github.com/soltiHQ/control-plane/internal/storage/overlay"
 	"github.com/soltiHQ/control-plane/internal/storage/snapshot"
 	bolt "go.etcd.io/bbolt"
 )
@@ -58,7 +59,7 @@ func preflightLogs(logs hraft.LogStore) error {
 			return fmt.Errorf("raft: preflight read log %d: %w", index, err)
 		}
 		if err == nil && entry.Type == hraft.LogCommand {
-			if _, err := decodeCommand(entry.Data); err != nil {
+			if _, err := overlay.DecodeCommand(entry.Data); err != nil {
 				return fmt.Errorf("raft: preflight command at log %d: %w", index, err)
 			}
 		}

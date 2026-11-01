@@ -9,6 +9,8 @@ import (
 
 // CollectPages drains an opaque-cursor listing before callers mutate its rows.
 // Rejecting repeated cursors prevents a faulty backend from wedging a runner.
+// A store that holds its rows in process re-reads all of them for each page, so
+// it should be a Scanner; the All* helpers prefer that to this.
 func CollectPages[T any](ctx context.Context, list func(ListOptions) (*ListResult[T], error)) ([]T, error) {
 	var items []T
 	seen := make(map[string]bool)
@@ -36,14 +38,27 @@ func CollectPages[T any](ctx context.Context, list func(ListOptions) (*ListResul
 	}
 }
 
+// AllRollouts returns every rollout the filter matches, in the order of ListOptions:
+// in one pass if the store is a Scanner, page by page otherwise.
 func AllRollouts(ctx context.Context, s RolloutStore, filter RolloutFilter) ([]*model.Rollout, error) {
+	if sc, ok := s.(Scanner); ok {
+		return sc.ScanRollouts(ctx, filter)
+	}
 	return CollectPages(ctx, func(o ListOptions) (*RolloutListResult, error) { return s.ListRollouts(ctx, filter, o) })
 }
 
+// AllSpecs returns every spec the filter matches, as AllRollouts does rollouts.
 func AllSpecs(ctx context.Context, s SpecStore, filter SpecFilter) ([]*model.Spec, error) {
+	if sc, ok := s.(Scanner); ok {
+		return sc.ScanSpecs(ctx, filter)
+	}
 	return CollectPages(ctx, func(o ListOptions) (*SpecListResult, error) { return s.ListSpecs(ctx, filter, o) })
 }
 
+// AllAgents returns every agent the filter matches, as AllRollouts does rollouts.
 func AllAgents(ctx context.Context, s AgentStore, filter AgentFilter) ([]*model.Agent, error) {
+	if sc, ok := s.(Scanner); ok {
+		return sc.ScanAgents(ctx, filter)
+	}
 	return CollectPages(ctx, func(o ListOptions) (*AgentListResult, error) { return s.ListAgents(ctx, filter, o) })
 }

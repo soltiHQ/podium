@@ -284,6 +284,26 @@ When the user table is empty, the first start creates the administrator
 Once users exist the variable is ignored, with one WARN per start: remove it from
 the environment after the first start. See `internal/bootstrap/README.md`.
 
+## Standalone storage
+
+```yaml
+cluster:
+  standalone:
+    data_dir: /var/lib/solti/podium   # default data/podium
+    snapshot_threshold: 4096          # log entries that start a snapshot
+```
+
+The standalone backend keeps its state in `podium.db` under
+`cluster.standalone.data_dir` (env `SOLTI_CLUSTER_STANDALONE_DATA_DIR`), unless
+`cluster.standalone.ephemeral: true` keeps it in memory. A blank `data_dir`
+without that flag fails configuration loading.
+
+`cluster.standalone.snapshot_threshold` (env
+`SOLTI_CLUSTER_STANDALONE_SNAPSHOT_THRESHOLD`, default 4096) is the number of
+log entries after which the store writes its state as a snapshot and truncates
+the log; 16 MiB of entries does the same. Zero keeps the default; a negative
+value fails configuration loading. See `internal/storage/durable/README.md`.
+
 ## Observed run history
 
 ```yaml
@@ -309,6 +329,26 @@ Zero values inherit owning-package defaults; negative values and collector count
 above their supported bounds fail configuration loading. `max_bytes` measures
 conservative retained-record payload, not database/RSS size. Captures are best
 effort and bound each task buffer to 8 MiB in addition to page/time limits.
+
+Retention is enforced from counters of the archive's rows, bytes and oldest
+capture time, not by reading the archive: the collector scans it only when a
+limit is crossed. A node that takes leadership counts it again once, since
+another node may have written to it. A row ages from the time it was captured.
+
+## Event stream
+
+```yaml
+events:
+  coalesce: 1s    # env SOLTI_EVENTS_COALESCE
+```
+
+`events.coalesce` (default 1s) is the window in which the event hub coalesces the refresh pulses it sends to the
+browsers' event streams (`agent_update`, `spec_update`, `dashboard_update`, `user_update`, `session_update`): per kind,
+the first pulse after a quiet period goes out at once and the pulses that follow within the window become one trailing
+delivery at its end, so a burst reaches a browser as two pulses, and its last change is never lost. It is also the
+longest a pulse can wait. Zero keeps the default; a negative value fails configuration loading. The keepalive and
+the access re-check of the stream are not pulses and are not delayed. In raft mode each replica coalesces for its own
+browsers. See `internal/event/README.md`.
 
 ## Agent lifecycle
 
@@ -359,6 +399,10 @@ shows a reconnect: the agent active again after it was inactive or
 disconnected, or with a lower uptime. An agent that stays active keeps it. Each
 agent's turn in a tick starts calls for one `push_timeout` of wall time at
 most; what is left waits for the next tick, so an agent that answers slowly
-holds a tick for about one `push_timeout`, not one per rollout. Zero or
-negative values inherit the defaults shown. See `internal/server/README.md`
-for the scheduling.
+holds a tick for about one `push_timeout`, not one per rollout. The check that
+an agent still has its tasks is one listing of them, up to 1000 to a page (fewer
+when the agent's answer would be too large), and only a whole listing counts:
+an agent whose last page cannot start inside what is left of one `push_timeout`
+after its pushes, or whose listing passes the bounds in the server README (65536
+task IDs, 32 MiB of them, 1024 calls), is not checked. Zero or negative values
+inherit the defaults shown. See `internal/server/README.md` for the scheduling.

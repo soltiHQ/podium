@@ -44,7 +44,7 @@ func TestSyncOverRolloutsOfADeletedAgent(t *testing.T) {
 
 			r.tick(ctx)
 
-			if calls := len(fp.applies) + len(fp.deletes) + len(fp.gets); calls != 0 {
+			if calls := len(fp.applies) + len(fp.deletes) + len(fp.lists); calls != 0 {
 				t.Fatalf("the deleted agent got %d calls, want none", calls)
 			}
 			after, err := s.GetRollout(ctx, pending.ID())

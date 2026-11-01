@@ -143,12 +143,13 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	existing, getErr := h.agentSVC.Get(r.Context(), in.GetId())
-	if err = h.agentSVC.Upsert(r.Context(), a); err != nil {
+	res, err := h.agentSVC.Upsert(r.Context(), a)
+	if err != nil {
 		h.logger.Error().Err(err).Str("agent_id", in.GetId()).Msg("upsert failed")
 		response.Unavailable(w, r, mode)
 		return
 	}
-	recordSyncEvents(h.eventHub, in.GetId(), in.GetName(), existing, getErr)
+	recordSyncEvents(h.eventHub, in.GetId(), in.GetName(), existing, getErr, res)
 
 	resp := &discoverv1.SyncResponse{Success: true}
 	respBytes, err := discoverySyncMarshal.Marshal(resp)
@@ -218,11 +219,12 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 	}
 
 	existing, getErr := g.agentSVC.Get(ctx, req.GetId())
-	if err = g.agentSVC.Upsert(ctx, a); err != nil {
+	res, err := g.agentSVC.Upsert(ctx, a)
+	if err != nil {
 		g.logger.Error().Err(err).Str("agent_id", req.GetId()).Msg("upsert failed")
 		return nil, status.FromError(ctx, err).Err()
 	}
-	recordSyncEvents(g.hub, req.GetId(), req.GetName(), existing, getErr)
+	recordSyncEvents(g.hub, req.GetId(), req.GetName(), existing, getErr, res)
 	return &discoverv1.SyncResponse{Success: true}, nil
 }
 
@@ -300,7 +302,16 @@ func agentFromSyncRequest(req *discoverv1.SyncRequest) (*model.Agent, error) {
 // Sync transports after a successful upsert. existing and getErr describe the
 // agent state observed *before* the upsert (getErr == ErrNotFound ⇒ brand new;
 // a non-active existing agent ⇒ reconnect that clears outstanding issues).
-func recordSyncEvents(hub *event.Hub, id, name string, existing *model.Agent, getErr error) {
+//
+// res is what the upsert changed in the stored row. The UI agent views get an
+// agent_update only when the sync gave them something new: a visible change (a
+// new agent, or another status, name, endpoint, labels or capabilities) or a
+// reconnect (see agent.UpsertResult: the agent is new, was not active, or
+// reports less uptime, because it restarted). A heartbeat that moves only the
+// time of the sync and the uptime sends none; a pulse for each would make every
+// open agents, dashboard and spec page fetch again, and each spec page compute
+// its placement again. The pages poll for those two.
+func recordSyncEvents(hub *event.Hub, id, name string, existing *model.Agent, getErr error, res agent.UpsertResult) {
 	switch {
 	case errors.Is(getErr, storage.ErrNotFound):
 		hub.Record(event.AgentConnected, event.Payload{ID: id, Name: name, By: "discovery"})
@@ -314,7 +325,9 @@ func recordSyncEvents(hub *event.Hub, id, name string, existing *model.Agent, ge
 			hub.Notify(event.RefreshDashboard)
 		}
 	}
-	hub.Notify(event.RefreshAgents)
+	if res.Visible || res.Reconnected {
+		hub.Notify(event.RefreshAgents)
+	}
 }
 
 // bearerToken extracts the credential from an Authorization header value,

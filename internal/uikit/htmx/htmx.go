@@ -61,7 +61,7 @@ func defaultConfig() Config {
 		UserSessionsRefresh: Every3m,
 
 		AgentsRefresh:      Every1m,
-		AgentDetailRefresh: Every3m,
+		AgentDetailRefresh: Every1m,
 		AgentTasksRefresh:  Every1m,
 
 		SpecsRefresh:      Every3m,

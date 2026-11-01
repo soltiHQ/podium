@@ -109,6 +109,7 @@ type sseOptions struct {
 	access       func(*http.Request) error // nil: allowAccess
 	identity     *identity.Identity        // stored in each request context, as Auth does
 	smallBuffers bool                      // see smallSendBuffers
+	hub          []Option                  // options of the hub
 }
 
 // sseServer is a fresh hub's event stream served over a real http.Server.
@@ -133,7 +134,7 @@ func serveSSEWith(t *testing.T, opts sseOptions) *sseServer {
 	if access == nil {
 		access = allowAccess
 	}
-	s := &sseServer{hub: newTestHub(), writes: &writeLog{}, ended: make(chan struct{})}
+	s := &sseServer{hub: newTestHub(opts.hub...), writes: &writeLog{}, ended: make(chan struct{})}
 	t.Cleanup(s.hub.Close)
 	stream := s.hub.SSEHandler(access)
 	var endOnce sync.Once
@@ -375,6 +376,50 @@ func TestEventStreamKeepaliveCountsFromLastWrite(t *testing.T) {
 	}
 	if idle := keepalive.at.Sub(event.at); idle < interval {
 		t.Fatalf("keepalive written %v after the event, want a full %v of silence", idle, interval)
+	}
+}
+
+// TestEventStreamKeepaliveAndRecheckSurviveCoalescing: the window changes when
+// events reach the stream and nothing else. Under a flood of pulses the stream
+// writes about one event per window, its keepalives fill the silence between
+// them, and it re-checks access every keepalive, as it does without a window.
+func TestEventStreamKeepaliveAndRecheckSurviveCoalescing(t *testing.T) {
+	const (
+		keepalive = 50 * time.Millisecond
+		window    = 300 * time.Millisecond
+		run       = 1500 * time.Millisecond
+	)
+	withKeepalive(t, keepalive)
+	var rechecks atomic.Int32
+	s := serveSSEWith(t, sseOptions{
+		hub:    []Option{WithCoalesce(window)},
+		access: func(*http.Request) error { rechecks.Add(1); return nil },
+	})
+	frames := openStream(t, s.srv.URL)
+	waitSubscribed(t, s.hub)
+	notifyEvery(t, s.hub, RefreshAgents, time.Millisecond)
+
+	var events, keepalives int
+	readFor(t, frames, run, func(_ int, frame string) {
+		switch frame {
+		case "data: " + RefreshAgents:
+			events++
+		case keepaliveFrame:
+			keepalives++
+		default:
+			t.Fatalf("stream wrote %q, want an event or a keepalive", frame)
+		}
+	})
+	// The first pulse at once, then one per window: 6 in 1.5 s, without a window 1500.
+	if events < 3 || events > int(run/window)+3 {
+		t.Errorf("%d events in %v at a %v window, want about %d", events, run, window, run/window+1)
+	}
+	// The silence between events, 250 ms of each window, is 5 keepalives.
+	if keepalives < 10 {
+		t.Errorf("%d keepalives in %v of mostly silence, want at least 10", keepalives, run)
+	}
+	if n := rechecks.Load(); n < int32(run/keepalive/2) {
+		t.Errorf("%d access re-checks in %v at a %v keepalive, want at least %d", n, run, keepalive, run/keepalive/2)
 	}
 }
 

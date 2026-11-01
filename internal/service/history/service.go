@@ -7,21 +7,88 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
+	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"golang.org/x/sync/semaphore"
 )
 
+// usage is what the archive holds, as retention weighs it against its limits.
+type usage struct {
+	rows   int
+	bytes  int64     // the sum of ExecutionRecord.SizeBytes
+	oldest time.Time // when the oldest row was captured; zero while there are none
+}
+
+// add counts one more row.
+func (u *usage) add(e *model.ExecutionRecord) {
+	if at := e.CapturedAt(); u.rows == 0 || at.Before(u.oldest) {
+		u.oldest = at
+	}
+	u.rows++
+	u.bytes += e.SizeBytes()
+}
+
+// measure counts rows.
+func measure(rows []*model.ExecutionRecord) usage {
+	var u usage
+	for _, e := range rows {
+		u.add(e)
+	}
+	return u
+}
+
+// exceeds reports whether retention drops a row at now: a limit of cfg is crossed
+// or the oldest row has aged out.
+func (u usage) exceeds(cfg Config, now time.Time) bool {
+	return u.rows > cfg.MaxRecords || u.bytes > cfg.MaxBytes || (u.rows > 0 && u.oldest.Before(now.Add(-cfg.Retention)))
+}
+
+// Service archives terminal attempts and enforces the retention of the archive.
+//
+// Retention weighs the archive by counters instead of reading it: a pass over the
+// rows happens only when a limit is crossed. A counter that is off would leave a
+// limit unenforced, so the service skips a pass only while the counters are
+// exact: one pass counts the store, and from then on only the transactions of this
+// service that committed change it. They stop being exact when a transaction of
+// the service fails, as it may still have landed, and when Resume reports that
+// another node may have written. The next decision counts again.
+//
+// There must be one Service per store. The counters know of the writes of their
+// own Service only, so a second one over the same store would under-count
+// silently.
 type Service struct {
 	store storage.Storage
 	cfg   Config
 	now   func() time.Time
+
+	// gate orders each retention decision and each write with the counters they
+	// read and move. A write holds it across its transaction, as the stores run one
+	// transaction at a time anyway. A caller waits for it as long as its ctx lasts,
+	// as for the writer gate of the durable store, so a capture on a deadline gives
+	// up on a stuck commit and changes nothing.
+	gate  *semaphore.Weighted
+	usage usage
+	exact bool // usage is what the store holds
+	// resumed is set by Resume, which must not wait for a write.
+	resumed atomic.Bool
 }
 
+// Resume tells the service that this node resumes history work after a pause in
+// which another node may have written to the archive. The runners call it when
+// they take leadership. Only the node that leads writes, and nothing else tells
+// this one what the others did, so the next decision counts the store again.
+func (s *Service) Resume() { s.resumed.Store(true) }
+
+// New returns the Service that archives into store. There must be one per store:
+// see Service.
 func New(store storage.Storage, cfg Config) (*Service, error) {
 	if store == nil {
 		return nil, storage.ErrInvalidArgument
@@ -29,7 +96,7 @@ func New(store storage.Storage, cfg Config) (*Service, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	return &Service{store: store, cfg: cfg.WithDefaults(), now: func() time.Time { return time.Now().UTC() }}, nil
+	return &Service{store: store, cfg: cfg.WithDefaults(), now: func() time.Time { return time.Now().UTC() }, gate: semaphore.NewWeighted(1)}, nil
 }
 func (s *Service) Config() Config { return s.cfg }
 func (s *Service) List(ctx context.Context, q ListQuery) (*storage.ExecutionListResult, error) {
@@ -248,9 +315,18 @@ func (s *Service) commit(ctx context.Context, records []*model.ExecutionRecord, 
 	if len(pending) == 0 {
 		return result, ctx.Err()
 	}
-	added, pruned := 0, 0
+	if err := s.gate.Acquire(ctx, 1); err != nil {
+		return result, err
+	}
+	defer s.gate.Release(1)
+	if err := s.seed(ctx); err != nil {
+		return result, err
+	}
+	var added, pruned int
+	var after usage
 	now := s.now()
 	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		added, pruned, after = 0, 0, s.usage
 		for _, record := range pending {
 			if _, err := tx.GetExecution(ctx, record.ID()); err == nil {
 				continue
@@ -260,81 +336,112 @@ func (s *Service) commit(ctx context.Context, records []*model.ExecutionRecord, 
 			if err := tx.UpsertExecution(ctx, record); err != nil {
 				return err
 			}
+			after.add(record)
 			added++
 		}
-		rows, err := storage.AllExecutions(ctx, tx, tx.BuildExecutionFilter(storage.ExecutionQueryCriteria{}))
-		if err != nil {
-			return err
+		if !after.exceeds(s.cfg, now) {
+			return nil
 		}
-		for _, record := range s.toPrune(rows, now) {
-			if err := tx.DeleteExecution(ctx, record.ID()); err != nil {
-				return err
-			}
-			pruned++
-		}
-		return nil
+		var err error
+		pruned, after, err = s.evict(ctx, tx, now)
+		return err
 	})
 	if err != nil {
+		// The write may have landed whatever the error says, as when a deadline
+		// passes while the store commits.
+		s.exact = false
 		return result, err
 	}
+	s.usage = after
 	result.Added = added
 	result.Pruned = pruned
 	return result, nil
 }
 
-func (s *Service) toPrune(rows []*model.ExecutionRecord, now time.Time) []*model.ExecutionRecord {
-	sorted := append([]*model.ExecutionRecord(nil), rows...)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].CapturedAt().Equal(sorted[j].CapturedAt()) {
-			return sorted[i].ID() < sorted[j].ID()
-		}
-		return sorted[i].CapturedAt().Before(sorted[j].CapturedAt())
-	})
-	var bytes int64
-	for _, record := range sorted {
-		bytes += record.SizeBytes()
-	}
-	count := len(sorted)
-	expiredBefore := now.Add(-s.cfg.Retention)
-	var remove []*model.ExecutionRecord
-	for _, record := range sorted {
-		if !record.CapturedAt().Before(expiredBefore) && count <= s.cfg.MaxRecords && bytes <= s.cfg.MaxBytes {
-			break
-		}
-		remove = append(remove, record)
-		count--
-		bytes -= record.SizeBytes()
-	}
-	return remove
+// allRows reads every row of st in one pass, newest first.
+func allRows(ctx context.Context, st storage.Storage) ([]*model.ExecutionRecord, error) {
+	return storage.AllExecutions(ctx, st, st.BuildExecutionFilter(storage.ExecutionQueryCriteria{}))
 }
 
-// Prune skips the write transaction when retained history already fits, so an
-// idle collector does not repeatedly fsync the standalone full-state snapshot.
-func (s *Service) Prune(ctx context.Context) (int, error) {
-	rows, err := storage.AllExecutions(ctx, s.store, s.store.BuildExecutionFilter(storage.ExecutionQueryCriteria{}))
+// seed makes the counters exact, with one pass over the store, if they are not.
+// It expects the gate held.
+func (s *Service) seed(ctx context.Context) error {
+	if s.resumed.Swap(false) {
+		s.exact = false
+	}
+	if s.exact {
+		return nil
+	}
+	rows, err := allRows(ctx, s.store)
 	if err != nil {
+		return err
+	}
+	s.usage, s.exact = measure(rows), true
+	return nil
+}
+
+// evict deletes in tx the rows that retention drops at now, and returns how many
+// and what is left of the archive. Rows leave in the order of their capture, the
+// oldest first, so it takes one pass over the whole archive, sorted that way.
+func (s *Service) evict(ctx context.Context, tx storage.Storage, now time.Time) (int, usage, error) {
+	rows, err := allRows(ctx, tx)
+	if err != nil {
+		return 0, usage{}, err
+	}
+	slices.SortFunc(rows, func(a, b *model.ExecutionRecord) int {
+		if c := a.CapturedAt().Compare(b.CapturedAt()); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID(), b.ID())
+	})
+	left := measure(rows)
+	expiredBefore := now.Add(-s.cfg.Retention)
+	removed := 0
+	for _, record := range rows {
+		if !record.CapturedAt().Before(expiredBefore) && left.rows <= s.cfg.MaxRecords && left.bytes <= s.cfg.MaxBytes {
+			break
+		}
+		if err := tx.DeleteExecution(ctx, record.ID()); err != nil {
+			return 0, usage{}, err
+		}
+		removed++
+		left.rows--
+		left.bytes -= record.SizeBytes()
+	}
+	left.oldest = time.Time{}
+	if removed < len(rows) {
+		left.oldest = rows[removed].CapturedAt()
+	}
+	return removed, left, nil
+}
+
+// Prune enforces retention. It consults the counters and opens a transaction,
+// which scans the archive, only when a limit is crossed: the age of the oldest
+// row, the rows or the bytes. An idle collector therefore neither scans the store
+// nor writes to it every tick.
+func (s *Service) Prune(ctx context.Context) (int, error) {
+	if err := s.gate.Acquire(ctx, 1); err != nil {
+		return 0, err
+	}
+	defer s.gate.Release(1)
+	if err := s.seed(ctx); err != nil {
 		return 0, err
 	}
 	now := s.now()
-	if len(s.toPrune(rows, now)) == 0 {
+	if !s.usage.exceeds(s.cfg, now) {
 		return 0, ctx.Err()
 	}
 	removed := 0
-	err = s.store.WithTx(ctx, func(tx storage.Storage) error {
-		current, err := storage.AllExecutions(ctx, tx, tx.BuildExecutionFilter(storage.ExecutionQueryCriteria{}))
-		if err != nil {
-			return err
-		}
-		for _, record := range s.toPrune(current, now) {
-			if err := tx.DeleteExecution(ctx, record.ID()); err != nil {
-				return err
-			}
-			removed++
-		}
-		return nil
+	var after usage
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		var err error
+		removed, after, err = s.evict(ctx, tx, now)
+		return err
 	})
 	if err != nil {
+		s.exact = false
 		return 0, err
 	}
+	s.usage = after
 	return removed, nil
 }

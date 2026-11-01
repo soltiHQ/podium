@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -35,6 +36,24 @@ func agentError(op, agentErr error) error {
 		kind: classifyAgentErr(agentErr),
 		err:  fmt.Errorf("%w: %w", op, agentErr),
 	}
+}
+
+// receiveLimitMessage is how grpc-go words its refusal of a message over the
+// receive limit: "grpc: received message larger than max (N vs. M)".
+const receiveLimitMessage = "received message larger than max"
+
+// responseError is agentError for a gRPC call that reads an answer, which the
+// client may refuse for its size: grpc-go's ResourceExhausted for a message over
+// the receive limit. It adds ErrResponseTooLarge to that refusal, and keeps the
+// status, so that the Kind stays the one agentError derives. A ResourceExhausted
+// from the agent, a quota for one, is not tagged. A call that sends a large
+// request does not use it: the agent refuses a request over its limit in the same
+// words.
+func responseError(op, agentErr error) error {
+	if st, ok := status.FromError(agentErr); ok && st.Code() == codes.ResourceExhausted && strings.Contains(st.Message(), receiveLimitMessage) {
+		agentErr = fmt.Errorf("%w: %w", agentErr, ErrResponseTooLarge)
+	}
+	return agentError(op, agentErr)
 }
 
 // classifyAgentErr derives an errkind.Kind from an agent's transport error: a

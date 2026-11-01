@@ -114,6 +114,32 @@ or 503 if the store is unavailable. A reverse proxy in front of podium must
 keep its read timeout above 15 seconds (nginx `proxy_read_timeout` defaults to
 60); both streams send `X-Accel-Buffering: no`, so nginx does not buffer them.
 
+The event stream carries refresh pulses, not data: `agent_update`,
+`spec_update`, `dashboard_update`, `user_update` and `session_update`. A pulse
+makes the pages that listen for it fetch again. The pages poll as well, so one
+that misses a pulse is still refreshed: every 60 seconds for the agents list,
+an agent's detail and its task list, the dashboard and the placement of a spec,
+as `triggers` sets. Discovery sends `agent_update` only when a sync gives the
+pages something new, not on every heartbeat:
+
+- the agent is new, or its status, name, endpoint, labels or capabilities
+  changed;
+- the agent reconnected: it is active again after it was inactive or
+  disconnected, or it reports less uptime than before, because it restarted.
+
+A heartbeat that moves only the time of the sync and the uptime sends nothing,
+so `Last heartbeat` and `Uptime` show their latest value after the next poll or
+pulse. Without this, a fleet would make every open agents, dashboard and spec
+page fetch again, and each spec page compute its placement again, on every
+heartbeat. The sync runner sends `agent_update` too, with `spec_update`, when it
+applies a push, finishes an uninstall or queues a lost task for a reinstall, so
+an open agent page follows a deploy without waiting for its poll. The hub also
+coalesces the pulses of a kind (`events.coalesce`, default 1 second, see
+`internal/config`): the first goes out at once, and those that follow within the
+window arrive as one pulse at its end, so a burst of changes refreshes a page
+twice and its last change is never lost. The keepalive and the access re-check
+of the streams above are not pulses and are never delayed.
+
 Execution history shows partial capture from periodic agent polling. It can
 miss attempts removed between polls and is bounded by retention policy. Each
 record displays original task UID, SDK generation/attempt, source resource

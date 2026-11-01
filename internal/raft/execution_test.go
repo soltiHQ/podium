@@ -12,6 +12,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"github.com/soltiHQ/control-plane/internal/storage/overlay"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
@@ -28,31 +29,31 @@ func raftArchiveRow(t *testing.T, attempt uint32) *model.ExecutionRecord {
 
 func TestCommandArchiveVersionCompatibility(t *testing.T) {
 	e := raftArchiveRow(t, 1)
-	data, err := encodeCommand([]*raftv1.Op{{Op: &raftv1.Op_ExecutionUpsert{ExecutionUpsert: wire.ExecutionToProto(e)}}})
+	data, err := overlay.EncodeCommand([]*raftv1.Op{{Op: &raftv1.Op_ExecutionUpsert{ExecutionUpsert: wire.ExecutionToProto(e)}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if data[len(commandMagic)] != 3 {
+	if data[len(overlay.CommandMagic)] != 3 {
 		t.Fatal("newcommands lack downgrade guard")
 	}
-	if _, err := decodeCommand(data); err != nil {
+	if _, err := overlay.DecodeCommand(data); err != nil {
 		t.Fatal(err)
 	}
-	data[len(commandMagic)] = 2
-	if _, err := decodeCommand(data); err == nil {
+	data[len(overlay.CommandMagic)] = 2
+	if _, err := overlay.DecodeCommand(data); err == nil {
 		t.Fatal("v2 newentity allowed")
 	}
-	old, _ := encodeCommand([]*raftv1.Op{{Op: &raftv1.Op_AgentDelete{AgentDelete: "a"}}})
-	old[len(commandMagic)] = 2
-	if _, err := decodeCommand(old); err != nil {
+	old, _ := overlay.EncodeCommand([]*raftv1.Op{{Op: &raftv1.Op_AgentDelete{AgentDelete: "a"}}})
+	old[len(overlay.CommandMagic)] = 2
+	if _, err := overlay.DecodeCommand(old); err != nil {
 		t.Fatal("compatible v2 old ops rejected", err)
 	}
 	unknown := protowire.AppendTag(nil, 99, protowire.BytesType)
 	unknown = protowire.AppendBytes(unknown, []byte("future"))
 	op := &raftv1.Op{}
 	op.ProtoReflect().SetUnknown(unknown)
-	bad, _ := encodeCommand([]*raftv1.Op{op})
-	if _, err := decodeCommand(bad); err == nil {
+	bad, _ := overlay.EncodeCommand([]*raftv1.Op{op})
+	if _, err := overlay.DecodeCommand(bad); err == nil {
 		t.Fatal("unknown entity accepted")
 	}
 }
@@ -64,7 +65,7 @@ func TestArchiveTransactionOverlaySupportsAtomicPruning(t *testing.T) {
 	if err := inner.UpsertExecution(ctx, first); err != nil {
 		t.Fatal(err)
 	}
-	view := newTxView(inner)
+	view := overlay.New(inner)
 	if err := view.UpsertExecution(ctx, second); err != nil {
 		t.Fatal(err)
 	}

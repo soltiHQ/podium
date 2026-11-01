@@ -32,3 +32,20 @@ type PatchLabels struct {
 	Labels map[string]string
 	ID     string
 }
+
+// UpsertResult says what an Upsert changed in the agent's row.
+type UpsertResult struct {
+	// Visible is true when the agent is new, or its status, name, endpoint,
+	// labels or capabilities differ from the stored row: what operators watch
+	// and a sync can change (model.Agent.ChangedVisiblySince). The time of the
+	// sync and the uptime move with every sync and are not visible, so a
+	// heartbeat that changes nothing else reports false.
+	Visible bool
+
+	// Reconnected is true when the agent syncs again after being away: it is
+	// new to the store, its row was not active (inactive or disconnected, so it
+	// came back), or it reports less uptime than the row (it restarted between
+	// two syncs). It is model.Agent.ReconnectedSince, the rule that re-arms
+	// failed rollouts and ends the sync runner's backoff.
+	Reconnected bool
+}

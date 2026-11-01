@@ -10,6 +10,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/storage/overlay"
 )
 
 func TestRaftVersion2CommandLogCanBeReadAndExtended(t *testing.T) {
@@ -48,12 +49,12 @@ func TestRaftVersion2CommandLogCanBeReadAndExtended(t *testing.T) {
 		if entry.Type != hraft.LogCommand {
 			continue
 		}
-		if _, err := decodeCommand(entry.Data); err != nil {
+		if _, err := overlay.DecodeCommand(entry.Data); err != nil {
 			_ = logs.Close()
 			t.Fatal(err)
 		}
 		entry.Data = append([]byte(nil), entry.Data...)
-		entry.Data[len(commandMagic)] = 2
+		entry.Data[len(overlay.CommandMagic)] = 2
 		if err := logs.StoreLog(&entry); err != nil {
 			_ = logs.Close()
 			t.Fatal(err)

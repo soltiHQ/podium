@@ -1,6 +1,7 @@
 package durable
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,7 +13,9 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
-func TestQueuedReadsAndWritesCancelBeforeActiveTransactionEnds(t *testing.T) {
+// While a transaction runs, reads do not queue behind it, and queued transactions
+// return as soon as their context ends, without aborting it.
+func TestQueuedWritesCancelAndReadsDoNotQueueBehindActiveTransaction(t *testing.T) {
 	s, _ := newTestStore(t)
 	entered, release := make(chan struct{}), make(chan struct{})
 	var once sync.Once
@@ -28,36 +31,51 @@ func TestQueuedReadsAndWritesCancelBeforeActiveTransactionEnds(t *testing.T) {
 			t.Error(err)
 		}
 	}()
+	const callers = 20
+	reads := make(chan error, callers)
+	for range callers {
+		go func() {
+			_, err := s.GetAgent(context.Background(), "missing")
+			reads <- err
+		}()
+	}
+	readDeadline := time.NewTimer(250 * time.Millisecond)
+	defer readDeadline.Stop()
+	for i := 0; i < callers; i++ {
+		select {
+		case err := <-reads:
+			if !errors.Is(err, storage.ErrNotFound) {
+				t.Errorf("read%d during the transaction = %v, want ErrNotFound", i, err)
+			}
+		case <-readDeadline.C:
+			t.Fatal("reads waited for the active transaction")
+		}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	const callers = 40
-	replies := make(chan error, callers)
+	writes := make(chan error, callers)
 	ready := make(chan struct{}, callers)
-	for i := 0; i < callers; i++ {
-		go func(i int) {
+	for range callers {
+		go func() {
 			ready <- struct{}{}
-			if i%2 == 0 {
-				_, err := s.GetAgent(ctx, "missing")
-				replies <- err
-				return
-			}
-			replies <- s.WithTx(ctx, func(storage.Storage) error { return fmt.Errorf("canceled callback entered") })
-		}(i)
+			writes <- s.WithTx(ctx, func(storage.Storage) error { return fmt.Errorf("canceled callback entered") })
+		}()
 	}
 	for i := 0; i < callers; i++ {
 		<-ready
 	}
 	cancel()
-	deadline := time.NewTimer(250 * time.Millisecond)
-	defer deadline.Stop()
+	writeDeadline := time.NewTimer(250 * time.Millisecond)
+	defer writeDeadline.Stop()
 	for i := 0; i < callers; i++ {
 		select {
-		case err := <-replies:
+		case err := <-writes:
 			if !errors.Is(err, context.Canceled) {
-				t.Errorf("caller%d canceled result=%v", i, err)
+				t.Errorf("writer%d canceled result=%v", i, err)
 			}
-		case <-deadline.C:
-			t.Fatal("canceled queued calls waited for the active transaction")
+		case <-writeDeadline.C:
+			t.Fatal("canceled queued transactions waited for the active transaction")
 		}
 	}
 	// The active transaction remains held; returning canceled callers did not abort it.
@@ -97,6 +115,10 @@ func TestReadMethodsRejectCanceledContext(t *testing.T) {
 		"rollouts":            func() error { _, e := s.ListRollouts(ctx, nil, storage.ListOptions{}); return e },
 		"execution":           func() error { _, e := s.GetExecution(ctx, "missing"); return e },
 		"executions":          func() error { _, e := s.ListExecutions(ctx, nil, storage.ListOptions{}); return e },
+		"agents-scan":         func() error { _, e := s.ScanAgents(ctx, nil); return e },
+		"rollouts-scan":       func() error { _, e := s.ScanRollouts(ctx, nil); return e },
+		"specs-scan":          func() error { _, e := s.ScanSpecs(ctx, nil); return e },
+		"executions-scan":     func() error { _, e := s.ScanExecutions(ctx, nil); return e },
 	}
 	for name, read := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -163,5 +185,53 @@ func TestCloseWaitsForActiveCommitAndIsIdempotent(t *testing.T) {
 	}
 	if _, err := s.GetAgent(context.Background(), "missing"); !errors.Is(err, storage.ErrUnavailable) {
 		t.Fatal("closed store remained readable", err)
+	}
+}
+
+// Close waits for a snapshot the background snapshotter is writing, which then
+// commits whole, and leaves the snapshotter stopped. The snapshot stalls after
+// bbolt committed it, where bbolt's own Close has nothing to wait for: what holds
+// Close back is its own wait, for the writer the snapshot holds and for the
+// snapshotter. Both wait for the snapshot, but only the second ends the
+// snapshotter, so the test checks that too.
+func TestCloseWaitsForSnapshot(t *testing.T) {
+	var (
+		entered     = make(chan struct{})
+		release     = make(chan struct{})
+		enteredOnce sync.Once
+		releaseOnce sync.Once
+	)
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	s, dir := newTestStore(t, WithSnapshotThreshold(1), withHooks(hooks{snapshot: func(p snapshotPoint) {
+		if p == snapshotCommitted {
+			enteredOnce.Do(func() { close(entered) })
+			<-release
+		}
+	}}))
+	populate(t, s)
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the commit that crossed the threshold started no snapshot")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close() }()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned during the snapshot: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	unblock()
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-s.snapshotter.done:
+	default:
+		t.Fatal("Close returned with the snapshotter still running")
+	}
+	if l := readLayout(t, dir); !bytes.Equal(l.snapshotIndex, uint64Bytes(1)) || len(l.log) != 0 {
+		t.Fatalf("snapshot index %x, log %v, want the snapshot at entry 1 and no log", l.snapshotIndex, l.log)
 	}
 }
