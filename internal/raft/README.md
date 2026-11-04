@@ -130,6 +130,117 @@ hashicorp/raft creates the snapshot a leader installs through the same
 `Create`. `New` does the same to the snapshots already there
 (`TestRaftFilesArePrivate`, `TestSnapshotsArePrivateWhileWritten`).
 
+## Follower writes
+
+A write that reaches a node that is not the leader changes nothing and fails
+with `raft.ErrNotLeader`: a single operation, which hashicorp/raft refuses with
+its own `ErrNotLeader`, and a transaction, which fails before its function
+runs. `raft.ErrNotLeader` is `cluster.ErrNotLeader`, which lives in the
+`cluster` package so that the transports can tell it without importing raft
+(`errkind` cannot: raft depends on it through `domain/wire` and the proxy); the
+errors wrap it, so `errors.Is` finds it. `errkind.Classify` gives it
+`Unavailable`, so gRPC answers `codes.Unavailable` and HTTP answers 503.
+
+For HTTP the 503 of such an error (`response.FromError`) also carries
+`X-Leader`, the HTTP address of the leader as `host:port`, with no scheme: the
+host of its raft advertise address, as written, and the port this node serves
+the listener on. A follower forwards a write to the same host and port, which
+assumes that every node serves a listener on the same port. A request gets the
+address from the `Leader` middleware, which hands every request it passes
+through the means to ask where the leader is; a node that is the leader, or
+knows no leader, sends no header (`TestFollowerWriteIsUnavailableWithLeaderHint`).
+
+The `Leader` middleware forwards the writes of a follower, so a follower's
+handlers meet the error only when leadership moves under a request that began
+on the leader, or when a read writes. A handler that answers a failed store with
+`response.Unavailable` instead of `response.FromError` still answers 503, but
+without the header. gRPC discovery keeps the `x-leader` hint of its
+interceptors.
+
+A read that writes is the refresh of a browser session with
+`auth.rotate_refresh` on: the `Auth` and `OptionalAuth` middleware refresh a
+request whose access token is missing or expired, whatever its method, and the
+rotation of the refresh token is a transaction. On a follower it fails with
+`ErrNotLeader` before it consumes the token: the request answers 503 with
+`X-Leader`, no cookie is set, and the follower logs one WARN, not an ERROR. The
+same cookies then refresh at the leader
+(`TestRotatingRefreshOnAFollowerAsksForTheLeader`, and
+`TestRefreshOnAFollowerAsksForTheLeader` in the middleware package). So with
+`auth.rotate_refresh: true` a raft deployment needs leader-sticky routing: its
+load balancer must send browsers to the leader, or retry a request that gets
+`X-Leader` on the node it names. With `auth.rotate_refresh` off, as it is by
+default, a refresh only reads and works on every node.
+
+## Apply failures
+
+A committed command that cannot be decoded, or whose operations fail to apply,
+changes nothing on the replica and is dropped, whole, on every replica that
+fails on it. `FSM.Apply` returns the error, but only the leader that proposed
+the command ever reads it, as the response of `Apply`. So every replica logs the
+command at ERROR, with the index of its log entry, its kind and the number of
+its operations, and nothing it carries, not the error either, as either can
+hold the values of the state:
+
+- `raft: committed command failed to apply and was dropped on this replica,
+  which stays as it was`, with `index`, `kind` (the names in the protocol of its
+  operations, each once, in order: `agent_upsert,agent_delete`) and `ops`;
+- `raft: committed command is not decodable and was dropped on this replica
+  (corrupted entry or version skew)`, with `index` and the kind `undecodable`,
+  and no count.
+
+`Store` runs a transaction on an overlay of the leader's store before it
+proposes it, so one that cannot apply fails for its caller then. A
+single-operation write is proposed as it is, so one that a concurrent write
+made impossible, such as the delete of an entity another write has deleted
+first, fails on apply, on every replica, and its proposer gets the error as the
+response of `Apply`: that is one line on each node for an ordinary conflict.
+Any other failure is a corrupted entry or a version skew: a node that does not
+know an operation cannot apply a command a newer node proposed, and the
+replicas diverge, which the line is the only sign of
+(`TestFollowerLogsFailedApply`, `TestFSMApplyLogsOnlyTheShapeOfAFailedCommand`).
+A restart replays the log entries since the last snapshot, so a command that
+failed is logged again at each restart until a snapshot compacts it away; the
+`index` tells it is the same entry.
+
+## Log compaction
+
+`cluster.raft.snapshot_interval`, `snapshot_threshold` and `trailing_logs` are
+`Config.SnapshotInterval`, `SnapshotThreshold` and `TrailingLogs`, and
+hashicorp/raft's own settings of the same name: every `SnapshotInterval` (120 s
+by default, in fact a random time of between one and two intervals) the node
+checks whether `SnapshotThreshold` log entries (8192) have piled up since its
+last snapshot, and takes one if so; the snapshot then truncates the log down to
+the last `TrailingLogs` entries (10240), which a follower that is slightly
+behind catches up from, in place of a snapshot of the whole state. A zero value
+keeps the default, so the settings are hashicorp/raft's until configured
+(`TestRaftCompactionDefaultsAreHashicorps`); the configuration refuses a
+negative one, and hashicorp/raft refuses, when the node starts, an interval
+under 5 ms. `TestCompactionKnobsApplied` shows the values reach
+hashicorp/raft's configuration, and that a node with small ones snapshots on
+its own and truncates its log to the trailing logs.
+
+## Logging
+
+hashicorp/raft, its snapshot store and its network transport log through the
+node's zerolog logger (`logger.go`), in place of the hclog loggers they would
+make on stderr: a node writes nothing to stderr
+(`TestRaftLogsGoThroughTheNodeLogger`). The adapter keeps hashicorp's INFO,
+WARN and ERROR levels and drops its TRACE and DEBUG lines, the elections and
+the replication chatter. Each line carries
+`profile=raft`, the name of the component that logged it as `component` (`raft`,
+`snapshot` or `raft-net`), and the key and value pairs of hashicorp's line as
+fields. No command payload reaches the log: a byte slice is only counted, and
+the value of `command`, under which raft prints a request it did not expect
+whole, is `[redacted]` (`TestHCLogAdapterRedactsPayloads`).
+
+Every connection that the transport refuses or that times out in its handshake
+is one ERROR line, `failed to decode incoming command` from `raft-net`, with the
+TLS error. That is expected of a host that is no cluster node and reaches the
+raft port, and nothing limits it: a connect flood is a flood of lines. So the
+raft port, `cluster.raft.bind_addr`, must be reachable only from the cluster's
+nodes, by firewall or network policy. TLS keeps other hosts out of the cluster,
+not off the port.
+
 ## Multi-node tests
 
 `loopback_test.go` holds the helper that multi-node tests share.
@@ -144,5 +255,7 @@ write on it, again on the next leader if leadership moves first. A node's
 `stop` and `start` restart it from its data directory (`dir`), with any
 discovery; options to `start` edit the node's `Config`, such as `withTLS` and
 `insecureTransport`, and `open` returns the error of a start a test expects to
-fail. The helper's waits poll a condition until a timeout, never a fixed
+fail. `capture` makes a node log into a `logBuffer`, which is safe to read while
+the node runs, before it starts: raft's goroutines log through the node's
+logger. The helper's waits poll a condition until a timeout, never a fixed
 sleep.

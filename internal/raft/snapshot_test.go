@@ -121,7 +121,7 @@ func TestFSM_SnapshotRoundtrip(t *testing.T) {
 	srcStore := inmemory.New()
 	src := populateStore(t, srcStore)
 
-	srcFSM := raftpkg.NewFSM(srcStore, event.NewHub(zerolog.Nop()))
+	srcFSM := raftpkg.NewFSM(srcStore, event.NewHub(zerolog.Nop()), zerolog.Nop())
 	snap, err := srcFSM.Snapshot()
 	if err != nil {
 		t.Fatalf("Snapshot: %v", err)
@@ -140,7 +140,7 @@ func TestFSM_SnapshotRoundtrip(t *testing.T) {
 	}
 
 	dstStore := inmemory.New()
-	dstFSM := raftpkg.NewFSM(dstStore, event.NewHub(zerolog.Nop()))
+	dstFSM := raftpkg.NewFSM(dstStore, event.NewHub(zerolog.Nop()), zerolog.Nop())
 	if err := dstFSM.Restore(sink.reader()); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestFSM_SnapshotRoundtrip(t *testing.T) {
 func TestFSM_RestoreOverwritesExisting(t *testing.T) {
 	srcStore := inmemory.New()
 	populateStore(t, srcStore)
-	srcFSM := raftpkg.NewFSM(srcStore, event.NewHub(zerolog.Nop()))
+	srcFSM := raftpkg.NewFSM(srcStore, event.NewHub(zerolog.Nop()), zerolog.Nop())
 	snap, err := srcFSM.Snapshot()
 	if err != nil {
 		t.Fatal(err)
@@ -195,7 +195,7 @@ func TestFSM_RestoreOverwritesExisting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dstFSM := raftpkg.NewFSM(dstStore, event.NewHub(zerolog.Nop()))
+	dstFSM := raftpkg.NewFSM(dstStore, event.NewHub(zerolog.Nop()), zerolog.Nop())
 	if err := dstFSM.Restore(sink.reader()); err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestFSM_RestoreOverwritesExisting(t *testing.T) {
 // TestFSM_RestoreEmpty — Persist of an empty store + Restore yields an
 // empty destination.
 func TestFSM_RestoreEmpty(t *testing.T) {
-	srcFSM := raftpkg.NewFSM(inmemory.New(), event.NewHub(zerolog.Nop()))
+	srcFSM := raftpkg.NewFSM(inmemory.New(), event.NewHub(zerolog.Nop()), zerolog.Nop())
 	snap, err := srcFSM.Snapshot()
 	if err != nil {
 		t.Fatal(err)
@@ -222,7 +222,7 @@ func TestFSM_RestoreEmpty(t *testing.T) {
 	}
 
 	dstStore := inmemory.New()
-	dstFSM := raftpkg.NewFSM(dstStore, event.NewHub(zerolog.Nop()))
+	dstFSM := raftpkg.NewFSM(dstStore, event.NewHub(zerolog.Nop()), zerolog.Nop())
 	if err := dstFSM.Restore(sink.reader()); err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestFSM_RestoreBadMagic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	dstFSM := raftpkg.NewFSM(inmemory.New(), event.NewHub(zerolog.Nop()))
+	dstFSM := raftpkg.NewFSM(inmemory.New(), event.NewHub(zerolog.Nop()), zerolog.Nop())
 	if err := dstFSM.Restore(io.NopCloser(bytes.NewReader(data))); err == nil {
 		t.Fatal("Restore accepted bad magic")
 	}
@@ -255,7 +255,7 @@ func TestFSM_RestoreCorrupt(t *testing.T) {
 	preexisting, _ := model.NewAgent("pre", "preexisting", "http://pre")
 	_ = dstStore.UpsertAgent(context.Background(), preexisting)
 
-	dstFSM := raftpkg.NewFSM(dstStore, event.NewHub(zerolog.Nop()))
+	dstFSM := raftpkg.NewFSM(dstStore, event.NewHub(zerolog.Nop()), zerolog.Nop())
 	if err := dstFSM.Restore(io.NopCloser(bytes.NewReader([]byte("not a proto")))); err == nil {
 		t.Fatal("Restore accepted garbage bytes")
 	}

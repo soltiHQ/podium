@@ -12,7 +12,19 @@
 // internal/cluster/standalone, internal/cluster/raft.
 package cluster
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrNotLeader indicates a write that reached a replica which is not the
+// leader. The write changed nothing; the leader, when one is known, is
+// [Leadership.CurrentLeader]. The transports answer it as unavailable (HTTP 503,
+// gRPC Unavailable), and HTTP adds the leader's address. It lives here, apart
+// from the raft package that returns it (as raft.ErrNotLeader), so that the
+// transports can tell it without importing raft: errkind, which classifies it,
+// cannot, as raft depends on errkind through domain/wire and the proxy.
+var ErrNotLeader = errors.New("this replica is not the leader")
 
 // Peer is a cluster member. ID is stable across reconnects; Address is a
 // host:port the peer listens on for internal RPC.

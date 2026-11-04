@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
 	"github.com/soltiHQ/control-plane/internal/cluster"
@@ -345,6 +346,9 @@ func TestLoadRaftCluster(t *testing.T) {
     data_dir: /var/lib/solti/raft
     election_timeout_ms: 1000
     heartbeat_timeout_ms: 500
+    snapshot_interval: 30s
+    snapshot_threshold: 4096
+    trailing_logs: 2048
     tls:
       cert_file: /etc/solti/raft/n1.crt
       key_file: /etc/solti/raft/n1.key
@@ -368,6 +372,9 @@ func TestLoadRaftCluster(t *testing.T) {
 		"SOLTI_CLUSTER_RAFT_DATA_DIR":             "/var/lib/solti/raft",
 		"SOLTI_CLUSTER_RAFT_ELECTION_TIMEOUT_MS":  "1000",
 		"SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS": "500",
+		"SOLTI_CLUSTER_RAFT_SNAPSHOT_INTERVAL":    "30s",
+		"SOLTI_CLUSTER_RAFT_SNAPSHOT_THRESHOLD":   "4096",
+		"SOLTI_CLUSTER_RAFT_TRAILING_LOGS":        "2048",
 		"SOLTI_CLUSTER_RAFT_TLS_CERT_FILE":        "/etc/solti/raft/n1.crt",
 		"SOLTI_CLUSTER_RAFT_TLS_KEY_FILE":         "/etc/solti/raft/n1.key",
 		"SOLTI_CLUSTER_RAFT_TLS_CA_FILE":          "/etc/solti/raft/ca.crt",
@@ -388,6 +395,9 @@ func TestLoadRaftCluster(t *testing.T) {
 		DataDir:            "/var/lib/solti/raft",
 		ElectionTimeoutMs:  1000,
 		HeartbeatTimeoutMs: 500,
+		SnapshotInterval:   30 * time.Second,
+		SnapshotThreshold:  4096,
+		TrailingLogs:       2048,
 		TLS: cluster.RaftTLSConfig{
 			CertFile: "/etc/solti/raft/n1.crt",
 			KeyFile:  "/etc/solti/raft/n1.key",
@@ -396,6 +406,18 @@ func TestLoadRaftCluster(t *testing.T) {
 	}
 	insecure := raft
 	insecure.TLS, insecure.AllowInsecureTransport = cluster.RaftTLSConfig{}, true
+	// withoutCompaction leaves out the compaction settings, which then load as
+	// the defaults.
+	withoutCompaction := map[string]string{}
+	for key, value := range static {
+		if !strings.Contains(key, "_SNAPSHOT_") && !strings.HasSuffix(key, "_TRAILING_LOGS") {
+			withoutCompaction[key] = value
+		}
+	}
+	defaults := raft
+	defaults.SnapshotInterval = cluster.DefaultRaftSnapshotInterval
+	defaults.SnapshotThreshold = cluster.DefaultRaftSnapshotThreshold
+	defaults.TrailingLogs = cluster.DefaultRaftTrailingLogs
 	peers := []cluster.Peer{{ID: "n1", Address: "10.0.0.1:7000"}, {ID: "n2", Address: "10.0.0.2:7000"}, {ID: "n3", Address: "10.0.0.3:7000"}}
 	for _, tc := range []struct {
 		name, path string
@@ -405,6 +427,7 @@ func TestLoadRaftCluster(t *testing.T) {
 	}{
 		{name: "yaml", path: yamlPath, raft: raft},
 		{name: "environment", env: static, raft: raft},
+		{name: "compaction defaults", env: withoutCompaction, raft: defaults},
 		{name: "plain TCP allowed", env: plainTCP, raft: insecure},
 		{name: "refused", env: map[string]string{
 			"SOLTI_CLUSTER_BACKEND":                       "raft",

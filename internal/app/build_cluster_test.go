@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/cluster"
+	raftpkg "github.com/soltiHQ/control-plane/internal/raft"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/durable"
 )
@@ -128,6 +129,32 @@ func TestMsToDuration(t *testing.T) {
 	for ms, want := range map[int]time.Duration{-1: 0, 0: 0, 250: 250 * time.Millisecond} {
 		if got := msToDuration(ms); got != want {
 			t.Fatalf("msToDuration(%d) = %v, want %v", ms, got, want)
+		}
+	}
+}
+
+// The raft node gets every setting of the raft configuration, the compaction
+// settings with it, and a number of log entries of zero or less is left to raft.New.
+func TestRaftNodeConfig(t *testing.T) {
+	files := cluster.RaftTLSConfig{CertFile: "n1.crt", KeyFile: "n1.key", CAFile: "ca.crt"}
+	got := raftNodeConfig(cluster.RaftConfig{
+		NodeID: "n1", BindAddr: "0.0.0.0:7000", AdvertiseAddr: "10.0.0.1:7000", DataDir: "/var/lib/solti/raft",
+		ElectionTimeoutMs: 1000, HeartbeatTimeoutMs: 500,
+		SnapshotInterval: 30 * time.Second, SnapshotThreshold: 4096, TrailingLogs: 2048,
+		TLS: files, AllowInsecureTransport: true,
+	})
+	want := raftpkg.Config{
+		NodeID: "n1", BindAddr: "0.0.0.0:7000", AdvertiseAddr: "10.0.0.1:7000", DataDir: "/var/lib/solti/raft",
+		ElectionTimeout: time.Second, HeartbeatTimeout: 500 * time.Millisecond,
+		SnapshotInterval: 30 * time.Second, SnapshotThreshold: 4096, TrailingLogs: 2048,
+		TLS: files, AllowInsecureTransport: true,
+	}
+	if got != want {
+		t.Fatalf("raftNodeConfig() = %+v, want %+v", got, want)
+	}
+	for n, want := range map[int]uint64{-1: 0, 0: 0, 1: 1, 8192: 8192} {
+		if got := entries(n); got != want {
+			t.Fatalf("entries(%d) = %d, want %d", n, got, want)
 		}
 	}
 }

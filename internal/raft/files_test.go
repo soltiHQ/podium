@@ -12,6 +12,7 @@ import (
 	"time"
 
 	hraft "github.com/hashicorp/raft"
+	"github.com/rs/zerolog"
 
 	"github.com/soltiHQ/control-plane/domain/model"
 )
@@ -110,7 +111,7 @@ func TestRaftFilesArePrivate(t *testing.T) {
 // between the store's Create and the sink's Close.
 func TestSnapshotsArePrivateWhileWritten(t *testing.T) {
 	dir := privateTestDir(t)
-	store, err := newSnapshotStore(dir)
+	store, err := newSnapshotStore(dir, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}

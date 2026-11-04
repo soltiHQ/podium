@@ -5,7 +5,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	hraft "github.com/hashicorp/raft"
 	"github.com/kelseyhightower/envconfig"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage/durable"
@@ -96,6 +98,62 @@ func TestStandaloneSnapshotThresholdDefaultIsTheStores(t *testing.T) {
 	}
 }
 
+// The raft log compaction settings load from YAML and from the environment, over
+// defaults, and a zero value keeps the default; a negative one is refused. The
+// interval is a duration string.
+func TestRaftCompactionConfig(t *testing.T) {
+	type compaction struct {
+		interval            time.Duration
+		threshold, trailing int
+	}
+	for _, tc := range []struct {
+		name, yaml string
+		env        map[string]string
+		want       compaction
+		valid      bool
+	}{
+		{name: "defaults", want: compaction{120 * time.Second, 8192, 10240}, valid: true},
+		{name: "yaml", yaml: "raft:\n  snapshot_interval: 30s\n  snapshot_threshold: 512\n  trailing_logs: 100\n", want: compaction{30 * time.Second, 512, 100}, valid: true},
+		{name: "env", env: map[string]string{
+			"SOLTI_CLUSTER_RAFT_SNAPSHOT_INTERVAL": "2m30s", "SOLTI_CLUSTER_RAFT_SNAPSHOT_THRESHOLD": "1024", "SOLTI_CLUSTER_RAFT_TRAILING_LOGS": "200",
+		}, want: compaction{150 * time.Second, 1024, 200}, valid: true},
+		{name: "env over yaml", yaml: "raft:\n  trailing_logs: 100\n", env: map[string]string{"SOLTI_CLUSTER_RAFT_TRAILING_LOGS": "300"}, want: compaction{120 * time.Second, 8192, 300}, valid: true},
+		{name: "zero keeps the default", yaml: "raft:\n  snapshot_interval: 0s\n  snapshot_threshold: 0\n  trailing_logs: 0\n", want: compaction{0, 0, 0}, valid: true},
+		{name: "negative interval", yaml: "raft:\n  snapshot_interval: -1s\n", want: compaction{-time.Second, 8192, 10240}},
+		{name: "negative threshold", env: map[string]string{"SOLTI_CLUSTER_RAFT_SNAPSHOT_THRESHOLD": "-1"}, want: compaction{120 * time.Second, -1, 10240}},
+		{name: "negative trailing logs", yaml: "raft:\n  trailing_logs: -1\n", want: compaction{120 * time.Second, 8192, -1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := raftConfig()
+			if err := yaml.Unmarshal([]byte(tc.yaml), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			for key, value := range tc.env {
+				t.Setenv(key, value)
+			}
+			if err := envconfig.Process("SOLTI_CLUSTER", &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if got := (compaction{cfg.Raft.SnapshotInterval, cfg.Raft.SnapshotThreshold, cfg.Raft.TrailingLogs}); got != tc.want {
+				t.Fatalf("loaded %+v, want %+v", got, tc.want)
+			}
+			if err := cfg.Validate(); (err == nil) != tc.valid {
+				t.Fatalf("Validate() = %v, want valid %v", err, tc.valid)
+			}
+		})
+	}
+}
+
+// The defaults of the raft compaction settings are hashicorp/raft's, which a zero
+// value of a setting keeps.
+func TestRaftCompactionDefaultsAreHashicorps(t *testing.T) {
+	raft, defaults := hraft.DefaultConfig(), cluster.DefaultConfig().Raft
+	if defaults.SnapshotInterval != raft.SnapshotInterval || uint64(defaults.SnapshotThreshold) != raft.SnapshotThreshold || uint64(defaults.TrailingLogs) != raft.TrailingLogs {
+		t.Fatalf("cluster defaults %v, %d and %d; hashicorp/raft defaults %v, %d and %d: they must agree",
+			defaults.SnapshotInterval, defaults.SnapshotThreshold, defaults.TrailingLogs, raft.SnapshotInterval, raft.SnapshotThreshold, raft.TrailingLogs)
+	}
+}
+
 func TestDataDirIsThatOfTheSelectedBackend(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -174,16 +232,17 @@ func checkValidate(t *testing.T, err, want error) {
 }
 
 // raftConfig is a valid raft configuration: node n1 binds and advertises
-// 10.0.0.1:7000, its transport runs mutual TLS, and its static peers name all
-// three nodes.
+// 10.0.0.1:7000, its transport runs mutual TLS, its static peers name all three
+// nodes, and its compaction settings are the defaults.
 func raftConfig() cluster.Config {
 	cfg := cluster.DefaultConfig()
 	cfg.Backend = cluster.BackendRaft
-	cfg.Raft = cluster.RaftConfig{NodeID: "n1", BindAddr: "10.0.0.1:7000", DataDir: "/var/lib/solti/raft", TLS: cluster.RaftTLSConfig{
+	cfg.Raft.NodeID, cfg.Raft.BindAddr, cfg.Raft.DataDir = "n1", "10.0.0.1:7000", "/var/lib/solti/raft"
+	cfg.Raft.TLS = cluster.RaftTLSConfig{
 		CertFile: "/etc/solti/raft/n1.crt",
 		KeyFile:  "/etc/solti/raft/n1.key",
 		CAFile:   "/etc/solti/raft/ca.crt",
-	}}
+	}
 	cfg.Discovery.Peers = []string{"n1=10.0.0.1:7000", "n2=10.0.0.2:7000", "n3=10.0.0.3:7000"}
 	return cfg
 }
@@ -396,7 +455,7 @@ func TestStandaloneIgnoresRaftConfig(t *testing.T) {
 	for _, backend := range []cluster.Backend{"", cluster.BackendStandalone} {
 		cfg := cluster.DefaultConfig()
 		cfg.Backend = backend
-		cfg.Raft = cluster.RaftConfig{BindAddr: "0.0.0.0:7000", TLS: cluster.RaftTLSConfig{CertFile: "n1.crt"}, AllowInsecureTransport: true}
+		cfg.Raft = cluster.RaftConfig{BindAddr: "0.0.0.0:7000", TLS: cluster.RaftTLSConfig{CertFile: "n1.crt"}, AllowInsecureTransport: true, SnapshotInterval: -1, SnapshotThreshold: -1, TrailingLogs: -1}
 		cfg.Discovery = cluster.DiscoveryConfig{Driver: "consul", Peers: []string{"=10.0.0.1:7000"}}
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("backend %q: Validate() = %v, want nil", backend, err)

@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -13,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,7 +146,7 @@ func (c *loopbackCluster) write(t *testing.T, timeout time.Duration, fn func(sto
 		switch {
 		case err == nil:
 			return
-		case !errors.Is(err, hraft.ErrNotLeader) && !errors.Is(err, hraft.ErrLeadershipLost):
+		case !errors.Is(err, ErrNotLeader) && !errors.Is(err, hraft.ErrLeadershipLost):
 			t.Fatalf("write: %v", err)
 		case time.Now().After(deadline):
 			t.Fatalf("write: %v, still after %s", err, timeout)
@@ -183,6 +185,33 @@ func (n *loopbackNode) open(disco cluster.Discovery, opts ...func(*Config)) erro
 	}
 	n.profile, n.hub = p, hub
 	return nil
+}
+
+// capture makes n log into a buffer, which the test reads while the node runs.
+// Call it before the node starts.
+func (n *loopbackNode) capture() *logBuffer {
+	logs := &logBuffer{}
+	n.logger = zerolog.New(logs)
+	return logs
+}
+
+// logBuffer collects what a node logs. raft's goroutines log while the test
+// reads it, so unlike a bytes.Buffer it is safe for concurrent use.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // stop shuts n down and keeps its data directory for a restart.

@@ -13,6 +13,8 @@
 // bootstraps the cluster with the same list, every peer Discovery reports
 // sorted by ID, which must name this node. Subsequent starts join a
 // pre-existing cluster and reuse the on-disk log.
+// Logging: hashicorp/raft, its snapshot store and its transport log through the
+// logger given to New, at their own levels from INFO, and write nothing to stderr.
 package raft
 
 import (
@@ -58,6 +60,15 @@ type Config struct {
 	// you can lower to 100-200ms; for cross-DC bump to 3-5s.
 	ElectionTimeout  time.Duration
 	HeartbeatTimeout time.Duration
+
+	// SnapshotInterval is how often the node checks whether to snapshot,
+	// SnapshotThreshold the number of log entries since the last snapshot that
+	// starts one, and TrailingLogs the number of entries a snapshot leaves in
+	// the log, for a slow follower to catch up from. Zero values use
+	// hashicorp/raft's defaults (120 s, 8192 and 10240).
+	SnapshotInterval  time.Duration
+	SnapshotThreshold uint64
+	TrailingLogs      uint64
 
 	// TLS names the PEM files of mutual TLS between nodes, see
 	// [cluster.RaftTLSConfig]. A node without them runs its transport on plain
@@ -148,13 +159,24 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 	if cfg.HeartbeatTimeout > 0 {
 		rcfg.HeartbeatTimeout = cfg.HeartbeatTimeout
 	}
+	if cfg.SnapshotInterval > 0 {
+		rcfg.SnapshotInterval = cfg.SnapshotInterval
+	}
+	if cfg.SnapshotThreshold > 0 {
+		rcfg.SnapshotThreshold = cfg.SnapshotThreshold
+	}
+	if cfg.TrailingLogs > 0 {
+		rcfg.TrailingLogs = cfg.TrailingLogs
+	}
 	// LeaderLeaseTimeout must be <= HeartbeatTimeout; Raft rejects the
 	// config otherwise. Default is 500ms — when the caller tightens
 	// heartbeats (e.g. tests with 50ms) we must bring the lease down too.
 	if rcfg.LeaderLeaseTimeout > rcfg.HeartbeatTimeout {
 		rcfg.LeaderLeaseTimeout = rcfg.HeartbeatTimeout
 	}
-	rcfg.LogOutput = os.Stderr
+	// hashicorp/raft logs through the node's logger, in place of its own on
+	// stderr, as do the snapshot store and the transport below.
+	rcfg.Logger = newHCLog(logger, "raft")
 
 	// The advertise address is resolved only to check that peers can dial it.
 	// The transport gives raft the address as written, as the bootstrap
@@ -170,7 +192,7 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 	if err := preflightLogFile(filepath.Join(cfg.DataDir, "raft-log.bolt")); err != nil {
 		return nil, err
 	}
-	snap, err := newSnapshotStore(cfg.DataDir)
+	snap, err := newSnapshotStore(cfg.DataDir, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +250,7 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 			return nil, err
 		}
 	}
-	transport, err = newTransport(cfg.BindAddr, advertise, advTCP, security)
+	transport, err = newTransport(cfg.BindAddr, advertise, advTCP, security, logger)
 	if err != nil {
 		return nil, fmt.Errorf("raft: transport on %s: %w", cfg.BindAddr, err)
 	}
@@ -246,7 +268,7 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 		}
 	}
 
-	fsm := NewFSM(inner, hub)
+	fsm := NewFSM(inner, hub, logger)
 	r, err = newRaft(rcfg, fsm, logStore, stable, snap, transport)
 	if err != nil {
 		return nil, fmt.Errorf("raft: new raft: %w", err)
@@ -339,8 +361,8 @@ type snapshotStore struct {
 // holds already: those of an earlier version, which left them 0755 and 0644,
 // or of a snapshot that a crash cut short. New checks the directory earlier,
 // before anything is opened; the check here keeps the store private for any
-// other caller.
-func newSnapshotStore(dataDir string) (*snapshotStore, error) {
+// other caller. The store logs into logger.
+func newSnapshotStore(dataDir string, logger zerolog.Logger) (*snapshotStore, error) {
 	dir := filepath.Join(dataDir, snapshotsDir)
 	if err := privateDir(dir); err != nil {
 		return nil, err
@@ -348,7 +370,7 @@ func newSnapshotStore(dataDir string) (*snapshotStore, error) {
 	if err := privateSnapshots(dir); err != nil {
 		return nil, err
 	}
-	store, err := hraft.NewFileSnapshotStore(dataDir, 2, os.Stderr)
+	store, err := hraft.NewFileSnapshotStoreWithLogger(dataDir, 2, newHCLog(logger, "snapshot"))
 	if err != nil {
 		return nil, fmt.Errorf("raft: snapshot store: %w", err)
 	}

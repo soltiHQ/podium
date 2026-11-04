@@ -1,7 +1,6 @@
 package raft
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -38,14 +37,14 @@ func (l peerLayer) Dial(address hraft.ServerAddress, timeout time.Duration) (net
 }
 
 // peerTransport returns the raft transport of a peer a test plays, which dials
-// with cfg, or plain TCP when cfg is nil.
+// with cfg, or plain TCP when cfg is nil. Like peerServer's, it logs nothing.
 func peerTransport(t *testing.T, cfg *tls.Config) *hraft.NetworkTransport {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	trans := hraft.NewNetworkTransportWithConfig(&hraft.NetworkTransportConfig{Stream: peerLayer{Listener: l, tls: cfg}, MaxPool: 1, Timeout: 5 * time.Second})
+	trans := hraft.NewNetworkTransportWithConfig(&hraft.NetworkTransportConfig{Stream: peerLayer{Listener: l, tls: cfg}, MaxPool: 1, Timeout: 5 * time.Second, Logger: newHCLog(zerolog.Nop(), "raft-net")})
 	t.Cleanup(func() { _ = trans.Close() })
 	return trans
 }
@@ -62,7 +61,7 @@ func peerServer(t *testing.T, cfg *tls.Config) string {
 	if cfg != nil {
 		l = tls.NewListener(l, cfg)
 	}
-	trans := hraft.NewNetworkTransportWithConfig(&hraft.NetworkTransportConfig{Stream: peerLayer{Listener: l}, MaxPool: 1, Timeout: 5 * time.Second})
+	trans := hraft.NewNetworkTransportWithConfig(&hraft.NetworkTransportConfig{Stream: peerLayer{Listener: l}, MaxPool: 1, Timeout: 5 * time.Second, Logger: newHCLog(zerolog.Nop(), "raft-net")})
 	done := make(chan struct{})
 	go func() {
 		for {
@@ -466,17 +465,23 @@ func TestPlainTCPNeedsAllowInsecureTransport(t *testing.T) {
 		{"neither", func(c *Config) { c.TLS = cluster.RaftTLSConfig{} }, cluster.ErrRaftTLSRequired, false, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var logs bytes.Buffer
 			n := newLoopbackNode(t, ca, "n1", reserveLoopbackAddrs(t, 1)[0])
-			n.logger = zerolog.New(&logs)
+			logs := n.capture()
 			t.Cleanup(n.stop)
 			err := n.open(n.self(), tc.opt)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("New() = %v, want %v", err, tc.want)
 			}
 			out := logs.String()
-			if warns := strings.Count(out, `"level":"warn"`); warns != tc.warns {
-				t.Fatalf("New logged %d warnings, want %d: %s", warns, tc.warns, out)
+			// hashicorp/raft logs through the same logger, in lines that name their component.
+			own := 0
+			for _, line := range strings.Split(out, "\n") {
+				if strings.Contains(line, `"level":"warn"`) && !strings.Contains(line, `"component"`) {
+					own++
+				}
+			}
+			if own != tc.warns {
+				t.Fatalf("New logged %d warnings, want %d: %s", own, tc.warns, out)
 			}
 			if tc.warns > 0 && !strings.Contains(out, "allow_insecure_transport") {
 				t.Fatalf("the warning does not name allow_insecure_transport: %s", out)

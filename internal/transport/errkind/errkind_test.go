@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/soltiHQ/control-plane/internal/auth"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
@@ -43,6 +44,9 @@ func TestClassify(t *testing.T) {
 		{"already exists", storage.ErrAlreadyExists, AlreadyExists},
 		{"conflict", storage.ErrConflict, Conflict},
 		{"storage invalid argument", storage.ErrInvalidArgument, InvalidArgument},
+		{"storage unavailable", storage.ErrUnavailable, Unavailable},
+		{"not the leader → unavailable", cluster.ErrNotLeader, Unavailable},
+		{"wrapped not the leader", fmt.Errorf("raft: WithTx: %w", cluster.ErrNotLeader), Unavailable},
 		{"wrapped sentinel is unwrapped", fmt.Errorf("load: %w", storage.ErrNotFound), NotFound},
 	}
 	for _, tt := range tests {

@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/domain/wire"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/overlay"
 )
@@ -24,6 +26,22 @@ var (
 
 // applyTimeout bounds the wait for a Raft log entry to be committed.
 const applyTimeout = 5 * time.Second
+
+// ErrNotLeader is [cluster.ErrNotLeader]: what every write of a Store returns on
+// a node that is not the leader, wrapped, so that errors.Is finds it. The write
+// changed nothing, and the transports answer it as unavailable, HTTP with the
+// leader's address.
+var ErrNotLeader = cluster.ErrNotLeader
+
+// leaderError returns ErrNotLeader for the error hashicorp/raft gives an
+// operation only the leader can run, on a node that is not it, and err for
+// every other error.
+func leaderError(err error) error {
+	if errors.Is(err, hraft.ErrNotLeader) {
+		return ErrNotLeader
+	}
+	return err
+}
 
 // Store wraps an inner storage.Storage. Reads go local (eventual
 // consistency). Writes are encoded as protobuf Commands and submitted to
@@ -58,7 +76,8 @@ func NewStore(inner storage.Storage, r *hraft.Raft) *Store {
 	return &Store{inner: inner, raft: r}
 }
 
-// apply submits a Command to Raft, waiting up to applyTimeout for commit.
+// apply submits a Command to Raft, waiting up to applyTimeout for commit. On a
+// node that is not the leader it fails with ErrNotLeader.
 func (s *Store) apply(ops []*raftv1.Op) error {
 	data, err := overlay.EncodeCommand(ops)
 	if err != nil {
@@ -66,7 +85,7 @@ func (s *Store) apply(ops []*raftv1.Op) error {
 	}
 	f := s.raft.Apply(data, applyTimeout)
 	if err := f.Error(); err != nil {
-		return fmt.Errorf("raft: apply: %w", err)
+		return fmt.Errorf("raft: apply: %w", leaderError(err))
 	}
 	if resp := f.Response(); resp != nil {
 		if e, ok := resp.(error); ok {
@@ -354,7 +373,7 @@ func (s *Store) BuildSpecFilter(c storage.SpecQueryCriteria) storage.SpecFilter 
 // node that loses leadership while fn runs fails the submission.
 //
 // Contract: only leader can run WithTx. If Raft.State() != Leader the tx is
-// rejected before fn executes.
+// rejected with ErrNotLeader before fn executes.
 func (s *Store) WithTx(ctx context.Context, fn func(tx storage.Storage) error) error {
 	if fn == nil {
 		return storage.ErrInvalidArgument
@@ -363,7 +382,7 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx storage.Storage) error) e
 		return err
 	}
 	if s.raft.State() != hraft.Leader {
-		return fmt.Errorf("raft: WithTx on non-leader replica")
+		return fmt.Errorf("raft: WithTx: %w", ErrNotLeader)
 	}
 
 	s.txMu.Lock()

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	hraft "github.com/hashicorp/raft"
+	"github.com/rs/zerolog"
 	raftv1 "github.com/soltiHQ/control-plane/api/gen/solti/raft/v1"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
@@ -65,7 +66,7 @@ func assertSessionClockReplicas(t *testing.T, original *model.Session, mutation 
 	var replicas []*model.Session
 	for i := 0; i < 2; i++ {
 		store := inmemory.New()
-		f := NewFSM(store, nil)
+		f := NewFSM(store, nil, zerolog.Nop())
 		applyClockCommand(t, f, create, 1)
 		applyClockCommand(t, f, data, 2)
 		got, err := store.GetSession(context.Background(), original.ID())
@@ -101,7 +102,7 @@ func restoreSessionClock(t *testing.T, f *FSM, id string) (*FSM, *inmemory.Store
 		t.Fatal(err)
 	}
 	store := inmemory.New()
-	restored := NewFSM(store, nil)
+	restored := NewFSM(store, nil, zerolog.Nop())
 	if err := restored.Restore(io.NopCloser(bytes.NewReader(sink.Bytes()))); err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +151,7 @@ func TestFSMSessionClockExplicitReplaySnapshot(t *testing.T) {
 			data := clockCommand(t, mutation)
 			assertSessionClockReplicas(t, original, mutation, tc.at)
 			store := inmemory.New()
-			f := NewFSM(store, nil)
+			f := NewFSM(store, nil, zerolog.Nop())
 			applyClockCommand(t, f, clockCommand(t, &raftv1.Op{Op: &raftv1.Op_SessionCreate{SessionCreate: wire.SessionToProto(original)}}), 1)
 			applyClockCommand(t, f, data, 2)
 			restored, restoredStore, got := restoreSessionClock(t, f, original.ID())
@@ -184,7 +185,7 @@ func TestFSMSessionClockLegacyReplaySnapshot(t *testing.T) {
 					original.SetUpdatedAt(time.Time{})
 				}
 				store := inmemory.New()
-				f := NewFSM(store, nil)
+				f := NewFSM(store, nil, zerolog.Nop())
 				seed := wire.SessionToProto(original)
 				// Old writers carried scalar timestamp values only, without presence flags.
 				seed.CreatedAtPresent = false
@@ -269,7 +270,7 @@ func TestSessionTxReadOwnMutations(t *testing.T) {
 		t.Fatal("recording view published changes before commit")
 	}
 	// The exact recorded operations produce the same state as the read overlay.
-	f := NewFSM(inner, nil)
+	f := NewFSM(inner, nil, zerolog.Nop())
 	data, err := overlay.EncodeCommand(view.Ops())
 	if err != nil {
 		t.Fatal(err)

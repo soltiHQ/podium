@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Backend picks the storage + replication strategy at startup.
@@ -47,10 +48,29 @@ type StandaloneConfig struct {
 	SnapshotThreshold int    `yaml:"snapshot_threshold" envconfig:"SNAPSHOT_THRESHOLD"`
 }
 
+// The defaults of the raft log compaction settings of [RaftConfig]: they are
+// hashicorp/raft's own, which a zero value of a setting keeps.
+const (
+	// DefaultRaftSnapshotInterval is how often a node checks whether to snapshot.
+	DefaultRaftSnapshotInterval = 120 * time.Second
+	// DefaultRaftSnapshotThreshold is the number of log entries since the last
+	// snapshot that starts the next one.
+	DefaultRaftSnapshotThreshold = 8192
+	// DefaultRaftTrailingLogs is the number of log entries a snapshot leaves in
+	// the log, for a slow follower to catch up from.
+	DefaultRaftTrailingLogs = 10240
+)
+
 // RaftConfig parametrises the raft backend; no other backend reads it.
 // AdvertiseAddr is the address peers dial, BindAddr when it is empty. The raft
 // transport runs mutual TLS with the files of TLS, or plain TCP when
 // AllowInsecureTransport is true; it needs one of the two.
+//
+// SnapshotInterval, SnapshotThreshold and TrailingLogs set how the node
+// compacts its log: it checks every SnapshotInterval whether SnapshotThreshold
+// entries have piled up since its last snapshot, and a snapshot leaves
+// TrailingLogs entries in the log. A zero value keeps the default; a negative
+// one is refused.
 type RaftConfig struct {
 	NodeID             string `yaml:"node_id"           envconfig:"NODE_ID"`
 	BindAddr           string `yaml:"bind_addr"         envconfig:"BIND_ADDR"`
@@ -58,6 +78,10 @@ type RaftConfig struct {
 	DataDir            string `yaml:"data_dir"          envconfig:"DATA_DIR"`
 	ElectionTimeoutMs  int    `yaml:"election_timeout_ms" envconfig:"ELECTION_TIMEOUT_MS"`
 	HeartbeatTimeoutMs int    `yaml:"heartbeat_timeout_ms" envconfig:"HEARTBEAT_TIMEOUT_MS"`
+
+	SnapshotInterval  time.Duration `yaml:"snapshot_interval"  envconfig:"SNAPSHOT_INTERVAL"`
+	SnapshotThreshold int           `yaml:"snapshot_threshold" envconfig:"SNAPSHOT_THRESHOLD"`
+	TrailingLogs      int           `yaml:"trailing_logs"      envconfig:"TRAILING_LOGS"`
 
 	TLS                    RaftTLSConfig `yaml:"tls"                      envconfig:"TLS"`
 	AllowInsecureTransport bool          `yaml:"allow_insecure_transport" envconfig:"ALLOW_INSECURE_TRANSPORT"`
@@ -252,12 +276,21 @@ func ServerList(peers []Peer, nodeID, advertise string) ([]Peer, error) {
 	return sorted, nil
 }
 
-// DefaultConfig returns a standalone config.
+// DefaultConfig returns a standalone config. Its raft settings are the
+// defaults of the compaction settings; the other raft settings have none.
 func DefaultConfig() Config {
-	return Config{Backend: BackendStandalone, Standalone: StandaloneConfig{
-		DataDir:           DefaultStandaloneDataDir,
-		SnapshotThreshold: DefaultStandaloneSnapshotThreshold,
-	}}
+	return Config{
+		Backend: BackendStandalone,
+		Standalone: StandaloneConfig{
+			DataDir:           DefaultStandaloneDataDir,
+			SnapshotThreshold: DefaultStandaloneSnapshotThreshold,
+		},
+		Raft: RaftConfig{
+			SnapshotInterval:  DefaultRaftSnapshotInterval,
+			SnapshotThreshold: DefaultRaftSnapshotThreshold,
+			TrailingLogs:      DefaultRaftTrailingLogs,
+		},
+	}
 }
 
 // Validate requires a persistent standalone location unless ephemeral mode is
@@ -283,9 +316,10 @@ func (c Config) Validate() error {
 
 // validateRaft fails a raft node before it opens anything: node_id, bind_addr
 // and data_dir are required, and so is the transport's mutual TLS or the
-// explicit choice of plain TCP; bind_addr and advertise_addr are host:port, and
-// a bind_addr on every interface needs an advertise_addr; the peers must list
-// this node as node_id at its advertise address.
+// explicit choice of plain TCP; the compaction settings are not negative;
+// bind_addr and advertise_addr are host:port, and a bind_addr on every interface
+// needs an advertise_addr; the peers must list this node as node_id at its
+// advertise address.
 func (c Config) validateRaft() error {
 	r := c.Raft
 	for _, setting := range []struct{ key, value string }{
@@ -299,6 +333,18 @@ func (c Config) validateRaft() error {
 	}
 	if err := r.TLS.validate(r.AllowInsecureTransport); err != nil {
 		return err
+	}
+	for _, setting := range []struct {
+		key      string
+		negative bool
+	}{
+		{"raft.snapshot_interval", r.SnapshotInterval < 0},
+		{"raft.snapshot_threshold", r.SnapshotThreshold < 0},
+		{"raft.trailing_logs", r.TrailingLogs < 0},
+	} {
+		if setting.negative {
+			return fmt.Errorf("%s must not be negative", setting.key)
+		}
 	}
 	bindHost, err := hostPort(r.BindAddr)
 	if err != nil {

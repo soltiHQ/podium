@@ -205,6 +205,19 @@ cookie that login sets (see "Rate limiting"):
 
 Any other value, an empty one included, fails configuration loading.
 
+`auth.rotate_refresh` (env `SOLTI_AUTH_ROTATE_REFRESH`, default `false`) makes
+every refresh of a browser's session replace its refresh token. The replacement
+is a write, so in raft mode only the leader can make it. A browser whose access
+token has expired (`auth.access_ttl`, 15m by default) and whose request, a GET
+included, reaches a follower gets 503 with the HTTP address of the leader in
+`X-Leader` instead of a new token, and sets no cookie; the follower logs one
+WARN, `auth refresh needs the leader`, with the method and the path. So with
+rotation on, a raft deployment needs leader-sticky routing: its load balancer
+must send browsers to the leader, or retry a request that gets `X-Leader` on
+the node it names. Without rotation a refresh only reads, and works on every
+node, as does a request whose access token is still valid. Standalone is
+unaffected. See `internal/raft/README.md`.
+
 The main listener refuses state-changing requests that a browser sends from
 another origin (Go's `http.CrossOriginProtection`) with 403
 `Cross-origin request blocked.`: a request whose `Sec-Fetch-Site` is not
@@ -333,6 +346,9 @@ cluster:
     data_dir: /var/lib/solti/raft
     election_timeout_ms: 1000       # 0 keeps hashicorp/raft's 1 s
     heartbeat_timeout_ms: 500       # 0 keeps hashicorp/raft's 1 s
+    snapshot_interval: 120s         # how often to check whether to snapshot; 0s keeps 120s
+    snapshot_threshold: 8192        # log entries since the last snapshot that start one; 0 keeps 8192
+    trailing_logs: 10240            # log entries a snapshot leaves in the log; 0 keeps 10240
     tls:                            # mutual TLS between the nodes
       cert_file: /etc/solti/raft/n1.crt
       key_file: /etc/solti/raft/n1.key
@@ -348,9 +364,10 @@ cluster:
 Env equivalents: `SOLTI_CLUSTER_BACKEND`, `SOLTI_CLUSTER_RAFT_NODE_ID`,
 `SOLTI_CLUSTER_RAFT_BIND_ADDR`, `SOLTI_CLUSTER_RAFT_ADVERTISE_ADDR`,
 `SOLTI_CLUSTER_RAFT_DATA_DIR`, `SOLTI_CLUSTER_RAFT_ELECTION_TIMEOUT_MS`,
-`SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS`, `SOLTI_CLUSTER_RAFT_TLS_CERT_FILE`,
-`SOLTI_CLUSTER_RAFT_TLS_KEY_FILE`, `SOLTI_CLUSTER_RAFT_TLS_CA_FILE`,
-`SOLTI_CLUSTER_RAFT_ALLOW_INSECURE_TRANSPORT`,
+`SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS`, `SOLTI_CLUSTER_RAFT_SNAPSHOT_INTERVAL`,
+`SOLTI_CLUSTER_RAFT_SNAPSHOT_THRESHOLD`, `SOLTI_CLUSTER_RAFT_TRAILING_LOGS`,
+`SOLTI_CLUSTER_RAFT_TLS_CERT_FILE`, `SOLTI_CLUSTER_RAFT_TLS_KEY_FILE`,
+`SOLTI_CLUSTER_RAFT_TLS_CA_FILE`, `SOLTI_CLUSTER_RAFT_ALLOW_INSECURE_TRANSPORT`,
 `SOLTI_CLUSTER_DISCOVERY_DRIVER`, and `SOLTI_CLUSTER_DISCOVERY_PEERS`, split
 on commas:
 
@@ -362,6 +379,22 @@ SOLTI_CLUSTER_DISCOVERY_PEERS="n1=10.0.0.1:7000, n2=10.0.0.2:7000, n3=10.0.0.3:7
 heartbeat timeouts, in milliseconds; 0 keeps hashicorp/raft's default of 1 s.
 An election timeout below the heartbeat timeout passes configuration loading
 but fails the start.
+
+`snapshot_interval`, `snapshot_threshold` and `trailing_logs` set how a node
+compacts its raft log. Every `snapshot_interval` (a duration string such as
+`120s`, in YAML and in the environment) the node checks whether
+`snapshot_threshold` entries have piled up since its last snapshot, and takes
+one if so; the snapshot truncates the log down to its last `trailing_logs`
+entries. A follower that is further behind than that catches up from a snapshot
+of the whole state, not from log entries. The defaults are hashicorp/raft's:
+`120s`, 8192 and 10240. Zero keeps the default and a negative value fails
+configuration loading; an interval under 5 ms passes loading but fails the
+start. They are not `cluster.standalone.snapshot_threshold`, which is the
+standalone store's. hashicorp/raft's own logs, of its elections, snapshots and
+transport, go through podium's logger like any other line, at their own INFO,
+WARN and ERROR levels, with `profile=raft` and `component` (`raft`, `snapshot`
+or `raft-net`); its DEBUG lines are dropped and it writes nothing to stderr. See
+`internal/raft/README.md`.
 
 Each `discovery.peers` entry is `id=host:port`: a node's `node_id` and the
 address its peers dial. A bare `host:port` names the node by its address.
@@ -429,6 +462,12 @@ password verifiers included, so it runs mutual TLS 1.3 between the nodes:
 - A node closes a connection it accepted whose TLS handshake does not finish
   within 10 s, so a host that connects to `bind_addr` and stalls holds nothing
   of the node for longer.
+
+TLS keeps other hosts out of the cluster, not off the port: every connection
+from a host that is no cluster node, refused or timed out in its handshake, is
+one ERROR line in the node's log, `failed to decode incoming command`, and
+nothing limits them. So `raft.bind_addr` must be reachable only from the
+cluster's nodes, by firewall or network policy.
 
 `raft.tls.ca_file` must be a CA that signs raft node certificates only. A node
 accepts every certificate it verifies as a full member of the cluster, whatever

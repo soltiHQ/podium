@@ -1,8 +1,10 @@
 package response
 
 import (
+	"errors"
 	"net/http"
 
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
@@ -11,7 +13,12 @@ import (
 	"github.com/a-h/templ"
 )
 
+// LeaderHeader is the response header that carries the HTTP address of the cluster leader: host:port, no scheme.
+const LeaderHeader = "X-Leader"
+
 // FromError maps a domain error to the matching HTTP response using the shared errkind classifier.
+// A write that reached a follower (cluster.ErrNotLeader) answers 503 like any unavailable store,
+// with LeaderHeader when the Leader middleware knows who leads.
 func FromError(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, err error) {
 	switch errkind.Classify(err) {
 	case errkind.InvalidArgument:
@@ -29,6 +36,11 @@ func FromError(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, 
 	case errkind.FailedPrecondition:
 		Conflict(w, r, mode, "precondition failed")
 	case errkind.Unavailable, errkind.Canceled, errkind.DeadlineExceeded:
+		if errors.Is(err, cluster.ErrNotLeader) {
+			if leader := httpctx.Leader(r.Context()); leader != "" {
+				w.Header().Set(LeaderHeader, leader)
+			}
+		}
 		Unavailable(w, r, mode)
 	default:
 		Internal(w, r, mode)

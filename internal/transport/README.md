@@ -19,7 +19,7 @@ transport/
 │   ├── response/      one-call helpers (OK, NotFound, …) + FromError
 │   └── route/         middleware chaining + REST dispatch (Resource, Router)
 │
-├── httpctx/           HTTP-only request context (Responder, RenderMode)
+├── httpctx/           HTTP-only request context (Responder, RenderMode, Leader)
 ├── clientip/          client IP + HTTPS detection behind trusted proxies
 ├── tlsconf/           PEM config → *tls.Config (server + client, mTLS)
 └── errkind/           domain/agent error → Kind (shared by both transports)
@@ -37,7 +37,8 @@ Main listener (`app.buildMainHandler`), outermost first:
         ▼
   Recovery       ── turns a panic into 503
    CORS          ── answers preflights, adds the CORS headers
-    Leader       ── raft only: forwards writes to the leader, over TLS with tls.client when tls.server is set
+    Leader       ── raft only: forwards writes to the leader, over TLS with tls.client when tls.server is set;
+                    stores where the leader serves this listener in ctx (httpctx.Leader), for the 503 of a write that reaches a follower
      Negotiate   ── picks the Responder (JSON vs HTML), stores it in ctx
       CrossOrigin ── refuses cross-origin browser mutations: 403 through that Responder.
                      It runs before any route, so a refusal gets no request id and no
@@ -46,12 +47,14 @@ Main listener (`app.buildMainHandler`), outermost first:
         │  per route:
   RequestID      ── installs request id + error slot (API routes and the event stream only)
    Logger        ── reads the slot back after the handler returns (same routes)
-    Auth / OptionalAuth / RequirePermission  ── 503 when credentials cannot be checked, logged at ERROR
+    Auth / OptionalAuth / RequirePermission  ── 503 when credentials cannot be checked, logged at ERROR; a refresh that needs the
+                                                 raft leader (auth.rotate_refresh on a follower) is 503 + X-Leader, logged at WARN
      handler/api.go | ui.go
         ├─ success → response.OK(w, r, mode, &View{Data: dto, Component: tmpl})
         │              └─ Responder from ctx → JSON (json.Marshal + sec headers)
         │                                    or HTML (templ.Render + CSP)
         └─ error   → response.FromError(w, r, mode, err)   ← classifies via errkind
+                       ├─ cluster.ErrNotLeader: 503 + X-Leader (httpctx.Leader), when this node knows the leader
                        └─ sets the error slot → Logger appends it to the log line
 ```
 
@@ -100,7 +103,8 @@ Each transport only maps `Kind` to its wire form.
 ```text
                                     ┌─────────────────────────────┐
    domain sentinels ──────────────► │  errkind.Classify → Kind    │ ◄─── proxy AgentError
-   (auth.*, storage.*, context.*)   │  (single source of truth)   │      (ErrorKind() tag)
+   (auth.*, storage.*, cluster.*,   │  (single source of truth)   │      (ErrorKind() tag)
+    context.*)                      │                             │
                                     └──────────────┬──────────────┘
                                                    │
                             ┌──────────────────────┴───────────────────────┐

@@ -11,6 +11,7 @@ import (
 
 	hraft "github.com/hashicorp/raft"
 	boltdb "github.com/hashicorp/raft-boltdb/v2"
+	"github.com/rs/zerolog"
 	bolt "go.etcd.io/bbolt"
 
 	"github.com/soltiHQ/control-plane/domain/model"
@@ -64,7 +65,7 @@ func openRaft(b *testing.B) storage.Storage {
 	b.Cleanup(func() { _ = logs.Close() })
 	inner := inmemory.New()
 	addr, transport := hraft.NewInmemTransport("")
-	r, err := hraft.NewRaft(cfg, raft.NewFSM(inner, nil), logs, logs, hraft.NewInmemSnapshotStore(), transport)
+	r, err := hraft.NewRaft(cfg, raft.NewFSM(inner, nil, zerolog.Nop()), logs, logs, hraft.NewInmemSnapshotStore(), transport)
 	if err != nil {
 		b.Fatal(err)
 	}

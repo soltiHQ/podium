@@ -131,16 +131,7 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger, hubOpts ...event.Op
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}
-		p, err := raftpkg.New(raftpkg.Config{
-			NodeID:                 cfg.Raft.NodeID,
-			BindAddr:               cfg.Raft.BindAddr,
-			AdvertiseAddr:          cfg.Raft.AdvertiseAddr,
-			DataDir:                cfg.Raft.DataDir,
-			ElectionTimeout:        msToDuration(cfg.Raft.ElectionTimeoutMs),
-			HeartbeatTimeout:       msToDuration(cfg.Raft.HeartbeatTimeoutMs),
-			TLS:                    cfg.Raft.TLS,
-			AllowInsecureTransport: cfg.Raft.AllowInsecureTransport,
-		}, inner, hub, disco, logger)
+		p, err := raftpkg.New(raftNodeConfig(cfg.Raft), inner, hub, disco, logger)
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}
@@ -150,11 +141,37 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger, hubOpts ...event.Op
 	}
 }
 
+// raftNodeConfig is the configuration of the raft node that cfg describes.
+func raftNodeConfig(cfg cluster.RaftConfig) raftpkg.Config {
+	return raftpkg.Config{
+		NodeID:                 cfg.NodeID,
+		BindAddr:               cfg.BindAddr,
+		AdvertiseAddr:          cfg.AdvertiseAddr,
+		DataDir:                cfg.DataDir,
+		ElectionTimeout:        msToDuration(cfg.ElectionTimeoutMs),
+		HeartbeatTimeout:       msToDuration(cfg.HeartbeatTimeoutMs),
+		SnapshotInterval:       cfg.SnapshotInterval,
+		SnapshotThreshold:      entries(cfg.SnapshotThreshold),
+		TrailingLogs:           entries(cfg.TrailingLogs),
+		TLS:                    cfg.TLS,
+		AllowInsecureTransport: cfg.AllowInsecureTransport,
+	}
+}
+
 func msToDuration(ms int) time.Duration {
 	if ms <= 0 {
 		return 0
 	}
 	return time.Duration(ms) * time.Millisecond
+}
+
+// entries converts a number of log entries; zero or less leaves raft.New its own
+// default.
+func entries(n int) uint64 {
+	if n <= 0 {
+		return 0
+	}
+	return uint64(n)
 }
 
 // bootstrapOptions tells bootstrap where this node keeps its state, which is

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	hraft "github.com/hashicorp/raft"
+	"github.com/rs/zerolog"
 
 	"github.com/soltiHQ/control-plane/internal/cluster"
 )
@@ -222,8 +223,9 @@ func (c *serverConn) Write(b []byte) (int, error) {
 
 // newTransport opens the raft transport on bind, over mutual TLS, or plain TCP
 // when security is nil. Peers reach it at advertise, as written, which resolves
-// to resolved: an address they can dial.
-func newTransport(bind, advertise string, resolved *net.TCPAddr, security *transportTLS) (*hraft.NetworkTransport, error) {
+// to resolved: an address they can dial. The transport logs into logger: every
+// connection it refuses or that times out in its handshake is one ERROR line.
+func newTransport(bind, advertise string, resolved *net.TCPAddr, security *transportTLS, logger zerolog.Logger) (*hraft.NetworkTransport, error) {
 	if resolved.IP == nil || resolved.IP.IsUnspecified() {
 		return nil, errNotAdvertisable
 	}
@@ -231,7 +233,6 @@ func newTransport(bind, advertise string, resolved *net.TCPAddr, security *trans
 	if err != nil {
 		return nil, err
 	}
-	// A nil Logger logs to stderr, as hashicorp/raft's TCP transport did.
 	return hraft.NewNetworkTransportWithConfig(&hraft.NetworkTransportConfig{
 		Stream: &streamLayer{
 			Listener:  listener,
@@ -241,5 +242,6 @@ func newTransport(bind, advertise string, resolved *net.TCPAddr, security *trans
 		},
 		MaxPool: transportMaxPool,
 		Timeout: transportTimeout,
+		Logger:  newHCLog(logger, "raft-net"),
 	}), nil
 }

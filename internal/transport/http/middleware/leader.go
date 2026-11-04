@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/internal/cluster"
+	"github.com/soltiHQ/control-plane/internal/transport/http/response"
+	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
 )
 
 // defaultForwardTimeout bounds a single proxied writing to the leader when LeaderOptions.ForwardTimeout is left unset.
@@ -63,7 +65,12 @@ type LeaderOptions struct {
 //   - Writes on follower with ForwardPort > 0: transparent reverse-proxy to http://<leader-host>:<ForwardPort>,
 //     or https:// with TargetTLS, verified and authenticated with TLSClientConfig.
 //
-// In a standalone deployment AmLeader is always true, so the middleware adds essentially zero overhead.
+// A request that passes through carries, in its context, where the leader serves this listener
+// (httpctx.Leader, see leaderAddress), so that a write that reaches a follower anyway, such as a
+// refresh with rotation on a read, answers 503 with that address in X-Leader (response.FromError).
+//
+// In a standalone deployment AmLeader is always true, so the middleware adds essentially zero overhead:
+// that context value, which says nothing.
 func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler) http.Handler {
 	isWrite := opts.IsWrite
 	if isWrite == nil {
@@ -83,10 +90,11 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 		TLSClientConfig: opts.TLSClientConfig.Clone(),
 	}
 
+	leader := func() string { return leaderAddress(leadership, opts.ForwardPort) }
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !isWrite(r) || leadership.AmLeader() {
-				next.ServeHTTP(w, r)
+				next.ServeHTTP(w, r.WithContext(httpctx.WithLeader(r.Context(), leader)))
 				return
 			}
 			leaderAddr := leadership.CurrentLeader()
@@ -95,7 +103,7 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 				return
 			}
 			if opts.ForwardPort == 0 {
-				w.Header().Set("X-Leader", leaderAddr)
+				w.Header().Set(response.LeaderHeader, leaderAddr)
 				http.Error(w, "cluster: not leader", http.StatusServiceUnavailable)
 				return
 			}
@@ -108,7 +116,7 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 			proxy := httputil.NewSingleHostReverseProxy(target)
 			proxy.Transport = transport
 			proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
-				w.Header().Set("X-Leader", leaderAddr)
+				w.Header().Set(response.LeaderHeader, leaderAddr)
 				http.Error(w, "cluster: leader unreachable", http.StatusBadGateway)
 			}
 			proxy.ServeHTTP(w, r)
@@ -116,18 +124,36 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 	}
 }
 
-func buildTarget(leaderAddr string, port int, tls bool) (*url.URL, error) {
+// leaderAddress is where the leader serves this listener, as a follower knows it: the host of the
+// leader's raft address with port, which every replica is assumed to serve the listener on. It is empty
+// when this node is the leader or no leader is known. Without a port (ForwardPort == 0) the leader's raft
+// address stands in, as it does in the 503 of a write.
+func leaderAddress(leadership cluster.Leadership, port int) string {
+	if leadership.AmLeader() {
+		return ""
+	}
+	leaderAddr := leadership.CurrentLeader()
+	if leaderAddr == "" || port == 0 {
+		return leaderAddr
+	}
+	return hostWithPort(leaderHost(leaderAddr), port)
+}
+
+// leaderHost returns the host of the leader's raft address, without the brackets of an IPv6 one.
+func leaderHost(leaderAddr string) string {
 	host := leaderAddr
 	if i := strings.LastIndex(leaderAddr, ":"); i > 0 {
 		host = leaderAddr[:i]
 	}
-	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	return strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+}
 
+func buildTarget(leaderAddr string, port int, tls bool) (*url.URL, error) {
 	scheme := "http"
 	if tls {
 		scheme = "https"
 	}
-	u, err := url.Parse(scheme + "://" + hostWithPort(host, port))
+	u, err := url.Parse(scheme + "://" + hostWithPort(leaderHost(leaderAddr), port))
 	if err != nil {
 		return nil, err
 	}

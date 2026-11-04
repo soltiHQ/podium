@@ -52,7 +52,7 @@ func newLeadershipTestCluster(t *testing.T) []*leadershipTestNode {
 		cfg.LogOutput = io.Discard
 		logs := hraft.NewInmemStore()
 		var err error
-		n.r, err = hraft.NewRaft(cfg, NewFSM(inmemory.New(), event.NewHub(zerolog.Nop())), logs, logs, hraft.NewInmemSnapshotStore(), n.transport)
+		n.r, err = hraft.NewRaft(cfg, NewFSM(inmemory.New(), event.NewHub(zerolog.Nop()), zerolog.Nop()), logs, logs, hraft.NewInmemSnapshotStore(), n.transport)
 		if err != nil {
 			t.Fatal(err)
 		}

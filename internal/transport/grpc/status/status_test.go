@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc/codes"
 
 	"github.com/soltiHQ/control-plane/internal/auth"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
@@ -29,6 +30,7 @@ func TestMapError(t *testing.T) {
 		{"already exists", storage.ErrAlreadyExists, codes.AlreadyExists},
 		{"conflict → aborted", storage.ErrConflict, codes.Aborted},
 		{"storage invalid argument", storage.ErrInvalidArgument, codes.InvalidArgument},
+		{"not the leader → unavailable", fmt.Errorf("raft: apply: %w", cluster.ErrNotLeader), codes.Unavailable},
 		{"unknown → internal", errors.New("boom"), codes.Internal},
 		{"wrapped sentinel is unwrapped", fmt.Errorf("load: %w", storage.ErrNotFound), codes.NotFound},
 	}
