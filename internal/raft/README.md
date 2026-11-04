@@ -72,24 +72,45 @@ discovery: a node restarted while discovery fails rejoins its cluster
 ## Transport security
 
 The transport runs mutual TLS 1.3 (`tls_stream.go`): a `hraft.StreamLayer`
-that accepts on a `tls.Listen` listener and dials with `tls.DialWithDialer`,
-given to hashicorp/raft through `NewNetworkTransportWithConfig`. A node
-presents its one certificate, `Config.TLS`, both ways, and verifies the peer's
-against the cluster CA both ways: it answers no RPC from a peer with a
-certificate of another CA, with none, over TLS 1.2 or over plain TCP, and gets
-none through to a peer with a certificate of another CA, over TLS 1.2 or over
-plain TCP, so such a node cannot join (`TestRaftRefusesPeerWithoutClusterCert`).
-A dialed peer's certificate must also name the host the node dials, its
-address in the raft configuration, compared as written
-(`TestRaftRefusesPeerCertForAnotherHost`). An accepted connection's handshake
-runs on its first read, in the goroutine the transport gives that connection,
-so a slow peer delays no other.
+that wraps each TCP connection it accepts in `tls.Server` and dials with
+`tls.DialWithDialer`, given to hashicorp/raft through
+`NewNetworkTransportWithConfig`. A node presents its one certificate,
+`Config.TLS`, both ways, and verifies the peer's against the cluster CA both
+ways: it answers no RPC from a peer with a certificate of another CA, with
+none, over TLS 1.2 or over plain TCP, and gets none through to a peer with a
+certificate of another CA, over TLS 1.2 or over plain TCP, so such a node
+cannot join (`TestRaftRefusesPeerWithoutClusterCert`). A dialed peer's
+certificate must also name the host the node dials, its address in the raft
+configuration, compared as written (`TestRaftRefusesPeerCertForAnotherHost`).
+Inbound, any certificate the CA verifies is a member, whatever it names: no
+check of a connecting peer against the configured peers exists, so the CA must
+sign raft node certificates only.
+
+An accepted connection's handshake runs on its first read or write, in the
+goroutine hashicorp/raft gives that connection, never in its one accept loop.
+It must finish within `handshakeTimeout` (10 s), or the connection is closed:
+a host that connects and stays silent, or stops halfway through its
+ClientHello, holds that goroutine, the connection and hashicorp/raft's 256 KB
+read buffer no longer. The bound ends with the handshake, so a connection may
+then sit idle between RPCs (`TestRaftBoundsInboundHandshakes`). The dial
+timeout covers the handshake of a connection the node dials.
+
+The stream layer gives raft the node's advertise address as written, not as
+it resolves: raft takes it for the node's own address, which a leader
+announces, so every node knows its leader by the address the configuration
+lists, the host a follower's HTTP forward checks the leader's certificate for
+(`TestNodesKnowTheLeaderByItsAdvertiseAddress`). The address is resolved only
+to check that peers can dial it.
 
 `New` reads the TLS files before it makes the data directory: a file it cannot
 use fails the start with nothing made, in an error that names the file, never
-what it holds (`TestNewRefusesUnusableTLSFiles`). Plain TCP, the hashicorp/raft
-TCP transport, needs `AllowInsecureTransport` and no TLS file, and logs one
-WARN at start; without either, `New` refuses the node
+what it holds (`TestNewRefusesUnusableTLSFiles`). It then checks the node's
+own certificate as its peers will, against the CA, now, for server and for
+client authentication, and for the host of the advertise address as written,
+and fails the start with an error that says which check failed
+(`TestNewChecksItsOwnCertificate`). Plain TCP, the same stream layer without
+TLS, needs `AllowInsecureTransport` and no TLS file, and logs one WARN at
+start; without either, `New` refuses the node
 (`TestPlainTCPNeedsAllowInsecureTransport`), as `cluster.Config.Validate` does
 earlier. See "Raft transport security" in `internal/config/README.md` for the
 certificates.
@@ -97,8 +118,9 @@ certificates.
 ## Data directory
 
 The data directory and its `snapshots` directory are made 0700, and `New`
-refuses either, before it opens anything there, when its group or others have
-any permission on it or it is a symlink, as the durable store does
+refuses either, before it opens anything there, the log of a node with state
+included, when its group or others have any permission on it or it is a
+symlink, written with a trailing slash or not, as the durable store does
 (`TestRaftRefusesLooseDataDir`). raft-boltdb makes its files 0600, but
 hashicorp/raft makes each snapshot directory 0755 and its `meta.json` and
 `state.bin` 0644, so the snapshot store takes their group and other

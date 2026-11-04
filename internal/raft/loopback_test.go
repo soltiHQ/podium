@@ -309,6 +309,12 @@ func newTestCA(t *testing.T) *testCA {
 // key, and returns the files of a node that presents it and trusts ca.
 func (ca *testCA) issue(t *testing.T, hosts ...string) cluster.RaftTLSConfig {
 	t.Helper()
+	return ca.issueWith(t, func(*x509.Certificate) {}, hosts...)
+}
+
+// issueWith is issue with edit applied to the certificate before ca signs it.
+func (ca *testCA) issueWith(t *testing.T, edit func(*x509.Certificate), hosts ...string) cluster.RaftTLSConfig {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -332,6 +338,7 @@ func (ca *testCA) issue(t *testing.T, hosts ...string) cluster.RaftTLSConfig {
 			tmpl.DNSNames = append(tmpl.DNSNames, host)
 		}
 	}
+	edit(tmpl)
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
 	if err != nil {
 		t.Fatal(err)
@@ -352,6 +359,20 @@ func (ca *testCA) pool() *x509.CertPool {
 	pool := x509.NewCertPool()
 	pool.AddCert(ca.cert)
 	return pool
+}
+
+// bundle writes the certificates of cas to one CA file and returns it.
+func bundle(t *testing.T, cas ...*testCA) string {
+	t.Helper()
+	var pemBytes []byte
+	for _, ca := range cas {
+		pemBytes = append(pemBytes, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.cert.Raw})...)
+	}
+	file := filepath.Join(t.TempDir(), "bundle.crt")
+	if err := os.WriteFile(file, pemBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return file
 }
 
 // writePEM writes der to path as one PEM block of typ, readable by its owner

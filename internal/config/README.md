@@ -47,16 +47,17 @@ tls:
 Env equivalents: `SOLTI_TLS_SERVER_CERT_FILE`, `SOLTI_TLS_CLIENT_CA_FILE`, etc.
 
 In raft mode a follower forwards the writes it gets on the HTTP and
-HTTP-discovery listeners to the leader, at the leader's raft host and this
-node's port of that listener. With `tls.server` set it forwards over TLS with
-`tls.client`: `ca_file` must also hold the CA of the replicas' server
-certificates, which must name each replica's raft advertise host as an IP or
-DNS subject alternative name, and `cert_file`/`key_file` are presented when the
-leader asks for a client certificate, as the discovery listener does with
-`client_ca_file`. Without a `tls.client.ca_file`, the leader is verified against
-the system roots. A leader whose certificate does not verify gets no write: the
-follower answers 502. The raft transport has TLS settings of its own, see "Raft
-transport security".
+HTTP-discovery listeners to the leader, at the host of the leader's raft
+advertise address, as written, and this node's port of that listener. With
+`tls.server` set it forwards over TLS with `tls.client`: `ca_file` must also
+hold the CA of the replicas' server certificates, which must name each
+replica's raft advertise host as written, an IP SAN for `10.0.0.1:7000` and a
+DNS SAN for `podium-0.podium:7000`, and `cert_file`/`key_file` are presented
+when the leader asks for a client certificate, as the discovery listener does
+with `client_ca_file`. Without a `tls.client.ca_file`, the leader is verified
+against the system roots. A leader whose certificate does not verify gets no
+write: the follower answers 502. The raft transport has TLS settings of its
+own, with a CA of its own, see "Raft transport security".
 
 ## Agent authentication
 
@@ -413,9 +414,9 @@ password verifiers included, so it runs mutual TLS 1.3 between the nodes:
 
 - Each node has one certificate, `raft.tls.cert_file` with its
   `raft.tls.key_file`, and presents it both to the peers that connect to it
-  and to the peers it dials. Its extended key usage, and that of any
-  intermediate CA, must allow both server and client authentication, or be
-  absent.
+  and to the peers it dials. Every certificate of its chain, the root
+  included, must allow both server and client authentication in its extended
+  key usage, or carry no extended key usage.
 - `raft.tls.ca_file` holds the cluster CA. A node accepts a connection only
   from a peer that presents a certificate this CA signed, and dials a peer only
   when the peer's certificate is signed by it too.
@@ -425,10 +426,25 @@ password verifiers included, so it runs mutual TLS 1.3 between the nodes:
   `podium-1.podium:7000`. With `discovery.driver: dns` the peers are dialed at
   their IPs, so the certificates need IP SANs.
 - TLS 1.2 and older are refused both ways.
+- A node closes a connection it accepted whose TLS handshake does not finish
+  within 10 s, so a host that connects to `bind_addr` and stalls holds nothing
+  of the node for longer.
+
+`raft.tls.ca_file` must be a CA that signs raft node certificates only. A node
+accepts every certificate it verifies as a full member of the cluster, whatever
+host the certificate names: it does not check a connecting peer's certificate
+against the configured peers. So it must never be the agents' CA, the CA of
+`tls.server` or `tls.client`, or a bundle merged with any of them, or every
+certificate those sign could write the cluster's state.
 
 The files are read when the node starts, before anything in `data_dir` is
 opened: a file that is missing or holds no usable certificate or key fails the
-start, and a renewed certificate takes effect at the next start.
+start, and a renewed certificate takes effect at the next start. The node then
+checks its own certificate as its peers will: signed by the CA of `ca_file`,
+valid now, for both server and client authentication, and naming the host of
+its advertise address as written. A certificate that fails any of these fails
+the start with an error that says which, so a node that its peers would refuse
+does not start cut off from them.
 
 `raft.allow_insecure_transport: true` runs the transport on plain TCP instead,
 for a cluster on a trusted network: any host that reaches `bind_addr` can then
@@ -438,16 +454,17 @@ configuration loading fails.
 
 ### Raft data directory
 
-`data_dir` holds the raft log, the stable store and the snapshots, so only its
-owner may enter it. A node makes a missing `data_dir` and its `snapshots`
-directory with mode 0700, and refuses to start, before it opens anything
-there, when either is open to its group or others or is a symlink, as the
+`data_dir` holds the raft log, the stable store and the snapshots, so neither
+`data_dir` nor anything in it may carry group or other permission bits. A node
+makes a missing `data_dir` and its `snapshots` directory with mode 0700, and
+refuses to start, before it opens anything there, when either is open to its
+group or others or is a symlink, written with a trailing slash or not, as the
 standalone store refuses its directory. The BoltDB files are 0600. Each
 snapshot directory is made 0700 and its files 0600 as soon as hashicorp/raft
 creates them, before any state is written into them, and again once the
 snapshot is in place; snapshots already there, such as an earlier version's,
-are made private at start. A volume mounted for the group, as Kubernetes does
-with `fsGroup`, cannot be `data_dir` itself: use a directory in it.
+are made private at start. Volume settings that add group permissions to
+`data_dir` make the node refuse to start.
 
 ### Upgrading a raft node
 
@@ -467,10 +484,10 @@ Earlier versions also ran the transport on plain TCP and made `data_dir` and
 `snapshots` 0755 and the snapshot files 0644. This version needs, on every
 node:
 
-- `raft.tls`, with a certificate as above for each node, or
-  `raft.allow_insecure_transport: true`, which keeps plain TCP as before. A
-  node on TLS and a node on plain TCP cannot reach each other, so a cluster
-  works only while a majority of its nodes runs the same transport.
+- `raft.tls`, with a certificate as above for each node, of a CA kept for raft
+  alone, or `raft.allow_insecure_transport: true`, which keeps plain TCP as
+  before. A node on TLS and a node on plain TCP cannot reach each other, so a
+  cluster works only while a majority of its nodes runs the same transport.
 - `chmod -R go-rwx` on `data_dir`. A node refuses a `data_dir` or `snapshots`
   directory that is still open to the group or others; it makes the snapshots
   in it private by itself at its next start.

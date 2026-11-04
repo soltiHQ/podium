@@ -18,6 +18,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/cluster"
+	"github.com/soltiHQ/control-plane/internal/cluster/discovery"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
@@ -110,9 +111,10 @@ func TestRaftRefusesPeerWithoutClusterCert(t *testing.T) {
 	c := loopbackNodes(t, "n1", "n2", "n3")
 	members, rogue := c.nodes[:2], c.nodes[2]
 	other := newTestCA(t)
-	// The rogue trusts the cluster CA, so only the other nodes' checks keep it out.
+	// The rogue trusts the cluster CA as well as its own, which its start checks
+	// its certificate against, so only the other nodes' checks keep it out.
 	rogueTLS := other.issue(t, "127.0.0.1")
-	rogueTLS.CAFile = c.ca.file
+	rogueTLS.CAFile = bundle(t, other, c.ca)
 	for _, n := range members {
 		n.start(t, c.discovery(t))
 	}
@@ -247,6 +249,24 @@ func TestRaftRefusesPeerCertForAnotherHost(t *testing.T) {
 	}
 }
 
+// checkRefusedStart fails the test unless New's refusal err of n shows no line
+// of the key in keyFile and n's data directory was never made.
+func checkRefusedStart(t *testing.T, n *loopbackNode, err error, keyFile string) {
+	t.Helper()
+	key, readErr := os.ReadFile(keyFile)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(key)), "\n") {
+		if !strings.HasPrefix(line, "-----") && strings.Contains(err.Error(), line) {
+			t.Fatalf("the error shows the key: %v", err)
+		}
+	}
+	if _, err := os.Lstat(n.dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the data directory of a refused node: %v, want none", err)
+	}
+}
+
 // New reads the TLS files before it makes the data directory: a file that is
 // missing, a key of another certificate or a CA file without a certificate
 // fails the start with nothing made, and the error never shows what a file
@@ -254,10 +274,6 @@ func TestRaftRefusesPeerCertForAnotherHost(t *testing.T) {
 func TestNewRefusesUnusableTLSFiles(t *testing.T) {
 	ca := newTestCA(t)
 	files, other := ca.issue(t, "127.0.0.1"), ca.issue(t, "127.0.0.1")
-	key, err := os.ReadFile(files.KeyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, tc := range []struct {
 		name string
 		edit func(*cluster.RaftTLSConfig)
@@ -276,14 +292,157 @@ func TestNewRefusesUnusableTLSFiles(t *testing.T) {
 			if err == nil {
 				t.Fatal("New accepted the files")
 			}
-			for _, line := range strings.Split(strings.TrimSpace(string(key)), "\n") {
-				if !strings.HasPrefix(line, "-----") && strings.Contains(err.Error(), line) {
-					t.Fatalf("the error shows the key: %v", err)
+			checkRefusedStart(t, n, err, files.KeyFile)
+		})
+	}
+}
+
+// Before its transport starts, a node checks the certificate it presents as
+// its peers will: signed by the CA of ca_file, valid now, for server and for
+// client authentication, which no extended key usage allows as well, and for
+// the host of its advertise address as written. A certificate that fails
+// stops the start with an error that says why and never shows the key, and
+// nothing is made.
+func TestNewChecksItsOwnCertificate(t *testing.T) {
+	ca, other := newTestCA(t), newTestCA(t)
+	usage := func(usages ...x509.ExtKeyUsage) func(*x509.Certificate) {
+		return func(c *x509.Certificate) { c.ExtKeyUsage = usages }
+	}
+	strange := other.issue(t, "127.0.0.1")
+	strange.CAFile = ca.file
+	for _, tc := range []struct {
+		name      string
+		files     cluster.RaftTLSConfig
+		advertise string // the host of the advertise address; empty keeps 127.0.0.1
+		want      string // in the error; empty when the node starts
+	}{
+		{"a certificate of the CA for the advertise IP", ca.issue(t, "127.0.0.1"), "", ""},
+		{"no extended key usage", ca.issueWith(t, usage(), "127.0.0.1"), "", ""},
+		{"for the advertise host name", ca.issue(t, "localhost"), "localhost", ""},
+		{"a certificate of another CA", strange, "", "unknown authority"},
+		{"for server authentication only", ca.issueWith(t, usage(x509.ExtKeyUsageServerAuth), "127.0.0.1"), "", "client certificate"},
+		{"for client authentication only", ca.issueWith(t, usage(x509.ExtKeyUsageClientAuth), "127.0.0.1"), "", "server certificate"},
+		{"for another host", ca.issue(t, "10.0.0.9"), "", "advertise host"},
+		{"for the IP the advertise host name resolves to", ca.issue(t, "127.0.0.1"), "localhost", "advertise host"},
+		{"expired", ca.issueWith(t, func(c *x509.Certificate) {
+			c.NotBefore, c.NotAfter = time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour)
+		}, "127.0.0.1"), "", "expired"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := newLoopbackNode(t, ca, "n1", reserveLoopbackAddrs(t, 1)[0])
+			t.Cleanup(n.stop)
+			disco, opts := n.self(), []func(*Config){withTLS(tc.files)}
+			if tc.advertise != "" {
+				_, port, err := net.SplitHostPort(n.addr)
+				if err != nil {
+					t.Fatal(err)
 				}
+				advertise := net.JoinHostPort(tc.advertise, port)
+				disco = discovery.NewStatic([]cluster.Peer{{ID: n.id, Address: advertise}})
+				opts = append(opts, func(c *Config) { c.AdvertiseAddr = advertise })
 			}
-			if _, err := os.Lstat(n.dir); !errors.Is(err, fs.ErrNotExist) {
-				t.Fatalf("the data directory of a refused node: %v, want none", err)
+			err := n.open(disco, opts...)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("New() = %v, want the node started", err)
+				}
+				return
 			}
+			if !errors.Is(err, ErrNodeCertificate) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("New() = %v, want %v saying %q", err, ErrNodeCertificate, tc.want)
+			}
+			checkRefusedStart(t, n, err, tc.files.KeyFile)
+		})
+	}
+}
+
+// partialClientHello is the start of a TLS record that announces a ClientHello
+// of 124 bytes and stops after its first two, as a host that stalls halfway.
+var partialClientHello = []byte{0x16, 0x03, 0x01, 0x00, 0x80, 0x01, 0x00, 0x00, 0x7c, 0x03, 0x03}
+
+// A node closes a connection it accepted whose TLS handshake does not finish
+// within handshakeTimeout: a host that connects and stays silent, or stops
+// halfway through its ClientHello, holds the goroutine, the file and the buffer
+// the transport gives the connection for no longer. A connection whose
+// handshake finished may sit idle past that bound and still carry RPCs.
+func TestRaftBoundsInboundHandshakes(t *testing.T) {
+	bound := handshakeTimeout
+	handshakeTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { handshakeTimeout = bound })
+	c := newLoopbackCluster(t, "n1")
+	node := c.nodes[0]
+	member := peerTransport(t, &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		RootCAs:      c.ca.pool(),
+		Certificates: []tls.Certificate{certOf(t, c.ca.issue(t, "127.0.0.1"))},
+	})
+	if err := requestVote(member, node.addr); err != nil {
+		t.Fatalf("a member's RPC: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		send []byte
+	}{
+		{"a silent host", nil},
+		{"half a ClientHello", partialClientHello},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := net.Dial("tcp", node.addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conn.Close() }()
+			if _, err := conn.Write(tc.send); err != nil {
+				t.Fatal(err)
+			}
+			// This deadline only ends the wait: the node closes the connection
+			// long before it.
+			if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := conn.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("the node kept the connection open for 2s, with a handshake bound of %s: %v", handshakeTimeout, err)
+			}
+		})
+	}
+	// The member's pooled connection has sat idle for as long as the hosts'.
+	if err := requestVote(member, node.addr); err != nil {
+		t.Fatalf("a member's RPC on its idle connection: %v", err)
+	}
+}
+
+// A node's own address in raft, the one its leader announces, is its
+// advertise address as written, as its peers list and dial it. So nodes that
+// advertise a host name all know their leader by that name, the host whose
+// certificate a follower checks when it forwards a write to its leader.
+func TestNodesKnowTheLeaderByItsAdvertiseAddress(t *testing.T) {
+	c := loopbackNodes(t, "n1", "n2", "n3")
+	peers := make([]cluster.Peer, 0, len(c.nodes))
+	for _, n := range c.nodes {
+		_, port, err := net.SplitHostPort(n.addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		peers = append(peers, cluster.Peer{ID: n.id, Address: net.JoinHostPort("localhost", port)})
+	}
+	for i, n := range c.nodes {
+		n.start(t, discovery.NewStatic(peers), withTLS(c.ca.issue(t, "localhost")), func(cfg *Config) {
+			cfg.AdvertiseAddr = peers[i].Address
+		})
+	}
+	var leader string
+	elected := c.leader(t, 5*time.Second)
+	for i, n := range c.nodes {
+		if n == elected {
+			leader = peers[i].Address
+		}
+	}
+	for i, n := range c.nodes {
+		if got := string(n.profile.transport.LocalAddr()); got != peers[i].Address {
+			t.Fatalf("%s's own address is %s, want its advertise address %s", n.id, got, peers[i].Address)
+		}
+		waitFor(t, 5*time.Second, n.id+" knows the leader at "+leader, func() bool {
+			return n.profile.leadership.CurrentLeader() == leader
 		})
 	}
 }

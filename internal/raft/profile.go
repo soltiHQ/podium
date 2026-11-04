@@ -98,8 +98,10 @@ type Profile struct {
 // New builds and starts a Raft profile. It expects a configuration that
 // [cluster.Config.Validate] accepted, and checks only that NodeID, BindAddr
 // and DataDir are set, and that the transport has TLS or may run plain TCP.
-// It loads the TLS files before it makes DataDir, which it makes 0700 and
-// refuses when it is open to its group or others (see privateDir).
+// It loads the TLS files and checks the node's certificate before it makes
+// DataDir, which it makes 0700, as its snapshots directory, and refuses, before
+// it opens anything there, when either is open to its group or others (see
+// privateDir).
 //
 // On first start (empty DataDir) the node derives its server list from
 // disco.Peers() (see bootstrapServers) before its transport listens, and
@@ -122,14 +124,20 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 	if hub == nil {
 		return nil, fmt.Errorf("raft: nil hub")
 	}
-	security, err := transportSecurity(cfg)
+	advertise := cfg.AdvertiseAddr
+	if advertise == "" {
+		advertise = cfg.BindAddr
+	}
+	security, err := transportSecurity(cfg, advertise)
 	if err != nil {
 		return nil, err
 	}
 	logger = logger.With().Str("profile", "raft").Logger()
 
-	if err := privateDir(cfg.DataDir); err != nil {
-		return nil, err
+	for _, dir := range []string{cfg.DataDir, filepath.Join(cfg.DataDir, snapshotsDir)} {
+		if err := privateDir(dir); err != nil {
+			return nil, err
+		}
 	}
 
 	rcfg := hraft.DefaultConfig()
@@ -148,16 +156,11 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 	}
 	rcfg.LogOutput = os.Stderr
 
-	advertise := cfg.AdvertiseAddr
-	if advertise == "" {
-		advertise = cfg.BindAddr
-	}
-	// TCP transport requires a *net.TCPAddr for advertise — it validates
-	// the concrete type. We resolve the FQDN to an IP for the transport,
-	// but the Raft *bootstrap configuration* is the discovered list as
-	// written, which names this node by the raw advertise string, so every
-	// replica bootstraps with the same config regardless of which IP its
-	// local DNS returned first.
+	// The advertise address is resolved only to check that peers can dial it.
+	// The transport gives raft the address as written, as the bootstrap
+	// configuration, the discovered list, names this node, so the node's own
+	// address and its leader address are the ones its peers know, whichever
+	// IP its local DNS returned first.
 	advTCP, err := net.ResolveTCPAddr("tcp", advertise)
 	if err != nil {
 		return nil, fmt.Errorf("raft: resolve advertise %q: %w", advertise, err)
@@ -225,7 +228,7 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 			return nil, err
 		}
 	}
-	transport, err = newTransport(cfg.BindAddr, advTCP, security)
+	transport, err = newTransport(cfg.BindAddr, advertise, advTCP, security)
 	if err != nil {
 		return nil, fmt.Errorf("raft: transport on %s: %w", cfg.BindAddr, err)
 	}
@@ -305,9 +308,11 @@ const snapshotsDir = "snapshots"
 
 // privateDir makes dir 0700 when it is missing and, as the durable store does,
 // refuses it when it is not a directory, a symlink included, or its group or
-// others have any permission on it. It checks no file: BoltDB makes its files
-// 0600, and the snapshot store makes its own private.
+// others have any permission on it. The path is cleaned first: with a
+// trailing slash, Lstat would follow a symlink. It checks no file: BoltDB makes
+// its files 0600, and the snapshot store makes its own private.
 func privateDir(dir string) error {
+	dir = filepath.Clean(dir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("raft: mkdir %s: %w", dir, err)
 	}
@@ -332,7 +337,9 @@ type snapshotStore struct {
 // newSnapshotStore opens the snapshot store of dataDir, whose snapshots
 // directory must be as private as dataDir, and makes private the snapshots it
 // holds already: those of an earlier version, which left them 0755 and 0644,
-// or of a snapshot that a crash cut short.
+// or of a snapshot that a crash cut short. New checks the directory earlier,
+// before anything is opened; the check here keeps the store private for any
+// other caller.
 func newSnapshotStore(dataDir string) (*snapshotStore, error) {
 	dir := filepath.Join(dataDir, snapshotsDir)
 	if err := privateDir(dir); err != nil {

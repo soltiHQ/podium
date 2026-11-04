@@ -99,7 +99,7 @@ func (t RaftTLSConfig) validate(allowInsecure bool) error {
 	case !t.Enabled() && allowInsecure:
 		return nil
 	case allowInsecure:
-		return errors.New("raft.allow_insecure_transport is true while raft.tls is set: set either, for plain TCP or for mutual TLS")
+		return ErrRaftInsecureWithTLS
 	case !t.Enabled():
 		return ErrRaftTLSRequired
 	case len(missing) > 0:
@@ -139,6 +139,10 @@ var (
 	// ErrRaftTLSRequired indicates a raft node with neither all three files of
 	// raft.tls nor raft.allow_insecure_transport.
 	ErrRaftTLSRequired = errors.New("the raft transport needs raft.tls.cert_file, raft.tls.key_file and raft.tls.ca_file for mutual TLS, or raft.allow_insecure_transport: true for plain TCP")
+
+	// ErrRaftInsecureWithTLS indicates raft.allow_insecure_transport set with a
+	// file of raft.tls: which transport is meant is unclear.
+	ErrRaftInsecureWithTLS = errors.New("raft.allow_insecure_transport is true while raft.tls is set: set either, for plain TCP or for mutual TLS")
 
 	// ErrAdvertiseRequired indicates a raft.bind_addr that listens on every
 	// interface without a raft.advertise_addr to give peers instead.

@@ -211,8 +211,8 @@ func TestRaftRequiresTLSOrExplicitInsecure(t *testing.T) {
 		{"only a ca_file", func(r *cluster.RaftConfig) { r.TLS = cluster.RaftTLSConfig{CAFile: files.CAFile} }, cluster.ErrRaftTLSRequired},
 		{"some files with the flag", func(r *cluster.RaftConfig) {
 			r.TLS, r.AllowInsecureTransport = cluster.RaftTLSConfig{CertFile: files.CertFile}, true
-		}, errAny},
-		{"mutual TLS with the flag", func(r *cluster.RaftConfig) { r.AllowInsecureTransport = true }, errAny},
+		}, cluster.ErrRaftInsecureWithTLS},
+		{"mutual TLS with the flag", func(r *cluster.RaftConfig) { r.AllowInsecureTransport = true }, cluster.ErrRaftInsecureWithTLS},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := raftConfig()

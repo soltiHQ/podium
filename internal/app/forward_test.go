@@ -23,6 +23,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
@@ -67,9 +68,9 @@ func newTestCA(t *testing.T) *testCA {
 	return ca
 }
 
-// issue writes a server and client certificate of ca for the IP 127.0.0.1, and
-// its key, and returns their files.
-func (ca *testCA) issue(t *testing.T) (certFile, keyFile string) {
+// issue writes a server and client certificate of ca for hosts, each an IP or
+// a DNS subject alternative name, and its key, and returns their files.
+func (ca *testCA) issue(t *testing.T, hosts ...string) (certFile, keyFile string) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -81,12 +82,18 @@ func (ca *testCA) issue(t *testing.T) (certFile, keyFile string) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		Subject:      pkix.Name{CommonName: hosts[0]},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+	for _, host := range hosts {
+		if ip := net.ParseIP(host); ip != nil {
+			tmpl.IPAddresses = append(tmpl.IPAddresses, ip)
+		} else {
+			tmpl.DNSNames = append(tmpl.DNSNames, host)
+		}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
 	if err != nil {
@@ -123,6 +130,100 @@ func (follower) WhenLeader(ctx context.Context, _ func(context.Context) error) e
 	return nil
 }
 
+// followerOf is the leadership of a follower of the node whose leadership it
+// holds: the follower leads nothing, and its leader is that node's leader.
+type followerOf struct{ cluster.Leadership }
+
+func (followerOf) AmLeader() bool { return false }
+
+// A follower knows its leader by the raft address the leader advertises, as
+// written, so with tls.server set it checks the leader's certificate for that
+// host: a write reaches a leader that advertises a host name with a
+// certificate for that name, and none reaches a leader whose certificate
+// names only the IP the name resolves to.
+func TestLeaderForwardingToALeaderNamedByHost(t *testing.T) {
+	ca := newTestCA(t)
+	raftCert, raftKey := ca.issue(t, "localhost")
+	bind := loopbackAddrs(t, 1)[0]
+	_, raftPort, err := net.SplitHostPort(bind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	advertise := net.JoinHostPort("localhost", raftPort)
+	raftCfg := cluster.DefaultConfig()
+	raftCfg.Backend = cluster.BackendRaft
+	raftCfg.Raft = cluster.RaftConfig{
+		NodeID: "n1", BindAddr: bind, AdvertiseAddr: advertise, DataDir: filepath.Join(t.TempDir(), "raft"),
+		ElectionTimeoutMs: 50, HeartbeatTimeoutMs: 50,
+		TLS: cluster.RaftTLSConfig{CertFile: raftCert, KeyFile: raftKey, CAFile: ca.file},
+	}
+	raftCfg.Discovery.Peers = []string{"n1=" + advertise}
+	_, leadership, hub, shutdown, err := buildCluster(raftCfg, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		hub.Close()
+		shutdown()
+	})
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for deadline := time.Now().Add(5 * time.Second); !leadership.AmLeader(); <-tick.C {
+		if time.Now().After(deadline) {
+			t.Fatal("the raft node did not lead within 5s")
+		}
+	}
+
+	followerCert, followerKey := ca.issue(t, "127.0.0.1")
+	for _, tc := range []struct {
+		name      string
+		hosts     []string // the subject alternative names of the leader's certificate
+		forwarded bool
+	}{
+		{"a leader certificate for the host name", []string{"localhost"}, true},
+		{"a leader certificate for its IP only", []string{"127.0.0.1"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			leaderCert, leaderKey := ca.issue(t, tc.hosts...)
+			cert, err := tls.LoadX509KeyPair(leaderCert, leaderKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reached := make(chan struct{}, 1)
+			leader := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				reached <- struct{}{}
+				w.WriteHeader(http.StatusAccepted)
+			}))
+			leader.Config.ErrorLog = log.New(io.Discard, "", 0)
+			leader.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+			leader.StartTLS()
+			t.Cleanup(leader.Close)
+			_, port, err := net.SplitHostPort(leader.Listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			cfg := config.Default()
+			cfg.HTTP.Addr = ":" + port
+			cfg.TLS.Server = tlsconf.ServerConfig{CertFile: followerCert, KeyFile: followerKey}
+			cfg.TLS.Client = tlsconf.ClientConfig{CAFile: ca.file}
+			clientTLS, err := cfg.TLS.Client.Build()
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			mainHandlerOf(t, cfg, inmemory.New(), zerolog.Nop(), followerOf{leadership}, clientTLS).
+				ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader("{}")))
+			switch want := map[bool]int{true: http.StatusAccepted, false: http.StatusBadGateway}[tc.forwarded]; {
+			case w.Code != want:
+				t.Fatalf("follower of the leader at %s answered %d %q, want %d", leadership.CurrentLeader(), w.Code, w.Body.String(), want)
+			case !tc.forwarded && len(reached) > 0:
+				t.Fatal("the leader got the write")
+			}
+		})
+	}
+}
+
 // With tls.server set, a follower forwards a write to the leader over TLS with
 // the tls.client configuration: it verifies the leader's certificate against
 // tls.client.ca_file, for the leader's host, and presents tls.client's
@@ -135,7 +236,7 @@ func TestLeaderForwardingTrustsClusterCA(t *testing.T) {
 	clusterCA, otherCA := newTestCA(t), newTestCA(t)
 	pool := x509.NewCertPool()
 	pool.AddCert(clusterCA.cert)
-	followerCert, followerKey := clusterCA.issue(t)
+	followerCert, followerKey := clusterCA.issue(t, "127.0.0.1")
 	for _, listener := range []struct {
 		name, path string
 		addr       func(*config.Config) *string // the listen address whose port the follower forwards to
@@ -165,7 +266,7 @@ func TestLeaderForwardingTrustsClusterCA(t *testing.T) {
 			{"leader that wants a client certificate the follower lacks", clusterCA, true, false, false},
 		} {
 			t.Run(listener.name+"/"+tc.name, func(t *testing.T) {
-				leaderCert, leaderKey := tc.leaderCA.issue(t)
+				leaderCert, leaderKey := tc.leaderCA.issue(t, "127.0.0.1")
 				cert, err := tls.LoadX509KeyPair(leaderCert, leaderKey)
 				if err != nil {
 					t.Fatal(err)

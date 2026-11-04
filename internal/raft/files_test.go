@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -135,37 +136,62 @@ func TestSnapshotsArePrivateWhileWritten(t *testing.T) {
 	}
 }
 
+// entries returns the names of what dir holds.
+func entries(t *testing.T, dir string) []string {
+	t.Helper()
+	list, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(list))
+	for _, entry := range list {
+		names = append(names, entry.Name())
+	}
+	return names
+}
+
 // A node refuses a data directory, or a snapshots directory in it, that its
-// group or others can enter, or that is a symlink, as the durable store does:
-// before it opens anything there, and without changing its mode.
+// group or others can enter, or that is a symlink, written with a trailing
+// slash or not, as the durable store does: before it opens anything there, a
+// log it holds already included, and without changing its mode.
 func TestRaftRefusesLooseDataDir(t *testing.T) {
 	ca := newTestCA(t)
+	symlink := func(t *testing.T, path string) {
+		if err := os.Symlink(privateTestDir(t), path); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, tc := range []struct {
 		name    string
 		prepare func(t *testing.T, dir string) // makes the data directory New gets
 		refused string                         // the directory refused, relative to the data directory
+		slash   bool                           // whether New gets the data directory with a trailing slash
 	}{
-		{"data directory open to its group", func(t *testing.T, dir string) { mkdirMode(t, dir, 0o750) }, "."},
-		{"data directory open to others", func(t *testing.T, dir string) { mkdirMode(t, dir, 0o701) }, "."},
-		{"data directory is a symlink", func(t *testing.T, dir string) {
-			if err := os.Symlink(privateTestDir(t), dir); err != nil {
-				t.Fatal(err)
-			}
-		}, "."},
+		{"data directory open to its group", func(t *testing.T, dir string) { mkdirMode(t, dir, 0o750) }, ".", false},
+		{"data directory open to others", func(t *testing.T, dir string) { mkdirMode(t, dir, 0o701) }, ".", false},
+		{"data directory is a symlink", symlink, ".", false},
+		{"data directory is a symlink, written with a trailing slash", symlink, ".", true},
 		{"snapshots directory open to its group", func(t *testing.T, dir string) {
 			mkdirMode(t, dir, 0o700)
 			mkdirMode(t, filepath.Join(dir, "snapshots"), 0o750)
-		}, "snapshots"},
+		}, "snapshots", false},
 		{"snapshots directory open to others", func(t *testing.T, dir string) {
 			mkdirMode(t, dir, 0o700)
 			mkdirMode(t, filepath.Join(dir, "snapshots"), 0o705)
-		}, "snapshots"},
+		}, "snapshots", false},
 		{"snapshots directory is a symlink", func(t *testing.T, dir string) {
 			mkdirMode(t, dir, 0o700)
-			if err := os.Symlink(privateTestDir(t), filepath.Join(dir, "snapshots")); err != nil {
+			symlink(t, filepath.Join(dir, "snapshots"))
+		}, "snapshots", false},
+		// The log holds no database, so a node that opened it would fail on that
+		// instead.
+		{"snapshots directory open to its group, next to a log", func(t *testing.T, dir string) {
+			mkdirMode(t, dir, 0o700)
+			if err := os.WriteFile(filepath.Join(dir, "raft-log.bolt"), []byte("not a database"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-		}, "snapshots"},
+			mkdirMode(t, filepath.Join(dir, "snapshots"), 0o750)
+		}, "snapshots", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			n := newLoopbackNode(t, ca, "n1", reserveLoopbackAddrs(t, 1)[0])
@@ -176,13 +202,17 @@ func TestRaftRefusesLooseDataDir(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := n.open(n.self()); !errors.Is(err, ErrDataDirNotPrivate) {
+			held := entries(t, n.dir)
+			err = n.open(n.self(), func(c *Config) {
+				if tc.slash {
+					c.DataDir += string(filepath.Separator)
+				}
+			})
+			if !errors.Is(err, ErrDataDirNotPrivate) {
 				t.Fatalf("New() = %v, want %v", err, ErrDataDirNotPrivate)
 			}
-			for _, name := range []string{"raft-log.bolt", "raft-stable.bolt"} {
-				if _, err := os.Lstat(filepath.Join(n.dir, name)); !errors.Is(err, fs.ErrNotExist) {
-					t.Fatalf("a refused data directory holds %s: %v", name, err)
-				}
+			if now := entries(t, n.dir); !slices.Equal(now, held) {
+				t.Fatalf("a refused data directory holds %v, want %v as it did", now, held)
 			}
 			after, err := os.Lstat(refused)
 			if err != nil {
