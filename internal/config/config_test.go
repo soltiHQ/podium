@@ -342,6 +342,8 @@ func TestLoadRaftCluster(t *testing.T) {
     bind_addr: 0.0.0.0:7000
     advertise_addr: 10.0.0.1:7000
     data_dir: /var/lib/solti/raft
+    election_timeout_ms: 1000
+    heartbeat_timeout_ms: 500
   discovery:
     driver: static
     peers:
@@ -354,15 +356,24 @@ func TestLoadRaftCluster(t *testing.T) {
 		t.Fatal(err)
 	}
 	static := map[string]string{
-		"SOLTI_CLUSTER_BACKEND":             "raft",
-		"SOLTI_CLUSTER_RAFT_NODE_ID":        "n1",
-		"SOLTI_CLUSTER_RAFT_BIND_ADDR":      "0.0.0.0:7000",
-		"SOLTI_CLUSTER_RAFT_ADVERTISE_ADDR": "10.0.0.1:7000",
-		"SOLTI_CLUSTER_RAFT_DATA_DIR":       "/var/lib/solti/raft",
-		"SOLTI_CLUSTER_DISCOVERY_DRIVER":    "static",
-		"SOLTI_CLUSTER_DISCOVERY_PEERS":     "n1=10.0.0.1:7000, n2=10.0.0.2:7000, n3=10.0.0.3:7000",
+		"SOLTI_CLUSTER_BACKEND":                   "raft",
+		"SOLTI_CLUSTER_RAFT_NODE_ID":              "n1",
+		"SOLTI_CLUSTER_RAFT_BIND_ADDR":            "0.0.0.0:7000",
+		"SOLTI_CLUSTER_RAFT_ADVERTISE_ADDR":       "10.0.0.1:7000",
+		"SOLTI_CLUSTER_RAFT_DATA_DIR":             "/var/lib/solti/raft",
+		"SOLTI_CLUSTER_RAFT_ELECTION_TIMEOUT_MS":  "1000",
+		"SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS": "500",
+		"SOLTI_CLUSTER_DISCOVERY_DRIVER":          "static",
+		"SOLTI_CLUSTER_DISCOVERY_PEERS":           "n1=10.0.0.1:7000, n2=10.0.0.2:7000, n3=10.0.0.3:7000",
 	}
-	raft := cluster.RaftConfig{NodeID: "n1", BindAddr: "0.0.0.0:7000", AdvertiseAddr: "10.0.0.1:7000", DataDir: "/var/lib/solti/raft"}
+	raft := cluster.RaftConfig{
+		NodeID:             "n1",
+		BindAddr:           "0.0.0.0:7000",
+		AdvertiseAddr:      "10.0.0.1:7000",
+		DataDir:            "/var/lib/solti/raft",
+		ElectionTimeoutMs:  1000,
+		HeartbeatTimeoutMs: 500,
+	}
 	peers := []cluster.Peer{{ID: "n1", Address: "10.0.0.1:7000"}, {ID: "n2", Address: "10.0.0.2:7000"}, {ID: "n3", Address: "10.0.0.3:7000"}}
 	for _, tc := range []struct {
 		name, path string

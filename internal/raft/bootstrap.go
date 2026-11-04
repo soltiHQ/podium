@@ -12,10 +12,11 @@ import (
 // peer discovery reports, as voters sorted by ID ([cluster.ServerList]).
 //
 // hashicorp/raft expects every node to bootstrap the same configuration, and
-// a node rejects the vote of a candidate its configuration lacks. So the list
-// is used exactly as discovery reports it on every node, never rewritten for
-// this one: a discovery error, an ID or address listed twice, or a list that
-// does not name this node as cfg.NodeID at myAddr fails the start instead.
+// once it has a configuration, a node rejects the vote of a candidate missing
+// from it. So the list is used exactly as discovery reports it on every node,
+// never rewritten for this one: a discovery error, an ID or address listed
+// twice, or a list that does not name this node as cfg.NodeID at myAddr fails
+// the start instead.
 //
 // This runs only on first start (HasExistingState=false). On subsequent
 // restarts Raft loads its config from the BoltDB log and discovery is not

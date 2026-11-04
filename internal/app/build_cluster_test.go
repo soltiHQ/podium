@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/model"
@@ -118,6 +119,16 @@ func TestBuildClusterRefusesImplicitEphemeral(t *testing.T) {
 	cfg.Standalone.DataDir = ""
 	if _, _, _, _, err := buildCluster(cfg, zerolog.Nop()); err == nil {
 		t.Fatal("blank data directory silently selected ephemeral state")
+	}
+}
+
+// The raft timeouts are configured in milliseconds; zero or less leaves raft.New
+// its own default.
+func TestMsToDuration(t *testing.T) {
+	for ms, want := range map[int]time.Duration{-1: 0, 0: 0, 250: 250 * time.Millisecond} {
+		if got := msToDuration(ms); got != want {
+			t.Fatalf("msToDuration(%d) = %v, want %v", ms, got, want)
+		}
 	}
 }
 

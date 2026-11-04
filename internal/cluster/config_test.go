@@ -2,6 +2,8 @@ package cluster_test
 
 import (
 	"errors"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/kelseyhightower/envconfig"
@@ -182,33 +184,35 @@ func raftConfig() cluster.Config {
 }
 
 // A peer entry is id=host:port, or a bare host:port named by its address.
-// Spaces around the entry, its ID and its address are trimmed.
+// Spaces around the entry, its ID and its address are trimmed. A refused entry
+// is named in the error with what is wrong with it.
 func TestPeerEntries(t *testing.T) {
 	for _, tc := range []struct {
-		entry string
-		want  cluster.Peer
-		err   error
+		entry  string
+		want   cluster.Peer
+		reason string // in the error of a refused entry
 	}{
 		{entry: "n1=10.0.0.1:7000", want: cluster.Peer{ID: "n1", Address: "10.0.0.1:7000"}},
 		{entry: "10.0.0.1:7000", want: cluster.Peer{ID: "10.0.0.1:7000", Address: "10.0.0.1:7000"}},
+		{entry: "[fd00::1]:7000", want: cluster.Peer{ID: "[fd00::1]:7000", Address: "[fd00::1]:7000"}},
 		{entry: "podium-0=podium-0.podium:7000", want: cluster.Peer{ID: "podium-0", Address: "podium-0.podium:7000"}},
 		{entry: "n1=[fd00::1]:7000", want: cluster.Peer{ID: "n1", Address: "[fd00::1]:7000"}},
 		{entry: " n1 = 10.0.0.1:7000 ", want: cluster.Peer{ID: "n1", Address: "10.0.0.1:7000"}},
-		{entry: "", err: cluster.ErrInvalidPeer},
-		{entry: "n1=", err: cluster.ErrInvalidPeer},
-		{entry: "=10.0.0.1:7000", err: cluster.ErrInvalidPeer},
-		{entry: "n1=10.0.0.1", err: cluster.ErrInvalidPeer},
-		{entry: "n1=:7000", err: cluster.ErrInvalidPeer},
-		{entry: "n1=10.0.0.1:0", err: cluster.ErrInvalidPeer},
-		{entry: "n1=10.0.0.1:65536", err: cluster.ErrInvalidPeer},
-		{entry: "n1=10.0.0.1:raft", err: cluster.ErrInvalidPeer},
-		{entry: "n1=n2=10.0.0.1:7000", err: cluster.ErrInvalidPeer},
+		{entry: "", reason: "the entry is empty"},
+		{entry: "n1=", reason: "missing port"},
+		{entry: "=10.0.0.1:7000", reason: "the ID is empty"},
+		{entry: "n1=10.0.0.1", reason: "missing port"},
+		{entry: "n1=:7000", reason: "the address has no host"},
+		{entry: "n1=10.0.0.1:0", reason: `port "0" is not a number from 1 to 65535`},
+		{entry: "n1=10.0.0.1:65536", reason: `port "65536" is not a number from 1 to 65535`},
+		{entry: "n1=10.0.0.1:raft", reason: `port "raft" is not a number from 1 to 65535`},
+		{entry: "n1=n2=10.0.0.1:7000", reason: "the entry has more than one ="},
 	} {
 		t.Run(tc.entry, func(t *testing.T) {
 			peers, err := cluster.DiscoveryConfig{Peers: []string{tc.entry}}.StaticPeers()
-			if tc.err != nil {
-				if !errors.Is(err, tc.err) {
-					t.Fatalf("StaticPeers() = %v, %v; want %v", peers, err, tc.err)
+			if tc.reason != "" {
+				if !errors.Is(err, cluster.ErrInvalidPeer) || !strings.Contains(err.Error(), tc.reason) || !strings.Contains(err.Error(), strconv.Quote(tc.entry)) {
+					t.Fatalf("StaticPeers() = %v, %v; want %v naming %q and %q", peers, err, cluster.ErrInvalidPeer, tc.entry, tc.reason)
 				}
 				return
 			}

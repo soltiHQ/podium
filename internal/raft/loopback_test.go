@@ -2,17 +2,25 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
 
+	hraft "github.com/hashicorp/raft"
 	"github.com/rs/zerolog"
 
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/cluster/discovery"
 	"github.com/soltiHQ/control-plane/internal/event"
+	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
+
+// loopbackTimeout is the election and heartbeat timeout of loopback nodes. It
+// leaves room for a slow race-detector run, in which a shorter lease can lapse
+// between a leader's election and its first write.
+const loopbackTimeout = 250 * time.Millisecond
 
 // loopbackCluster runs real nodes, each opened by New on its own loopback TCP
 // port. The ports are reserved before any node starts, so every node lists all
@@ -91,18 +99,42 @@ func (c *loopbackCluster) leader(t *testing.T, timeout time.Duration) *loopbackN
 	return leader
 }
 
-// start opens n from its data directory: a first start bootstraps from disco,
-// a restart reloads the node's own log.
-func (n *loopbackNode) start(t *testing.T, disco cluster.Discovery) {
+// write runs fn on the leader's store and, when leadership moves before the
+// write commits, runs it again on the next leader until timeout. fn must
+// tolerate a second run: a write whose leader stepped down may still commit.
+func (c *loopbackCluster) write(t *testing.T, timeout time.Duration, fn func(storage.Storage) error) {
 	t.Helper()
-	hub := event.NewHub(zerolog.Nop())
-	p, err := New(Config{
+	deadline := time.Now().Add(timeout)
+	for {
+		err := fn(c.leader(t, time.Until(deadline)).profile.Store())
+		switch {
+		case err == nil:
+			return
+		case !errors.Is(err, hraft.ErrNotLeader) && !errors.Is(err, hraft.ErrLeadershipLost):
+			t.Fatalf("write: %v", err)
+		case time.Now().After(deadline):
+			t.Fatalf("write: %v, still after %s", err, timeout)
+		}
+	}
+}
+
+// start opens n from its data directory: a first start bootstraps from disco,
+// a restart reloads the node's own log. Each opt edits the node's Config
+// before New gets it.
+func (n *loopbackNode) start(t *testing.T, disco cluster.Discovery, opts ...func(*Config)) {
+	t.Helper()
+	cfg := Config{
 		NodeID:           n.id,
 		BindAddr:         n.addr,
 		DataDir:          n.dir,
-		ElectionTimeout:  100 * time.Millisecond,
-		HeartbeatTimeout: 100 * time.Millisecond,
-	}, inmemory.New(), hub, disco, zerolog.Nop())
+		ElectionTimeout:  loopbackTimeout,
+		HeartbeatTimeout: loopbackTimeout,
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	hub := event.NewHub(zerolog.Nop())
+	p, err := New(cfg, inmemory.New(), hub, disco, zerolog.Nop())
 	if err != nil {
 		hub.Close()
 		t.Fatalf("start %s: %v", n.id, err)

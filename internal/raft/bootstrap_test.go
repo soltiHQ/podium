@@ -16,6 +16,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/cluster/discovery"
 	"github.com/soltiHQ/control-plane/internal/event"
+	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
 
@@ -70,16 +71,14 @@ func configuration(t *testing.T, n *loopbackNode) []hraft.Server {
 // write that every node applies.
 func TestThreeNodesWithNamedIDsElectLeader(t *testing.T) {
 	c := newLoopbackCluster(t, "n1", "n2", "n3")
-	leader := c.leader(t, 5*time.Second)
+	c.leader(t, 5*time.Second)
 
 	ctx := context.Background()
 	agent, err := model.NewAgent("named-agent", "replicated", "http://agent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := leader.profile.Store().UpsertAgent(ctx, agent); err != nil {
-		t.Fatalf("write on leader %s: %v", leader.id, err)
-	}
+	c.write(t, 5*time.Second, func(s storage.Storage) error { return s.UpsertAgent(ctx, agent) })
 	peers := make([]cluster.Peer, 0, len(c.nodes))
 	for _, n := range c.nodes {
 		peers = append(peers, cluster.Peer{ID: n.id, Address: n.addr})
@@ -149,8 +148,9 @@ func TestAllNodesDeriveTheSameServerList(t *testing.T) {
 }
 
 // A first start fails when discovery fails, or when the peers name an ID or an
-// address twice, or do not list this node as its node ID at its advertise
-// address, as when the node advertises a host name and DNS answers with IPs.
+// address twice, DNS answers included, or do not list this node as its node ID
+// at its advertise address, as when the node advertises a host name and DNS
+// answers with IPs.
 func TestBootstrapRefusesInconsistentPeers(t *testing.T) {
 	const self, addr = "n1", "10.0.0.1:7000"
 	others := func(more ...cluster.Peer) cluster.Discovery {
@@ -160,6 +160,10 @@ func TestBootstrapRefusesInconsistentPeers(t *testing.T) {
 		}, more...))
 	}
 	dns, err := discovery.NewDNS("podium.svc", 7000, discovery.WithDNSResolver(dnsAnswers{{Address: "10.0.0.1:7000"}, {Address: "10.0.0.2:7000"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dnsTwice, err := discovery.NewDNS("podium.svc", 7000, discovery.WithDNSResolver(dnsAnswers{{Address: "10.0.0.1:7000"}, {Address: "10.0.0.2:7000"}, {Address: "10.0.0.2:7000"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,6 +182,7 @@ func TestBootstrapRefusesInconsistentPeers(t *testing.T) {
 		{"an ID twice", self, addr, others(cluster.Peer{ID: self, Address: addr}, cluster.Peer{ID: "n2", Address: "10.0.0.4:7000"}), cluster.ErrDuplicatePeer},
 		{"an address twice", self, addr, others(cluster.Peer{ID: self, Address: addr}, cluster.Peer{ID: "n4", Address: "10.0.0.2:7000"}), cluster.ErrDuplicatePeer},
 		{"a host name against DNS answers", "podium-0.podium:7000", "podium-0.podium:7000", dns, cluster.ErrNodeNotListed},
+		{"an address DNS answers twice", addr, addr, dnsTwice, cluster.ErrDuplicatePeer},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			servers, err := bootstrapServers(Config{NodeID: tc.nodeID}, hraft.ServerAddress(tc.advertise), tc.disco)
@@ -201,8 +206,8 @@ func TestFirstStartRefusesPeersWithoutThisNode(t *testing.T) {
 			NodeID:           "n1",
 			BindAddr:         addr,
 			DataDir:          dir,
-			ElectionTimeout:  50 * time.Millisecond,
-			HeartbeatTimeout: 50 * time.Millisecond,
+			ElectionTimeout:  loopbackTimeout,
+			HeartbeatTimeout: loopbackTimeout,
 		}, inmemory.New(), hub, discovery.NewStatic(peers), zerolog.Nop())
 	}
 	holder, err := net.Listen("tcp", addr)
@@ -222,7 +227,36 @@ func TestFirstStartRefusesPeersWithoutThisNode(t *testing.T) {
 		t.Fatalf("start with the node listed: %v", err)
 	}
 	t.Cleanup(func() { _ = p.Shutdown() })
-	waitFor(t, 2*time.Second, "n1 leads its one-node cluster", p.leadership.AmLeader)
+	waitFor(t, 5*time.Second, "n1 leads its one-node cluster", p.leadership.AmLeader)
+}
+
+// A first start writes its bootstrap configuration into the stores before
+// hashicorp/raft runs. The transport listens already, but nothing consumes its
+// RPCs before NewRaft, so no vote request can persist a term first, which
+// would leave the node with state and make the bootstrap fail.
+func TestFirstStartBootstrapsBeforeRaftRuns(t *testing.T) {
+	var (
+		term    uint64
+		servers []hraft.Server
+		readErr error
+	)
+	startRaft := newRaft
+	t.Cleanup(func() { newRaft = startRaft })
+	newRaft = func(conf *hraft.Config, fsm hraft.FSM, logs hraft.LogStore, stable hraft.StableStore, snaps hraft.SnapshotStore, trans hraft.Transport) (*hraft.Raft, error) {
+		var entry hraft.Log
+		if term, readErr = stable.GetUint64([]byte("CurrentTerm")); readErr == nil {
+			if readErr = logs.GetLog(1, &entry); readErr == nil && entry.Type == hraft.LogConfiguration {
+				servers = hraft.DecodeConfiguration(entry.Data).Servers
+			}
+		}
+		return startRaft(conf, fsm, logs, stable, snaps, trans)
+	}
+
+	n := newLoopbackCluster(t, "n1").nodes[0]
+	want := sortedServers([]cluster.Peer{{ID: n.id, Address: n.addr}})
+	if readErr != nil || term != 1 || !slices.Equal(servers, want) {
+		t.Fatalf("when raft started, the stores held term %d and servers %v (%v); want term 1 and %v", term, servers, readErr, want)
+	}
 }
 
 // A restart reloads the configuration from the node's own log and does not ask

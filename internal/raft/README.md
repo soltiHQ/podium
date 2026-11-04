@@ -15,7 +15,9 @@ every node, itself included. With the static driver each entry of
 address; with the dns driver each address the hostname resolves to is a peer at
 `ip:<discovery.port>`, named by that address. A node is listed as its
 `node_id` at its advertise address: `advertise_addr`, or `bind_addr` without
-it.
+it. Earlier versions appended a node to its own peers; a node upgraded from one
+must list itself first, see "Upgrading a raft node" in
+`internal/config/README.md`.
 
 ## Validation
 
@@ -38,14 +40,22 @@ no raft state:
 2. `cluster.ServerList` sorts them by ID. It fails the start when an ID or an
    address appears twice, or when no peer is this node's `NodeID` at its
    advertise address, compared as written.
-3. The node bootstraps with exactly that list, every server a voter.
+3. The node writes exactly that list, every server a voter, into its stores
+   with hashicorp/raft's package-level `BootstrapCluster`, then starts raft
+   with `NewRaft`. The transport listens already, but nothing consumes its
+   RPCs before `NewRaft`, so no vote request can persist a term first, which
+   would give the node state and make the bootstrap fail with
+   `ErrCantBootstrap` (`TestFirstStartBootstrapsBeforeRaftRuns`).
 
 The list is never rewritten for the node that derives it, so every node
 derives the same configuration whatever order discovery reports the peers in
 (`TestAllNodesDeriveTheSameServerList`). hashicorp/raft expects that of
-`BootstrapCluster`, and a node rejects the vote of a candidate missing from its
-own configuration (`requestVote` in hashicorp/raft v1.8.0). Three nodes named
-`n1`, `n2` and `n3` elect a leader and replicate a write
+`BootstrapCluster`, and once it has a configuration, a node rejects the vote of
+a candidate missing from it (`requestVote` in hashicorp/raft v1.8.0). Every
+node must therefore see the same peers at its first start: nothing compares the
+lists of different nodes, so DNS answers that differ between nodes go
+unnoticed, while an address DNS answers twice fails the start as a duplicate.
+Three nodes named `n1`, `n2` and `n3` elect a leader and replicate a write
 (`TestThreeNodesWithNamedIDsElectLeader`).
 
 The list is derived before the transport listens, and a start that fails on
@@ -64,7 +74,9 @@ discovery: a node restarted while discovery fails rejoins its cluster
 `loopback_test.go` holds the helper that multi-node tests share.
 `newLoopbackCluster(t, ids...)` reserves a loopback port for each node, then
 starts every node through `New` on plain TCP, each listing all of them as
-`id=127.0.0.1:port` peers. `leader` waits for exactly one ready leader; a
-node's `stop` and `start` restart it from its data directory (`dir`), with any
-discovery. The helper's waits poll a condition until a timeout, never a fixed
-sleep.
+`id=127.0.0.1:port` peers, with election and heartbeat timeouts of
+`loopbackTimeout` (250 ms). `leader` waits for exactly one ready leader, and
+`write` runs a write on it, again on the next leader if leadership moves first.
+A node's `stop` and `start` restart it from its data directory (`dir`), with
+any discovery; options to `start` edit the node's `Config`. The helper's waits
+poll a condition until a timeout, never a fixed sleep.

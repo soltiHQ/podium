@@ -128,14 +128,31 @@ func (d DiscoveryConfig) staticPeers() ([]Peer, bool, error) {
 			id, addr = entry, entry
 		}
 		p := Peer{ID: strings.TrimSpace(id), Address: strings.TrimSpace(addr)}
-		host, err := hostPort(p.Address)
-		if err != nil || host == "" || p.ID == "" || strings.Contains(p.Address, "=") {
-			return nil, false, fmt.Errorf("discovery.peers entry %q: %w", entry, ErrInvalidPeer)
+		if err := checkPeer(p); err != nil {
+			return nil, false, fmt.Errorf("discovery.peers entry %q: %w: %w", entry, ErrInvalidPeer, err)
 		}
 		peers = append(peers, p)
 		bare = bare || !named
 	}
 	return peers, bare, nil
+}
+
+// checkPeer says what is wrong with a parsed peer entry, if anything.
+func checkPeer(p Peer) error {
+	host, err := hostPort(p.Address)
+	switch {
+	case p.ID == "" && p.Address == "":
+		return errors.New("the entry is empty")
+	case p.ID == "":
+		return errors.New("the ID is empty")
+	case strings.Contains(p.Address, "="):
+		return errors.New("the entry has more than one =")
+	case err != nil:
+		return err
+	case host == "":
+		return errors.New("the address has no host")
+	}
+	return nil
 }
 
 // ServerList returns peers as the server list every node of a new cluster

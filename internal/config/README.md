@@ -318,6 +318,8 @@ cluster:
     bind_addr: 0.0.0.0:7000         # where the raft transport listens
     advertise_addr: 10.0.0.1:7000   # where peers dial it; default bind_addr
     data_dir: /var/lib/solti/raft
+    election_timeout_ms: 1000       # 0 keeps hashicorp/raft's 1 s
+    heartbeat_timeout_ms: 500       # 0 keeps hashicorp/raft's 1 s
   discovery:
     driver: static                  # the default; or dns
     peers:
@@ -328,12 +330,18 @@ cluster:
 
 Env equivalents: `SOLTI_CLUSTER_BACKEND`, `SOLTI_CLUSTER_RAFT_NODE_ID`,
 `SOLTI_CLUSTER_RAFT_BIND_ADDR`, `SOLTI_CLUSTER_RAFT_ADVERTISE_ADDR`,
-`SOLTI_CLUSTER_RAFT_DATA_DIR`, `SOLTI_CLUSTER_DISCOVERY_DRIVER`, and
-`SOLTI_CLUSTER_DISCOVERY_PEERS`, split on commas:
+`SOLTI_CLUSTER_RAFT_DATA_DIR`, `SOLTI_CLUSTER_RAFT_ELECTION_TIMEOUT_MS`,
+`SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS`, `SOLTI_CLUSTER_DISCOVERY_DRIVER`,
+and `SOLTI_CLUSTER_DISCOVERY_PEERS`, split on commas:
 
 ```sh
 SOLTI_CLUSTER_DISCOVERY_PEERS="n1=10.0.0.1:7000, n2=10.0.0.2:7000, n3=10.0.0.3:7000"
 ```
+
+`election_timeout_ms` and `heartbeat_timeout_ms` are raft's election and
+heartbeat timeouts, in milliseconds; 0 keeps hashicorp/raft's default of 1 s.
+An election timeout below the heartbeat timeout passes configuration loading
+but fails the start.
 
 Each `discovery.peers` entry is `id=host:port`: a node's `node_id` and the
 address its peers dial. A bare `host:port` names the node by its address.
@@ -364,13 +372,31 @@ address. Env: `SOLTI_CLUSTER_DISCOVERY_HOSTNAME`,
 A node bootstraps the cluster on its first start, while `data_dir` holds no
 raft state: it asks discovery for the peers and starts with exactly that list,
 sorted by ID, so every node derives the same configuration whatever order
-discovery reports the peers in. A discovery error fails that start, and so
-does a list that breaks the rules above, which DNS answers can: a node that
-advertises a host name is not among them. A failed start keeps no raft state,
-so the next one bootstraps again. Later starts load the configuration from the
-node's own log and do not ask discovery, so a discovery outage does not keep a
-restarting node down; validation still checks a static list on every start.
-See `internal/raft/README.md`.
+discovery reports the peers in. Every node must see the same peers at its
+first start, and nothing compares the lists of different nodes: DNS answers
+that differ between nodes go unnoticed and leave them with different
+configurations, while an address DNS answers twice fails the start as a
+duplicate. A discovery error fails that start, and so does a list that breaks
+the rules above, which DNS answers can: a node that advertises a host name is
+not among them. A failed start keeps no raft state, so the next one bootstraps
+again. Later starts load the configuration from the node's own log and do not
+ask discovery, so a discovery outage does not keep a restarting node down;
+validation still checks a static list on every start. See
+`internal/raft/README.md`.
+
+### Upgrading a raft node
+
+Earlier versions appended a node to its own peers: an empty `peers` list
+bootstrapped a one-node cluster, and a list of only the other nodes worked.
+This version refuses both. Before upgrading a raft node, add it to its own
+`peers` as `<node_id>=<advertise address>`; a node that keeps bare entries
+needs `node_id` equal to its advertise address. Do this on every node. A list
+that already names the node at its advertise address, as written, passes
+unchanged. A node whose list does not pass is refused at configuration
+loading, before anything in `data_dir` is opened, so its raft state stays as
+it was: fix the list and start it again. A node with raft state reads its
+configuration from its own log, not from `peers`, so listing itself changes
+nothing in the running cluster.
 
 ## Observed run history
 

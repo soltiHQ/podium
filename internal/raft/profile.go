@@ -57,6 +57,10 @@ type Config struct {
 	HeartbeatTimeout time.Duration
 }
 
+// newRaft starts hashicorp/raft on the stores New prepared. It is a variable
+// so that tests can see what the stores hold when raft starts.
+var newRaft = hraft.NewRaft
+
 // Profile bundles the Raft-backed storage.Storage with a cluster.Leadership.
 type Profile struct {
 	cfg Config
@@ -78,10 +82,11 @@ type Profile struct {
 // [cluster.Config.Validate] accepted, and checks only that NodeID, BindAddr
 // and DataDir are set.
 //
-// On first start (empty DataDir) the node bootstraps a cluster of exactly the
-// peers disco.Peers() returns (see bootstrapServers), before its transport
-// listens. On subsequent starts the on-disk state is loaded and the cluster
-// re-formed automatically, without asking disco.
+// On first start (empty DataDir) the node derives its server list from
+// disco.Peers() (see bootstrapServers) before its transport listens, and
+// writes it into its stores as the bootstrap configuration before raft runs.
+// On subsequent starts the on-disk state is loaded and the cluster re-formed
+// automatically, without asking disco.
 func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discovery, logger zerolog.Logger) (*Profile, error) {
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("raft: NodeID is required")
@@ -200,17 +205,20 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 	if err != nil {
 		return nil, fmt.Errorf("raft: tcp transport on %s: %w", cfg.BindAddr, err)
 	}
-
-	fsm := NewFSM(inner, hub)
-	r, err = hraft.NewRaft(rcfg, fsm, logStore, stable, snap, transport)
-	if err != nil {
-		return nil, fmt.Errorf("raft: new raft: %w", err)
-	}
-
+	// The bootstrap configuration goes into the stores before raft runs. The
+	// transport listens already, but nothing consumes its RPCs before NewRaft,
+	// so no vote request can persist a term first, which would give the node
+	// state and make the bootstrap fail with ErrCantBootstrap.
 	if !hasState {
-		if err := r.BootstrapCluster(hraft.Configuration{Servers: servers}).Error(); err != nil {
+		if err := hraft.BootstrapCluster(rcfg, logStore, stable, snap, transport, hraft.Configuration{Servers: servers}); err != nil {
 			return nil, fmt.Errorf("raft: bootstrap cluster: %w", err)
 		}
+	}
+
+	fsm := NewFSM(inner, hub)
+	r, err = newRaft(rcfg, fsm, logStore, stable, snap, transport)
+	if err != nil {
+		return nil, fmt.Errorf("raft: new raft: %w", err)
 	}
 
 	p := &Profile{
