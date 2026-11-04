@@ -127,7 +127,7 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger, hubOpts ...event.Op
 			}
 		}, nil
 	case cluster.BackendRaft:
-		disco, err := buildDiscovery(cfg.Discovery)
+		disco, err := discovery.New(cfg.Discovery)
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}
@@ -145,21 +145,6 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger, hubOpts ...event.Op
 		return p.Store(), p.Leadership(), hub, func() { _ = p.Shutdown() }, nil
 	default:
 		return nil, nil, nil, nil, fmt.Errorf("cluster: unknown backend %q", cfg.Backend)
-	}
-}
-
-func buildDiscovery(cfg cluster.DiscoveryConfig) (cluster.Discovery, error) {
-	switch cfg.Driver {
-	case "", "static":
-		peers := make([]cluster.Peer, 0, len(cfg.Peers))
-		for _, addr := range cfg.Peers {
-			peers = append(peers, cluster.Peer{ID: addr, Address: addr})
-		}
-		return discovery.NewStatic(peers), nil
-	case "dns":
-		return discovery.NewDNS(cfg.Hostname, cfg.Port)
-	default:
-		return nil, fmt.Errorf("discovery: unknown driver %q", cfg.Driver)
 	}
 }
 

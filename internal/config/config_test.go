@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 )
 
@@ -327,5 +328,104 @@ func TestEnrollSecretNeedsAgentAuthRequired(t *testing.T) {
 				t.Fatalf("error %q must name agent_auth.require and not show the value", err)
 			}
 		})
+	}
+}
+
+// The raft cluster of the README's "Cluster" example loads from YAML and from
+// the environment, whose comma-separated peers may have spaces after the
+// commas. A raft configuration that fails cluster validation fails loading.
+func TestLoadRaftCluster(t *testing.T) {
+	const example = `cluster:
+  backend: raft
+  raft:
+    node_id: n1
+    bind_addr: 0.0.0.0:7000
+    advertise_addr: 10.0.0.1:7000
+    data_dir: /var/lib/solti/raft
+  discovery:
+    driver: static
+    peers:
+      - n1=10.0.0.1:7000
+      - n2=10.0.0.2:7000
+      - n3=10.0.0.3:7000
+`
+	yamlPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(yamlPath, []byte(example), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	static := map[string]string{
+		"SOLTI_CLUSTER_BACKEND":             "raft",
+		"SOLTI_CLUSTER_RAFT_NODE_ID":        "n1",
+		"SOLTI_CLUSTER_RAFT_BIND_ADDR":      "0.0.0.0:7000",
+		"SOLTI_CLUSTER_RAFT_ADVERTISE_ADDR": "10.0.0.1:7000",
+		"SOLTI_CLUSTER_RAFT_DATA_DIR":       "/var/lib/solti/raft",
+		"SOLTI_CLUSTER_DISCOVERY_DRIVER":    "static",
+		"SOLTI_CLUSTER_DISCOVERY_PEERS":     "n1=10.0.0.1:7000, n2=10.0.0.2:7000, n3=10.0.0.3:7000",
+	}
+	raft := cluster.RaftConfig{NodeID: "n1", BindAddr: "0.0.0.0:7000", AdvertiseAddr: "10.0.0.1:7000", DataDir: "/var/lib/solti/raft"}
+	peers := []cluster.Peer{{ID: "n1", Address: "10.0.0.1:7000"}, {ID: "n2", Address: "10.0.0.2:7000"}, {ID: "n3", Address: "10.0.0.3:7000"}}
+	for _, tc := range []struct {
+		name, path string
+		env        map[string]string
+		want       error // nil: loads raft and peers
+	}{
+		{name: "yaml", path: yamlPath},
+		{name: "environment", env: static},
+		{name: "refused", env: map[string]string{
+			"SOLTI_CLUSTER_BACKEND":         "raft",
+			"SOLTI_CLUSTER_RAFT_NODE_ID":    "n1",
+			"SOLTI_CLUSTER_RAFT_BIND_ADDR":  "10.0.0.1:7000",
+			"SOLTI_CLUSTER_RAFT_DATA_DIR":   "/var/lib/solti/raft",
+			"SOLTI_CLUSTER_DISCOVERY_PEERS": "10.0.0.1:7000,10.0.0.2:7000,10.0.0.3:7000",
+		}, want: cluster.ErrNodeIDNotAdvertise},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CONFIG_PATH", tc.path)
+			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+			for key, value := range tc.env {
+				t.Setenv(key, value)
+			}
+			cfg, err := load(nil)
+			if tc.want != nil {
+				if !errors.Is(err, tc.want) || !strings.Contains(err.Error(), "config.cluster") {
+					t.Fatalf("want a config.cluster error wrapping %v, got %v", tc.want, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Cluster.Backend != cluster.BackendRaft || cfg.Cluster.Raft != raft {
+				t.Fatalf("cluster = %+v, want backend raft with %+v", cfg.Cluster, raft)
+			}
+			if got, err := cfg.Cluster.Discovery.StaticPeers(); err != nil || !slices.Equal(got, peers) {
+				t.Fatalf("peers = %v, %v; want %v", got, err, peers)
+			}
+		})
+	}
+}
+
+// The DNS settings load from the environment as well.
+func TestLoadRaftClusterWithDNS(t *testing.T) {
+	t.Setenv("CONFIG_PATH", "")
+	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+	for key, value := range map[string]string{
+		"SOLTI_CLUSTER_BACKEND":            "raft",
+		"SOLTI_CLUSTER_RAFT_NODE_ID":       "10.0.0.1:7000",
+		"SOLTI_CLUSTER_RAFT_BIND_ADDR":     "10.0.0.1:7000",
+		"SOLTI_CLUSTER_RAFT_DATA_DIR":      "/var/lib/solti/raft",
+		"SOLTI_CLUSTER_DISCOVERY_DRIVER":   "dns",
+		"SOLTI_CLUSTER_DISCOVERY_HOSTNAME": "podium.svc",
+		"SOLTI_CLUSTER_DISCOVERY_PORT":     "7000",
+	} {
+		t.Setenv(key, value)
+	}
+	cfg, err := load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := cluster.DiscoveryConfig{Driver: cluster.DriverDNS, Hostname: "podium.svc", Port: 7000}
+	if d := cfg.Cluster.Discovery; d.Driver != want.Driver || d.Hostname != want.Hostname || d.Port != want.Port {
+		t.Fatalf("discovery = %+v, want %+v", d, want)
 	}
 }

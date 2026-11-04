@@ -20,7 +20,8 @@ func openRestartProfile(t *testing.T, dir string) (*Profile, *inmemory.Store, *e
 	t.Helper()
 	inner := inmemory.New()
 	hub := event.NewHub(zerolog.Nop())
-	p, err := New(Config{NodeID: "restart-node", BindAddr: "127.0.0.1:0", DataDir: dir, ElectionTimeout: 50 * time.Millisecond, HeartbeatTimeout: 50 * time.Millisecond}, inner, hub, discovery.NewStatic(nil), zerolog.Nop())
+	self := []cluster.Peer{{ID: "restart-node", Address: "127.0.0.1:0"}}
+	p, err := New(Config{NodeID: "restart-node", BindAddr: "127.0.0.1:0", DataDir: dir, ElectionTimeout: 50 * time.Millisecond, HeartbeatTimeout: 50 * time.Millisecond}, inner, hub, discovery.NewStatic(self), zerolog.Nop())
 	if err != nil {
 		hub.Close()
 		t.Fatal(err)

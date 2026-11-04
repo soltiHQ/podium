@@ -8,8 +8,9 @@
 //
 // Transport: TCP.
 // Log store: BoltDB on disk (so logs survive restart).
-// Peer bootstrap: from [cluster.Discovery] — on first start we bootstrap the
-// cluster with every peer Discovery reports. Subsequent starts join a
+// Peer bootstrap: from [cluster.Discovery] — on first start every node
+// bootstraps the cluster with the same list, every peer Discovery reports
+// sorted by ID, which must name this node. Subsequent starts join a
 // pre-existing cluster and reuse the on-disk log.
 package raft
 
@@ -42,7 +43,8 @@ type Config struct {
 
 	// AdvertiseAddr overrides BindAddr for peer-facing addressing (use
 	// when bind is 0.0.0.0 but peers must see an explicit host). If empty,
-	// BindAddr is used.
+	// BindAddr is used. Discovery must list this node at this address, as
+	// written.
 	AdvertiseAddr string
 
 	// DataDir holds the BoltDB log store and snapshots. Required.
@@ -72,11 +74,14 @@ type Profile struct {
 	logger zerolog.Logger
 }
 
-// New builds and starts a Raft profile.
+// New builds and starts a Raft profile. It expects a configuration that
+// [cluster.Config.Validate] accepted, and checks only that NodeID, BindAddr
+// and DataDir are set.
 //
-// On first start (empty DataDir) the node bootstraps a cluster consisting of
-// every peer returned by disco.Peers() plus itself. On subsequent starts the
-// on-disk state is loaded and the cluster re-formed automatically.
+// On first start (empty DataDir) the node bootstraps a cluster of exactly the
+// peers disco.Peers() returns (see bootstrapServers), before its transport
+// listens. On subsequent starts the on-disk state is loaded and the cluster
+// re-formed automatically, without asking disco.
 func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discovery, logger zerolog.Logger) (*Profile, error) {
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("raft: NodeID is required")
@@ -120,9 +125,10 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 	}
 	// TCP transport requires a *net.TCPAddr for advertise — it validates
 	// the concrete type. We resolve the FQDN to an IP for the transport,
-	// but for the Raft *bootstrap configuration* we keep the raw string
-	// so every replica bootstraps with the same config regardless of
-	// which IP its local DNS returned first.
+	// but the Raft *bootstrap configuration* is the discovered list as
+	// written, which names this node by the raw advertise string, so every
+	// replica bootstraps with the same config regardless of which IP its
+	// local DNS returned first.
 	advTCP, err := net.ResolveTCPAddr("tcp", advertise)
 	if err != nil {
 		return nil, fmt.Errorf("raft: resolve advertise %q: %w", advertise, err)
@@ -181,6 +187,15 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 	if err != nil {
 		return nil, fmt.Errorf("raft: has existing state: %w", err)
 	}
+	// Bootstrap if log is empty (first start in this DataDir). The server
+	// list comes first, so a list this node cannot bootstrap with fails the
+	// start before the transport listens and before the node keeps any state.
+	var servers []hraft.Server
+	if !hasState {
+		if servers, err = bootstrapServers(cfg, hraft.ServerAddress(advertise), disco); err != nil {
+			return nil, err
+		}
+	}
 	transport, err = hraft.NewTCPTransport(cfg.BindAddr, advTCP, 3, 10*time.Second, os.Stderr)
 	if err != nil {
 		return nil, fmt.Errorf("raft: tcp transport on %s: %w", cfg.BindAddr, err)
@@ -192,17 +207,7 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 		return nil, fmt.Errorf("raft: new raft: %w", err)
 	}
 
-	// Bootstrap if log is empty (first start in this DataDir).
-
 	if !hasState {
-		// Use the CONFIG advertise string (FQDN as written by the user)
-		// for the bootstrap config, not transport.LocalAddr() — that one
-		// is IP-resolved and would differ across replicas, breaking the
-		// "all replicas bootstrap with identical config" requirement.
-		servers, err := bootstrapServers(cfg, hraft.ServerAddress(advertise), disco)
-		if err != nil {
-			return nil, err
-		}
 		if err := r.BootstrapCluster(hraft.Configuration{Servers: servers}).Error(); err != nil {
 			return nil, fmt.Errorf("raft: bootstrap cluster: %w", err)
 		}

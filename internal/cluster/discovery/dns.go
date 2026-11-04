@@ -72,6 +72,8 @@ func NewDNS(hostname string, port int, opts ...DNSOption) (*DNS, error) {
 	return d, nil
 }
 
+// Peers resolves the hostname and lists every answer as ip:port, named by
+// that address, sorted by address.
 func (d *DNS) Peers(ctx context.Context) ([]cluster.Peer, error) {
 	ips, err := d.resolver.LookupIPAddr(ctx, d.hostname)
 	if err != nil {

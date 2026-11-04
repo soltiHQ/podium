@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,5 +118,73 @@ func TestBuildClusterRefusesImplicitEphemeral(t *testing.T) {
 	cfg.Standalone.DataDir = ""
 	if _, _, _, _, err := buildCluster(cfg, zerolog.Nop()); err == nil {
 		t.Fatal("blank data directory silently selected ephemeral state")
+	}
+}
+
+// loopbackAddrs returns count distinct 127.0.0.1 addresses on ports the kernel
+// picked, free again when it returns.
+func loopbackAddrs(t *testing.T, count int) []string {
+	t.Helper()
+	addrs := make([]string, 0, count)
+	listeners := make([]net.Listener, 0, count)
+	defer func() {
+		for _, l := range listeners {
+			_ = l.Close()
+		}
+	}()
+	for range count {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		listeners = append(listeners, l)
+		addrs = append(addrs, l.Addr().String())
+	}
+	return addrs
+}
+
+// An invalid raft configuration fails buildCluster before anything is opened:
+// its data directory is never created.
+func TestRaftConfigValidatedBeforeStoreOpens(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*cluster.Config)
+		want   error
+	}{
+		{"no node ID", func(c *cluster.Config) { c.Raft.NodeID = "" }, cluster.ErrRaftRequired},
+		{"no bind address", func(c *cluster.Config) { c.Raft.BindAddr = "" }, cluster.ErrRaftRequired},
+		{"no data directory", func(c *cluster.Config) { c.Raft.DataDir = "" }, cluster.ErrRaftRequired},
+		{"every interface without advertise_addr", func(c *cluster.Config) {
+			c.Raft.BindAddr = "0.0.0.0" + c.Raft.BindAddr[strings.LastIndex(c.Raft.BindAddr, ":"):]
+		}, cluster.ErrAdvertiseRequired},
+		{"bare peers with a named node", func(c *cluster.Config) {
+			for i, entry := range c.Discovery.Peers {
+				_, c.Discovery.Peers[i], _ = strings.Cut(entry, "=")
+			}
+		}, cluster.ErrNodeIDNotAdvertise},
+		{"peers without this node", func(c *cluster.Config) { c.Discovery.Peers = c.Discovery.Peers[1:] }, cluster.ErrNodeNotListed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addrs := loopbackAddrs(t, 3)
+			dir := filepath.Join(t.TempDir(), "raft")
+			cfg := cluster.DefaultConfig()
+			cfg.Backend = cluster.BackendRaft
+			cfg.Raft = cluster.RaftConfig{NodeID: "n1", BindAddr: addrs[0], DataDir: dir, ElectionTimeoutMs: 50, HeartbeatTimeoutMs: 50}
+			cfg.Discovery.Peers = []string{"n1=" + addrs[0], "n2=" + addrs[1], "n3=" + addrs[2]}
+			tc.mutate(&cfg)
+
+			_, _, hub, shutdown, err := buildCluster(cfg, zerolog.Nop())
+			if err == nil {
+				hub.Close()
+				shutdown()
+				t.Fatalf("buildCluster accepted the configuration, want %v", tc.want)
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("buildCluster() = %v, want %v", err, tc.want)
+			}
+			if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("the data directory exists after a refused configuration: %v", err)
+			}
+		})
 	}
 }

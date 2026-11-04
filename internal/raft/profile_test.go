@@ -8,6 +8,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/cluster/discovery"
 	"github.com/soltiHQ/control-plane/internal/event"
 	raftpkg "github.com/soltiHQ/control-plane/internal/raft"
@@ -16,7 +17,7 @@ import (
 )
 
 // newSingleNode spins a 1-node raft cluster on loopback, returns profile
-// and cleanup.
+// and cleanup. Its one peer is itself, at the address it advertises.
 func newSingleNode(t *testing.T) *raftpkg.Profile {
 	t.Helper()
 	dir := t.TempDir()
@@ -26,7 +27,7 @@ func newSingleNode(t *testing.T) *raftpkg.Profile {
 		DataDir:          dir,
 		ElectionTimeout:  50 * time.Millisecond,
 		HeartbeatTimeout: 50 * time.Millisecond,
-	}, inmemory.New(), event.NewHub(zerolog.Nop()), discovery.NewStatic(nil), zerolog.Nop())
+	}, inmemory.New(), event.NewHub(zerolog.Nop()), discovery.NewStatic([]cluster.Peer{{ID: "n1", Address: "127.0.0.1:0"}}), zerolog.Nop())
 	if err != nil {
 		t.Fatalf("raft.New: %v", err)
 	}

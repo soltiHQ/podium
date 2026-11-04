@@ -304,6 +304,74 @@ log entries after which the store writes its state as a snapshot and truncates
 the log; 16 MiB of entries does the same. Zero keeps the default; a negative
 value fails configuration loading. See `internal/storage/durable/README.md`.
 
+## Cluster
+
+`cluster.backend: raft` runs podium as one node of a raft cluster. Only that
+backend reads `cluster.raft` and `cluster.discovery`: standalone ignores them,
+valid or not.
+
+```yaml
+cluster:
+  backend: raft
+  raft:
+    node_id: n1                     # unique, the same on every start
+    bind_addr: 0.0.0.0:7000         # where the raft transport listens
+    advertise_addr: 10.0.0.1:7000   # where peers dial it; default bind_addr
+    data_dir: /var/lib/solti/raft
+  discovery:
+    driver: static                  # the default; or dns
+    peers:
+      - n1=10.0.0.1:7000
+      - n2=10.0.0.2:7000
+      - n3=10.0.0.3:7000
+```
+
+Env equivalents: `SOLTI_CLUSTER_BACKEND`, `SOLTI_CLUSTER_RAFT_NODE_ID`,
+`SOLTI_CLUSTER_RAFT_BIND_ADDR`, `SOLTI_CLUSTER_RAFT_ADVERTISE_ADDR`,
+`SOLTI_CLUSTER_RAFT_DATA_DIR`, `SOLTI_CLUSTER_DISCOVERY_DRIVER`, and
+`SOLTI_CLUSTER_DISCOVERY_PEERS`, split on commas:
+
+```sh
+SOLTI_CLUSTER_DISCOVERY_PEERS="n1=10.0.0.1:7000, n2=10.0.0.2:7000, n3=10.0.0.3:7000"
+```
+
+Each `discovery.peers` entry is `id=host:port`: a node's `node_id` and the
+address its peers dial. A bare `host:port` names the node by its address.
+Spaces around an entry, its ID and its address are trimmed. List every node,
+this one included: a one-node cluster lists itself.
+
+Configuration loading fails, and nothing in `data_dir` is opened, when:
+
+- `raft.node_id`, `raft.bind_addr` or `raft.data_dir` is empty;
+- `bind_addr` or `advertise_addr` is not `host:port` with a port from 1 to
+  65535;
+- `bind_addr` listens on every interface (`0.0.0.0`, `::` or no host) and
+  `advertise_addr` is unset, or `advertise_addr` is such an address itself;
+- a peer entry is malformed, an ID or an address appears twice, or no entry is
+  this node: `node_id` at its advertise address (`advertise_addr`, or
+  `bind_addr` without it), compared as written;
+- an entry is bare and `node_id` is not this node's advertise address. To
+  choose IDs, write every entry as `id=host:port`.
+
+With `discovery.driver: dns`, each address that `discovery.hostname` resolves
+to is a peer at `ip:<discovery.port>`, named by that address. So
+`discovery.hostname` and a `discovery.port` from 1 to 65535 are required, the
+advertise address must be this node's IP and `discovery.port`, written as DNS
+returns it (`10.0.0.1:7000`, `[fd00::1]:7000`), and `node_id` must be that same
+address. Env: `SOLTI_CLUSTER_DISCOVERY_HOSTNAME`,
+`SOLTI_CLUSTER_DISCOVERY_PORT`.
+
+A node bootstraps the cluster on its first start, while `data_dir` holds no
+raft state: it asks discovery for the peers and starts with exactly that list,
+sorted by ID, so every node derives the same configuration whatever order
+discovery reports the peers in. A discovery error fails that start, and so
+does a list that breaks the rules above, which DNS answers can: a node that
+advertises a host name is not among them. A failed start keeps no raft state,
+so the next one bootstraps again. Later starts load the configuration from the
+node's own log and do not ask discovery, so a discovery outage does not keep a
+restarting node down; validation still checks a static list on every start.
+See `internal/raft/README.md`.
+
 ## Observed run history
 
 ```yaml
