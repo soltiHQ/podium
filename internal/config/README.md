@@ -319,14 +319,19 @@ When the user table is empty, the first start creates the administrator
 - Without it podium generates a password and writes it, on one line with mode
   0600, to `bootstrap-admin-password` in the data directory of the selected
   backend: `cluster.standalone.data_dir` (default `data/podium`), or
-  `cluster.raft.data_dir` in raft mode, where the file sits on the node that led
-  at first boot. The log names only that path, made absolute.
+  `cluster.raft.data_dir` in raft mode, where the file sits on the node whose
+  leadership term seeded, the node whose log line gives its `node_id`. The log
+  names only that path, made absolute.
 - In ephemeral mode (`cluster.standalone.ephemeral: true`) there is no data
   directory, so the generated password is logged once, at WARN, with the prefix
   `ephemeral mode:`. No other mode logs a password.
 
 Once users exist the variable is ignored, with one WARN per start: remove it from
-the environment after the first start. See `internal/bootstrap/README.md`.
+the environment after the first start. A raft node seeds at the start of each of
+its leadership terms, whenever a quorum gives it one, and never waits for a
+leader at start. It refuses a value that breaks the policy at start, even with
+users present, and logs the WARN about an ignored value at every term. See
+`internal/bootstrap/README.md`.
 
 ## Standalone storage
 
@@ -623,12 +628,12 @@ lifecycle:
 
 `delete_after` is a floor: an agent is deleted once its silence exceeds the
 larger of `delete_after` and `delete_multiplier` × its heartbeat, and never
-sooner. Silence counts from the later of the agent's last sync and the control
-plane's start, so after a restart every agent that has not synced yet gets the
-full thresholds to sync again before its status changes. Zero or negative
-values inherit the defaults shown; `delete_after` is also read from
-`SOLTI_LIFECYCLE_DELETEAFTER`. See `internal/server/README.md` for the states
-and the restart grace.
+sooner. Silence counts from the later of the agent's last sync and the start of
+the replica's leadership term, so after a restart, or a change of leader in raft
+mode, every agent that has not synced yet gets the full thresholds to sync again
+before its status changes. Zero or negative values inherit the defaults shown;
+`delete_after` is also read from `SOLTI_LIFECYCLE_DELETEAFTER`. See
+`internal/server/README.md` for the states and the grace of each term.
 
 Deleting an agent drops its row and the labels operators set on it. Its
 rollouts and its credential stay: until the agent syncs again, its pushes fail

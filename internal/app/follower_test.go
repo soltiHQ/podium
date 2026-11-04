@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,14 +47,28 @@ type raftNode struct {
 	store      storage.Storage
 	leadership cluster.Leadership
 	hub        *event.Hub
+	stop       func() // shuts the node down, once; the end of the test does too
 }
 
-// raftCluster starts one raft node per ID through buildCluster, as New does, on
-// loopback ports with mutual TLS: each presents a certificate of one CA for
-// 127.0.0.1, and lists all of them as id=127.0.0.1:port peers. It returns the
-// leader, once it is ready and every node knows it, with the other nodes, and
-// stops them all when the test ends.
+// raftCluster starts one raft node per ID through buildCluster, as New does, with
+// the configurations raftConfigs gives them. It returns the leader, once it is
+// ready and every node knows it, with the other nodes, and stops them all when
+// the test ends.
 func raftCluster(t *testing.T, ids ...string) (leader *raftNode, followers []*raftNode) {
+	t.Helper()
+	nodes := make([]*raftNode, 0, len(ids))
+	for _, cfg := range raftConfigs(t, ids...) {
+		nodes = append(nodes, startRaftNode(t, cfg))
+	}
+	return readyLeader(t, nodes)
+}
+
+// raftConfigs returns the configuration of one raft node per ID, on loopback
+// ports with mutual TLS: each presents a certificate of one CA for 127.0.0.1,
+// keeps its state in a data directory of its own, and lists all of them as
+// id=127.0.0.1:port peers. Nothing starts: a test can start each node when it
+// wants, through startRaftNode or New.
+func raftConfigs(t *testing.T, ids ...string) []cluster.Config {
 	t.Helper()
 	ca := newTestCA(t)
 	addrs := loopbackAddrs(t, len(ids))
@@ -61,7 +76,7 @@ func raftCluster(t *testing.T, ids ...string) (leader *raftNode, followers []*ra
 	for i, id := range ids {
 		peers = append(peers, id+"="+addrs[i])
 	}
-	nodes := make([]*raftNode, 0, len(ids))
+	cfgs := make([]cluster.Config, 0, len(ids))
 	for i, id := range ids {
 		cert, key := ca.issue(t, "127.0.0.1")
 		cfg := cluster.DefaultConfig()
@@ -72,16 +87,33 @@ func raftCluster(t *testing.T, ids ...string) (leader *raftNode, followers []*ra
 			TLS: cluster.RaftTLSConfig{CertFile: cert, KeyFile: key, CAFile: ca.file},
 		}
 		cfg.Discovery.Peers = peers
-		store, leadership, hub, shutdown, err := buildCluster(cfg, zerolog.Nop())
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			hub.Close()
-			shutdown()
-		})
-		nodes = append(nodes, &raftNode{id: id, addr: addrs[i], store: store, leadership: leadership, hub: hub})
+		cfgs = append(cfgs, cfg)
 	}
+	return cfgs
+}
+
+// startRaftNode starts the raft node of cfg through buildCluster, as New does,
+// and stops it when the test ends, if stop did not first.
+func startRaftNode(t *testing.T, cfg cluster.Config) *raftNode {
+	t.Helper()
+	store, leadership, hub, shutdown, err := buildCluster(cfg, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := &raftNode{id: cfg.Raft.NodeID, addr: cfg.Raft.BindAddr, store: store, leadership: leadership, hub: hub}
+	n.stop = sync.OnceFunc(func() {
+		hub.Close()
+		shutdown()
+	})
+	t.Cleanup(n.stop)
+	return n
+}
+
+// readyLeader waits until one of nodes leads, is ready and is known by every
+// other node, and returns it with the other nodes. A stopped node must not be
+// among nodes: it knows no leader.
+func readyLeader(t *testing.T, nodes []*raftNode) (leader *raftNode, followers []*raftNode) {
+	t.Helper()
 	waitFor(t, 10*time.Second, "one ready leader that every node knows", func() bool {
 		leader, followers = nil, nil
 		for _, n := range nodes {

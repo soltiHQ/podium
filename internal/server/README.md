@@ -80,7 +80,15 @@ A tick runner is built on `runner/base`, which ticks only while this replica
 leads. `base.Runner.OnLeader(fn)` registers a function to run each time the
 replica takes leadership, before the first tick of that term. The sync runner and
 the history collector use it to tell the history service that another replica
-may have written history in the meantime.
+may have written history in the meantime, and the lifecycle runner to start the
+grace of the term (below).
+
+`base.NewTermTask` builds a runner of `runner/base` that never ticks: it runs a
+task once at the start of each leadership term. A task that fails while the
+term lasts logs one WARN and runs again after a pause, from 1s doubling up to
+1m; a term that ends first, by a leadership loss or a shutdown, leaves the task
+to the next term, with one INFO. In raft mode the app seeds through one, the
+`bootstrap` runner, see `internal/bootstrap/README.md`.
 
 ### Lifecycle runner
 Each tick takes the agents whose next-heartbeat deadline has passed (or was
@@ -94,12 +102,16 @@ by how long they have been silent. `hb` is the heartbeat the agent reported, or
 | `disconnected` | `disconnect_multiplier` (5) × hb                         | 150s          |
 | deleted        | max(`delete_after` (24h), `delete_multiplier` (10) × hb) | 24h           |
 
-- **Grace after a restart.** Silence counts from the later of the agent's last
-  sync and the runner's start, so an outage is not held against the agents:
-  each agent that has not synced yet walks through every state in order and
-  gets the full thresholds to sync again first. The grace restarts with every
-  start, so a control plane restarted more often than the deletion threshold
-  deletes no silent agent.
+- **Grace at each leadership term.** Silence counts from the later of the
+  agent's last sync and the start of this replica's current leadership term,
+  set before the term's first tick, so neither an outage nor the time in which
+  another replica led, or none did, is held against the agents: each agent that
+  has not synced yet walks through every state in order and gets the full
+  thresholds to sync again first. A replica that takes leadership long after it
+  started gives the grace all the same. The grace restarts with every term, so a
+  control plane restarted, or a cluster whose leader changes, more often than
+  the deletion threshold deletes no silent agent. In standalone the one term
+  starts when the runner does.
 - **Status only gets worse.** Lifecycle never lowers a status: an agent that was
   already `disconnected` stays so during the grace, and only a sync makes an
   agent `active` again. No event is recorded when the status does not change;

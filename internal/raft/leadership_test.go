@@ -2,7 +2,10 @@ package raft
 
 import (
 	"context"
+	"errors"
 	"io"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -266,5 +269,109 @@ func TestLeadershipFollowerParentCancelAndCallbackError(t *testing.T) {
 	cancelImmediately()
 	if err := leader.leadership.WhenLeader(canceled, func(context.Context) error { t.Error("canceled caller invoked work"); return nil }); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// errBarrierTimedOut is what a barrier that timed out on a node that still leads
+// returns: no leadership loss.
+var errBarrierTimedOut = errors.New("raft: wait for applied state: context deadline exceeded")
+
+// warnings counts the WARN lines in logs.
+func warnings(logs *logBuffer) int { return strings.Count(logs.String(), `"level":"warn"`) }
+
+// A WaitReady that fails while the node still leads is no leadership loss, and
+// does not end WhenLeader: WhenLeader logs one WARN, pauses and waits again, and
+// runs fn once the applied state is ready.
+func TestWhenLeaderRetriesAFailedWaitReady(t *testing.T) {
+	nodes := newLeadershipTestCluster(t)
+	leader := leadershipTestLeader(t, nodes)
+	logs := &logBuffer{}
+	leader.leadership.logger = zerolog.New(logs)
+	leader.leadership.retryPause = 10 * time.Millisecond
+	barrier := leader.leadership.ready
+	var waits atomic.Int32
+	leader.leadership.ready = func(ctx context.Context) error {
+		if waits.Add(1) == 1 {
+			return errBarrierTimedOut
+		}
+		return barrier(ctx)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ran := make(chan struct{}, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- leader.leadership.WhenLeader(ctx, func(term context.Context) error {
+			select {
+			case ran <- struct{}{}:
+			default:
+			}
+			<-term.Done()
+			return nil
+		})
+	}()
+	select {
+	case <-ran:
+	case err := <-done:
+		t.Fatalf("WhenLeader returned %v after a failed WaitReady, want it to wait again and run fn", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("fn did not run after WaitReady succeeded")
+	}
+	if n := warnings(logs); n != 1 || waits.Load() < 2 {
+		t.Fatalf("%d warnings and %d waits for one failed WaitReady, want 1 warning and a second wait:\n%s", n, waits.Load(), logs)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("WhenLeader did not return after its context ended")
+	}
+}
+
+// Only the caller's context or a closed raft ends the waits of a WaitReady that
+// keeps failing while the node leads: WhenLeader logs a WARN for each failure,
+// never runs fn, and returns nil once its context ends, or once raft shuts down.
+func TestWhenLeaderRetriesWaitReadyUntilItsContextEndsOrRaftCloses(t *testing.T) {
+	nodes := newLeadershipTestCluster(t)
+	leader := leadershipTestLeader(t, nodes)
+	logs := &logBuffer{}
+	leader.leadership.logger = zerolog.New(logs)
+	leader.leadership.retryPause = 5 * time.Millisecond
+	leader.leadership.ready = func(context.Context) error { return errBarrierTimedOut }
+	fn := func(context.Context) error { t.Error("fn ran while WaitReady failed"); return nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	byContext, byShutdown := make(chan error, 1), make(chan error, 1)
+	go func() { byContext <- leader.leadership.WhenLeader(ctx, fn) }()
+	go func() { byShutdown <- leader.leadership.WhenLeader(context.Background(), fn) }()
+	waitFor(t, 3*time.Second, "warnings for several failed WaitReady", func() bool { return warnings(logs) >= 6 })
+	for _, ch := range []chan error{byContext, byShutdown} {
+		select {
+		case err := <-ch:
+			t.Fatalf("WhenLeader returned %v while WaitReady kept failing on a leader", err)
+		default:
+		}
+	}
+	for _, end := range []struct {
+		what string
+		do   func()
+		ch   chan error
+	}{
+		{"its context ended", cancel, byContext},
+		{"raft shut down", func() { _ = leader.r.Shutdown().Error() }, byShutdown},
+	} {
+		end.do()
+		select {
+		case err := <-end.ch:
+			if err != nil {
+				t.Fatalf("WhenLeader returned %v after %s, want nil", err, end.what)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("WhenLeader did not return after %s", end.what)
+		}
 	}
 }

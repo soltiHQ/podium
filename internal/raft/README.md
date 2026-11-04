@@ -69,6 +69,23 @@ Later starts load the configuration from the node's own log and do not ask
 discovery: a node restarted while discovery fails rejoins its cluster
 (`TestRestartDoesNotAskDiscovery`).
 
+## Leadership terms
+
+`Leadership.WhenLeader` runs its function once in each leadership term of the
+node, with a context that the end of the term cancels, and only once a barrier
+(`WaitReady`) saw every committed write applied, so the work of a term reads
+what every earlier term wrote. The background runners use it: the lifecycle,
+sync and history runners tick in the term, and the `bootstrap` runner seeds at
+its start, see `internal/bootstrap/README.md`; nothing waits for a leader at
+start. A barrier that fails while the node still leads, one that timed out on a
+slow quorum for instance, is no leadership loss: one WARN, `raft: the applied
+state is not ready at the start of a leadership term: waiting again`, a pause of
+a second, and another barrier, as long as the term lasts
+(`TestWhenLeaderRetriesAFailedWaitReady`). Only the caller's context, a raft
+that shuts down, or an error of the function ends `WhenLeader`, so such a
+barrier no longer ends a runner, and with it the server
+(`TestWhenLeaderRetriesWaitReadyUntilItsContextEndsOrRaftCloses`).
+
 ## Transport security
 
 The transport runs mutual TLS 1.3 (`tls_stream.go`): a `hraft.StreamLayer`

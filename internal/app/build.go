@@ -31,6 +31,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/loghub"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	raftpkg "github.com/soltiHQ/control-plane/internal/raft"
+	"github.com/soltiHQ/control-plane/internal/server/runner/base"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
@@ -187,41 +188,20 @@ func bootstrapOptions(cfg config.Config) bootstrap.Options {
 	}
 }
 
-// readyForBootstrap distinguishes leader election from applied-state readiness.
-// Followers skip seeding; leaders must finish replay before reading seed data.
-func readyForBootstrap(ctx context.Context, leader cluster.Leadership, timeout time.Duration) (bool, error) {
-	readyCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	if !waitForLeader(readyCtx, leader) || !leader.AmLeader() {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		return false, nil
-	}
-	if err := cluster.AwaitLeaderReady(readyCtx, leader); err != nil {
-		return false, fmt.Errorf("cluster: wait for leader state replay: %w", err)
-	}
-	return true, nil
-}
-
-// waitForLeader polls until a leader is elected or ctx expires. Election is
-// followed by AwaitLeaderReady before any bootstrap reads on the leader.
-func waitForLeader(ctx context.Context, l cluster.Leadership) bool {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if ctx.Err() != nil {
-			return false
-		}
-		if l.AmLeader() || l.CurrentLeader() != "" {
-			return true
-		}
-		select {
-		case <-ctx.Done():
-			return false
-		case <-ticker.C:
-		}
-	}
+// seedingRunner is the runner that seeds the shared state on a raft node. At the
+// start of each leadership term of the node, once the term's WaitReady saw every
+// committed write applied, it runs the whole bootstrap.Run: the built-in roles
+// are reconciled to this node's definitions, and the administrator is seeded
+// only when the user table is empty or a first seed stopped halfway. It retries
+// a failure while the node leads, and leaves a lost term to the next one (see
+// [base.NewTermTask]). Its log lines name the node: the one whose line says a
+// password was generated holds the password file.
+func seedingRunner(cfg config.Config, logger zerolog.Logger, leadership cluster.Leadership, svc services) *base.Runner {
+	logger = logger.With().Str("node_id", cfg.Cluster.Raft.NodeID).Logger()
+	opts := bootstrapOptions(cfg)
+	return base.NewTermTask("bootstrap", leadership, logger, func(ctx context.Context) error {
+		return bootstrap.Run(ctx, logger, opts, svc.role, svc.user, svc.credential)
+	})
 }
 
 // buildMainHandler wires the UI and API listener. resolver gives client IPs to

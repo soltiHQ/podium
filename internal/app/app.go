@@ -7,7 +7,6 @@ package app
 import (
 	"context"
 	"sync"
-	"time"
 
 	"github.com/soltiHQ/control-plane/internal/loghub"
 
@@ -34,10 +33,6 @@ import (
 	pageSystem "github.com/soltiHQ/control-plane/ui/templates/page/system"
 )
 
-// leaderWaitTimeout caps how long [New] blocks waiting for any leader to be
-// elected before falling back to follower-mode bootstrap behaviour.
-const leaderWaitTimeout = 30 * time.Second
-
 // App is the fully wired control-plane runtime.
 type App struct {
 	logger zerolog.Logger
@@ -55,10 +50,22 @@ type App struct {
 	shutdownDone chan struct{}
 }
 
-// New assembles all dependencies and seeds initial data when this replica is
-// the leader. Returned [App] is ready to [Run]. Caller must call [Shutdown]
-// to release deferred resources (Raft node, proxy pool, event hub).
+// New assembles all dependencies. Standalone seeds the initial data here. A
+// raft node waits for no leader: it checks what a seed needs, and once it runs,
+// seeds at the start of each of its leadership terms (see [seedingRunner]).
+// Returned [App] is ready to [Run]. Caller must call [Shutdown] to release
+// deferred resources (Raft node, proxy pool, event hub).
 func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, error) {
+	raftMode := cfg.Cluster.Backend == cluster.BackendRaft
+	// A raft node cannot know at start whether a term of its own will seed: it
+	// checks before anything starts what any seed needs, which would otherwise
+	// fail at every term it leads.
+	if raftMode {
+		if err := bootstrapOptions(cfg).Check(); err != nil {
+			return nil, err
+		}
+	}
+
 	store, leadership, eventHub, raftShutdown, err := buildCluster(cfg.Cluster, logger, hubOptions(cfg)...)
 	if err != nil {
 		return nil, err
@@ -71,23 +78,15 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	// Default users/roles/credentials seeding must run through the store.
-	// In raft mode that means only the leader actually persists — followers
-	// would get "not the leader" on Upsert. Solution: wait for any leader,
-	// then only the leader seeds. If this replica is a follower, skip —
-	// leader's writes will replicate here automatically.
-	seed, readyErr := readyForBootstrap(ctx, leadership, leaderWaitTimeout)
-	if readyErr != nil {
-		closeOnError(raftShutdown, eventHub)
-		return nil, readyErr
-	}
-	if seed {
+	// Default users/roles/credentials seeding must run through the store, on the
+	// leader. Standalone always leads: it seeds here, and a seed that fails fails
+	// the start. A raft node leads in some terms only; its seeding runner seeds
+	// at the start of each, and the seed replicates to the other nodes.
+	if !raftMode {
 		if err = bootstrap.Run(ctx, logger, bootstrapOptions(cfg), svc.role, svc.user, svc.credential); err != nil {
 			closeOnError(raftShutdown, eventHub)
 			return nil, err
 		}
-	} else {
-		logger.Info().Msg("bootstrap skipped: this replica is a follower; leader seeds shared state")
 	}
 
 	// TLS: agent-facing listeners (HTTP-discovery, gRPC) get the full server config,
@@ -201,7 +200,11 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	srv, err := server.New(cfg.Server, logger, httpRunner, httpDiscoveryRunner, grpcRunner, lifecycleRunner, syncRunner, historyRunner)
+	runners := []server.Runner{httpRunner, httpDiscoveryRunner, grpcRunner, lifecycleRunner, syncRunner, historyRunner}
+	if raftMode {
+		runners = append(runners, seedingRunner(cfg, logger, leadership, svc))
+	}
+	srv, err := server.New(cfg.Server, logger, runners...)
 	if err != nil {
 		logHub.Close()
 		_ = proxyPool.Close()
