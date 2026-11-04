@@ -323,6 +323,37 @@ func TestConfigCheckRetriesAFailedFetch(t *testing.T) {
 		}
 	})
 
+	// A recovered fetch that finds a mismatch logged before logs it again at
+	// ERROR: the WARN between said the check could not tell, so the mismatch
+	// must not stay below it.
+	t.Run("then a mismatch logged before", func(t *testing.T) {
+		src := newStubSource()
+		src.id, src.addr = "n2", "10.0.0.2:7000"
+		src.answers["10.0.0.2:7000"] = drifted
+		check, logs := runStubCheck(t, src, own, (&immediately{}).after)
+		receive(t, src.asked, "read of the leader at the start")
+		receive(t, src.fetched, "fetch from n2")
+		src.mu.Lock()
+		src.failures["10.0.0.2:7000"] = 2
+		src.mu.Unlock()
+		src.lead("n2", "10.0.0.2:7000")
+		receive(t, src.asked, "read of the leader n2 again")
+		for range 3 {
+			receive(t, src.fetched, "fetch from n2")
+		}
+		src.lead("n2", "10.0.0.2:7000")
+		receive(t, src.asked, "read of the leader n2 once more")
+		receive(t, src.fetched, "fetch from n2")
+		differs := func(level string) checkLine {
+			return checkLine{level: level, message: configDiffers, leader: "n2", groups: []string{cluster.GroupCORS}}
+		}
+		got := stopCheck(t, check, logs)
+		want := []checkLine{differs("error"), warn("n2"), differs("error"), differs("debug")}
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("the check logged\n%v\nwant\n%v", got, want)
+		}
+	})
+
 	t.Run("until this node leads", func(t *testing.T) {
 		src := newStubSource()
 		src.id, src.addr = "n2", "10.0.0.2:7000"
@@ -342,21 +373,29 @@ func TestConfigCheckRetriesAFailedFetch(t *testing.T) {
 	})
 }
 
-// moveLeadership makes the node id of c lead, by a transfer of hashicorp/raft
-// to it, and waits until every node knows it as the leader.
+// moveLeadership makes the node id of c lead, and waits until every node knows
+// it as the leader. hashicorp/raft's transfer to a node returns once the
+// leader steps down, whoever then wins the election, so it transfers again,
+// from whichever node leads, until id leads, within 5s.
 func moveLeadership(t *testing.T, c *loopbackCluster, id string) {
 	t.Helper()
-	leader := c.leader(t, 5*time.Second)
-	if leader.id != id {
-		var target *loopbackNode
-		for _, n := range c.nodes {
-			if n.id == id {
-				target = n
-			}
+	var target *loopbackNode
+	for _, n := range c.nodes {
+		if n.id == id {
+			target = n
 		}
-		if err := leader.profile.raft.LeadershipTransferToServer(hraft.ServerID(id), hraft.ServerAddress(target.addr)).Error(); err != nil {
-			t.Fatalf("transfer the leadership of %s to %s: %v", leader.id, id, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for {
+		leader := c.leader(t, time.Until(deadline))
+		if leader == target {
+			break
 		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s still leads, not %s, 5s into the transfers: %v", leader.id, id, lastErr)
+		}
+		lastErr = leader.profile.raft.LeadershipTransferToServer(hraft.ServerID(id), hraft.ServerAddress(target.addr)).Error()
 	}
 	waitFor(t, 5*time.Second, "every node knows "+id+" as its leader", func() bool {
 		for _, n := range c.nodes {

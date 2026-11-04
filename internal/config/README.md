@@ -488,27 +488,37 @@ validation still checks a static list on every start. See
 These settings must be the same on every node of a raft cluster, as a request
 may reach any of them:
 
-- `auth.jwt_secret` (env `SOLTI_AUTH_JWT_SECRET`) and `auth.cookie_secure`: a
-  token one node signed fails on another, and cookies are marked otherwise;
+- `auth.jwt_secret` (env `SOLTI_AUTH_JWT_SECRET`), `auth.cookie_secure`,
+  `auth.issuer` and `auth.audience`: a token one node signed fails on another,
+  and cookies are marked otherwise;
 - `agent_auth.require` and `agent_auth.enroll_secret` (env
   `SOLTI_AGENT_AUTH_ENROLL_SECRET` only): the nodes authenticate and enroll
   agents otherwise, and send agents tokens or not;
 - `trusted_proxies`: a proxy one node trusts is a client on another, and the
   limiters key its clients otherwise;
-- `cors.*`: a browser origin one node allows, another refuses.
+- `cors.*`: a browser origin one node allows, another refuses;
+- `tls.server.client_ca_file`, which turns agent mTLS on for the discovery
+  listeners: a node without it accepts agents that present no certificate, and
+  a node with another CA refuses agents the others accept. What must match is
+  whether it is set, and the certificates of the bundle, not its path, which
+  may differ from node to node.
 
 Every raft node digests them, group by group, and its `config-check` runner
 compares the digests with its leader's at each change of leader. A node whose
 settings differ logs one ERROR per leader, `configuration check: this node's
 configuration differs from the leader's in settings that every replica must
 share`, naming the groups that differ (`auth`, `agent auth`, `proxies`,
-`CORS`) and never a value; a drifted leader is reported by each of its
-followers. `GET /api/v1/cluster` shows each node's fingerprint of these
+`CORS`, `agent TLS`) and never a value; a drifted leader is reported by each of
+its followers. `GET /api/v1/cluster` shows each node's fingerprint of these
 settings as `config_fingerprint`: nodes whose fingerprints differ do not share
-them. Lists that apply alike count alike: `trusted_proxies` and
-`cors.allow_origins` in any order, a proxy as an IP or its /32, and a CORS list
-left empty or set to the defaults it gets. Overlapping proxy prefixes are not
-merged, though: write the lists alike on every node.
+them. Settings that apply alike count alike: `trusted_proxies` and
+`cors.allow_origins` in any order, a proxy as an IP or its /32, a CORS list
+left empty or set to the defaults it gets, an empty `auth.issuer` or
+`auth.audience` and its default, and the same CA bundle at another path.
+Overlapping proxy prefixes are not merged, though: write the lists alike on
+every node. A raft node reads `tls.server.client_ca_file` before it starts: a
+bundle it cannot read, or that holds no certificate, fails the start with the
+same error as it does in standalone.
 
 Whoever reads the fingerprint and knows the other settings can confirm a guess
 of a weak `jwt_secret` or `enroll_secret` offline, as the fingerprint of every
@@ -517,11 +527,12 @@ fingerprint is served only behind `cluster:get` and is never logged.
 
 Nothing compares the other settings. Those of the runners that only the leader
 runs, `lifecycle.*`, `sync.*` and `history.*`, change what the cluster does
-each time the leadership moves to a node configured otherwise, and the others,
-such as `auth.issuer`, `auth.audience` or the token lifetimes, can break
-requests that cross nodes just as well: keep every node's configuration the
-same, and change it on all of them. See "Configuration drift" in
-`internal/raft/README.md`.
+each time the leadership moves to a node configured otherwise. Of `tls.*`, each
+node's `tls.server.cert_file` and `key_file` are its own, and `tls.client.*`
+is not compared either: its drift shows as failed dials to agents or to the
+leader. Other settings, such as the token lifetimes, may differ unseen too:
+keep every node's configuration the same, and change it on all of them. See
+"Configuration drift" in `internal/raft/README.md`.
 
 ### Joining a cluster
 
@@ -636,6 +647,16 @@ This version also adds the permissions `cluster:get` and `cluster:manage`, in
 standalone too, which the Admin role gets when bootstrap reconciles it, and a
 user who holds every permission directly, not through the Admin role, needs the
 two new permissions to keep counting as an administrator.
+
+This version's nodes check their settings against the leader's (see "Settings
+every replica must share" above), which a node of an earlier version cannot
+answer. During a rolling upgrade, each upgraded follower of a leader that still
+runs the earlier version logs one WARN, `configuration check: cannot fetch the
+leader's configuration digests`, and fetches again 1, 2, 4, 8, 16 and 32 s
+after each failure, then every 60 s, from 1 s again at each change of leader.
+The old leader logs one ERROR, `failed to decode incoming command` with
+`unknown rpc type 240`, for each of those attempts of each such follower. Both
+stop once a node of this version leads.
 
 ## Observed run history
 

@@ -317,29 +317,34 @@ see "Configuration drift" below.
 ## Configuration drift
 
 Some settings must be the same on every replica, or the nodes act otherwise
-whichever of them a request reaches: a token one signed fails on another, a
-proxy one trusts is a client on another. They come in four groups, by the names
-the logs give them:
+whichever of them a request reaches: a token one signed fails on another, an
+agent one accepts another refuses, a proxy one trusts is a client on another.
+They come in five groups, by the names the logs give them:
 
-| Group        | Settings                                          |
-|--------------|---------------------------------------------------|
-| `auth`       | `auth.jwt_secret`, `auth.cookie_secure`           |
-| `agent auth` | `agent_auth.require`, `agent_auth.enroll_secret`  |
-| `proxies`    | `trusted_proxies`                                 |
-| `CORS`       | `cors.*`                                          |
+| Group        | Settings                                                                 |
+|--------------|--------------------------------------------------------------------------|
+| `auth`       | `auth.jwt_secret`, `auth.cookie_secure`, `auth.issuer`, `auth.audience`  |
+| `agent auth` | `agent_auth.require`, `agent_auth.enroll_secret`                         |
+| `proxies`    | `trusted_proxies`                                                        |
+| `CORS`       | `cors.*`                                                                 |
+| `agent TLS`  | `tls.server.client_ca_file`: whether it is set, and its certificates     |
 
 `Config.ConfigDigests` holds one digest per group (`cluster.Digests`), which
 `app` computes in raft mode only from the node's configuration
 (`cluster.SharedSettings`): the SHA-256 of a canonical encoding of the group,
 which starts with `podium-config-fingerprint-v1` and the group's name and writes
-each setting in a fixed order, every string and list after its length. A secret
-enters it only as HMAC-SHA256(secret, `podium-config-fingerprint-v1`), an unset
-one included, so no digest holds a secret or its plain SHA-256
-(`TestFingerprintRevealsNoSecret`). Settings that apply alike encode alike
-(`TestFingerprintChangesWithEachSetting`):
+each setting in a fixed order, every string and list after its length as 8
+bytes, big endian. A secret enters it only as HMAC-SHA256(secret,
+`podium-config-fingerprint-v1`), an unset one included, so no digest holds a
+secret or its plain SHA-256 (`TestFingerprintRevealsNoSecret`). The digests of a
+fixed configuration are pinned as known answers, which a separate
+implementation of this description gave (`TestDigestsOfAKnownConfiguration`).
+Settings that apply alike encode alike (`TestFingerprintChangesWithEachSetting`):
 
 - `auth.cookie_secure` as written (`auto` or `always`, all validation allows);
-  `agent_auth.require` and `cors.allow_credentials` as booleans;
+  `auth.issuer` and `auth.audience` with their defaults (`solti`,
+  `control-plane`) for empty values, as written, as a token's claims compare
+  with them; `agent_auth.require` and `cors.allow_credentials` as booleans;
 - `trusted_proxies` as the set of prefixes the client IP resolver trusts
   (`clientip.ParseTrusted`): trimmed, an IP as its /32 or /128, IPv4-mapped
   entries unmapped, prefixes masked, sorted, without duplicates. Overlapping or
@@ -351,11 +356,21 @@ one included, so no digest holds a secret or its plain SHA-256
   defaults CORS applies to an empty list, as the sets of names their header
   lists carry: the entries joined and split on commas, trimmed, empty names
   dropped, header names in lower case, methods as written;
-- `cors.max_age` with CORS's 12 hours for zero, in the whole seconds CORS sends.
+- `cors.max_age` with CORS's 12 hours for zero, in the whole seconds CORS sends;
+- agent mTLS, which `tls.server.client_ca_file` turns on for the discovery
+  listeners, as a boolean, and its CA bundle as the set of DER certificates the
+  listeners' pool holds, sorted, without duplicates: `tlsconf.ServerConfig`'s
+  `ClientCAs` reads the bundle as `Build` does, every `CERTIFICATE` block
+  without headers that parses (`TestServerConfigClientCAs`). The path counts
+  for nothing, as it may differ from node to node; another CA counts.
 
-Every setting of `cors` counts even while `allow_origins` is empty, when the
-others have no effect. `cluster.Fingerprint` is the hex SHA-256 over the four
-digests in order. The status, `GET /api/v1/cluster`, shows it as
+A raft node reads that bundle before it starts, and fails as `Build` fails on
+it, with the same error: a bundle that cannot be read, or holds no
+certificate, fails `New` before the raft node opens anything
+(`TestUnreadableAgentCABundleFailsTheStart`), where standalone fails later, in
+`Build`, as before. Every setting of `cors` counts even while `allow_origins` is
+empty, when the others have no effect. `cluster.Fingerprint` is the hex SHA-256
+over the five digests in order. The status, `GET /api/v1/cluster`, shows it as
 `config_fingerprint`, behind `cluster:get` (see "Cluster" in
 `internal/handler/README.md`); the group digests travel only from node to node,
 and no log line holds a digest, the fingerprint or a value. Whoever reads the
@@ -378,8 +393,8 @@ connection and returns the end of the stream, which hashicorp/raft's
 byte, passes through untouched, so raft's RPCs of every type, and the probe of
 a membership change, which reads a quiet end of stream, work as before
 (`TestRaftPortAnswersConfigRequests`, `TestOnlyTheFirstByteIsAConfigRequest`).
-The answer has a fixed format, version 1: the byte 1, then the four digests in
-the order above, 32 bytes each, 129 bytes in all (`TestConfigAnswerFormat`).
+The answer has a fixed format, version 1: the byte 1, then the five digests in
+the order above, 32 bytes each, 161 bytes in all (`TestConfigAnswerFormat`).
 The fetch dials the peer as the probe does, sends the byte, and reads until the
 peer closes, within 5 s for the dial, the handshake, the request and the
 answer; the node's write of its answer has the same bound. A request is the
@@ -409,16 +424,22 @@ leader's `leader_id`:
 
 - a mismatch is one ERROR, `configuration check: this node's configuration
   differs from the leader's in settings that every replica must share`, with
-  `groups`, the names of the groups that differ, once per leader and digest set:
-  the same leader seen again with the same digests logs it at DEBUG only;
+  `groups`, the names of the groups that differ, once per leader and digest set
+  since the last match: the same leader seen again with the same digests logs
+  it at DEBUG only, unless a failed fetch was logged since, after which it is
+  an ERROR again. A match clears what was logged, so the same leader with the
+  same digests is an ERROR again after a match in between;
 - a match is a DEBUG line, `configuration check: this node's configuration
   matches the leader's`, or an INFO line when it follows a mismatch or a failed
   fetch logged since the last match;
 - a fetch that fails is one WARN per check of a leader, `configuration check:
-  cannot fetch the leader's configuration digests: retrying, at most every
-  minute`, with the error; the check retries after a second, a pause that
-  doubles after each failure up to a minute, until a fetch succeeds or the
-  leader changes, which ends the pause
+  cannot fetch the leader's configuration digests: retrying after 1, 2, 4, 8,
+  16 and 32 s, then every 60 s, from 1 s again at each change of leader`, with
+  the error. The check fetches again 1, 2, 4, 8, 16 and 32 s after each
+  failure, so at 1, 3, 7, 15, 31 and 63 s after its first attempt, six attempts
+  in its first minute with the first, then every 60 s, until a fetch succeeds
+  or the leader changes, which ends the pause; the check of the next leader
+  starts again from 1 s
   (`TestConfigCheckLogsEachMismatchOnce`, `TestConfigCheckRetriesAFailedFetch`).
 
 `TestConfigCheckFollowsTheLeader` moves the leadership of three nodes over
@@ -430,16 +451,23 @@ nothing.
 
 The check covers exactly the settings above. Nothing compares the others: the
 settings of the runners that only the leader runs, `lifecycle.*`, `sync.*` and
-`history.*`, which change behaviour when the leadership moves, and every other
-setting, such as `auth.issuer`, `auth.audience` or the token lifetimes, may
-differ between nodes without a line. Run every node with one configuration.
+`history.*`, which change behaviour when the leadership moves; the rest of
+`tls.*`, that is each node's own `tls.server.cert_file` and `key_file`, which
+differ from node to node, and `tls.client.*`, whose drift shows as failed dials
+to agents or to the leader; and every other setting, such as the token
+lifetimes. They may differ between nodes without a line. Run every node with
+one configuration.
 
-During a rolling upgrade from a version without the check, a follower of the
-new version whose leader runs the old one logs the WARN, as the old leader
-answers nothing, and retries, at most every minute; the old leader logs one
-ERROR, `unknown rpc type 240`, for each attempt. A later version that changes
-the encoding would change every digest, so nodes of the two versions would log
-the ERROR for every group until all run the same one.
+During a rolling upgrade from a version without the check, each follower of
+the new version whose leader runs the old one logs the WARN once, as the old
+leader answers nothing, and fetches again after 1, 2, 4, 8, 16 and 32 s, then
+every 60 s, from 1 s again at each change of leader; the old leader logs one
+ERROR, `failed to decode incoming command` with `unknown rpc type 240`, for
+each of those attempts of each such follower, until a node of the new version
+leads. A
+later version that changes the encoding would change every digest, so nodes of
+the two versions would log the ERROR for every group until all run the same
+one.
 
 ## Data directory
 

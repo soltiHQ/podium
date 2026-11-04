@@ -20,28 +20,32 @@ const fingerprintVersion = "podium-config-fingerprint-v1"
 // The groups of [SharedSettings], by the names logs give them, in the order of
 // [Digests].
 const (
-	GroupAuth      = "auth"       // auth.jwt_secret, auth.cookie_secure
+	GroupAuth      = "auth"       // auth.jwt_secret, auth.cookie_secure, auth.issuer, auth.audience
 	GroupAgentAuth = "agent auth" // agent_auth.require, agent_auth.enroll_secret
 	GroupProxies   = "proxies"    // trusted_proxies
 	GroupCORS      = "CORS"       // cors.*
+	GroupAgentTLS  = "agent TLS"  // tls.server.client_ca_file: whether it is set, and its certificates
 )
 
 // GroupCount is the number of groups of [SharedSettings].
-const GroupCount = 4
+const GroupCount = 5
 
 // groupNames are the groups of [Digests], in order.
-var groupNames = [GroupCount]string{GroupAuth, GroupAgentAuth, GroupProxies, GroupCORS}
+var groupNames = [GroupCount]string{GroupAuth, GroupAgentAuth, GroupProxies, GroupCORS, GroupAgentTLS}
 
 // SharedSettings are the settings that every replica of a cluster must share,
 // as a node applies them. A replica whose own differ from its leader's
 // authenticates, trusts or answers otherwise than the leader: a token the
-// leader signed fails on it, a proxy the leader trusts is a client on it, a
-// browser origin the leader allows is refused on it.
+// leader signed fails on it, an agent the leader accepts is refused by it, a
+// proxy the leader trusts is a client on it, a browser origin the leader
+// allows is refused on it.
 //
 // The caller gives each setting as the component that applies it reads it:
-// TrustedProxies as the client IP resolver parses them, and CORS with the
-// defaults of the CORS middleware filled in. Digests then encodes each group
-// canonically, so that settings that apply alike encode alike (see Digests).
+// Issuer and Audience with the defaults of auth filled in, TrustedProxies as the
+// client IP resolver parses them, CORS with the defaults of the CORS middleware
+// filled in, and AgentCAs as the discovery listeners' pool holds them. Digests
+// then encodes each group canonically, so that settings that apply alike encode
+// alike (see Digests).
 type SharedSettings struct {
 	// JWTSecret and CookieSecure are auth.jwt_secret and auth.cookie_secure.
 	JWTSecret    string
@@ -55,10 +59,21 @@ type SharedSettings struct {
 	TrustedProxies []netip.Prefix
 	// CORS is cors.*, with the CORS middleware's defaults filled in.
 	CORS CORSSettings
+	// Issuer and Audience are auth.issuer and auth.audience, with their
+	// defaults filled in.
+	Issuer, Audience string
+	// AgentMTLS says whether the discovery listeners require agents' client
+	// certificates (tls.server.client_ca_file), and AgentCAs are the DER of the
+	// certificates of that CA bundle, as the listeners' pool holds them, in any
+	// order; none while AgentMTLS is off.
+	AgentMTLS bool
+	AgentCAs  [][]byte
 }
 
 // CORSSettings are the settings of the CORS middleware, cors.*, with its
-// defaults filled in.
+// defaults filled in. Its fields are those of middleware.CORSConfig, which
+// converts to it: a field that one struct gains and the other does not fails
+// the build of that conversion.
 type CORSSettings struct {
 	AllowOrigins     []string
 	AllowMethods     []string
@@ -69,9 +84,9 @@ type CORSSettings struct {
 }
 
 // Digests are the digests of the groups of a node's [SharedSettings], in the
-// order auth, agent auth, proxies, CORS: each the SHA-256 of its group's
-// canonical encoding. They travel between nodes only; no log line and no
-// answer of the API holds them.
+// order auth, agent auth, proxies, CORS, agent TLS: each the SHA-256 of its
+// group's canonical encoding. They travel between nodes only; no log line and
+// no answer of the API holds them.
 type Digests [GroupCount][sha256.Size]byte
 
 // Digests returns the digests of s, group by group. Each digest is the SHA-256
@@ -84,8 +99,9 @@ type Digests [GroupCount][sha256.Size]byte
 //     HMAC-SHA256(secret, "podium-config-fingerprint-v1"), an unset one
 //     included, never as itself;
 //   - auth.cookie_secure as written, "auto" or "always", the two values
-//     validation allows, and agent_auth.require and cors.allow_credentials as
-//     booleans;
+//     validation allows, auth.issuer and auth.audience with their defaults, as
+//     written, as a token's claims compare with them, and agent_auth.require,
+//     cors.allow_credentials and whether agent mTLS is on as booleans;
 //   - trusted_proxies as a set of the prefixes the resolver trusts, sorted,
 //     without duplicates: overlapping or adjacent prefixes are not merged;
 //   - cors.allow_origins as a set of origins as written, which CORS compares
@@ -95,13 +111,18 @@ type Digests [GroupCount][sha256.Size]byte
 //     entries joined with commas, split on commas and trimmed, empty names
 //     dropped, header names in lower case, as they compare without case,
 //     methods as written, as they compare with case;
-//   - cors.max_age in the whole seconds that CORS sends.
+//   - cors.max_age in the whole seconds that CORS sends;
+//   - the agents' CA bundle as the set of DER certificates the listeners' pool
+//     holds, sorted, without duplicates, never its path, which may differ from
+//     node to node.
 func (s SharedSettings) Digests() Digests {
 	c := s.CORS
 	return Digests{
 		digest(GroupAuth, func(e encoder) {
 			e.bytes(secretMAC(s.JWTSecret))
 			e.string(s.CookieSecure)
+			e.string(s.Issuer)
+			e.string(s.Audience)
 		}),
 		digest(GroupAgentAuth, func(e encoder) {
 			e.bool(s.AgentAuthRequire)
@@ -121,6 +142,14 @@ func (s SharedSettings) Digests() Digests {
 			e.strings(headerNames(c.ExposeHeaders, true))
 			e.bool(c.AllowCredentials)
 			e.int(int64(c.MaxAge.Seconds()))
+		}),
+		digest(GroupAgentTLS, func(e encoder) {
+			cas := make([]string, 0, len(s.AgentCAs))
+			for _, der := range s.AgentCAs {
+				cas = append(cas, string(der))
+			}
+			e.bool(s.AgentMTLS)
+			e.strings(set(cas))
 		}),
 	}
 }

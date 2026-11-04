@@ -3,6 +3,7 @@ package tlsconf
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
@@ -42,6 +43,18 @@ func (c ServerConfig) Build() (*tls.Config, error) {
 	return c.build(true)
 }
 
+// ClientCAs returns the certificates against which the listeners of Build
+// verify client certificates, read from ClientCAFile as Build reads it, into
+// the pool it builds: none while Build requires no client certificate, as
+// server TLS is off or ClientCAFile is unset. A bundle that cannot be read, or
+// holds no certificate, fails it as it fails Build.
+func (c ServerConfig) ClientCAs() ([]*x509.Certificate, error) {
+	if !c.Enabled() || c.ClientCAFile == "" {
+		return nil, nil
+	}
+	return readCABundle(c.ClientCAFile)
+}
+
 // BuildNoClientAuth returns the server *tls.Config WITHOUT requiring a client
 // certificate, even when ClientCAFile is set. This scopes mTLS to the agent-facing
 // listeners while keeping the human-facing UI reachable from a browser.
@@ -61,13 +74,15 @@ func (c ServerConfig) build(requireClientCert bool) (*tls.Config, error) {
 		MinVersion:   tls.VersionTLS12,
 		Certificates: []tls.Certificate{cert},
 	}
-	if requireClientCert && c.ClientCAFile != "" {
-		pool, err := loadCAPool(c.ClientCAFile)
+	if requireClientCert {
+		cas, err := c.ClientCAs()
 		if err != nil {
 			return nil, fmt.Errorf("tls server: client CA: %w", err)
 		}
-		cfg.ClientCAs = pool
-		cfg.ClientAuth = tls.RequireAndVerifyClientCert
+		if cas != nil {
+			cfg.ClientCAs = certPool(cas)
+			cfg.ClientAuth = tls.RequireAndVerifyClientCert
+		}
 	}
 	return cfg, nil
 }
@@ -115,13 +130,49 @@ func (c ClientConfig) Build() (*tls.Config, error) {
 
 // loadCAPool reads a PEM CA bundle into a *x509.CertPool.
 func loadCAPool(path string) (*x509.CertPool, error) {
-	pem, err := os.ReadFile(path)
+	certs, err := readCABundle(path)
 	if err != nil {
 		return nil, err
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
+	return certPool(certs), nil
+}
+
+// readCABundle reads the certificates of the PEM bundle at path as
+// x509.CertPool.AppendCertsFromPEM reads them: every CERTIFICATE block without
+// headers that parses, in order; other blocks are skipped. A bundle that holds
+// none is an error, as a file that cannot be read is.
+func readCABundle(path string) ([]*x509.Certificate, error) {
+	rest, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var certs []*x509.Certificate
+	for len(rest) > 0 {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			continue
+		}
+		certs = append(certs, cert)
+	}
+	if len(certs) == 0 {
 		return nil, fmt.Errorf("no certificates found in %s", path)
 	}
-	return pool, nil
+	return certs, nil
+}
+
+// certPool is a pool of certs, which it holds as AppendCertsFromPEM would.
+func certPool(certs []*x509.Certificate) *x509.CertPool {
+	pool := x509.NewCertPool()
+	for _, cert := range certs {
+		pool.AddCert(cert)
+	}
+	return pool
 }

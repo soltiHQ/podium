@@ -72,11 +72,12 @@ func secretForms(t *testing.T, cfg config.Config) []string {
 // Three whole raft nodes run as main runs them, over mutual TLS: n1 and n2
 // share their settings, and n3's jwt_secret and CORS origins differ. n1 and n2
 // elect a leader before n3 starts, so n3 follows it. The configuration check of
-// n3 then logs exactly one ERROR, naming the groups auth and CORS and the
-// leader, while the check of the other follower finds the leader's digests
-// match, and no check of n1 or n2 logs an ERROR. No line of any node holds a
-// secret, a CORS origin, a digest or a fingerprint. The status of each node
-// gives the fingerprint of its own settings: n1's and n2's alike, n3's another.
+// n3 then logs one ERROR for each leader it follows, which names that leader
+// and the groups auth and CORS, while the check of the other follower finds the
+// leader's digests match. The checks of n1 and n2 log an ERROR, as one, only
+// for n3, should n3 come to lead. No line of any node holds a secret, a CORS
+// origin, a digest or a fingerprint. The status of each node gives the
+// fingerprint of its own settings: n1's and n2's alike, n3's another.
 func TestMismatchedReplicaLogsError(t *testing.T) {
 	nodes := clusterNodes(t, "n1", "n2", "n3")
 	for _, n := range nodes {
@@ -99,27 +100,36 @@ func TestMismatchedReplicaLogsError(t *testing.T) {
 	waitFor(t, 15*time.Second, matching[0].id+" finds its leader's configuration matches", func() bool {
 		return len(matching[0].logged(t, map[string]any{"runner": configCheck, "message": configMatches, "leader_id": leader.id})) > 0
 	})
-	// A deliberate delay, not a wait for a condition: a check that repeated its
-	// ERROR without a change of leader would repeat it within it.
-	time.Sleep(2 * raftTimeoutMs * time.Millisecond)
 
-	lines := drifted.logged(t, checkErrors)
-	if len(lines) != 1 {
-		t.Fatalf("%s logged %d ERROR lines of its configuration check, want one: %v", drifted.id, len(lines), lines)
+	// errorsByLeader counts the ERROR lines of n's check by the leader each
+	// names, and fails the test unless each says the configuration differs in
+	// auth and CORS.
+	errorsByLeader := func(n *clusterNode) map[string]int {
+		counts := map[string]int{}
+		for _, line := range n.logged(t, checkErrors) {
+			var groups []string
+			if raw, ok := line.fields["groups"].([]any); ok {
+				for _, g := range raw {
+					groups = append(groups, fmt.Sprint(g))
+				}
+			}
+			if line.fields["message"] != configDiffers || !slices.Equal(groups, []string{cluster.GroupAuth, cluster.GroupCORS}) {
+				t.Fatalf("%s logged %v, want %q naming the groups [auth CORS]", n.id, line.fields, configDiffers)
+			}
+			counts[fmt.Sprint(line.fields["leader_id"])]++
+		}
+		return counts
 	}
-	line := lines[0].fields
-	var groups []string
-	if raw, ok := line["groups"].([]any); ok {
-		for _, g := range raw {
-			groups = append(groups, fmt.Sprint(g))
+	for id, count := range errorsByLeader(drifted) {
+		if count != 1 {
+			t.Fatalf("%s logged %d ERROR lines for the leader %s, want one", drifted.id, count, id)
 		}
 	}
-	if line["message"] != configDiffers || line["leader_id"] != leader.id || !slices.Equal(groups, []string{cluster.GroupAuth, cluster.GroupCORS}) {
-		t.Fatalf("%s logged %v, want %q naming the leader %s and the groups [auth CORS]", drifted.id, line, configDiffers, leader.id)
-	}
 	for _, n := range nodes[:2] {
-		if got := n.logged(t, checkErrors); len(got) != 0 {
-			t.Fatalf("%s, which shares the leader's settings, logged %v", n.id, got)
+		for id, count := range errorsByLeader(n) {
+			if id != drifted.id || count != 1 {
+				t.Fatalf("%s logged %d ERROR lines for the leader %s, want one, and only while %s leads", n.id, count, id, drifted.id)
+			}
 		}
 	}
 

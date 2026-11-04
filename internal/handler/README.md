@@ -182,7 +182,7 @@ it. `node_id`, `role` (`leader`, `follower`, `candidate` or `shutdown`), `leader
 address of the leader it knows, both left out while it knows none, `members`, each with its `id`, its raft `address` as
 the configuration writes it, and its `suffrage` (`voter`, `nonvoter` or `staging`), `last_index`, the index of the last
 entry of its log, and `config_fingerprint`, the fingerprint of the settings that every replica must share, as this node
-holds them: the hex SHA-256 over the digests of their four groups, `cluster.Fingerprint` (`TestClusterStatusAnswer`).
+holds them: the hex SHA-256 over the digests of their five groups, `cluster.Fingerprint` (`TestClusterStatusAnswer`).
 Nodes whose fingerprints differ do not share those settings, so comparing the answers of every node shows drift that the
 nodes' `config-check` runners also log (see "Configuration drift" in `internal/raft/README.md`). The fingerprint is no
 secret, but whoever reads it and knows the other settings can confirm a guess of a weak `auth.jwt_secret` or

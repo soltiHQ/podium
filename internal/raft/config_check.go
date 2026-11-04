@@ -26,9 +26,10 @@ const (
 // What the configuration check logs: one WARN for a check whose first fetch
 // failed, one ERROR for a leader whose digests differ, and a line for a leader
 // whose digests match, at INFO when it ends a mismatch or a failed fetch logged
-// before, at DEBUG otherwise. A mismatch logged before is logged again at DEBUG.
+// before, at DEBUG otherwise. A mismatch logged before is logged again at
+// DEBUG, or at ERROR when a failed fetch was logged since.
 const (
-	configFetchFailed = "configuration check: cannot fetch the leader's configuration digests: retrying, at most every minute"
+	configFetchFailed = "configuration check: cannot fetch the leader's configuration digests: retrying after 1, 2, 4, 8, 16 and 32 s, then every 60 s, from 1 s again at each change of leader"
 	configDiffers     = "configuration check: this node's configuration differs from the leader's in settings that every replica must share"
 	configMatches     = "configuration check: this node's configuration matches the leader's"
 )
@@ -47,14 +48,17 @@ var ErrConfigCheckStarted = errors.New("raft: configuration check already starte
 // It logs the outcome under runner=config-check, with the node's ID, the
 // leader's ID and, for a mismatch, the names of the groups that differ; never a
 // digest or a value:
-//   - a mismatch at ERROR, once per leader and digest set: the same leader seen
-//     again with the same digests, a flap of leadership through no leader
-//     included, logs it at DEBUG only;
+//   - a mismatch at ERROR, once per leader and digest set since the last match:
+//     the same leader seen again with the same digests, a flap of leadership
+//     through no leader included, logs it at DEBUG only, unless a failed fetch
+//     was logged since, which logs it at ERROR again; a match clears what was
+//     logged, so a later mismatch is an ERROR again;
 //   - a match at DEBUG, or at INFO when it follows a mismatch or a failed fetch
 //     logged since the last match, which it ends;
 //   - a fetch that fails at WARN, once per check of a leader: the check retries
-//     after a pause of a second that doubles after each failure, up to a minute,
-//     until a fetch succeeds or the leader changes, which ends the pause.
+//     after 1, 2, 4, 8, 16 and 32 s, then every 60 s, until a fetch succeeds or
+//     the leader changes, which ends the pause, and a check of the next leader
+//     starts again from 1 s.
 type ConfigCheck struct {
 	self   string          // this node's ID
 	own    cluster.Digests // this node's digests
@@ -239,8 +243,9 @@ func (c *ConfigCheck) compare(id string, theirs cluster.Digests, state *checkSta
 		*state = checkState{}
 		return
 	}
+	warned := state.warned
 	state.warned = false
-	if logged, ok := state.mismatches[id]; ok && logged == theirs {
+	if logged, ok := state.mismatches[id]; ok && logged == theirs && !warned {
 		c.logger.Debug().Str("leader_id", id).Strs("groups", groups).Msg(configDiffers)
 		return
 	}

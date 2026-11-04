@@ -40,7 +40,7 @@ type App struct {
 
 	store        storage.Storage
 	leadership   cluster.Leadership
-	cluster      *clustersvc.Service // a raft node's cluster service, nil in standalone
+	cluster      *clustersvc.Service // a test hook: only tests read it; the raft node's cluster service, nil in standalone
 	eventHub     *event.Hub
 	raftShutdown func()
 	proxyPool    *proxy.Pool

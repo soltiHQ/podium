@@ -215,30 +215,39 @@ func entries(n int) uint64 {
 }
 
 // sharedSettings are the settings of cfg that every replica of a raft cluster
-// must share (cluster.SharedSettings), as the node applies them:
-// trusted_proxies as the client IP resolver parses them, and cors with the
-// defaults that the CORS middleware fills in. cluster.Fingerprint cannot take
-// cfg itself: config imports cluster.
+// must share (cluster.SharedSettings), as the node applies them: auth with its
+// defaults, trusted_proxies as the client IP resolver parses them, cors with
+// the defaults that the CORS middleware fills in, and the agents' CA bundle as
+// the discovery listeners' pool holds it. That bundle is read as
+// tlsconf.ServerConfig.Build reads it, and fails as Build fails on it, with its
+// error: a bundle that cannot be read, or holds no certificate, fails the start
+// of a raft node here, before the node starts, as it fails a standalone start
+// in Build. cluster.Fingerprint cannot take cfg itself: config imports cluster.
 func sharedSettings(cfg config.Config) (cluster.SharedSettings, error) {
 	proxies, err := clientip.ParseTrusted(cfg.TrustedProxies)
 	if err != nil {
 		return cluster.SharedSettings{}, fmt.Errorf("trusted_proxies: %w", err)
 	}
-	cors := cfg.CORS.WithDefaults()
+	cas, err := cfg.TLS.Server.ClientCAs()
+	if err != nil {
+		return cluster.SharedSettings{}, fmt.Errorf("tls server: client CA: %w", err)
+	}
+	agentCAs := make([][]byte, 0, len(cas))
+	for _, ca := range cas {
+		agentCAs = append(agentCAs, ca.Raw)
+	}
+	authCfg := cfg.Auth.WithDefaults()
 	return cluster.SharedSettings{
-		JWTSecret:        cfg.Auth.JWTSecret,
-		CookieSecure:     cfg.Auth.CookieSecure,
+		JWTSecret:        authCfg.JWTSecret,
+		CookieSecure:     authCfg.CookieSecure,
+		Issuer:           authCfg.Issuer,
+		Audience:         authCfg.Audience,
 		AgentAuthRequire: cfg.AgentAuth.Require,
 		EnrollSecret:     cfg.AgentAuth.EnrollSecret,
 		TrustedProxies:   proxies,
-		CORS: cluster.CORSSettings{
-			AllowOrigins:     cors.AllowOrigins,
-			AllowMethods:     cors.AllowMethods,
-			AllowHeaders:     cors.AllowHeaders,
-			ExposeHeaders:    cors.ExposeHeaders,
-			AllowCredentials: cors.AllowCredentials,
-			MaxAge:           cors.MaxAge,
-		},
+		CORS:             cluster.CORSSettings(cfg.CORS.WithDefaults()),
+		AgentMTLS:        cas != nil,
+		AgentCAs:         agentCAs,
 	}, nil
 }
 

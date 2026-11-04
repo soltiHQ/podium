@@ -134,14 +134,19 @@ func TestOnlyTheFirstByteIsAConfigRequest(t *testing.T) {
 }
 
 // The answer has a fixed format, version 1: the version byte, then the
-// digests of the four groups in their order, 32 bytes each. A fetch refuses an
-// answer of another version or size, and an empty one says that the peer
-// serves none.
+// digests of the five groups in their order, 32 bytes each, 161 bytes in all.
+// A fetch refuses an answer of another version or size, and an empty one says
+// that the peer serves none.
 func TestConfigAnswerFormat(t *testing.T) {
 	own := testDigests(5)
 	answer := configAnswer(&own)
-	if len(answer) != 1+4*32 || answer[0] != 1 || !bytes.Equal(answer[1:33], own[0][:]) || !bytes.Equal(answer[97:], own[3][:]) {
-		t.Fatalf("answer %x, want version 1 and the four digests in order", answer)
+	if len(answer) != 161 || answer[0] != 1 {
+		t.Fatalf("answer of %d bytes, version %d, want 161 bytes of version 1", len(answer), answer[0])
+	}
+	for i, g := range own {
+		if at := 1 + 32*i; !bytes.Equal(answer[at:at+32], g[:]) {
+			t.Fatalf("answer bytes %d to %d are %x, want the digest of group %d, %x", at, at+32, answer[at:at+32], i, g)
+		}
 	}
 	if configAnswer(nil) != nil {
 		t.Fatal("a node without digests has an answer")

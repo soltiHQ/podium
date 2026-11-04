@@ -25,8 +25,9 @@ import (
 const configRequest byte = 0xF0
 
 // configAnswerVersion is the first byte of the answer to a configRequest: the
-// version of its format. Version 1 is that byte, then the digests of the groups
-// in their order (auth, agent auth, proxies, CORS), 32 bytes each.
+// version of its format. Version 1 is that byte, then the digests of the five
+// groups in their order (auth, agent auth, proxies, CORS, agent TLS), 32 bytes
+// each.
 const configAnswerVersion byte = 1
 
 // configAnswerSize is the size of an answer of configAnswerVersion.

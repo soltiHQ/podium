@@ -1,6 +1,7 @@
 package tlsconf
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -11,6 +12,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -119,6 +121,85 @@ func TestServerConfigBuildMTLS(t *testing.T) {
 	}
 	if cfg.ClientCAs == nil {
 		t.Fatalf("ClientCAs is nil, want pool")
+	}
+}
+
+// ClientCAs gives the certificates that the pool of Build holds, read from the
+// bundle as Build reads it: every CERTIFICATE block without headers that
+// parses, in order, other blocks skipped. It gives none while Build requires no
+// client certificate, and fails as Build fails on a bundle it cannot read or
+// that holds no certificate.
+func TestServerConfigClientCAs(t *testing.T) {
+	cert, key := writeSelfSigned(t)
+	other, _ := writeSelfSigned(t)
+	read := func(path string) []byte {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	der := func(path string) []byte {
+		block, _ := pem.Decode(read(path))
+		return block.Bytes
+	}
+	bundle := filepath.Join(t.TempDir(), "bundle.pem")
+	parts := [][]byte{
+		read(cert),
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("not a certificate")}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Headers: map[string]string{"Proc-Type": "4,ENCRYPTED"}, Bytes: der(other)}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("does not parse")}),
+		read(other),
+	}
+	if err := os.WriteFile(bundle, bytes.Join(parts, nil), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := ServerConfig{CertFile: cert, KeyFile: key, ClientCAFile: bundle}
+	got, err := server.ClientCAs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || !bytes.Equal(got[0].Raw, der(cert)) || !bytes.Equal(got[1].Raw, der(other)) {
+		t.Fatalf("ClientCAs() gave %d certificates, want the two plain CERTIFICATE blocks in order", len(got))
+	}
+	if _, err := server.Build(); err != nil {
+		t.Fatalf("Build() of the same bundle: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		cfg  ServerConfig
+	}{
+		{"no client CA", ServerConfig{CertFile: cert, KeyFile: key}},
+		{"no server TLS", ServerConfig{ClientCAFile: bundle}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, err := tc.cfg.ClientCAs(); got != nil || err != nil {
+				t.Fatalf("ClientCAs() = %v, %v, want none", got, err)
+			}
+		})
+	}
+
+	empty := filepath.Join(t.TempDir(), "empty.pem")
+	if err := os.WriteFile(empty, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("x")}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, file, want string
+	}{
+		{"a missing bundle", filepath.Join(t.TempDir(), "missing.pem"), "no such file"},
+		{"a bundle without a certificate", empty, "no certificates found in " + empty},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := ServerConfig{CertFile: cert, KeyFile: key, ClientCAFile: tc.file}
+			if _, err := cfg.ClientCAs(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ClientCAs() = %v, want an error saying %q", err, tc.want)
+			}
+			if _, err := cfg.Build(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Build() = %v, want an error saying %q", err, tc.want)
+			}
+		})
 	}
 }
 
