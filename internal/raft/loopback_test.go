@@ -26,6 +26,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"github.com/soltiHQ/control-plane/internal/storage/snapshot"
 )
 
 // loopbackTimeout is the election and heartbeat timeout of loopback nodes. It
@@ -227,6 +228,27 @@ func (n *loopbackNode) stop() {
 // self is a discovery that lists only n, for a cluster of one node.
 func (n *loopbackNode) self() cluster.Discovery {
 	return discovery.NewStatic([]cluster.Peer{{ID: n.id, Address: n.addr}})
+}
+
+// state returns the state a running n holds, encoded as a snapshot encodes it,
+// which orders every entity: nodes that hold the same state give the same
+// bytes.
+func (n *loopbackNode) state(t *testing.T) []byte {
+	t.Helper()
+	data, err := snapshot.Marshal(n.profile.inner.(*inmemory.Store).SnapshotForRaft())
+	if err != nil {
+		t.Fatalf("%s: %v", n.id, err)
+	}
+	return data
+}
+
+// agents returns the IDs of the agents a running n holds.
+func (n *loopbackNode) agents() map[string]bool {
+	ids := make(map[string]bool)
+	for _, agent := range n.profile.inner.(*inmemory.Store).SnapshotForRaft().Agents {
+		ids[agent.ID()] = true
+	}
+	return ids
 }
 
 // withTLS gives a node files other than its own.

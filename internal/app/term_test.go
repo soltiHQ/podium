@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/credentials"
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -58,13 +60,21 @@ type clusterNode struct {
 // that the kernel picks when the node runs.
 func clusterNodes(t *testing.T, ids ...string) []*clusterNode {
 	t.Helper()
-	nodes := make([]*clusterNode, 0, len(ids))
-	for _, raft := range raftConfigs(t, ids...) {
+	return clusterNodesOf(raftConfigs(t, ids...))
+}
+
+// clusterNodesOf is clusterNodes with the raft configurations raft, one node
+// each, whose listeners listen on the host of the node's raft address.
+func clusterNodesOf(raft []cluster.Config) []*clusterNode {
+	nodes := make([]*clusterNode, 0, len(raft))
+	for _, r := range raft {
 		cfg := config.Default()
-		cfg.Cluster = raft
+		cfg.Cluster = r
 		cfg.Auth.JWTSecret = strings.Repeat("leadership-term-test-secret", 2)
-		cfg.HTTP.Addr, cfg.HTTPDiscovery.Addr, cfg.GRPC.Addr = "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0"
-		nodes = append(nodes, &clusterNode{id: raft.Raft.NodeID, cfg: cfg, logs: &syncBuffer{}})
+		host, _, _ := net.SplitHostPort(r.Raft.BindAddr)
+		listen := net.JoinHostPort(host, "0")
+		cfg.HTTP.Addr, cfg.HTTPDiscovery.Addr, cfg.GRPC.Addr = listen, listen, listen
+		nodes = append(nodes, &clusterNode{id: r.Raft.NodeID, cfg: cfg, logs: &syncBuffer{}})
 	}
 	return nodes
 }

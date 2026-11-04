@@ -52,7 +52,7 @@ Main listener (`app.buildMainHandler`), outermost first:
   RequestID      ── installs request id + error slot (API routes and the event stream only)
    Logger        ── reads the slot back after the handler returns (same routes); logs 5xx at ERROR, but a 503 with X-Leader at WARN
     Auth / OptionalAuth / RequirePermission  ── 503 when credentials cannot be checked, logged at ERROR; a refresh that needs the
-                                                 raft leader (auth.rotate_refresh on a follower) is 503 + X-Leader, logged at WARN
+                                                 raft leader (auth.rotate_refresh on a follower) is 503, with X-Leader when the leader is known, logged at WARN
      handler/api.go | ui.go
         ├─ success → response.OK(w, r, mode, &View{Data: dto, Component: tmpl})
         │              └─ Responder from ctx → JSON (json.Marshal + sec headers)

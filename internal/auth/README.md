@@ -66,9 +66,10 @@ A session or user that is gone, expired, revoked or disabled is an auth error (`
 failed lookup (storage or RBAC) is returned as it is, so `middleware.Auth` answers 503, not 401, logs the error at ERROR
 with the method and path (never a credential), and logout does not clear the cookies of a session it could not check.
 With `rotate_refresh` the refresh is a write: in raft mode a follower cannot make it (`cluster.ErrNotLeader`), and `middleware.Auth`
-answers 503 with the leader's address in `X-Leader` (see "Leader hint" in `internal/transport/README.md`) and logs a WARN,
-not an ERROR; the access log of an API route records that 503 as a WARN too. See `internal/raft/README.md` for the
-leader-sticky routing it needs.
+answers 503, with the leader's address in `X-Leader` when the node knows its leader (see "Leader hint" in
+`internal/transport/README.md`), and logs a WARN, not an ERROR; the access log of an API route records a 503 with `X-Leader`
+as a WARN too. See "Browsers and `auth.rotate_refresh`" in `internal/raft/README.md` for the leader-sticky routing it
+needs.
 
 ## Dependency graph
 ```text

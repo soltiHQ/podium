@@ -34,10 +34,7 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   share with the leader's, see "Configuration drift" in
   `internal/raft/README.md`).
 - `Shutdown` closes resources in reverse acquisition order: proxy pool →
-  event hub → Raft node. Safe to call multiple times. In raft mode the Raft
-  node's shutdown first closes the gRPC forwarder of a follower's syncs, its
-  connection to the leader included, and the lookups of the raft hosts that
-  the client IP resolver trusts: both live as long as the node.
+  event hub → Raft node. Safe to call multiple times.
 
 ## Startup flow
 ```text

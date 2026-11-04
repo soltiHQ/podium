@@ -7,6 +7,198 @@ log, which applies them on every node, and `Leadership()` reports whether this
 node leads. The settings are described under "Cluster" in
 `internal/config/README.md`.
 
+## Runbook: a three-node cluster
+
+What an operator does to run a cluster of three nodes, `n1`, `n2` and `n3` at
+`10.0.0.1:7000`, `10.0.0.2:7000` and `10.0.0.3:7000`, from the first start to a
+rolling upgrade. Each step names the section that explains it, and the test
+that shows it where one does; "Multi-node tests" lists the tests that run
+these steps on real nodes over loopback with mutual TLS.
+
+### Certificates
+
+1. Make a CA for raft alone: never the agents' CA, the CA of `tls.server` or
+   `tls.client`, or a bundle merged with one of them. A node takes every
+   certificate its CA signs for a full member, whatever host it names (see
+   "Transport security").
+2. Give each node one certificate of that CA, for both server and client
+   authentication, whose subject alternative names hold the host of the node's
+   advertise address as written: an IP SAN for `10.0.0.1:7000`, a DNS SAN for
+   `podium-0.podium:7000`, IP SANs with the dns driver. A node checks a peer's
+   certificate for the host it dials (`TestRaftRefusesPeerCertForAnotherHost`),
+   and refuses to start with a certificate its peers would refuse
+   (`TestNewChecksItsOwnCertificate`).
+3. Set `cluster.raft.tls.cert_file`, `key_file` and `ca_file` on every node.
+   The HTTP and gRPC listeners have TLS settings of their own: with `tls.server`
+   set, a follower forwards writes over TLS and checks the leader's
+   certificate for the leader's raft host, so those certificates name each
+   node's advertise host too, and `tls.client.ca_file` holds their CA (see "TLS"
+   in `internal/config/README.md`).
+
+### Network
+
+- Serve `http.addr`, `http_discovery.addr` and `grpc.addr` on the same ports on
+  every node. A follower forwards a write to the host of the leader's raft
+  address at its own port of the listener the write came in on, and names that
+  address in the HTTP `X-Leader` and the gRPC `x-leader` hints; nothing checks
+  that the ports match (see "Forwarding and trusted hosts").
+  `TestFollowerHTTPAndGRPCWritesLand`, in `internal/app`, runs three whole nodes
+  on loopback IPs of their own with one port per listener: a login and a user
+  created through a follower's main listener, and agent syncs through its HTTP
+  and gRPC discovery listeners, land on every node.
+- Let only the cluster's nodes reach `cluster.raft.bind_addr`, by firewall or
+  network policy. TLS keeps other hosts out of the cluster, not off the port: a
+  connection the node refuses is an ERROR line (see "Logging"), and a host that
+  connects and stays silent holds a goroutine, a descriptor and
+  hashicorp/raft's 256 KB read buffer (`connReceiveBufferSize` in v1.8.0) until
+  the handshake bound of 10 s closes the connection
+  (`TestRaftBoundsInboundHandshakes`). Nothing caps how many such connections a
+  node holds at once.
+- Do not relay outside clients at L4 on a node's host, by a port forward, SNAT
+  or kube-proxy for a hostNetwork pod: every node believes the forwarding
+  headers of the hosts of the raft configuration, so such a client could pick
+  its own client IP (see "Forwarding and trusted hosts").
+
+### Configuration
+
+Each node has its own `cluster.raft.node_id`, unique and the same on every
+start, its own `data_dir`, and lists every node, itself included:
+
+```yaml
+cluster:
+  backend: raft
+  raft:
+    node_id: n1
+    bind_addr: 10.0.0.1:7000
+    data_dir: /var/lib/solti/raft
+    tls:
+      cert_file: /etc/solti/raft/n1.crt
+      key_file: /etc/solti/raft/n1.key
+      ca_file: /etc/solti/raft/ca.crt
+  discovery:
+    peers: [n1=10.0.0.1:7000, n2=10.0.0.2:7000, n3=10.0.0.3:7000]
+```
+
+Every other setting is the same on every node: the ones every replica must
+share are listed under "Settings every replica must share" in
+`internal/config/README.md`, and each node compares them with its leader's
+(see "Configuration drift"); the rest nothing compares.
+
+### First start
+
+Start the three nodes with empty data directories. Each writes the same
+configuration of the three, sorted by ID, before its raft runs, and the nodes
+elect a leader and replicate writes (`TestThreeNodesWithNamedIDsElectLeader`).
+A node waits for no leader at start: one that starts alone leads nothing until
+a second one starts, and the first node to lead seeds the administrator
+(`TestLateQuorumStillSeedsOnce`); "Raft mode" in `internal/bootstrap/README.md`
+says which node's password file to read. A start that fails on its peers keeps
+no raft state, so it bootstraps again once they are fixed (see "Bootstrap").
+From then on a node reads its configuration from its own log, not from
+`peers` (`TestRestartDoesNotAskDiscovery`).
+
+### Restarts and failover
+
+- A node started again from its data directory rejoins as itself: it restarts
+  from its own log, follows the node that leads, catches up the writes it
+  missed, and votes again, the former leader as a follower
+  (`TestRejoinAfterRestart`). One that fell behind further than the leader's
+  log reaches, after compaction, catches up from the leader's snapshot
+  (`TestSnapshotAndRestoreUnderLoad`). `GET /api/v1/cluster` on a node shows its
+  role, the leader it knows and its `last_index` (see "Cluster" in
+  `internal/handler/README.md`): restart the next node only once the last one
+  follows the leader again.
+- When the leader goes down, the other two elect a leader and take writes, and
+  every write that was acknowledged is on both
+  (`TestFailoverKeepsAcknowledgedWrites`). A write in flight as the leader went
+  down has an unknown outcome, whatever its client got, a 503 with
+  `cluster.ErrLeadershipLost` (see "Follower writes") or no answer: it may land
+  or not, so a client should repeat only writes that are safe to repeat.
+  Followers forward to the new leader, which the hints name.
+- A lone node never leads (`TestLateQuorumStillSeedsOnce`), and hashicorp/raft
+  steps a leader down when it hears from no quorum within its lease
+  (`checkLeaderLease` in v1.8.0), so with two nodes down the last one answers
+  writes 503 until a second node is back.
+
+### Adding and removing members
+
+- Add a node: start it with an empty `data_dir`, a certificate of the cluster
+  CA for its advertise host, and `cluster.raft.join: true`; then `POST
+  /api/v1/cluster/members` with its `node_id` and advertise address, at any
+  node, as a follower forwards it. The leader probes the address as raft dials
+  it, adds the node as a voter, and the node catches up from the leader's log
+  or a snapshot (`TestJoiningNodeWaitsToBeAdded`; see "Membership" and
+  "Joining a running cluster"). Keep `join` set until `discovery.peers` lists
+  the node.
+- Start every node that has no raft state of its own with `join: true`: a
+  replacement, and a node whose `data_dir` was lost or wiped, which is a new
+  node to remove and add back. Without the flag a first start bootstraps from
+  the static peers, as a new cluster does: a configuration of its own at term 1
+  (`TestFirstStartBootstrapsBeforeRaftRuns`), not the cluster's, and the node
+  does not wait to be added.
+- Remove a member with `DELETE /api/v1/cluster/members/<id>`, and `?force=true`
+  when fewer than three voters would remain, as on any removal from three
+  nodes; the last voter cannot be removed (`TestRemoveMemberForceGuard`). The
+  leader's own removal takes two calls: it hands its leadership over and
+  answers 503 with `X-Leader`, and the repeated call removes it
+  (`TestRemoveLeaderTransfersFirst`). Remove dead members first (see "Removing
+  a member").
+- Stop the process of every node you remove: its raft keeps running outside the
+  cluster, with a state that no longer follows it, until the process stops
+  (see "A removed node").
+- A dead member is replaced by its removal, with `force`, and the addition of
+  the replacement, started with `join: true`: "Replacing a dead member" lists
+  the steps, which `TestReplaceDeadMember`, in `internal/app`, runs.
+
+### Browsers and `auth.rotate_refresh`
+
+A browser holds an access token, valid for `auth.access_ttl` (15 minutes by
+default), a refresh token and a session ID, in cookies. Any node checks an
+access token by itself, its signature and the session in the node's own store,
+and serves a read with it (`TestFollowerHTTPAndGRPCWritesLand`). Once the access
+token has expired, `Auth` and `OptionalAuth` refresh the session from the other
+two cookies, on a GET as well, which the `Leader` middleware passes to the
+node's own handlers.
+
+- With `auth.rotate_refresh: false`, the default, a refresh only reads
+  (`TestServiceRefreshNoRotationRemainsReusable`), so any node refreshes a
+  browser, and the routing of browsers is free.
+- With `auth.rotate_refresh: true`, every refresh replaces the session's
+  refresh token in a transaction, a write that only the leader can make. On a
+  follower the transaction fails before it changes anything: the request
+  answers 503, with the leader's HTTP address in `X-Leader` when the follower
+  knows its leader, sets no cookie, and the old refresh token stays valid
+  (`TestRefreshOnAFollowerAsksForTheLeader`,
+  `TestRotatingRefreshOnAFollowerAsksForTheLeader`).
+
+So with rotation on, a browser whose access token has expired gets 503 for
+every request that reaches a follower, page loads and API reads alike, until a
+request reaches the leader, which rotates the token and sets new cookies; their
+access token works on every node again until it expires. A browser does not
+retry at `X-Leader` by itself, so behind a balancer that spreads requests over
+the three nodes, two in three of those requests fail. Routing must therefore be
+leader-sticky: the balancer sends browsers to the leader, or retries a request
+that gets `X-Leader` at the node it names, and follows the leadership when it
+moves. The status that names the
+leader, `GET /api/v1/cluster`, needs `cluster:get`
+(`TestClusterRoutesNeedPermission`), so a balancer that probes it needs a
+credential. A refresh on a leader that loses its leadership as the rotation
+commits answers 503 as well, and may have rotated the token all the same (see
+"Follower writes"): its browser then holds a refresh token that no longer
+matches, and logs in again. Without rotation none of this applies: turn
+rotation off where the balancer cannot follow the leader.
+
+### Rolling upgrade
+
+Upgrade one node at a time, and the next only once the last one follows the
+leader again. Before the first upgrade from an earlier version, read
+"Upgrading a raft node" in `internal/config/README.md`: every node must list
+itself among its peers, needs `raft.tls` or `allow_insecure_transport`, and a
+private `data_dir`, and it says what the configuration check logs while the
+leader runs the earlier version. During the upgrade the built-in roles follow
+whichever version leads, as each leadership term reconciles them to the
+leader's definitions (see "Built-in roles" in `internal/bootstrap/README.md`).
+
 ## Node IDs and peers
 
 Every node has an explicit ID, `cluster.raft.node_id`, and every node lists
@@ -75,11 +267,11 @@ discovery: a node restarted while discovery fails rejoins its cluster
 
 `cluster.raft.join: true` (`Config.Join`) starts a node whose data directory
 holds no raft state without a bootstrap: `New` neither asks discovery nor writes
-a configuration, logs one INFO line that the node waits to be added, and starts
-raft with no configuration, so the node leads nothing. The leader of the running
-cluster adds it through the membership API (`POST /api/v1/cluster/members`, see
-"Membership" below); the leader's log, or a snapshot, then reaches the node, and
-it catches up the state written before it joined
+a configuration, and starts raft with no configuration, so the node leads
+nothing. The leader of the running cluster adds it through the membership API
+(`POST /api/v1/cluster/members`, see "Membership" below); the leader's log, or
+a snapshot, then reaches the node, and it catches up the state written before it
+joined
 (`TestJoiningNodeWaitsToBeAdded`). Validation accepts a joining node that
 `discovery.peers` does not list, and an empty list, though a list that is set
 must still parse. A node with raft state loads its configuration from its own
@@ -90,9 +282,9 @@ and with the dns driver needs its `node_id` and advertise address to be its
 `ip:<discovery.port>`. So a node the API added keeps the flag set until its
 `discovery.peers` lists it, and with dns until its `node_id` matches too:
 cleared earlier, the flag's absence fails every start of the node at
-validation. A node that replaces
-another, or whose data directory was wiped, starts with the flag, so that it
-does not bootstrap a configuration of its own from the static list.
+validation. A node that replaces another, or whose data directory was wiped,
+starts with the flag, so that it does not bootstrap a configuration of its own
+from the static list.
 
 ## Leadership terms
 
@@ -256,13 +448,15 @@ A dead member is replaced by a removal and then an addition, which is what
 A removed node's raft keeps running, outside the cluster. hashicorp/raft shuts
 a node down at its removal (`ShutdownOnRemove`, which podium leaves on) only
 when the node commits its own removal as the leader, which the transfer
-avoids. The leader stops replicating to a member as soon as it dispatches the
-member's removal, so the node may never learn that it was removed. It cannot
-disrupt the members: they refuse its pre-votes, as it is not in their
-configuration. Once it no longer hears from a leader its writes answer 503,
-while its reads answer from a state that no longer follows the cluster. It
-logs election WARNs, and every member logs a WARN for each pre-vote it
-refuses, until the node's process is stopped, which the operator must do.
+avoids (`TestRemoveLeaderTransfersFirst`: the removed node never logs
+`removed ourself`). The leader stops replicating to a member as soon as it
+dispatches the member's removal, so the node may never learn that it was
+removed. It cannot disrupt the members: they refuse its pre-votes, as it is not
+in their configuration (`requestPreVote` in hashicorp/raft v1.8.0). Once it no
+longer hears from a leader its writes answer 503, while its reads answer from a
+state that no longer follows the cluster. It logs election WARNs, and every
+member logs a WARN for each pre-vote it refuses, until the node's process is
+stopped, which the operator must do.
 
 ## Transport security
 
@@ -337,9 +531,10 @@ each setting in a fixed order, every string and list after its length as 8
 bytes, big endian. A secret enters it only as HMAC-SHA256(secret,
 `podium-config-fingerprint-v1`), an unset one included, so no digest holds a
 secret or its plain SHA-256 (`TestFingerprintRevealsNoSecret`). The digests of a
-fixed configuration are pinned as known answers, which a separate
-implementation of this description gave (`TestDigestsOfAKnownConfiguration`).
-Settings that apply alike encode alike (`TestFingerprintChangesWithEachSetting`):
+fixed configuration are pinned as known answers
+(`TestDigestsOfAKnownConfiguration`), so a change of the encoding, of the order
+of a group's settings or of how a secret enters it fails that test. Settings
+that apply alike encode alike (`TestFingerprintChangesWithEachSetting`):
 
 - `auth.cookie_secure` as written (`auto` or `always`, all validation allows);
   `auth.issuer` and `auth.audience` with their defaults (`solti`,
@@ -464,10 +659,9 @@ leader answers nothing, and fetches again after 1, 2, 4, 8, 16 and 32 s, then
 every 60 s, from 1 s again at each change of leader; the old leader logs one
 ERROR, `failed to decode incoming command` with `unknown rpc type 240`, for
 each of those attempts of each such follower, until a node of the new version
-leads. A
-later version that changes the encoding would change every digest, so nodes of
-the two versions would log the ERROR for every group until all run the same
-one.
+leads. A later version that changes the encoding would change every digest, so
+nodes of the two versions would log the ERROR for every group until all run the
+same one.
 
 ## Data directory
 
@@ -479,10 +673,12 @@ symlink, written with a trailing slash or not, as the durable store does
 hashicorp/raft makes each snapshot directory 0755 and its `meta.json` and
 `state.bin` 0644, so the snapshot store takes their group and other
 permissions off as soon as `FileSnapshotStore.Create` returns, before any state
-is written into them, and again once `Close` has put the snapshot in place.
-hashicorp/raft creates the snapshot a leader installs through the same
-`Create`. `New` does the same to the snapshots already there
-(`TestRaftFilesArePrivate`, `TestSnapshotsArePrivateWhileWritten`).
+is written into them, and they are still private once `Close` has put the
+snapshot in place. hashicorp/raft creates the snapshot a leader installs
+through the same `Create`, so a follower's installed snapshot is as private: its
+directory 0700, its files 0600 (`TestSnapshotAndRestoreUnderLoad`). `New` does
+the same to the snapshots already there (`TestRaftFilesArePrivate`,
+`TestSnapshotsArePrivateWhileWritten`).
 
 ## Follower writes
 
@@ -531,18 +727,21 @@ A read that writes is the refresh of a browser session with
 request whose access token is missing or expired, whatever its method, and the
 rotation of the refresh token is a transaction. On a follower it fails with
 `ErrNotLeader` before it consumes the token: the request answers 503 with
-`X-Leader`, no cookie is set, and the follower logs a WARN from `Auth`, not an
-ERROR. On an API route the access log wraps `Auth` and logs every 5xx at ERROR,
-except a 503 that carries `X-Leader`, which it logs at WARN: that header is set
-only for a routing condition, so the refresh leaves no ERROR line
+`X-Leader` when the follower knows its leader, no cookie is set, and the
+follower logs a WARN from `Auth`, not an ERROR. On an API route the access log
+wraps `Auth` and logs every 5xx at ERROR, except a 503 that carries `X-Leader`,
+which it logs at WARN: that header is set only for a routing condition, so the
+refresh on a follower that knows its leader leaves no ERROR line
 (`TestAccessLogLevelFollowsTheStatus`,
-`TestFollowerRefreshThroughTheAccessLogLogsNoError`). The same cookies then
-refresh at the leader (`TestRotatingRefreshOnAFollowerAsksForTheLeader`, and
+`TestFollowerRefreshThroughTheAccessLogLogsNoError`), while one on a follower
+that knows no leader answers its 503 without the header, which the access log
+logs at ERROR. The same cookies then refresh at the leader
+(`TestRotatingRefreshOnAFollowerAsksForTheLeader`, and
 `TestRefreshOnAFollowerAsksForTheLeader` in the middleware package). So with
-`auth.rotate_refresh: true` a raft deployment needs leader-sticky routing: its
-load balancer must send browsers to the leader, or retry a request that gets
-`X-Leader` on the node it names. With `auth.rotate_refresh` off, as it is by
-default, a refresh only reads and works on every node.
+`auth.rotate_refresh: true` a raft deployment needs leader-sticky routing, see
+"Browsers and `auth.rotate_refresh`" in the runbook above. With
+`auth.rotate_refresh` off, as it is by default, a refresh only reads
+(`TestServiceRefreshNoRotationRemainsReusable`) and works on every node.
 
 ## Forwarding and trusted hosts
 
@@ -562,8 +761,8 @@ with the `UnaryLeader` interceptor's `Forwarder`, through the generated client:
   `x-forwarded-for`, the caller's own values with its peer appended, and
   `x-podium-forwarded`, and nothing else of the call's metadata;
 - over one client connection, kept while the leader keeps its address, replaced
-  when the leader moves, which closes the former leader's, and closed when the
-  node shuts down (`TestForwarderKeepsOneConnectionPerLeader`).
+  when the leader moves, which closes the former leader's, and closed by its
+  `Close` (`TestForwarderKeepsOneConnectionPerLeader`).
 
 The leader's answer, an error included, is the follower's
 (`TestFollowerForwardsGRPCSync`, `TestUnaryLeaderForwardsAWriteWithItsMetadata`,
@@ -712,14 +911,14 @@ of the configuration, such as `AddVoter`, which operators need to see next to
 the ID and the address of the server it changes
 (`TestHCLogAdapterShowsConfigurationChanges`).
 
-Every connection that the transport refuses or that times out in its handshake
-is one ERROR line, `failed to decode incoming command` from `raft-net`, with the
-TLS error. That is expected of a host that is no cluster node and reaches the
-raft port, and nothing limits it: a connect flood is a flood of lines. So the
-raft port, `cluster.raft.bind_addr`, must be reachable only from the cluster's
-nodes, by firewall or network policy. TLS keeps other hosts out of the cluster,
-not off the port. A configuration request that the node answers leaves no line
-(see "Configuration drift").
+A connection that the transport refuses, one that speaks no TLS for instance, is
+one ERROR line, `failed to decode incoming command` from `raft-net`, with the
+TLS error (`TestRaftLogsGoThroughTheNodeLogger`). That is expected of a host
+that is no cluster node and reaches the raft port, and nothing limits it: a
+connect flood is a flood of lines. So the raft port, `cluster.raft.bind_addr`,
+must be reachable only from the cluster's nodes, by firewall or network policy.
+TLS keeps other hosts out of the cluster, not off the port. A configuration
+request that the node answers leaves no line (see "Configuration drift").
 
 ## Multi-node tests
 
@@ -734,8 +933,22 @@ node first. `leader` waits for exactly one ready leader, and `write` runs a
 write on it, again on the next leader if leadership moves first. A node's
 `stop` and `start` restart it from its data directory (`dir`), with any
 discovery; options to `start` edit the node's `Config`, such as `withTLS`,
-`insecureTransport` and `withConfigDigests`, and `open` returns the error of a start a test expects to
-fail. `capture` makes a node log into a `logBuffer`, which is safe to read while
-the node runs, before it starts: raft's goroutines log through the node's
-logger. The helper's waits poll a condition until a timeout, never a fixed
-sleep.
+`insecureTransport` and `withConfigDigests`, and `open` returns the error of a
+start a test expects to fail. `capture` makes a node log into a `logBuffer`,
+which is safe to read while the node runs, before it starts: raft's goroutines
+log through the node's logger. `state` returns what a running node holds,
+encoded as a snapshot encodes it, so nodes that hold the same state give the
+same bytes, and `agents` the IDs of its agents. The helper's waits poll a
+condition until a timeout, never a fixed sleep.
+
+`cluster_test.go` runs the runbook's events on three such nodes:
+`TestFailoverKeepsAcknowledgedWrites` kills the leader during the 100th of 200
+writes and finds every acknowledged write on both survivors, which hold the
+same state; `TestSnapshotAndRestoreUnderLoad` compacts the log under writes
+past what a stopped follower holds, which then installs the leader's snapshot,
+private on disk, matches the others, and restores that snapshot at its next
+start; `TestRejoinAfterRestart` restarts the leader from its data directory,
+which follows, catches up and votes again. `TestFollowerHTTPAndGRPCWritesLand`,
+in `internal/app`, runs three whole nodes, each on a loopback IP of its own: it
+skips on a host where 127.0.0.2 and 127.0.0.3 cannot be bound, which a Linux
+host can.

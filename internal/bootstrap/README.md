@@ -109,7 +109,8 @@ nothing.
 - A run that ends with its term, a leadership loss, is not retried: one INFO,
   `runner task ended with its leadership term: the next term runs it again`, and
   the next term, on whichever node leads, runs bootstrap again.
-- Every line of the runner and of bootstrap carries the node's `node_id`.
+- The runner and bootstrap log with the node's `node_id`, so the line that names
+  a password file names the node that holds it (`TestLateQuorumStillSeedsOnce`).
 
 Each node writes a password it generates into its own `cluster.raft.data_dir`,
 and never removes the file of another node. So the file is on the node whose
@@ -143,8 +144,9 @@ the node whose seed failed after writing it, whose error names the file.
   operator-managed administrator and a canceled startup.
 
 Raft mode is tested in `internal/app` on three real raft nodes with mutual TLS,
-started through `app.New` and `Run`: a quorum that forms late seeds once, with
-the file on the seeding node alone (`TestLateQuorumStillSeedsOnce`), and a new
-leader's term changes nothing (`TestSeedingIsIdempotentAcrossLeaders`). The
+started through `app.New` and `Run`: a quorum that forms late seeds one
+administrator, with the same stored password on every node, which the file this
+README says to trust holds (`TestLateQuorumStillSeedsOnce`), and a new leader's
+term changes nothing (`TestSeedingIsIdempotentAcrossLeaders`). The
 checks at start are `TestNewRaftRefusesAnAdminPasswordBreakingThePolicy` and
 `TestNewRaftRefusesToStartWithoutADataDirectory`.

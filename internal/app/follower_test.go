@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -25,7 +26,9 @@ import (
 	"google.golang.org/grpc/status"
 
 	discoverv1 "github.com/soltiHQ/control-plane/api/gen/solti/discover/v1"
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/cluster/standalone"
 	"github.com/soltiHQ/control-plane/internal/config"
@@ -72,15 +75,25 @@ func raftCluster(t *testing.T, ids ...string) (leader *raftNode, followers []*ra
 // startRaftNode or New.
 func raftConfigs(t *testing.T, ids ...string) []cluster.Config {
 	t.Helper()
+	return raftConfigsAt(t, loopbackAddrs(t, len(ids)), ids...)
+}
+
+// raftConfigsAt is raftConfigs with node i at the raft address addrs[i], whose
+// host its certificate names, with localhost.
+func raftConfigsAt(t *testing.T, addrs []string, ids ...string) []cluster.Config {
+	t.Helper()
 	ca := newTestCA(t)
-	addrs := loopbackAddrs(t, len(ids))
 	peers := make([]string, 0, len(ids))
 	for i, id := range ids {
 		peers = append(peers, id+"="+addrs[i])
 	}
 	cfgs := make([]cluster.Config, 0, len(ids))
 	for i, id := range ids {
-		cert, key := ca.issue(t, "127.0.0.1", "localhost")
+		host, _, err := net.SplitHostPort(addrs[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert, key := ca.issue(t, host, "localhost")
 		cfg := cluster.DefaultConfig()
 		cfg.Backend = cluster.BackendRaft
 		cfg.Raft = cluster.RaftConfig{
@@ -335,6 +348,255 @@ func TestFollowerForwardsGRPCSync(t *testing.T) {
 			}
 		})
 	}
+}
+
+// sharedPorts returns count distinct ports, each of which every one of hosts
+// could bind when it returns: a listener on each host holds each port until
+// then. Another process may take one before a node binds it, a race tests
+// accept.
+func sharedPorts(t *testing.T, hosts []string, count int) []string {
+	t.Helper()
+	var held []net.Listener
+	defer func() {
+		for _, l := range held {
+			_ = l.Close()
+		}
+	}()
+	ports := make([]string, 0, count)
+	for attempt := 1; len(ports) < count; attempt++ {
+		if attempt > 20 {
+			t.Fatalf("no port free on every one of %v in 20 attempts", hosts)
+		}
+		first, err := net.Listen("tcp", net.JoinHostPort(hosts[0], "0"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, first)
+		_, port, err := net.SplitHostPort(first.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		free := true
+		for _, host := range hosts[1:] {
+			l, err := net.Listen("tcp", net.JoinHostPort(host, port))
+			if err != nil {
+				free = false
+				break
+			}
+			held = append(held, l)
+		}
+		if free {
+			ports = append(ports, port)
+		}
+	}
+	return ports
+}
+
+// readyNodes is readyLeader over whole nodes that run.
+func readyNodes(t *testing.T, nodes []*clusterNode) (leader *clusterNode, followers []*clusterNode) {
+	t.Helper()
+	views := make([]*raftNode, 0, len(nodes))
+	of := make(map[*raftNode]*clusterNode, len(nodes))
+	for _, n := range nodes {
+		view := &raftNode{id: n.id, addr: n.cfg.Cluster.Raft.BindAddr, store: n.app.store, leadership: n.app.leadership}
+		views = append(views, view)
+		of[view] = n
+	}
+	viewLeader, viewFollowers := readyLeader(t, views)
+	for _, f := range viewFollowers {
+		followers = append(followers, of[f])
+	}
+	return of[viewLeader], followers
+}
+
+// Three whole nodes run as main runs them, each on a loopback IP of its own,
+// all serving HTTP, HTTP discovery and gRPC on one port per listener, as the
+// same-port assumption wants. A write sent to a follower reaches the leader,
+// which applies it, and every node then holds it: on the main HTTP listener a
+// login, which creates a session, and the creation of a user with the login's
+// cookies; on the HTTP discovery listener the sync of one agent, and over gRPC
+// the sync of another. The follower forwards each to the leader's raft host at
+// its own port of the listener, and still follows that leader once the write
+// is answered; the leader's access log, not the follower's, holds the creation
+// of the user. A read with the login's cookies is the follower's own: it checks
+// the access token against its own store and serves the read itself. The test
+// needs 127.0.0.2 and 127.0.0.3, which Linux gives every host as loopback, and
+// skips where they cannot be bound.
+func TestFollowerHTTPAndGRPCWritesLand(t *testing.T) {
+	hosts := []string{"127.0.0.1", "127.0.0.2", "127.0.0.3"}
+	for _, host := range hosts[1:] {
+		l, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+		if err != nil {
+			t.Skipf("each node needs a loopback IP of its own, and %s cannot be bound here: %v", host, err)
+		}
+		_ = l.Close()
+	}
+	ports := sharedPorts(t, hosts, 4) // raft, HTTP, HTTP discovery and gRPC
+	raftAddrs := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		raftAddrs = append(raftAddrs, net.JoinHostPort(host, ports[0]))
+	}
+	nodes := clusterNodesOf(raftConfigsAt(t, raftAddrs, "n1", "n2", "n3"))
+	for i, n := range nodes {
+		n.cfg.HTTP.Addr = net.JoinHostPort(hosts[i], ports[1])
+		n.cfg.HTTPDiscovery.Addr = net.JoinHostPort(hosts[i], ports[2])
+		n.cfg.GRPC.Addr = net.JoinHostPort(hosts[i], ports[3])
+		n.start(t)
+	}
+	// Run serves the listeners once New has returned.
+	for _, n := range nodes {
+		for _, addr := range []string{n.cfg.HTTP.Addr, n.cfg.HTTPDiscovery.Addr, n.cfg.GRPC.Addr} {
+			waitFor(t, 10*time.Second, n.id+" serves "+addr, func() bool {
+				conn, err := net.Dial("tcp", addr)
+				if err == nil {
+					_ = conn.Close()
+				}
+				return err == nil
+			})
+		}
+	}
+	leader, followers := readyNodes(t, nodes)
+	ctx := context.Background()
+	// landed waits until every node holds what found finds.
+	landed := func(what string, found func(storage.Storage) bool) {
+		t.Helper()
+		for _, n := range nodes {
+			waitFor(t, 10*time.Second, n.id+" holds "+what, func() bool { return found(n.app.store) })
+		}
+	}
+	// follows fails the test unless via still follows the leader once what was
+	// answered: a node that led meanwhile may have served it itself.
+	follows := func(via *clusterNode, what string) {
+		t.Helper()
+		if via.app.leadership.AmLeader() || via.app.leadership.CurrentLeader() != leader.cfg.Cluster.Raft.BindAddr {
+			t.Fatalf("%s no longer follows %s once %s was answered", via.id, leader.id, what)
+		}
+	}
+
+	via := followers[0]
+	resp, err := discoveryClient(t, via.cfg.GRPC.Addr, nil, nil).Sync(withToken(ctx, "token-of-agent-grpc"), syncRequest("agent-grpc"))
+	if err != nil || !resp.GetSuccess() {
+		t.Fatalf("sync through %s over gRPC: %v %v, want the leader's success", via.id, resp, err)
+	}
+	follows(via, "the gRPC sync")
+	landed("the agent synced over gRPC", func(s storage.Storage) bool {
+		_, err := s.GetAgent(ctx, "agent-grpc")
+		return err == nil
+	})
+
+	via = followers[1]
+	client := &http.Client{
+		Timeout:       10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	// send posts body to target with the bearer token, when set, and cookies.
+	send := func(target, contentType, body, token string, cookies []*http.Cookie) (*http.Response, string) {
+		t.Helper()
+		r, err := http.NewRequest(http.MethodPost, target, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Header.Set("Content-Type", contentType)
+		if token != "" {
+			r.Header.Set("Authorization", "Bearer "+token)
+		}
+		for _, c := range cookies {
+			r.AddCookie(c)
+		}
+		w, err := client.Do(r)
+		if err != nil {
+			t.Fatalf("POST %s: %v", target, err)
+		}
+		defer func() { _ = w.Body.Close() }()
+		answer, err := io.ReadAll(w.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return w, string(answer)
+	}
+
+	httpSync, body := send("http://"+via.cfg.HTTPDiscovery.Addr+"/api/v1/discovery/sync", jsonType,
+		`{"id":"agent-http","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`, "token-of-agent-http", nil)
+	if httpSync.StatusCode != http.StatusOK {
+		t.Fatalf("sync through %s over HTTP: %d %q, want the leader's 200", via.id, httpSync.StatusCode, body)
+	}
+	follows(via, "the HTTP sync")
+	landed("the agent synced over HTTP", func(s storage.Storage) bool {
+		_, err := s.GetAgent(ctx, "agent-http")
+		return err == nil
+	})
+
+	// A user to log in as, with a cheap hash, which the leader checks.
+	writer, err := model.NewUser("user-writer", "writer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.SetPermissions([]string{string(enum.UsersGet), string(enum.UsersAdd)})
+	if err := leader.app.store.UpsertUser(ctx, writer); err != nil {
+		t.Fatal(err)
+	}
+	if err := credential.New(leader.app.store, zerolog.Nop()).SetPassword(ctx, credential.SetPasswordRequest{UserID: writer.ID(), Password: browserPassword, Cost: 4}); err != nil {
+		t.Fatal(err)
+	}
+	login, body := send("http://"+via.cfg.HTTP.Addr+"/login", formType, loginForm("writer"), "", nil)
+	if login.StatusCode != http.StatusFound {
+		t.Fatalf("login through %s: %d %q, want the leader's 302", via.id, login.StatusCode, body)
+	}
+	follows(via, "the login")
+	var session string
+	for _, c := range login.Cookies() {
+		if c.Name == httpcookie.NameSessionID {
+			session = c.Value
+		}
+	}
+	if session == "" {
+		t.Fatalf("login through %s set no %s cookie", via.id, httpcookie.NameSessionID)
+	}
+	landed("the session of the login", func(s storage.Storage) bool {
+		_, err := s.GetSession(ctx, session)
+		return err == nil
+	})
+	created, body := send("http://"+via.cfg.HTTP.Addr+"/api/v1/users", jsonType, `{"subject":"landed-over-http"}`, "", login.Cookies())
+	if created.StatusCode != http.StatusNoContent {
+		t.Fatalf("user created through %s: %d %q, want the leader's 204", via.id, created.StatusCode, body)
+	}
+	follows(via, "the creation of a user")
+	landed("the user created over HTTP", func(s storage.Storage) bool {
+		_, err := s.GetUserBySubject(ctx, "landed-over-http")
+		return err == nil
+	})
+	// The access log of an API route runs behind the Leader middleware, so the
+	// node that logs a request on /api/v1/users served it.
+	served := func(n *clusterNode, method string, status int) bool {
+		return len(n.logged(t, map[string]any{"message": "http request", "method": method, "path": "/api/v1/users", "status": float64(status)})) > 0
+	}
+	waitFor(t, 5*time.Second, leader.id+" logs the creation of the user", func() bool {
+		return served(leader, http.MethodPost, http.StatusNoContent)
+	})
+	if served(via, http.MethodPost, http.StatusNoContent) {
+		t.Fatalf("%s served the creation of the user itself", via.id)
+	}
+
+	// A read is no write: the follower serves it itself, and checks the access
+	// token of the login against the session in its own store.
+	read, err := http.NewRequest(http.MethodGet, "http://"+via.cfg.HTTP.Addr+"/api/v1/users", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range login.Cookies() {
+		read.AddCookie(c)
+	}
+	listed, err := client.Do(read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = listed.Body.Close()
+	if listed.StatusCode != http.StatusOK {
+		t.Fatalf("users read through %s: %d, want 200", via.id, listed.StatusCode)
+	}
+	waitFor(t, 5*time.Second, via.id+" logs the read it served", func() bool {
+		return served(via, http.MethodGet, http.StatusOK)
+	})
 }
 
 // syncOutcome is how a discovery sync ended, the same over either transport.

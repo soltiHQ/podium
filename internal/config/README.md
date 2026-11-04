@@ -226,15 +226,16 @@ Any other value, an empty one included, fails configuration loading.
 every refresh of a browser's session replace its refresh token. The replacement
 is a write, so in raft mode only the leader can make it. A browser whose access
 token has expired (`auth.access_ttl`, 15m by default) and whose request, a GET
-included, reaches a follower gets 503 with `X-Leader` (see "Leader hint" in
-`internal/transport/README.md`) instead of a new token, and sets no cookie; the
-follower logs a WARN, `auth refresh needs the leader`, with the method and the
-path, and the access log of an API route records the 503 as a WARN too: the
-refresh leaves no ERROR line. So with rotation on, a raft deployment needs leader-sticky routing: its
-load balancer must send browsers to the leader, or retry a request that gets
-`X-Leader` on the node it names. Without rotation a refresh only reads, and
-works on every node, as does a request whose access token is still valid.
-Standalone is unaffected. See `internal/raft/README.md`.
+included, reaches a follower gets 503 instead of a new token, with `X-Leader`
+when the follower knows its leader (see "Leader hint" in
+`internal/transport/README.md`), and sets no cookie; the follower logs a WARN,
+`auth refresh needs the leader`, with the method and the path, and the access
+log of an API route records a 503 with `X-Leader` as a WARN too, so the refresh
+leaves no ERROR line while the follower knows its leader. So with rotation on,
+a raft deployment needs leader-sticky routing: see "Browsers and
+`auth.rotate_refresh`" in the runbook of `internal/raft/README.md`. Without
+rotation a refresh only reads, and works on every node, as does a request whose
+access token is still valid. Standalone is unaffected.
 
 The main listener refuses state-changing requests that a browser sends from
 another origin (Go's `http.CrossOriginProtection`) with 403
@@ -357,7 +358,10 @@ value fails configuration loading. See `internal/storage/durable/README.md`.
 
 `cluster.backend: raft` runs podium as one node of a raft cluster. Only that
 backend reads `cluster.raft` and `cluster.discovery`: standalone ignores them,
-valid or not.
+valid or not. To set up and run a cluster, follow "Runbook: a three-node
+cluster" in `internal/raft/README.md`: certificates, network, the first start,
+restarts and failover, adding and removing members, the routing of browsers,
+and rolling upgrades.
 
 ```yaml
 cluster:
@@ -477,11 +481,11 @@ that differ between nodes go unnoticed and leave them with different
 configurations, while an address DNS answers twice fails the start as a
 duplicate. A discovery error fails that start, and so does a list that breaks
 the rules above, which DNS answers can: a node that advertises a host name is
-not among them. A failed start keeps no raft state, so the next one bootstraps
-again. Later starts load the configuration from the node's own log and do not
-ask discovery, so a discovery outage does not keep a restarting node down;
-validation still checks a static list on every start. See
-`internal/raft/README.md`.
+not among them. A start that fails on its peers keeps no raft state, so the
+next one bootstraps again. Later starts load the configuration from the node's
+own log and do not ask discovery, so a discovery outage does not keep a
+restarting node down; validation still checks a static list on every start.
+See `internal/raft/README.md`.
 
 ### Settings every replica must share
 
@@ -538,9 +542,9 @@ keep every node's configuration the same, and change it on all of them. See
 
 `cluster.raft.join: true` (env `SOLTI_CLUSTER_RAFT_JOIN`) starts a node whose
 `data_dir` holds no raft state without a bootstrap: it asks discovery for
-nothing, writes no configuration, logs one INFO line that it waits, and waits
-for the leader of the running cluster to add it with `POST
-/api/v1/cluster/members` (see "Cluster" in `internal/handler/README.md`). A
+nothing, writes no configuration, and waits for the leader of the running
+cluster to add it with `POST /api/v1/cluster/members` (see "Cluster" in
+`internal/handler/README.md`). A
 node that replaces a removed one, or whose `data_dir` was wiped, starts with
 it: without it, a first start bootstraps a configuration of its own from the
 static list. Once the node holds raft state, a restart loads the configuration
@@ -576,10 +580,10 @@ password verifiers included, so it runs mutual TLS 1.3 between the nodes:
   of the node for longer.
 
 TLS keeps other hosts out of the cluster, not off the port: every connection
-from a host that is no cluster node, refused or timed out in its handshake, is
-one ERROR line in the node's log, `failed to decode incoming command`, and
-nothing limits them. So `raft.bind_addr` must be reachable only from the
-cluster's nodes, by firewall or network policy.
+that the node refuses, from a host that is no cluster node, is one ERROR line in
+the node's log, `failed to decode incoming command`, and nothing limits them.
+So `raft.bind_addr` must be reachable only from the cluster's nodes, by firewall
+or network policy.
 
 `raft.tls.ca_file` must be a CA that signs raft node certificates only. A node
 accepts every certificate it verifies as a full member of the cluster, whatever
@@ -612,9 +616,10 @@ refuses to start, before it opens anything there, when either is open to its
 group or others or is a symlink, written with a trailing slash or not, as the
 standalone store refuses its directory. The BoltDB files are 0600. Each
 snapshot directory is made 0700 and its files 0600 as soon as hashicorp/raft
-creates them, before any state is written into them, and again once the
-snapshot is in place; snapshots already there, such as an earlier version's,
-are made private at start. Volume settings that add group permissions to
+creates them, before any state is written into them, and they stay so once the
+snapshot is in place, a snapshot a leader installs on the node included;
+snapshots already there, such as an earlier version's, are made private at
+start. Volume settings that add group permissions to
 `data_dir` make the node refuse to start.
 
 ### Upgrading a raft node
