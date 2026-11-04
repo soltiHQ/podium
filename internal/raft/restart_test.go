@@ -16,12 +16,15 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// openRestartProfile starts a one-node cluster from dir, a private data
+// directory, with mutual TLS on a certificate of a CA of its own, and returns
+// it once it leads, with its inner store and its hub.
 func openRestartProfile(t *testing.T, dir string) (*Profile, *inmemory.Store, *event.Hub) {
 	t.Helper()
 	inner := inmemory.New()
 	hub := event.NewHub(zerolog.Nop())
 	self := []cluster.Peer{{ID: "restart-node", Address: "127.0.0.1:0"}}
-	p, err := New(Config{NodeID: "restart-node", BindAddr: "127.0.0.1:0", DataDir: dir, ElectionTimeout: 50 * time.Millisecond, HeartbeatTimeout: 50 * time.Millisecond}, inner, hub, discovery.NewStatic(self), zerolog.Nop())
+	p, err := New(Config{NodeID: "restart-node", BindAddr: "127.0.0.1:0", DataDir: dir, ElectionTimeout: 50 * time.Millisecond, HeartbeatTimeout: 50 * time.Millisecond, TLS: newTestCA(t).issue(t, "127.0.0.1")}, inner, hub, discovery.NewStatic(self), zerolog.Nop())
 	if err != nil {
 		hub.Close()
 		t.Fatal(err)
@@ -41,7 +44,7 @@ func openRestartProfile(t *testing.T, dir string) (*Profile, *inmemory.Store, *e
 func TestRaftCurrentStateRestoresFromLogAndSnapshot(t *testing.T) {
 	for _, compact := range []bool{false, true} {
 		t.Run(map[bool]string{false: "command-log", true: "snapshot"}[compact], func(t *testing.T) {
-			dir := t.TempDir()
+			dir := privateTestDir(t)
 			p, _, hub := openRestartProfile(t, dir)
 			agent, err := model.NewAgent("restart-agent", "persisted", "http://agent")
 			if err != nil {
@@ -90,7 +93,7 @@ func TestRaftCurrentStateRestoresFromLogAndSnapshot(t *testing.T) {
 // directly after election. The store must establish its own applied-state barrier
 // before the callback constructs a read view from restored committed state.
 func TestRaftFirstTransactionAfterElectionReadsRestoredState(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTestDir(t)
 	p, _, hub := openRestartProfile(t, dir)
 	agent, err := model.NewAgent("first-tx-agent", "persisted", "http://agent")
 	if err != nil {

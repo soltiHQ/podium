@@ -46,6 +46,18 @@ tls:
 
 Env equivalents: `SOLTI_TLS_SERVER_CERT_FILE`, `SOLTI_TLS_CLIENT_CA_FILE`, etc.
 
+In raft mode a follower forwards the writes it gets on the HTTP and
+HTTP-discovery listeners to the leader, at the leader's raft host and this
+node's port of that listener. With `tls.server` set it forwards over TLS with
+`tls.client`: `ca_file` must also hold the CA of the replicas' server
+certificates, which must name each replica's raft advertise host as an IP or
+DNS subject alternative name, and `cert_file`/`key_file` are presented when the
+leader asks for a client certificate, as the discovery listener does with
+`client_ca_file`. Without a `tls.client.ca_file`, the leader is verified against
+the system roots. A leader whose certificate does not verify gets no write: the
+follower answers 502. The raft transport has TLS settings of its own, see "Raft
+transport security".
+
 ## Agent authentication
 
 `agent_auth.require` defaults to `true`. It authenticates enrolled agents: a
@@ -320,6 +332,10 @@ cluster:
     data_dir: /var/lib/solti/raft
     election_timeout_ms: 1000       # 0 keeps hashicorp/raft's 1 s
     heartbeat_timeout_ms: 500       # 0 keeps hashicorp/raft's 1 s
+    tls:                            # mutual TLS between the nodes
+      cert_file: /etc/solti/raft/n1.crt
+      key_file: /etc/solti/raft/n1.key
+      ca_file: /etc/solti/raft/ca.crt
   discovery:
     driver: static                  # the default; or dns
     peers:
@@ -331,8 +347,11 @@ cluster:
 Env equivalents: `SOLTI_CLUSTER_BACKEND`, `SOLTI_CLUSTER_RAFT_NODE_ID`,
 `SOLTI_CLUSTER_RAFT_BIND_ADDR`, `SOLTI_CLUSTER_RAFT_ADVERTISE_ADDR`,
 `SOLTI_CLUSTER_RAFT_DATA_DIR`, `SOLTI_CLUSTER_RAFT_ELECTION_TIMEOUT_MS`,
-`SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS`, `SOLTI_CLUSTER_DISCOVERY_DRIVER`,
-and `SOLTI_CLUSTER_DISCOVERY_PEERS`, split on commas:
+`SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS`, `SOLTI_CLUSTER_RAFT_TLS_CERT_FILE`,
+`SOLTI_CLUSTER_RAFT_TLS_KEY_FILE`, `SOLTI_CLUSTER_RAFT_TLS_CA_FILE`,
+`SOLTI_CLUSTER_RAFT_ALLOW_INSECURE_TRANSPORT`,
+`SOLTI_CLUSTER_DISCOVERY_DRIVER`, and `SOLTI_CLUSTER_DISCOVERY_PEERS`, split
+on commas:
 
 ```sh
 SOLTI_CLUSTER_DISCOVERY_PEERS="n1=10.0.0.1:7000, n2=10.0.0.2:7000, n3=10.0.0.3:7000"
@@ -351,6 +370,9 @@ this one included: a one-node cluster lists itself.
 Configuration loading fails, and nothing in `data_dir` is opened, when:
 
 - `raft.node_id`, `raft.bind_addr` or `raft.data_dir` is empty;
+- the node has neither all three `raft.tls` files nor
+  `raft.allow_insecure_transport: true`, or has the files and the flag (see
+  "Raft transport security" below);
 - `bind_addr` or `advertise_addr` is not `host:port` with a port from 1 to
   65535;
 - `bind_addr` listens on every interface (`0.0.0.0`, `::` or no host) and
@@ -384,6 +406,49 @@ ask discovery, so a discovery outage does not keep a restarting node down;
 validation still checks a static list on every start. See
 `internal/raft/README.md`.
 
+### Raft transport security
+
+The raft transport carries the whole control-plane state, agent tokens and
+password verifiers included, so it runs mutual TLS 1.3 between the nodes:
+
+- Each node has one certificate, `raft.tls.cert_file` with its
+  `raft.tls.key_file`, and presents it both to the peers that connect to it
+  and to the peers it dials. Its extended key usage, and that of any
+  intermediate CA, must allow both server and client authentication, or be
+  absent.
+- `raft.tls.ca_file` holds the cluster CA. A node accepts a connection only
+  from a peer that presents a certificate this CA signed, and dials a peer only
+  when the peer's certificate is signed by it too.
+- A node dials a peer at its address as the peers list it, and the peer's
+  certificate must name that host as a subject alternative name, compared as
+  written, not as it resolves: an IP SAN for `10.0.0.2:7000`, a DNS SAN for
+  `podium-1.podium:7000`. With `discovery.driver: dns` the peers are dialed at
+  their IPs, so the certificates need IP SANs.
+- TLS 1.2 and older are refused both ways.
+
+The files are read when the node starts, before anything in `data_dir` is
+opened: a file that is missing or holds no usable certificate or key fails the
+start, and a renewed certificate takes effect at the next start.
+
+`raft.allow_insecure_transport: true` runs the transport on plain TCP instead,
+for a cluster on a trusted network: any host that reaches `bind_addr` can then
+read the raft traffic and forge it, and every start logs one WARN that says
+so. The flag runs plain TCP only for a node without `raft.tls`; with both set,
+configuration loading fails.
+
+### Raft data directory
+
+`data_dir` holds the raft log, the stable store and the snapshots, so only its
+owner may enter it. A node makes a missing `data_dir` and its `snapshots`
+directory with mode 0700, and refuses to start, before it opens anything
+there, when either is open to its group or others or is a symlink, as the
+standalone store refuses its directory. The BoltDB files are 0600. Each
+snapshot directory is made 0700 and its files 0600 as soon as hashicorp/raft
+creates them, before any state is written into them, and again once the
+snapshot is in place; snapshots already there, such as an earlier version's,
+are made private at start. A volume mounted for the group, as Kubernetes does
+with `fsGroup`, cannot be `data_dir` itself: use a directory in it.
+
 ### Upgrading a raft node
 
 Earlier versions appended a node to its own peers: an empty `peers` list
@@ -397,6 +462,18 @@ loading, before anything in `data_dir` is opened, so its raft state stays as
 it was: fix the list and start it again. A node with raft state reads its
 configuration from its own log, not from `peers`, so listing itself changes
 nothing in the running cluster.
+
+Earlier versions also ran the transport on plain TCP and made `data_dir` and
+`snapshots` 0755 and the snapshot files 0644. This version needs, on every
+node:
+
+- `raft.tls`, with a certificate as above for each node, or
+  `raft.allow_insecure_transport: true`, which keeps plain TCP as before. A
+  node on TLS and a node on plain TCP cannot reach each other, so a cluster
+  works only while a majority of its nodes runs the same transport.
+- `chmod -R go-rwx` on `data_dir`. A node refuses a `data_dir` or `snapshots`
+  directory that is still open to the group or others; it makes the snapshots
+  in it private by itself at its next start.
 
 ## Observed run history
 

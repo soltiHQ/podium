@@ -174,13 +174,52 @@ func checkValidate(t *testing.T, err, want error) {
 }
 
 // raftConfig is a valid raft configuration: node n1 binds and advertises
-// 10.0.0.1:7000, and its static peers name all three nodes.
+// 10.0.0.1:7000, its transport runs mutual TLS, and its static peers name all
+// three nodes.
 func raftConfig() cluster.Config {
 	cfg := cluster.DefaultConfig()
 	cfg.Backend = cluster.BackendRaft
-	cfg.Raft = cluster.RaftConfig{NodeID: "n1", BindAddr: "10.0.0.1:7000", DataDir: "/var/lib/solti/raft"}
+	cfg.Raft = cluster.RaftConfig{NodeID: "n1", BindAddr: "10.0.0.1:7000", DataDir: "/var/lib/solti/raft", TLS: cluster.RaftTLSConfig{
+		CertFile: "/etc/solti/raft/n1.crt",
+		KeyFile:  "/etc/solti/raft/n1.key",
+		CAFile:   "/etc/solti/raft/ca.crt",
+	}}
 	cfg.Discovery.Peers = []string{"n1=10.0.0.1:7000", "n2=10.0.0.2:7000", "n3=10.0.0.3:7000"}
 	return cfg
+}
+
+// A raft node needs its transport secured: mutual TLS with all three files of
+// raft.tls, or raft.allow_insecure_transport for plain TCP. Some of the files
+// are no TLS, and the files with the flag leave the transport unclear. Paths
+// are only checked to be set; New loads them.
+func TestRaftRequiresTLSOrExplicitInsecure(t *testing.T) {
+	files := raftConfig().Raft.TLS
+	for _, tc := range []struct {
+		name   string
+		mutate func(*cluster.RaftConfig)
+		want   error
+	}{
+		{"mutual TLS", func(*cluster.RaftConfig) {}, nil},
+		{"plain TCP allowed", func(r *cluster.RaftConfig) {
+			r.TLS, r.AllowInsecureTransport = cluster.RaftTLSConfig{}, true
+		}, nil},
+		{"neither", func(r *cluster.RaftConfig) { r.TLS = cluster.RaftTLSConfig{} }, cluster.ErrRaftTLSRequired},
+		{"no cert_file", func(r *cluster.RaftConfig) { r.TLS.CertFile = "" }, cluster.ErrRaftTLSRequired},
+		{"no key_file", func(r *cluster.RaftConfig) { r.TLS.KeyFile = "" }, cluster.ErrRaftTLSRequired},
+		{"no ca_file", func(r *cluster.RaftConfig) { r.TLS.CAFile = "" }, cluster.ErrRaftTLSRequired},
+		{"a blank ca_file", func(r *cluster.RaftConfig) { r.TLS.CAFile = " " }, cluster.ErrRaftTLSRequired},
+		{"only a ca_file", func(r *cluster.RaftConfig) { r.TLS = cluster.RaftTLSConfig{CAFile: files.CAFile} }, cluster.ErrRaftTLSRequired},
+		{"some files with the flag", func(r *cluster.RaftConfig) {
+			r.TLS, r.AllowInsecureTransport = cluster.RaftTLSConfig{CertFile: files.CertFile}, true
+		}, errAny},
+		{"mutual TLS with the flag", func(r *cluster.RaftConfig) { r.AllowInsecureTransport = true }, errAny},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := raftConfig()
+			tc.mutate(&cfg.Raft)
+			checkValidate(t, cfg.Validate(), tc.want)
+		})
+	}
 }
 
 // A peer entry is id=host:port, or a bare host:port named by its address.
@@ -357,7 +396,7 @@ func TestStandaloneIgnoresRaftConfig(t *testing.T) {
 	for _, backend := range []cluster.Backend{"", cluster.BackendStandalone} {
 		cfg := cluster.DefaultConfig()
 		cfg.Backend = backend
-		cfg.Raft = cluster.RaftConfig{BindAddr: "0.0.0.0:7000"}
+		cfg.Raft = cluster.RaftConfig{BindAddr: "0.0.0.0:7000", TLS: cluster.RaftTLSConfig{CertFile: "n1.crt"}, AllowInsecureTransport: true}
 		cfg.Discovery = cluster.DiscoveryConfig{Driver: "consul", Peers: []string{"=10.0.0.1:7000"}}
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("backend %q: Validate() = %v, want nil", backend, err)

@@ -94,7 +94,7 @@ func TestRaftExecutionArchiveRestoresLogAndSnapshot(t *testing.T) {
 	for _, compact := range []bool{false, true} {
 		t.Run(map[bool]string{false: "log", true: "snapshot"}[compact], func(t *testing.T) {
 			ctx := context.Background()
-			dir := t.TempDir()
+			dir := privateTestDir(t)
 			p, _, hub := openRestartProfile(t, dir)
 			e := raftArchiveRow(t, 1)
 			if err := p.Store().WithTx(ctx, func(tx storage.Storage) error {

@@ -10,14 +10,11 @@ import (
 	"time"
 
 	hraft "github.com/hashicorp/raft"
-	"github.com/rs/zerolog"
 
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/cluster/discovery"
-	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
 
 // errDiscoveryDown is the error of every failingDiscovery lookup.
@@ -198,36 +195,19 @@ func TestBootstrapRefusesInconsistentPeers(t *testing.T) {
 // node listed, bootstraps. Another listener holds the node's port during the
 // failed start: a transport that tried to listen would fail on it instead.
 func TestFirstStartRefusesPeersWithoutThisNode(t *testing.T) {
-	addr, dir := reserveLoopbackAddrs(t, 1)[0], t.TempDir()
-	open := func(peers ...cluster.Peer) (*Profile, error) {
-		hub := event.NewHub(zerolog.Nop())
-		t.Cleanup(hub.Close)
-		return New(Config{
-			NodeID:           "n1",
-			BindAddr:         addr,
-			DataDir:          dir,
-			ElectionTimeout:  loopbackTimeout,
-			HeartbeatTimeout: loopbackTimeout,
-		}, inmemory.New(), hub, discovery.NewStatic(peers), zerolog.Nop())
-	}
-	holder, err := net.Listen("tcp", addr)
+	n := newLoopbackNode(t, newTestCA(t), "n1", reserveLoopbackAddrs(t, 1)[0])
+	t.Cleanup(n.stop)
+	holder, err := net.Listen("tcp", n.addr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := open(cluster.Peer{ID: "n2", Address: "127.0.0.1:1"})
+	err = n.open(discovery.NewStatic([]cluster.Peer{{ID: "n2", Address: "127.0.0.1:1"}}))
 	_ = holder.Close()
 	if !errors.Is(err, cluster.ErrNodeNotListed) {
-		if p != nil {
-			_ = p.Shutdown()
-		}
 		t.Fatalf("New() = %v, want %v", err, cluster.ErrNodeNotListed)
 	}
-	p, err = open(cluster.Peer{ID: "n1", Address: addr})
-	if err != nil {
-		t.Fatalf("start with the node listed: %v", err)
-	}
-	t.Cleanup(func() { _ = p.Shutdown() })
-	waitFor(t, 5*time.Second, "n1 leads its one-node cluster", p.leadership.AmLeader)
+	n.start(t, n.self())
+	waitFor(t, 5*time.Second, "n1 leads its one-node cluster", n.profile.leadership.AmLeader)
 }
 
 // A first start writes its bootstrap configuration into the stores before

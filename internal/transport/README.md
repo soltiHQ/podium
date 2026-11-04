@@ -37,7 +37,7 @@ Main listener (`app.buildMainHandler`), outermost first:
         ▼
   Recovery       ── turns a panic into 503
    CORS          ── answers preflights, adds the CORS headers
-    Leader       ── raft only: forwards writes to the leader
+    Leader       ── raft only: forwards writes to the leader, over TLS with tls.client when tls.server is set
      Negotiate   ── picks the Responder (JSON vs HTML), stores it in ctx
       CrossOrigin ── refuses cross-origin browser mutations: 403 through that Responder.
                      It runs before any route, so a refusal gets no request id and no
@@ -120,4 +120,6 @@ Both halves are opt-in (empty = plaintext):
 - `tls.server` → the CP's serving identity for the HTTP, HTTP-discovery, and gRPC listeners (`client_ca_file` enables mTLS - client cert required).
 - `tls.client` → the CP as a client when dialing agents (proxy); verifies agent certs and optionally presents a client cert.
 
-Applied uniformly: one server `*tls.Config` for all listeners, one client config for the proxy pool.
+Applied uniformly: one server `*tls.Config` for all listeners, one client config for the proxy pool and for the `Leader` middleware,
+whose follower forwards writes to the leader over TLS when `tls.server` is set (`LeaderOptions.TLSClientConfig`).
+The raft transport between nodes has TLS of its own, `cluster.raft.tls` (see `internal/raft`).

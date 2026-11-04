@@ -6,8 +6,9 @@
 //	store := profile.Store()                 // storage.Storage wired through raft
 //	leadership := profile.Leadership()       // cluster.Leadership
 //
-// Transport: TCP.
-// Log store: BoltDB on disk (so logs survive restart).
+// Transport: TCP with mutual TLS, or plain TCP when explicitly allowed.
+// Log store: BoltDB on disk (so logs survive restart), in a data directory
+// only its owner can enter, as are the snapshots.
 // Peer bootstrap: from [cluster.Discovery] — on first start every node
 // bootstraps the cluster with the same list, every peer Discovery reports
 // sorted by ID, which must name this node. Subsequent starts join a
@@ -15,7 +16,9 @@
 package raft
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -55,7 +58,21 @@ type Config struct {
 	// you can lower to 100-200ms; for cross-DC bump to 3-5s.
 	ElectionTimeout  time.Duration
 	HeartbeatTimeout time.Duration
+
+	// TLS names the PEM files of mutual TLS between nodes, see
+	// [cluster.RaftTLSConfig]. A node without them runs its transport on plain
+	// TCP, which New refuses unless AllowInsecureTransport is set.
+	TLS cluster.RaftTLSConfig
+
+	// AllowInsecureTransport permits plain TCP when TLS names no file. New
+	// logs a WARN when the transport runs it.
+	AllowInsecureTransport bool
 }
+
+// ErrDataDirNotPrivate indicates a data directory, or a snapshots directory in
+// it, that its group or others can enter, or that is not a directory but a
+// symlink or another file.
+var ErrDataDirNotPrivate = errors.New("the raft data directory and its snapshots directory must be directories that only their owner can enter (mode 0700), not symlinks")
 
 // newRaft starts hashicorp/raft on the stores New prepared. It is a variable
 // so that tests can see what the stores hold when raft starts.
@@ -80,7 +97,9 @@ type Profile struct {
 
 // New builds and starts a Raft profile. It expects a configuration that
 // [cluster.Config.Validate] accepted, and checks only that NodeID, BindAddr
-// and DataDir are set.
+// and DataDir are set, and that the transport has TLS or may run plain TCP.
+// It loads the TLS files before it makes DataDir, which it makes 0700 and
+// refuses when it is open to its group or others (see privateDir).
 //
 // On first start (empty DataDir) the node derives its server list from
 // disco.Peers() (see bootstrapServers) before its transport listens, and
@@ -103,9 +122,14 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 	if hub == nil {
 		return nil, fmt.Errorf("raft: nil hub")
 	}
+	security, err := transportSecurity(cfg)
+	if err != nil {
+		return nil, err
+	}
+	logger = logger.With().Str("profile", "raft").Logger()
 
-	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("raft: mkdir %s: %w", cfg.DataDir, err)
+	if err := privateDir(cfg.DataDir); err != nil {
+		return nil, err
 	}
 
 	rcfg := hraft.DefaultConfig()
@@ -143,9 +167,9 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 	if err := preflightLogFile(filepath.Join(cfg.DataDir, "raft-log.bolt")); err != nil {
 		return nil, err
 	}
-	snap, err := hraft.NewFileSnapshotStore(cfg.DataDir, 2, os.Stderr)
+	snap, err := newSnapshotStore(cfg.DataDir)
 	if err != nil {
-		return nil, fmt.Errorf("raft: snapshot store: %w", err)
+		return nil, err
 	}
 	if err := preflightSnapshots(snap); err != nil {
 		return nil, err
@@ -201,9 +225,13 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 			return nil, err
 		}
 	}
-	transport, err = hraft.NewTCPTransport(cfg.BindAddr, advTCP, 3, 10*time.Second, os.Stderr)
+	transport, err = newTransport(cfg.BindAddr, advTCP, security)
 	if err != nil {
-		return nil, fmt.Errorf("raft: tcp transport on %s: %w", cfg.BindAddr, err)
+		return nil, fmt.Errorf("raft: transport on %s: %w", cfg.BindAddr, err)
+	}
+	if security == nil {
+		logger.Warn().Str("bind_addr", cfg.BindAddr).
+			Msg("cluster.raft.allow_insecure_transport is true: the raft transport runs plain TCP, so any host that reaches bind_addr can read raft traffic, agent tokens and password verifiers included, and forge it; set cluster.raft.tls for mutual TLS")
 	}
 	// The bootstrap configuration goes into the stores before raft runs. The
 	// transport listens already, but nothing consumes its RPCs before NewRaft,
@@ -230,7 +258,7 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 		logStore:   logStore,
 		stable:     stable,
 		snap:       snap,
-		logger:     logger.With().Str("profile", "raft").Logger(),
+		logger:     logger,
 		leadership: NewLeadership(r),
 	}
 	p.store = NewStore(inner, r)
@@ -269,4 +297,111 @@ func (p *Profile) Shutdown() error {
 		_ = p.transport.Close()
 	}
 	return nil
+}
+
+// snapshotsDir is the directory of the data directory that hashicorp/raft's
+// file snapshot store keeps its snapshots in.
+const snapshotsDir = "snapshots"
+
+// privateDir makes dir 0700 when it is missing and, as the durable store does,
+// refuses it when it is not a directory, a symlink included, or its group or
+// others have any permission on it. It checks no file: BoltDB makes its files
+// 0600, and the snapshot store makes its own private.
+func privateDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("raft: mkdir %s: %w", dir, err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("raft: stat %s: %w", dir, err)
+	}
+	if !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("raft: %s has mode %v: %w", dir, info.Mode(), ErrDataDirNotPrivate)
+	}
+	return nil
+}
+
+// snapshotStore is hashicorp/raft's file snapshot store with private
+// snapshots: each snapshot directory 0700 and its files 0600, from Create on
+// and again once Close has put the snapshot in place.
+type snapshotStore struct {
+	*hraft.FileSnapshotStore
+	dir string // the snapshots directory
+}
+
+// newSnapshotStore opens the snapshot store of dataDir, whose snapshots
+// directory must be as private as dataDir, and makes private the snapshots it
+// holds already: those of an earlier version, which left them 0755 and 0644,
+// or of a snapshot that a crash cut short.
+func newSnapshotStore(dataDir string) (*snapshotStore, error) {
+	dir := filepath.Join(dataDir, snapshotsDir)
+	if err := privateDir(dir); err != nil {
+		return nil, err
+	}
+	if err := privateSnapshots(dir); err != nil {
+		return nil, err
+	}
+	store, err := hraft.NewFileSnapshotStore(dataDir, 2, os.Stderr)
+	if err != nil {
+		return nil, fmt.Errorf("raft: snapshot store: %w", err)
+	}
+	return &snapshotStore{FileSnapshotStore: store, dir: dir}, nil
+}
+
+// Create implements hraft.SnapshotStore. A snapshot the node takes, and one a
+// leader installs on it, both start here.
+func (s *snapshotStore) Create(version hraft.SnapshotVersion, index, term uint64, configuration hraft.Configuration, configurationIndex uint64, trans hraft.Transport) (hraft.SnapshotSink, error) {
+	sink, err := s.FileSnapshotStore.Create(version, index, term, configuration, configurationIndex, trans)
+	if err != nil {
+		return nil, err
+	}
+	if err := privateSnapshots(s.dir); err != nil {
+		_ = sink.Cancel()
+		return nil, err
+	}
+	return &snapshotSink{SnapshotSink: sink, dir: s.dir}, nil
+}
+
+// snapshotSink is a sink of a snapshotStore.
+type snapshotSink struct {
+	hraft.SnapshotSink
+	dir string // the snapshots directory
+}
+
+// Close implements hraft.SnapshotSink: it persists the snapshot, which
+// hashicorp/raft then moves into place, and makes it private again.
+func (s *snapshotSink) Close() error {
+	if err := s.SnapshotSink.Close(); err != nil {
+		return err
+	}
+	return privateSnapshots(s.dir)
+}
+
+// privateSnapshots takes the group and other permissions off everything under
+// dir, the snapshots directory. It leaves symlinks alone, which raft ignores,
+// and skips an entry that a reap removes meanwhile.
+func privateSnapshots(dir string) error {
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return nil
+		case err != nil:
+			return err
+		case path == dir || d.Type()&fs.ModeSymlink != 0:
+			return nil
+		}
+		info, err := d.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if perm := info.Mode().Perm(); perm&0o077 != 0 {
+			if err := os.Chmod(path, perm&^0o077); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("raft: make snapshot %s private: %w", path, err)
+			}
+		}
+		return nil
+	})
 }

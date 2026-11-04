@@ -132,12 +132,14 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger, hubOpts ...event.Op
 			return nil, nil, nil, nil, err
 		}
 		p, err := raftpkg.New(raftpkg.Config{
-			NodeID:           cfg.Raft.NodeID,
-			BindAddr:         cfg.Raft.BindAddr,
-			AdvertiseAddr:    cfg.Raft.AdvertiseAddr,
-			DataDir:          cfg.Raft.DataDir,
-			ElectionTimeout:  msToDuration(cfg.Raft.ElectionTimeoutMs),
-			HeartbeatTimeout: msToDuration(cfg.Raft.HeartbeatTimeoutMs),
+			NodeID:                 cfg.Raft.NodeID,
+			BindAddr:               cfg.Raft.BindAddr,
+			AdvertiseAddr:          cfg.Raft.AdvertiseAddr,
+			DataDir:                cfg.Raft.DataDir,
+			ElectionTimeout:        msToDuration(cfg.Raft.ElectionTimeoutMs),
+			HeartbeatTimeout:       msToDuration(cfg.Raft.HeartbeatTimeoutMs),
+			TLS:                    cfg.Raft.TLS,
+			AllowInsecureTransport: cfg.Raft.AllowInsecureTransport,
 		}, inner, hub, disco, logger)
 		if err != nil {
 			return nil, nil, nil, nil, err
@@ -209,7 +211,9 @@ func waitForLeader(ctx context.Context, l cluster.Leadership) bool {
 // cookies whether the client used HTTPS. The listener has no limit on failed authentication:
 // its tokens and session IDs cannot be guessed, and passwords go through the
 // login limiter. Cross-origin browser mutations are refused before any route.
-func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership, resolver *clientip.Resolver) (http.Handler, *loghub.Hub) {
+// A follower forwards writes to the leader with forwardTLS, see
+// [leaderOptions].
+func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership, resolver *clientip.Resolver, forwardTLS *tls.Config) (http.Handler, *loghub.Hub) {
 	var (
 		secure                 = cookieSecure(cfg.Auth.CookieSecure, resolver)
 		logHub                 = buildLogHub(logger, svc.agent, proxyPool, cfg.Streams)
@@ -237,10 +241,7 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 	var h http.Handler = mux
 	h = middleware.CrossOrigin(cfg.CORS, logger)(h)
 	h = middleware.Negotiate(responder.NewJSON(), responder.NewHTML())(h)
-	h = middleware.Leader(leadership, middleware.LeaderOptions{
-		ForwardPort: addrPort(cfg.HTTP.Addr),
-		TargetTLS:   cfg.TLS.Server.Enabled(),
-	})(h)
+	h = middleware.Leader(leadership, leaderOptions(addrPort(cfg.HTTP.Addr), cfg.TLS.Server.Enabled(), forwardTLS))(h)
 	h = middleware.CORS(cfg.CORS)(h)
 	h = middleware.Recovery(logger)(h)
 	return h, logHub
@@ -285,16 +286,17 @@ func warnOpenDiscovery(logger zerolog.Logger, cfg config.Config) {
 // buildDiscoveryListeners wires the HTTP and gRPC discovery listeners around one
 // failure limiter: both count agent token failures per (client IP, agent ID), so
 // an agent has one budget whichever transport it uses.
-func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, cfg config.Config, resolver *clientip.Resolver, serverTLS *tls.Config) (http.Handler, *grpc.Server) {
+func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, cfg config.Config, resolver *clientip.Resolver, serverTLS, forwardTLS *tls.Config) (http.Handler, *grpc.Server) {
 	limiter := kit.NewLimiter(cfg.Auth)
-	return buildDiscoveryHandler(logger, agentSVC, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), limiter, resolver, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled()),
+	return buildDiscoveryHandler(logger, agentSVC, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), limiter, resolver, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled(), forwardTLS),
 		buildGRPCServer(logger, agentSVC, eventHub, leadership, limiter, serverTLS, cfg.AgentAuth.Require)
 }
 
 // buildDiscoveryHandler wires the HTTP discovery listener. It has no per-IP
 // limit: the handler counts authentication failures per (client IP, agent ID)
-// in limiter, so agents behind one egress IP never block each other.
-func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, resolver *clientip.Resolver, requireAuth bool, targetTLS bool) http.Handler {
+// in limiter, so agents behind one egress IP never block each other. A
+// follower forwards syncs to the leader with forwardTLS, see [leaderOptions].
+func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, resolver *clientip.Resolver, requireAuth bool, targetTLS bool, forwardTLS *tls.Config) http.Handler {
 	var (
 		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC, eventHub, limiter, resolver, requireAuth)
 		mux           = http.NewServeMux()
@@ -302,11 +304,19 @@ func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, event
 	mux.HandleFunc("/api/v1/discovery/sync", httpDiscovery.Sync)
 
 	var h http.Handler = mux
-	h = middleware.Leader(leadership, middleware.LeaderOptions{ForwardPort: httpPort, TargetTLS: targetTLS})(h)
+	h = middleware.Leader(leadership, leaderOptions(httpPort, targetTLS, forwardTLS))(h)
 	h = middleware.Recovery(logger)(h)
 	h = middleware.Logger(logger)(h)
 	h = middleware.RequestID()(h)
 	return h
+}
+
+// leaderOptions makes a follower forward writes to port on the leader's host:
+// over TLS when tls.server is set (targetTLS), with forwardTLS, the tls.client
+// configuration, which verifies the leader's certificate against
+// tls.client.ca_file and presents tls.client's certificate when it has one.
+func leaderOptions(port int, targetTLS bool, forwardTLS *tls.Config) middleware.LeaderOptions {
+	return middleware.LeaderOptions{ForwardPort: port, TargetTLS: targetTLS, TLSClientConfig: forwardTLS}
 }
 
 // buildLogHub wires the (agent, task) log fanout hub. The OpenFunc resolves

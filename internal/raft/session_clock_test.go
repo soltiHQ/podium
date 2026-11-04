@@ -321,7 +321,7 @@ func TestSessionTxRejectedMutationsRecordNoOperations(t *testing.T) {
 
 func TestSessionTxCallbackFailureDoesNotPublish(t *testing.T) {
 	ctx := context.Background()
-	p, _, hub := openRestartProfile(t, t.TempDir())
+	p, _, hub := openRestartProfile(t, privateTestDir(t))
 	defer hub.Close()
 	defer func() { _ = p.Shutdown() }()
 	original := clockSession(t)

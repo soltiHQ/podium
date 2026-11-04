@@ -96,7 +96,7 @@ func TestPreflightSnapshotsRejectsLegacyBeforeFSM(t *testing.T) {
 }
 
 func TestNewRejectsLegacyLogBeforeTransportAndWritableOpen(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTestDir(t)
 	path := filepath.Join(dir, "raft-log.bolt")
 	logs, err := boltdb.NewBoltStore(path)
 	if err != nil {
@@ -123,7 +123,7 @@ func TestNewRejectsLegacyLogBeforeTransportAndWritableOpen(t *testing.T) {
 	}
 	hub := event.NewHub(zerolog.Nop())
 	defer hub.Close()
-	p, err := New(Config{NodeID: "n1", BindAddr: "127.0.0.1:0", DataDir: dir}, inner, hub, discovery.NewStatic(nil), zerolog.Nop())
+	p, err := New(Config{NodeID: "n1", BindAddr: "127.0.0.1:0", DataDir: dir, TLS: newTestCA(t).issue(t, "127.0.0.1")}, inner, hub, discovery.NewStatic(nil), zerolog.Nop())
 	if p != nil {
 		_ = p.Shutdown()
 	}
@@ -152,7 +152,11 @@ func TestNewRejectsLegacyLogBeforeTransportAndWritableOpen(t *testing.T) {
 }
 
 func TestNewRejectsLegacySnapshotBeforeTransportAndWritableOpen(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTestDir(t)
+	// hashicorp/raft makes a missing snapshots directory 0755, which New refuses.
+	if err := os.Mkdir(filepath.Join(dir, "snapshots"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	store, err := hraft.NewFileSnapshotStore(dir, 2, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -178,7 +182,7 @@ func TestNewRejectsLegacySnapshotBeforeTransportAndWritableOpen(t *testing.T) {
 	}
 	hub := event.NewHub(zerolog.Nop())
 	defer hub.Close()
-	p, err := New(Config{NodeID: "n1", BindAddr: "127.0.0.1:0", DataDir: dir}, inmemory.New(), hub, discovery.NewStatic(nil), zerolog.Nop())
+	p, err := New(Config{NodeID: "n1", BindAddr: "127.0.0.1:0", DataDir: dir, TLS: newTestCA(t).issue(t, "127.0.0.1")}, inmemory.New(), hub, discovery.NewStatic(nil), zerolog.Nop())
 	if p != nil {
 		_ = p.Shutdown()
 	}

@@ -162,6 +162,7 @@ func TestRaftConfigValidatedBeforeStoreOpens(t *testing.T) {
 		mutate func(*cluster.Config)
 		want   error
 	}{
+		{"neither TLS nor allow_insecure_transport", func(c *cluster.Config) { c.Raft.TLS = cluster.RaftTLSConfig{} }, cluster.ErrRaftTLSRequired},
 		{"no node ID", func(c *cluster.Config) { c.Raft.NodeID = "" }, cluster.ErrRaftRequired},
 		{"no bind address", func(c *cluster.Config) { c.Raft.BindAddr = "" }, cluster.ErrRaftRequired},
 		{"no data directory", func(c *cluster.Config) { c.Raft.DataDir = "" }, cluster.ErrRaftRequired},
@@ -180,7 +181,9 @@ func TestRaftConfigValidatedBeforeStoreOpens(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "raft")
 			cfg := cluster.DefaultConfig()
 			cfg.Backend = cluster.BackendRaft
-			cfg.Raft = cluster.RaftConfig{NodeID: "n1", BindAddr: addrs[0], DataDir: dir, ElectionTimeoutMs: 50, HeartbeatTimeoutMs: 50}
+			// Validation only checks that the TLS files are named.
+			tls := cluster.RaftTLSConfig{CertFile: "n1.crt", KeyFile: "n1.key", CAFile: "ca.crt"}
+			cfg.Raft = cluster.RaftConfig{NodeID: "n1", BindAddr: addrs[0], DataDir: dir, ElectionTimeoutMs: 50, HeartbeatTimeoutMs: 50, TLS: tls}
 			cfg.Discovery.Peers = []string{"n1=" + addrs[0], "n2=" + addrs[1], "n3=" + addrs[2]}
 			tc.mutate(&cfg)
 

@@ -48,7 +48,9 @@ type StandaloneConfig struct {
 }
 
 // RaftConfig parametrises the raft backend; no other backend reads it.
-// AdvertiseAddr is the address peers dial, BindAddr when it is empty.
+// AdvertiseAddr is the address peers dial, BindAddr when it is empty. The raft
+// transport runs mutual TLS with the files of TLS, or plain TCP when
+// AllowInsecureTransport is true; it needs one of the two.
 type RaftConfig struct {
 	NodeID             string `yaml:"node_id"           envconfig:"NODE_ID"`
 	BindAddr           string `yaml:"bind_addr"         envconfig:"BIND_ADDR"`
@@ -56,6 +58,54 @@ type RaftConfig struct {
 	DataDir            string `yaml:"data_dir"          envconfig:"DATA_DIR"`
 	ElectionTimeoutMs  int    `yaml:"election_timeout_ms" envconfig:"ELECTION_TIMEOUT_MS"`
 	HeartbeatTimeoutMs int    `yaml:"heartbeat_timeout_ms" envconfig:"HEARTBEAT_TIMEOUT_MS"`
+
+	TLS                    RaftTLSConfig `yaml:"tls"                      envconfig:"TLS"`
+	AllowInsecureTransport bool          `yaml:"allow_insecure_transport" envconfig:"ALLOW_INSECURE_TRANSPORT"`
+}
+
+// RaftTLSConfig names the PEM files of mutual TLS between raft nodes. A node
+// presents one certificate, CertFile with its KeyFile, both to the peers that
+// connect to it and to the peers it dials, and accepts a peer only with a
+// certificate that CAFile verifies, over TLS 1.3. A peer it dials must also
+// present a certificate for the host it dials: the host of the peer's address
+// as the peers list it, as an IP or DNS subject alternative name.
+type RaftTLSConfig struct {
+	CertFile string `yaml:"cert_file" envconfig:"CERT_FILE"`
+	KeyFile  string `yaml:"key_file"  envconfig:"KEY_FILE"`
+	CAFile   string `yaml:"ca_file"   envconfig:"CA_FILE"`
+}
+
+// Enabled reports whether any file of t is set, which asks for mutual TLS.
+func (t RaftTLSConfig) Enabled() bool {
+	return strings.TrimSpace(t.CertFile) != "" || strings.TrimSpace(t.KeyFile) != "" || strings.TrimSpace(t.CAFile) != ""
+}
+
+// validate requires all three files, or none with allowInsecure, the explicit
+// choice of plain TCP. Only some of the files are no TLS, and files with
+// allowInsecure leave unclear which transport is meant. The node reads the
+// files when it starts.
+func (t RaftTLSConfig) validate(allowInsecure bool) error {
+	var missing []string
+	for _, file := range []struct{ key, value string }{
+		{"raft.tls.cert_file", t.CertFile},
+		{"raft.tls.key_file", t.KeyFile},
+		{"raft.tls.ca_file", t.CAFile},
+	} {
+		if strings.TrimSpace(file.value) == "" {
+			missing = append(missing, file.key)
+		}
+	}
+	switch {
+	case !t.Enabled() && allowInsecure:
+		return nil
+	case allowInsecure:
+		return errors.New("raft.allow_insecure_transport is true while raft.tls is set: set either, for plain TCP or for mutual TLS")
+	case !t.Enabled():
+		return ErrRaftTLSRequired
+	case len(missing) > 0:
+		return fmt.Errorf("%s not set: %w", strings.Join(missing, ", "), ErrRaftTLSRequired)
+	}
+	return nil
 }
 
 // advertise returns the address this node gives its peers.
@@ -85,6 +135,10 @@ var (
 	// ErrRaftRequired indicates an empty raft.node_id, raft.bind_addr or
 	// raft.data_dir with backend raft.
 	ErrRaftRequired = errors.New("required when backend is raft")
+
+	// ErrRaftTLSRequired indicates a raft node with neither all three files of
+	// raft.tls nor raft.allow_insecure_transport.
+	ErrRaftTLSRequired = errors.New("the raft transport needs raft.tls.cert_file, raft.tls.key_file and raft.tls.ca_file for mutual TLS, or raft.allow_insecure_transport: true for plain TCP")
 
 	// ErrAdvertiseRequired indicates a raft.bind_addr that listens on every
 	// interface without a raft.advertise_addr to give peers instead.
@@ -224,8 +278,9 @@ func (c Config) Validate() error {
 }
 
 // validateRaft fails a raft node before it opens anything: node_id, bind_addr
-// and data_dir are required; bind_addr and advertise_addr are host:port, and a
-// bind_addr on every interface needs an advertise_addr; the peers must list
+// and data_dir are required, and so is the transport's mutual TLS or the
+// explicit choice of plain TCP; bind_addr and advertise_addr are host:port, and
+// a bind_addr on every interface needs an advertise_addr; the peers must list
 // this node as node_id at its advertise address.
 func (c Config) validateRaft() error {
 	r := c.Raft
@@ -237,6 +292,9 @@ func (c Config) validateRaft() error {
 		if strings.TrimSpace(setting.value) == "" {
 			return fmt.Errorf("%s: %w", setting.key, ErrRaftRequired)
 		}
+	}
+	if err := r.TLS.validate(r.AllowInsecureTransport); err != nil {
+		return err
 	}
 	bindHost, err := hostPort(r.BindAddr)
 	if err != nil {

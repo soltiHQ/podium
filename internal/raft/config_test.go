@@ -4,19 +4,13 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/rs/zerolog"
-
-	"github.com/soltiHQ/control-plane/internal/cluster"
-	"github.com/soltiHQ/control-plane/internal/cluster/discovery"
-	"github.com/soltiHQ/control-plane/internal/event"
-	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
 
 // Zero election and heartbeat timeouts keep hashicorp/raft's defaults of one
 // second, set ones replace them, and an election timeout below the heartbeat
 // timeout fails the start.
 func TestRaftTimeouts(t *testing.T) {
+	ca := newTestCA(t)
 	for _, tc := range []struct {
 		name                string
 		election, heartbeat time.Duration
@@ -27,9 +21,9 @@ func TestRaftTimeouts(t *testing.T) {
 		{"set", 400 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 200 * time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			n := &loopbackNode{id: "n1", addr: reserveLoopbackAddrs(t, 1)[0], dir: t.TempDir()}
+			n := newLoopbackNode(t, ca, "n1", reserveLoopbackAddrs(t, 1)[0])
 			t.Cleanup(n.stop)
-			n.start(t, discovery.NewStatic([]cluster.Peer{{ID: n.id, Address: n.addr}}), func(c *Config) {
+			n.start(t, n.self(), func(c *Config) {
 				c.ElectionTimeout, c.HeartbeatTimeout = tc.election, tc.heartbeat
 			})
 			got := n.profile.raft.ReloadableConfig()
@@ -40,20 +34,12 @@ func TestRaftTimeouts(t *testing.T) {
 	}
 
 	t.Run("election below heartbeat", func(t *testing.T) {
-		addr := reserveLoopbackAddrs(t, 1)[0]
-		hub := event.NewHub(zerolog.Nop())
-		t.Cleanup(hub.Close)
-		p, err := New(Config{
-			NodeID:           "n1",
-			BindAddr:         addr,
-			DataDir:          t.TempDir(),
-			ElectionTimeout:  100 * time.Millisecond,
-			HeartbeatTimeout: 200 * time.Millisecond,
-		}, inmemory.New(), hub, discovery.NewStatic([]cluster.Peer{{ID: "n1", Address: addr}}), zerolog.Nop())
+		n := newLoopbackNode(t, ca, "n1", reserveLoopbackAddrs(t, 1)[0])
+		t.Cleanup(n.stop)
+		err := n.open(n.self(), func(c *Config) {
+			c.ElectionTimeout, c.HeartbeatTimeout = 100*time.Millisecond, 200*time.Millisecond
+		})
 		if err == nil || !strings.Contains(err.Error(), "ElectionTimeout") {
-			if p != nil {
-				_ = p.Shutdown()
-			}
 			t.Fatalf("New() = %v, want the election timeout refused", err)
 		}
 	})

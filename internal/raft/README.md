@@ -69,14 +69,58 @@ Later starts load the configuration from the node's own log and do not ask
 discovery: a node restarted while discovery fails rejoins its cluster
 (`TestRestartDoesNotAskDiscovery`).
 
+## Transport security
+
+The transport runs mutual TLS 1.3 (`tls_stream.go`): a `hraft.StreamLayer`
+that accepts on a `tls.Listen` listener and dials with `tls.DialWithDialer`,
+given to hashicorp/raft through `NewNetworkTransportWithConfig`. A node
+presents its one certificate, `Config.TLS`, both ways, and verifies the peer's
+against the cluster CA both ways: it answers no RPC from a peer with a
+certificate of another CA, with none, over TLS 1.2 or over plain TCP, and gets
+none through to a peer with a certificate of another CA, over TLS 1.2 or over
+plain TCP, so such a node cannot join (`TestRaftRefusesPeerWithoutClusterCert`).
+A dialed peer's certificate must also name the host the node dials, its
+address in the raft configuration, compared as written
+(`TestRaftRefusesPeerCertForAnotherHost`). An accepted connection's handshake
+runs on its first read, in the goroutine the transport gives that connection,
+so a slow peer delays no other.
+
+`New` reads the TLS files before it makes the data directory: a file it cannot
+use fails the start with nothing made, in an error that names the file, never
+what it holds (`TestNewRefusesUnusableTLSFiles`). Plain TCP, the hashicorp/raft
+TCP transport, needs `AllowInsecureTransport` and no TLS file, and logs one
+WARN at start; without either, `New` refuses the node
+(`TestPlainTCPNeedsAllowInsecureTransport`), as `cluster.Config.Validate` does
+earlier. See "Raft transport security" in `internal/config/README.md` for the
+certificates.
+
+## Data directory
+
+The data directory and its `snapshots` directory are made 0700, and `New`
+refuses either, before it opens anything there, when its group or others have
+any permission on it or it is a symlink, as the durable store does
+(`TestRaftRefusesLooseDataDir`). raft-boltdb makes its files 0600, but
+hashicorp/raft makes each snapshot directory 0755 and its `meta.json` and
+`state.bin` 0644, so the snapshot store takes their group and other
+permissions off as soon as `FileSnapshotStore.Create` returns, before any state
+is written into them, and again once `Close` has put the snapshot in place.
+hashicorp/raft creates the snapshot a leader installs through the same
+`Create`. `New` does the same to the snapshots already there
+(`TestRaftFilesArePrivate`, `TestSnapshotsArePrivateWhileWritten`).
+
 ## Multi-node tests
 
 `loopback_test.go` holds the helper that multi-node tests share.
 `newLoopbackCluster(t, ids...)` reserves a loopback port for each node, then
-starts every node through `New` on plain TCP, each listing all of them as
+starts every node through `New` on mutual TLS, each listing all of them as
 `id=127.0.0.1:port` peers, with election and heartbeat timeouts of
-`loopbackTimeout` (250 ms). `leader` waits for exactly one ready leader, and
-`write` runs a write on it, again on the next leader if leadership moves first.
-A node's `stop` and `start` restart it from its data directory (`dir`), with
-any discovery; options to `start` edit the node's `Config`. The helper's waits
-poll a condition until a timeout, never a fixed sleep.
+`loopbackTimeout` (250 ms). Each node presents a certificate for 127.0.0.1 of a
+CA the helper makes when the test runs; no key is kept in the repository.
+`loopbackNodes` does the same without starting them, for a test that changes a
+node first. `leader` waits for exactly one ready leader, and `write` runs a
+write on it, again on the next leader if leadership moves first. A node's
+`stop` and `start` restart it from its data directory (`dir`), with any
+discovery; options to `start` edit the node's `Config`, such as `withTLS` and
+`insecureTransport`, and `open` returns the error of a start a test expects to
+fail. The helper's waits poll a condition until a timeout, never a fixed
+sleep.

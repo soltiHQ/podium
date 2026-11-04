@@ -333,7 +333,8 @@ func TestEnrollSecretNeedsAgentAuthRequired(t *testing.T) {
 
 // The raft cluster of the README's "Cluster" example loads from YAML and from
 // the environment, whose comma-separated peers may have spaces after the
-// commas. A raft configuration that fails cluster validation fails loading.
+// commas, and so does plain TCP allowed from the environment. A raft
+// configuration that fails cluster validation fails loading.
 func TestLoadRaftCluster(t *testing.T) {
 	const example = `cluster:
   backend: raft
@@ -344,6 +345,10 @@ func TestLoadRaftCluster(t *testing.T) {
     data_dir: /var/lib/solti/raft
     election_timeout_ms: 1000
     heartbeat_timeout_ms: 500
+    tls:
+      cert_file: /etc/solti/raft/n1.crt
+      key_file: /etc/solti/raft/n1.key
+      ca_file: /etc/solti/raft/ca.crt
   discovery:
     driver: static
     peers:
@@ -363,8 +368,18 @@ func TestLoadRaftCluster(t *testing.T) {
 		"SOLTI_CLUSTER_RAFT_DATA_DIR":             "/var/lib/solti/raft",
 		"SOLTI_CLUSTER_RAFT_ELECTION_TIMEOUT_MS":  "1000",
 		"SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS": "500",
+		"SOLTI_CLUSTER_RAFT_TLS_CERT_FILE":        "/etc/solti/raft/n1.crt",
+		"SOLTI_CLUSTER_RAFT_TLS_KEY_FILE":         "/etc/solti/raft/n1.key",
+		"SOLTI_CLUSTER_RAFT_TLS_CA_FILE":          "/etc/solti/raft/ca.crt",
 		"SOLTI_CLUSTER_DISCOVERY_DRIVER":          "static",
 		"SOLTI_CLUSTER_DISCOVERY_PEERS":           "n1=10.0.0.1:7000, n2=10.0.0.2:7000, n3=10.0.0.3:7000",
+	}
+	// plainTCP is static with the flag instead of the TLS files.
+	plainTCP := map[string]string{"SOLTI_CLUSTER_RAFT_ALLOW_INSECURE_TRANSPORT": "true"}
+	for key, value := range static {
+		if !strings.HasPrefix(key, "SOLTI_CLUSTER_RAFT_TLS_") {
+			plainTCP[key] = value
+		}
 	}
 	raft := cluster.RaftConfig{
 		NodeID:             "n1",
@@ -373,22 +388,39 @@ func TestLoadRaftCluster(t *testing.T) {
 		DataDir:            "/var/lib/solti/raft",
 		ElectionTimeoutMs:  1000,
 		HeartbeatTimeoutMs: 500,
+		TLS: cluster.RaftTLSConfig{
+			CertFile: "/etc/solti/raft/n1.crt",
+			KeyFile:  "/etc/solti/raft/n1.key",
+			CAFile:   "/etc/solti/raft/ca.crt",
+		},
 	}
+	insecure := raft
+	insecure.TLS, insecure.AllowInsecureTransport = cluster.RaftTLSConfig{}, true
 	peers := []cluster.Peer{{ID: "n1", Address: "10.0.0.1:7000"}, {ID: "n2", Address: "10.0.0.2:7000"}, {ID: "n3", Address: "10.0.0.3:7000"}}
 	for _, tc := range []struct {
 		name, path string
 		env        map[string]string
-		want       error // nil: loads raft and peers
+		raft       cluster.RaftConfig // what loads, with the peers, when want is nil
+		want       error
 	}{
-		{name: "yaml", path: yamlPath},
-		{name: "environment", env: static},
+		{name: "yaml", path: yamlPath, raft: raft},
+		{name: "environment", env: static, raft: raft},
+		{name: "plain TCP allowed", env: plainTCP, raft: insecure},
 		{name: "refused", env: map[string]string{
+			"SOLTI_CLUSTER_BACKEND":                       "raft",
+			"SOLTI_CLUSTER_RAFT_NODE_ID":                  "n1",
+			"SOLTI_CLUSTER_RAFT_BIND_ADDR":                "10.0.0.1:7000",
+			"SOLTI_CLUSTER_RAFT_DATA_DIR":                 "/var/lib/solti/raft",
+			"SOLTI_CLUSTER_RAFT_ALLOW_INSECURE_TRANSPORT": "true",
+			"SOLTI_CLUSTER_DISCOVERY_PEERS":               "10.0.0.1:7000,10.0.0.2:7000,10.0.0.3:7000",
+		}, want: cluster.ErrNodeIDNotAdvertise},
+		{name: "no transport security", env: map[string]string{
 			"SOLTI_CLUSTER_BACKEND":         "raft",
 			"SOLTI_CLUSTER_RAFT_NODE_ID":    "n1",
 			"SOLTI_CLUSTER_RAFT_BIND_ADDR":  "10.0.0.1:7000",
 			"SOLTI_CLUSTER_RAFT_DATA_DIR":   "/var/lib/solti/raft",
-			"SOLTI_CLUSTER_DISCOVERY_PEERS": "10.0.0.1:7000,10.0.0.2:7000,10.0.0.3:7000",
-		}, want: cluster.ErrNodeIDNotAdvertise},
+			"SOLTI_CLUSTER_DISCOVERY_PEERS": "n1=10.0.0.1:7000",
+		}, want: cluster.ErrRaftTLSRequired},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("CONFIG_PATH", tc.path)
@@ -406,8 +438,8 @@ func TestLoadRaftCluster(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.Cluster.Backend != cluster.BackendRaft || cfg.Cluster.Raft != raft {
-				t.Fatalf("cluster = %+v, want backend raft with %+v", cfg.Cluster, raft)
+			if cfg.Cluster.Backend != cluster.BackendRaft || cfg.Cluster.Raft != tc.raft {
+				t.Fatalf("cluster = %+v, want backend raft with %+v", cfg.Cluster, tc.raft)
 			}
 			if got, err := cfg.Cluster.Discovery.StaticPeers(); err != nil || !slices.Equal(got, peers) {
 				t.Fatalf("peers = %v, %v; want %v", got, err, peers)
@@ -425,6 +457,9 @@ func TestLoadRaftClusterWithDNS(t *testing.T) {
 		"SOLTI_CLUSTER_RAFT_NODE_ID":       "10.0.0.1:7000",
 		"SOLTI_CLUSTER_RAFT_BIND_ADDR":     "10.0.0.1:7000",
 		"SOLTI_CLUSTER_RAFT_DATA_DIR":      "/var/lib/solti/raft",
+		"SOLTI_CLUSTER_RAFT_TLS_CERT_FILE": "/etc/solti/raft/node.crt",
+		"SOLTI_CLUSTER_RAFT_TLS_KEY_FILE":  "/etc/solti/raft/node.key",
+		"SOLTI_CLUSTER_RAFT_TLS_CA_FILE":   "/etc/solti/raft/ca.crt",
 		"SOLTI_CLUSTER_DISCOVERY_DRIVER":   "dns",
 		"SOLTI_CLUSTER_DISCOVERY_HOSTNAME": "podium.svc",
 		"SOLTI_CLUSTER_DISCOVERY_PORT":     "7000",

@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/tls"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -46,6 +47,12 @@ type LeaderOptions struct {
 	// otherwise a plaintext request forwarded to a TLS listener (or vice versa) fails
 	// the handshake ("client sent an HTTP request to an HTTPS server").
 	TargetTLS bool
+
+	// TLSClientConfig is the client side of a forward to a TLS target: the CAs
+	// that verify the leader's certificate, for the leader's host, and the
+	// client certificate presented when the leader asks for one. Nil verifies
+	// the leader against the system roots, with no client certificate.
+	TLSClientConfig *tls.Config
 }
 
 // Leader routes write requests to the cluster leader.
@@ -53,7 +60,8 @@ type LeaderOptions struct {
 //   - Reads: pass through.
 //   - Writes on leader: pass through.
 //   - Writes on the follower with ForwardPort == 0: 503 + X-Leader header.
-//   - Writes on follower with ForwardPort > 0: transparent reverse-proxy to http://<leader-host>:<ForwardPort>.
+//   - Writes on follower with ForwardPort > 0: transparent reverse-proxy to http://<leader-host>:<ForwardPort>,
+//     or https:// with TargetTLS, verified and authenticated with TLSClientConfig.
 //
 // In a standalone deployment AmLeader is always true, so the middleware adds essentially zero overhead.
 func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler) http.Handler {
@@ -71,6 +79,8 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 		Proxy:                 http.ProxyFromEnvironment,
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: timeout,
+		// A clone: other clients, such as the proxy pool, share the configuration.
+		TLSClientConfig: opts.TLSClientConfig.Clone(),
 	}
 
 	return func(next http.Handler) http.Handler {

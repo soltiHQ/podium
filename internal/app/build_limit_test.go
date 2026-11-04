@@ -1,6 +1,7 @@
 package app
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/cluster/standalone"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
@@ -32,6 +34,13 @@ func mainHandler(t *testing.T, cfg config.Config) http.Handler {
 // mainHandlerOver builds the main listener from cfg over store, logging to logger.
 func mainHandlerOver(t *testing.T, cfg config.Config, store storage.Storage, logger zerolog.Logger) http.Handler {
 	t.Helper()
+	return mainHandlerOf(t, cfg, store, logger, standalone.NewLeadership(), nil)
+}
+
+// mainHandlerOf builds the main listener of a node led as leadership says,
+// which forwards writes with forwardTLS, from cfg over store, logging to logger.
+func mainHandlerOf(t *testing.T, cfg config.Config, store storage.Storage, logger zerolog.Logger, leadership cluster.Leadership, forwardTLS *tls.Config) http.Handler {
+	t.Helper()
 	cfg.Auth.JWTSecret = mainHandlerSecret
 	authModel := kit.New(store, cfg.Auth)
 	svc, err := initServices(store, authModel, cfg.History.Archive, cfg.AgentAuth, logger)
@@ -46,7 +55,7 @@ func mainHandlerOver(t *testing.T, cfg config.Config, store storage.Storage, log
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, logs := buildMainHandler(cfg, logger, svc, authModel, pool, events, standalone.NewLeadership(), resolver)
+	handler, logs := buildMainHandler(cfg, logger, svc, authModel, pool, events, leadership, resolver, forwardTLS)
 	t.Cleanup(logs.Close)
 	return handler
 }

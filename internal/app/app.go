@@ -95,7 +95,8 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 	// including mTLS when a client CA is set. The human-facing UI gets the SAME cert
 	// but WITHOUT a client-certificate requirement, so enabling mTLS for agents does
 	// not lock browsers (which have no client cert) out of the dashboard. One client
-	// config for outbound calls to agents. All opt-in (nil = plaintext).
+	// config for outbound calls: to agents, and from a follower to the leader when it
+	// forwards a write. All opt-in (nil = plaintext).
 	serverTLS, err := cfg.TLS.Server.Build()
 	if err != nil {
 		closeOnError(raftShutdown, eventHub)
@@ -161,7 +162,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	mainHandler, logHub := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership, resolver)
+	mainHandler, logHub := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership, resolver, clientTLS)
 	httpCfg := cfg.HTTP
 	httpCfg.TLSConfig = uiServerTLS
 	httpRunner, err := httpserver.New(httpCfg, logger, mainHandler)
@@ -172,7 +173,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	discoveryHandler, grpcSrv := buildDiscoveryListeners(logger, svc.agent, eventHub, leadership, cfg, resolver, serverTLS)
+	discoveryHandler, grpcSrv := buildDiscoveryListeners(logger, svc.agent, eventHub, leadership, cfg, resolver, serverTLS, clientTLS)
 	discoveryCfg := cfg.HTTPDiscovery
 	discoveryCfg.TLSConfig = serverTLS
 	httpDiscoveryRunner, err := httpserver.New(discoveryCfg, logger, discoveryHandler)

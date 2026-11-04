@@ -2,8 +2,17 @@ package raft
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -23,19 +32,23 @@ import (
 const loopbackTimeout = 250 * time.Millisecond
 
 // loopbackCluster runs real nodes, each opened by New on its own loopback TCP
-// port. The ports are reserved before any node starts, so every node lists all
-// of them as id=127.0.0.1:port entries of cluster.discovery.peers.
+// port, with mutual TLS: every node presents a certificate of the cluster's CA
+// for 127.0.0.1. The ports are reserved before any node starts, so every node
+// lists all of them as id=127.0.0.1:port entries of cluster.discovery.peers.
 type loopbackCluster struct {
+	ca    *testCA
 	nodes []*loopbackNode
 }
 
-// loopbackNode is one node of a loopbackCluster.
+// loopbackNode is one node of a loopbackCluster, or a node of its own.
 type loopbackNode struct {
 	id   string
-	addr string // 127.0.0.1:port, its bind and advertise address
-	dir  string // its data directory, kept across restarts
+	addr string                // 127.0.0.1:port, its bind and advertise address
+	dir  string                // its data directory, which New creates and restarts keep
+	tls  cluster.RaftTLSConfig // its certificate, key and CA, Config.TLS by default
 
-	profile *Profile // nil while the node is stopped
+	logger  zerolog.Logger // what New logs, nothing by default
+	profile *Profile       // nil while the node is stopped
 	hub     *event.Hub
 }
 
@@ -43,19 +56,40 @@ type loopbackNode struct {
 // [loopbackCluster.discovery], and stops them all when the test ends.
 func newLoopbackCluster(t *testing.T, ids ...string) *loopbackCluster {
 	t.Helper()
-	c := &loopbackCluster{}
+	c := loopbackNodes(t, ids...)
+	for _, n := range c.nodes {
+		n.start(t, c.discovery(t))
+	}
+	return c
+}
+
+// loopbackNodes is newLoopbackCluster without starting the nodes, for a test
+// that changes some first.
+func loopbackNodes(t *testing.T, ids ...string) *loopbackCluster {
+	t.Helper()
+	c := &loopbackCluster{ca: newTestCA(t)}
 	for i, addr := range reserveLoopbackAddrs(t, len(ids)) {
-		c.nodes = append(c.nodes, &loopbackNode{id: ids[i], addr: addr, dir: t.TempDir()})
+		c.nodes = append(c.nodes, newLoopbackNode(t, c.ca, ids[i], addr))
 	}
 	t.Cleanup(func() {
 		for _, n := range c.nodes {
 			n.stop()
 		}
 	})
-	for _, n := range c.nodes {
-		n.start(t, c.discovery(t))
-	}
 	return c
+}
+
+// newLoopbackNode returns a stopped node with a certificate of ca for
+// 127.0.0.1, whose data directory does not exist yet. The caller stops it.
+func newLoopbackNode(t *testing.T, ca *testCA, id, addr string) *loopbackNode {
+	t.Helper()
+	return &loopbackNode{
+		id:     id,
+		addr:   addr,
+		dir:    filepath.Join(t.TempDir(), "raft"),
+		tls:    ca.issue(t, "127.0.0.1"),
+		logger: zerolog.Nop(),
+	}
 }
 
 // discovery lists every node of c as the static driver does, from
@@ -119,27 +153,36 @@ func (c *loopbackCluster) write(t *testing.T, timeout time.Duration, fn func(sto
 }
 
 // start opens n from its data directory: a first start bootstraps from disco,
-// a restart reloads the node's own log. Each opt edits the node's Config
-// before New gets it.
+// a restart reloads the node's own log. The node runs mutual TLS with its own
+// files; each opt edits the node's Config before New gets it.
 func (n *loopbackNode) start(t *testing.T, disco cluster.Discovery, opts ...func(*Config)) {
 	t.Helper()
+	if err := n.open(disco, opts...); err != nil {
+		t.Fatalf("start %s: %v", n.id, err)
+	}
+}
+
+// open is start for a test that expects New to fail: it returns the error.
+func (n *loopbackNode) open(disco cluster.Discovery, opts ...func(*Config)) error {
 	cfg := Config{
 		NodeID:           n.id,
 		BindAddr:         n.addr,
 		DataDir:          n.dir,
 		ElectionTimeout:  loopbackTimeout,
 		HeartbeatTimeout: loopbackTimeout,
+		TLS:              n.tls,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 	hub := event.NewHub(zerolog.Nop())
-	p, err := New(cfg, inmemory.New(), hub, disco, zerolog.Nop())
+	p, err := New(cfg, inmemory.New(), hub, disco, n.logger)
 	if err != nil {
 		hub.Close()
-		t.Fatalf("start %s: %v", n.id, err)
+		return err
 	}
 	n.profile, n.hub = p, hub
+	return nil
 }
 
 // stop shuts n down and keeps its data directory for a restart.
@@ -150,6 +193,40 @@ func (n *loopbackNode) stop() {
 	_ = n.profile.Shutdown()
 	n.hub.Close()
 	n.profile, n.hub = nil, nil
+}
+
+// self is a discovery that lists only n, for a cluster of one node.
+func (n *loopbackNode) self() cluster.Discovery {
+	return discovery.NewStatic([]cluster.Peer{{ID: n.id, Address: n.addr}})
+}
+
+// withTLS gives a node files other than its own.
+func withTLS(files cluster.RaftTLSConfig) func(*Config) {
+	return func(c *Config) { c.TLS = files }
+}
+
+// insecureTransport runs a node on plain TCP, for a test that TLS has no part
+// in.
+func insecureTransport(c *Config) {
+	c.TLS, c.AllowInsecureTransport = cluster.RaftTLSConfig{}, true
+}
+
+// oneNodeTimeouts are short timeouts for a cluster of one node: with no peer to
+// hear from, its lease cannot lapse.
+func oneNodeTimeouts(c *Config) {
+	c.ElectionTimeout, c.HeartbeatTimeout = 50*time.Millisecond, 50*time.Millisecond
+}
+
+// privateTestDir makes an empty data directory that only its owner can enter,
+// for a test that writes into it before New opens it. t.TempDir is not
+// private: New refuses it.
+func privateTestDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "raft")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 // reserveLoopbackAddrs returns count distinct 127.0.0.1 addresses on ports the
@@ -187,5 +264,101 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 			t.Fatalf("%s: not within %s", what, timeout)
 		}
 		<-tick.C
+	}
+}
+
+// testCA is a certificate authority made when a test runs. Its key stays in
+// memory; its certificate is written to a file of the test.
+type testCA struct {
+	cert *x509.Certificate
+	key  *ecdsa.PrivateKey
+	file string // its certificate, PEM
+}
+
+// newTestCA makes a CA valid for the next hour.
+func newTestCA(t *testing.T) *testCA {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "podium raft test CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca := &testCA{cert: cert, key: key, file: filepath.Join(t.TempDir(), "ca.crt")}
+	writePEM(t, ca.file, "CERTIFICATE", der)
+	return ca
+}
+
+// issue writes a certificate of ca for hosts, each an IP or a DNS subject
+// alternative name, usable as a server and as a client certificate, and its
+// key, and returns the files of a node that presents it and trusts ca.
+func (ca *testCA) issue(t *testing.T, hosts ...string) cluster.RaftTLSConfig {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 62))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: hosts[0]},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+	}
+	for _, host := range hosts {
+		if ip := net.ParseIP(host); ip != nil {
+			tmpl.IPAddresses = append(tmpl.IPAddresses, ip)
+		} else {
+			tmpl.DNSNames = append(tmpl.DNSNames, host)
+		}
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	files := cluster.RaftTLSConfig{CertFile: filepath.Join(dir, "node.crt"), KeyFile: filepath.Join(dir, "node.key"), CAFile: ca.file}
+	writePEM(t, files.CertFile, "CERTIFICATE", der)
+	writePEM(t, files.KeyFile, "PRIVATE KEY", keyDER)
+	return files
+}
+
+// pool returns a pool of ca's certificate alone.
+func (ca *testCA) pool() *x509.CertPool {
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.cert)
+	return pool
+}
+
+// writePEM writes der to path as one PEM block of typ, readable by its owner
+// only.
+func writePEM(t *testing.T, path, typ string, der []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
