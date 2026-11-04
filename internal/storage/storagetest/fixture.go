@@ -1,6 +1,7 @@
 // Package storagetest builds the state that the storage and service benchmarks
-// run against. It writes through storage.Storage alone, so every backend gets
-// the same rows and a before/after comparison stays like for like.
+// run against, and times them (Measure). It writes through storage.Storage
+// alone, so every backend gets the same rows and a before/after comparison stays
+// like for like.
 package storagetest
 
 import (

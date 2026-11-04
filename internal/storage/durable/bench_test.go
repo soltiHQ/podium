@@ -2,13 +2,10 @@ package durable
 
 import (
 	"context"
-	"math"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/rs/zerolog"
 
@@ -36,33 +33,6 @@ func benchStore(b *testing.B, agents int) *Store {
 	return s
 }
 
-// measure runs op once per iteration and reports the median and the 99th
-// percentile of its latency next to the mean the framework prints: a commit
-// costs a sync, and one slow sync moves the mean but not the median. Below 100
-// iterations the 99th percentile is the slowest one.
-func measure(b *testing.B, op func(i int) error) {
-	b.Helper()
-	samples := make([]time.Duration, 0, 1024)
-	for i := 0; b.Loop(); i++ {
-		start := time.Now()
-		err := op(i)
-		samples = append(samples, time.Since(start))
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-	if len(samples) == 0 {
-		return
-	}
-	slices.Sort(samples)
-	quantile := func(q float64) float64 {
-		rank := max(int(math.Ceil(q*float64(len(samples))))-1, 0)
-		return float64(samples[rank]) / float64(time.Millisecond)
-	}
-	b.ReportMetric(quantile(0.50), "p50-ms")
-	b.ReportMetric(quantile(0.99), "p99-ms")
-}
-
 // touchAgent moves the uptime of one agent in a transaction of its own.
 func touchAgent(ctx context.Context, s storage.Storage, agents, i int) error {
 	return s.WithTx(ctx, func(tx storage.Storage) error {
@@ -83,7 +53,7 @@ func BenchmarkTxNoop(b *testing.B) {
 			ctx := context.Background()
 			noop := func(storage.Storage) error { return nil }
 			b.ReportAllocs()
-			measure(b, func(int) error { return s.WithTx(ctx, noop) })
+			storagetest.Measure(b, func(int) error { return s.WithTx(ctx, noop) })
 		})
 	}
 }
@@ -95,7 +65,7 @@ func BenchmarkTxAgentUpdate(b *testing.B) {
 			s := benchStore(b, n)
 			ctx := context.Background()
 			b.ReportAllocs()
-			measure(b, func(i int) error { return touchAgent(ctx, s, n, i) })
+			storagetest.Measure(b, func(i int) error { return touchAgent(ctx, s, n, i) })
 		})
 	}
 }
@@ -122,7 +92,7 @@ func BenchmarkHeartbeat(b *testing.B) {
 			first := committed(s)
 			refreshes := 0
 			b.ReportAllocs()
-			measure(b, func(i int) error {
+			storagetest.Measure(b, func(i int) error {
 				// The payload is built per heartbeat, as discovery does. An agent
 				// reports a longer uptime each time, or it would look restarted.
 				p := storagetest.AgentParams(i % n)
@@ -204,7 +174,7 @@ func BenchmarkReadDuringWrite(b *testing.B) {
 
 			// Start measuring once a writer is running.
 			<-ready
-			measure(b, func(i int) error {
+			storagetest.Measure(b, func(i int) error {
 				_, err := s.GetAgent(context.Background(), storagetest.AgentID(i%n))
 				return err
 			})

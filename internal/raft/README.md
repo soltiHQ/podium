@@ -361,8 +361,9 @@ right once a snapshot compacted the log past the configuration's entry
 entry above the latest snapshot, once per change, on the leader; the status
 reads the copy. Under heavy writes that is up to `snapshot_threshold` entries
 plus what `snapshot_interval` times the write rate adds between two snapshot
-checks; nothing has measured what it costs on a large log. While a snapshot is
-being written, the snapshot store's `List` can log hashicorp/raft's WARN `found
+checks; 70000 entries take about 0.2 s to read and 8192 about 23 ms
+(`BenchmarkLatestConfiguration`, see "Performance"). While a snapshot is being
+written, the snapshot store's `List` can log hashicorp/raft's WARN `found
 temporary snapshot`.
 
 A leader's configuration is at index 1 at least, the bootstrap entry, and lists
@@ -998,3 +999,131 @@ follows, catches up and votes again. `TestFollowerHTTPAndGRPCWritesLand`, in
 `internal/app`, runs three whole nodes, each on a loopback IP of its own: it
 skips on a host that is not Linux, and on Linux, where 127.0.0.0/8 is loopback,
 fails if 127.0.0.2 or 127.0.0.3 cannot be bound.
+
+## Performance
+
+`bench_test.go` holds three benchmarks. `BenchmarkThreeNodeHeartbeat` is
+`BenchmarkHeartbeat` of `internal/storage/durable`, the heartbeat that discovery
+runs for an enrolled agent (verify the token, read the agent, upsert it), on the
+leader's store of the cluster of "Multi-node tests": three nodes with mutual TLS
+on loopback, built by `newLoopbackCluster`, whose helpers take a `testing.TB`
+for that. The store is seeded through raft with the P2a fixture of
+`internal/storage/storagetest` (see "Performance" in
+`internal/storage/durable/README.md`) at 100, 1000 and 5000 agents: one command,
+which all three nodes apply, in 0.1 s, 0.15 s and 0.25 s.
+`BenchmarkThreeNodeBarrier` is the barrier that starts every write
+(`awaitApplied`) on the same cluster. Both report the entries the leader's log
+gained per iteration, as `commits/op`, with the `barriers/op` and `commands/op`
+among them. `BenchmarkLatestConfiguration` builds a log store and a snapshot
+store without a node and reads the latest configuration from them, as
+`Admin.Configuration` does. The numbers are indicative, not a gate.
+
+### Conditions
+
+The Task container on an Apple M3 Max Mac (OrbStack, 14 vCPUs, linux/arm64, Go
+1.27.3), on loopback, with TLS, without `-race`, with the data on the
+container's overlay filesystem, between 21:48 and 22:01 UTC on 2026-11-04, at
+`2771c6a` plus this change:
+
+```sh
+task golang:exec CMD='go test -run "^$" -bench "^(BenchmarkThreeNodeHeartbeat|BenchmarkThreeNodeBarrier)$" -benchtime=1000x -count=3 ./internal/raft/'
+task golang:exec CMD='go test -run "^$" -bench "^BenchmarkLatestConfiguration$" -benchtime=20x -count=3 ./internal/raft/'
+task golang:exec CMD='go test -run "^$" -bench "^BenchmarkHeartbeat$" -benchtime=1000x -count=4 ./internal/storage/durable/'
+```
+
+A cell below is the median over the runs of the p50 or the p99 of one run: the
+median and the 99th percentile of the latency of one operation over its
+iterations (`storagetest.Measure`, which the durable benchmarks use too).
+
+The latency of a commit is its fsyncs. bbolt syncs twice per transaction. The
+standalone store commits one transaction, and a raft commit stores its entry in
+the leader's log and then in a follower's before it is acknowledged: four syncs
+in a row. On this machine an `fdatasync` takes 0.4 ms in one state of the
+container's disk and 1 to 2 ms in the other, and what moves it between them is
+not known. A bare `fdatasync` loop falls into the slow state after 8 s of idling
+and stays there for a second or more; a cluster that had settled does the same,
+taking 7 to 10 ms per barrier for its first 300 or 400 commits after 8 s of
+idling and 2.2 ms after; and in an earlier set of runs one barrier run at 5000
+agents was still slow after its 6 s of settling, with a p50 of 7.7 ms. So the
+three-node benchmarks commit barriers for 6 s before they time anything
+(`settle`, skipped under `-benchtime=1x`), and each cell is the median of three
+runs, which leaves out a run that stayed slow. The standalone benchmark has no
+such warm-up: it was run twice, and its cells leave out the first two 100-agent
+runs of the second invocation, which started in the slow state (a p50 of 3.3 ms
+and of 2.5 ms). They are the median of the other 6, 8 and 8 runs at 100, 1000
+and 5000 agents.
+
+### Heartbeat
+
+A heartbeat commits 3.000 entries at every fleet size: two barriers and one
+command. `VerifyOrEnrollToken` and `Upsert` each start a transaction, so each
+starts with a barrier, the token check writes nothing when the token matches,
+`Get` reads the leader's local store, and the upsert proposes one agent. The
+standalone store commits 1.000. No heartbeat changes what an operator watches
+(`refreshes/op` is 0).
+
+| agents | three-node p50 | three-node p99 | standalone p50 | standalone p99 | p50 ratio |
+| -- | -- | -- | -- | -- | -- |
+| 100 | 7.3 ms | 11 ms | 0.80 ms | 1.5 ms | 9.1x |
+| 1000 | 7.1 ms | 12 ms | 0.80 ms | 1.3 ms | 8.9x |
+| 5000 | 7.5 ms | 44 ms | 0.79 ms | 1.4 ms | 9.5x |
+
+- The fleet size does not move the median: the time is in the commits, and a
+  command carries one agent.
+- The three-node p99 has outliers at 1000 and 5000 agents: one of three runs at
+  1000 agents and two of three at 5000 had a p99 of 44 to 51 ms, against 12 to
+  15 ms for the others. Three runs at 5000 agents with `GOGC=off` had 10.7, 15.8
+  and 10.9 ms (1000 agents was not tried), so the garbage collector is the
+  likely cause: the three nodes share a process, and so a heap.
+- A leader runs one transaction at a time: `Store.WithTx` holds `txMu` from the
+  barrier to the apply of the command. A heartbeat of 7.3 ms is therefore at
+  best about 135 heartbeats, or 400 log entries, a second on this machine, where
+  5000 agents at the fixture's 30 s interval send 167 a second.
+
+### Barrier
+
+A barrier is one log entry that carries nothing, committed like any other.
+
+| agents | barrier p50 | barrier p99 | one barrier / heartbeat p50 | two barriers / heartbeat p50 |
+| -- | -- | -- | -- | -- |
+| 100 | 2.3 ms | 10 ms | 32% | 63% |
+| 1000 | 2.2 ms | 3.3 ms | 32% | 63% |
+| 5000 | 2.1 ms | 2.9 ms | 29% | 57% |
+
+A heartbeat starts two transactions, so it pays two barriers: 57% to 63% of its
+median here, and 59% to 67% in an earlier set of runs. Every write starts with a
+barrier, and a barrier taken once per leadership term would remove that round
+trip; it is not built. The p99 is one percentile of 1000 samples and moves: the
+100-agent barrier's was 4.4, 10 and 18 ms in its three runs.
+
+### The configuration read
+
+`BenchmarkLatestConfiguration` times `latestConfiguration`, the read that
+`Admin.Configuration` makes, over a log with entries above the latest snapshot
+and the configuration entry at the bottom, the worst place for a scan that reads
+from the last entry down. The stores are built directly, in place of through
+raft: a BoltDB log store written in batches of 1000 and the snapshot store of
+`New`, with a snapshot at index 100000, so that the setup takes a fraction of a
+second where 70000 commits would take minutes. Every entry is a command of 435
+bytes, the encoding of a fixture agent's upsert; the barriers of a real log
+carry no data.
+
+| entries above the snapshot | p50 | p99 | allocated by one read |
+| -- | -- | -- | -- |
+| 8192 (`snapshot_threshold`) | 23 ms | 36 ms | 20 MiB, 262000 allocations |
+| 70000 | 215 ms | 239 ms | 172 MiB, 2.2 million allocations |
+
+- 70000 entries are `snapshot_threshold` plus `snapshot_interval` (120 s) at
+  about 500 entries a second; a write is a barrier and a command, two entries.
+- The read is linear in the entries, about 3 µs each (2.5 µs, 177 ms for 70000,
+  in an earlier set of runs). The snapshot check comes at a random time of
+  between one and two intervals, so a leader that writes so fast for two
+  intervals holds about twice as many entries, and the read takes about twice as
+  long.
+
+Under `-benchtime=1x`, as `task ci/golang/bench` runs them, the three-node
+benchmarks take the 100-agent fleet only and skip the settle: a run takes 0.66 s
+for `BenchmarkThreeNodeHeartbeat`, 0.59 s for `BenchmarkThreeNodeBarrier` and
+0.68 s for `BenchmarkLatestConfiguration`. At `-benchtime=1000x` a three-node
+sub-benchmark takes its 6 s of settling, about a second of setup, and its
+iterations.

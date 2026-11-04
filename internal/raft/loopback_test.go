@@ -56,8 +56,9 @@ type loopbackNode struct {
 }
 
 // newLoopbackCluster starts one node per ID, each bootstrapping from
-// [loopbackCluster.discovery], and stops them all when the test ends.
-func newLoopbackCluster(t *testing.T, ids ...string) *loopbackCluster {
+// [loopbackCluster.discovery], and stops them all when the test or benchmark
+// ends. The helpers a benchmark calls take a testing.TB.
+func newLoopbackCluster(t testing.TB, ids ...string) *loopbackCluster {
 	t.Helper()
 	c := loopbackNodes(t, ids...)
 	for _, n := range c.nodes {
@@ -68,7 +69,7 @@ func newLoopbackCluster(t *testing.T, ids ...string) *loopbackCluster {
 
 // loopbackNodes is newLoopbackCluster without starting the nodes, for a test
 // that changes some first.
-func loopbackNodes(t *testing.T, ids ...string) *loopbackCluster {
+func loopbackNodes(t testing.TB, ids ...string) *loopbackCluster {
 	t.Helper()
 	c := &loopbackCluster{ca: newTestCA(t)}
 	for i, addr := range reserveLoopbackAddrs(t, len(ids)) {
@@ -84,7 +85,7 @@ func loopbackNodes(t *testing.T, ids ...string) *loopbackCluster {
 
 // newLoopbackNode returns a stopped node with a certificate of ca for
 // 127.0.0.1, whose data directory does not exist yet. The caller stops it.
-func newLoopbackNode(t *testing.T, ca *testCA, id, addr string) *loopbackNode {
+func newLoopbackNode(t testing.TB, ca *testCA, id, addr string) *loopbackNode {
 	t.Helper()
 	return &loopbackNode{
 		id:     id,
@@ -97,7 +98,7 @@ func newLoopbackNode(t *testing.T, ca *testCA, id, addr string) *loopbackNode {
 
 // discovery lists every node of c as the static driver does, from
 // id=host:port entries of cluster.discovery.peers.
-func (c *loopbackCluster) discovery(t *testing.T) cluster.Discovery {
+func (c *loopbackCluster) discovery(t testing.TB) cluster.Discovery {
 	t.Helper()
 	entries := make([]string, 0, len(c.nodes))
 	for _, n := range c.nodes {
@@ -112,7 +113,7 @@ func (c *loopbackCluster) discovery(t *testing.T) cluster.Discovery {
 
 // leader waits until exactly one running node leads and has applied every
 // committed entry, and returns it.
-func (c *loopbackCluster) leader(t *testing.T, timeout time.Duration) *loopbackNode {
+func (c *loopbackCluster) leader(t testing.TB, timeout time.Duration) *loopbackNode {
 	t.Helper()
 	var leader *loopbackNode
 	waitFor(t, timeout, "one ready leader", func() bool {
@@ -158,7 +159,7 @@ func (c *loopbackCluster) write(t *testing.T, timeout time.Duration, fn func(sto
 // start opens n from its data directory: a first start bootstraps from disco,
 // a restart reloads the node's own log. The node runs mutual TLS with its own
 // files; each opt edits the node's Config before New gets it.
-func (n *loopbackNode) start(t *testing.T, disco cluster.Discovery, opts ...func(*Config)) {
+func (n *loopbackNode) start(t testing.TB, disco cluster.Discovery, opts ...func(*Config)) {
 	t.Helper()
 	if err := n.open(disco, opts...); err != nil {
 		t.Fatalf("start %s: %v", n.id, err)
@@ -283,7 +284,7 @@ func privateTestDir(t *testing.T) string {
 // reserveLoopbackAddrs returns count distinct 127.0.0.1 addresses on ports the
 // kernel picked. Its listeners are closed when it returns, so nodes can bind
 // the ports; another process may take one in between, a race tests accept.
-func reserveLoopbackAddrs(t *testing.T, count int) []string {
+func reserveLoopbackAddrs(t testing.TB, count int) []string {
 	t.Helper()
 	addrs := make([]string, 0, count)
 	listeners := make([]net.Listener, 0, count)
@@ -305,7 +306,7 @@ func reserveLoopbackAddrs(t *testing.T, count int) []string {
 
 // waitFor polls cond every 10ms until it holds, and fails the test when it
 // still does not after timeout.
-func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
+func waitFor(t testing.TB, timeout time.Duration, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	tick := time.NewTicker(10 * time.Millisecond)
@@ -327,7 +328,7 @@ type testCA struct {
 }
 
 // newTestCA makes a CA valid for the next hour.
-func newTestCA(t *testing.T) *testCA {
+func newTestCA(t testing.TB) *testCA {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -358,13 +359,13 @@ func newTestCA(t *testing.T) *testCA {
 // issue writes a certificate of ca for hosts, each an IP or a DNS subject
 // alternative name, usable as a server and as a client certificate, and its
 // key, and returns the files of a node that presents it and trusts ca.
-func (ca *testCA) issue(t *testing.T, hosts ...string) cluster.RaftTLSConfig {
+func (ca *testCA) issue(t testing.TB, hosts ...string) cluster.RaftTLSConfig {
 	t.Helper()
 	return ca.issueWith(t, func(*x509.Certificate) {}, hosts...)
 }
 
 // issueWith is issue with edit applied to the certificate before ca signs it.
-func (ca *testCA) issueWith(t *testing.T, edit func(*x509.Certificate), hosts ...string) cluster.RaftTLSConfig {
+func (ca *testCA) issueWith(t testing.TB, edit func(*x509.Certificate), hosts ...string) cluster.RaftTLSConfig {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -428,7 +429,7 @@ func bundle(t *testing.T, cas ...*testCA) string {
 
 // writePEM writes der to path as one PEM block of typ, readable by its owner
 // only.
-func writePEM(t *testing.T, path, typ string, der []byte) {
+func writePEM(t testing.TB, path, typ string, der []byte) {
 	t.Helper()
 	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der}), 0o600); err != nil {
 		t.Fatal(err)
