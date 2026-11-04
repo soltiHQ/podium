@@ -1,7 +1,6 @@
 package response
 
 import (
-	"errors"
 	"net/http"
 
 	"github.com/soltiHQ/control-plane/internal/cluster"
@@ -47,13 +46,25 @@ func FromError(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, 
 	case errkind.FailedPrecondition:
 		Conflict(w, r, mode, "precondition failed")
 	case errkind.Unavailable, errkind.Canceled, errkind.DeadlineExceeded:
-		if errors.Is(err, cluster.ErrNotLeader) || errors.Is(err, cluster.ErrLeadershipLost) {
+		if cluster.IsLeadershipError(err) {
 			SetLeader(w, httpctx.Leader(r.Context()))
 		}
 		Unavailable(w, r, mode)
 	default:
 		Internal(w, r, mode)
 	}
+}
+
+// StoreFailed answers a write that the store failed and the handler has no answer for: 503, as
+// Unavailable does. A write that reached a follower or lost leadership (cluster.IsLeadershipError) goes
+// through FromError instead, so that its 503 carries the leader's address; every other error is
+// answered as before.
+func StoreFailed(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, err error) {
+	if cluster.IsLeadershipError(err) {
+		FromError(w, r, mode, err)
+		return
+	}
+	Unavailable(w, r, mode)
 }
 
 type errorBody struct {

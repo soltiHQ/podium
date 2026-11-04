@@ -8,6 +8,7 @@ import (
 	"time"
 
 	hclog "github.com/hashicorp/go-hclog"
+	hraft "github.com/hashicorp/raft"
 	"github.com/rs/zerolog"
 )
 
@@ -27,10 +28,14 @@ const redacted = "[redacted]"
 //     move it. Raft's elections and its replication chatter log at DEBUG.
 //
 // Each key and value pair of a line becomes a field of the event, and the name
-// of the logger (raft, snapshot, raft-net) the field "component". A value is
-// logged as its text; a byte slice, which could be what a command carries,
-// only as its length, and the value of "command" never: raft prints a request it
-// did not expect whole under that key, a log entry's data included.
+// of the logger (raft, snapshot, raft-net) the field "component". A key that
+// zerolog or the adapter writes itself, the time, the level, the message and the
+// component, gets the prefix raft_ (raft logs the duration of a lost contact as
+// "time"): the event never has the same key twice. A value is logged as its
+// text; a byte slice, which could be what a command carries, only as its length,
+// and the value of "command" never, except a change of configuration: raft
+// prints a request it did not expect whole under that key, a log entry's data
+// included, and the kind of a change of the configuration under it as well.
 type hclogAdapter struct {
 	logger  zerolog.Logger
 	name    string
@@ -58,7 +63,7 @@ func (a *hclogAdapter) Log(level hclog.Level, msg string, args ...any) {
 		return
 	}
 	if a.name != "" {
-		event = event.Str("component", a.name)
+		event = event.Str(componentKey, a.name)
 	}
 	event = addFields(event, a.implied)
 	addFields(event, args).Msg(msg)
@@ -69,7 +74,7 @@ func (a *hclogAdapter) Log(level hclog.Level, msg string, args ...any) {
 // gives it.
 func addFields(event *zerolog.Event, args []any) *zerolog.Event {
 	for i := 0; i < len(args); i += 2 {
-		key := fmt.Sprint(args[i])
+		key := fieldKey(args[i])
 		if i+1 == len(args) {
 			event = event.Str(key, "EXTRA_VALUE_AT_END")
 			break
@@ -79,10 +84,30 @@ func addFields(event *zerolog.Event, args []any) *zerolog.Event {
 	return event
 }
 
+// fieldKey is the name that the key of a pair has in the event: the key, with
+// the prefix raft_ when it is a name that zerolog or the adapter writes on every
+// event, which an event would carry twice.
+func fieldKey(key any) string {
+	name := fmt.Sprint(key)
+	switch name {
+	case zerolog.TimestampFieldName, zerolog.LevelFieldName, zerolog.MessageFieldName, componentKey:
+		return "raft_" + name
+	}
+	return name
+}
+
+// componentKey is the field that names the component that logged a line.
+const componentKey = "component"
+
 // addField adds one field to event, as text unless the value is a number or a
 // boolean.
 func addField(event *zerolog.Event, key string, value any) *zerolog.Event {
 	if key == "command" {
+		// A change of the configuration shows its kind, such as AddVoter, with the ID and the
+		// address of the server it changes in the pairs next to it. Any other value is redacted.
+		if change, ok := value.(hraft.ConfigurationChangeCommand); ok {
+			return event.Str(key, change.String())
+		}
 		return event.Str(key, redacted)
 	}
 	switch v := value.(type) {

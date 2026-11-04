@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/loghub"
 	"github.com/soltiHQ/control-plane/internal/proxy"
@@ -202,6 +203,18 @@ func (a *API) rolesList(w http.ResponseWriter, r *http.Request, mode httpctx.Ren
 	response.OK(w, r, mode, &responder.View{
 		Data: restv1.ListRolesResponse{Items: items},
 	})
+}
+
+// failure starts the log line of a write that the store failed, with err on it: an
+// ERROR, except for a write that reached a follower or lost leadership
+// (cluster.IsLeadershipError), which is a routing condition and not a failure of
+// this node, so it is a WARN. The handler answers such a write with
+// response.StoreFailed.
+func (a *API) failure(err error) *zerolog.Event {
+	if cluster.IsLeadershipError(err) {
+		return a.logger.Warn().Err(err)
+	}
+	return a.logger.Error().Err(err)
 }
 
 // identity returns the authenticated identity from the request context.

@@ -145,6 +145,73 @@ func TestHCLogAdapterRedactsPayloads(t *testing.T) {
 	}
 }
 
+// A change of the configuration shows its kind under "command", with the ID and
+// the address of the server it changes beside it, which operators need to see
+// once nodes are added and removed. Any other value under that key, a formatted
+// one included, stays redacted.
+func TestHCLogAdapterShowsConfigurationChanges(t *testing.T) {
+	logs := &logBuffer{}
+	l := newHCLog(zerolog.New(logs), "raft")
+	servers := []hraft.Server{{Suffrage: hraft.Voter, ID: "n1", Address: "10.0.0.1:7000"}, {Suffrage: hraft.Voter, ID: "n4", Address: "10.0.0.4:7000"}}
+	l.Info("updating configuration", "command", hraft.AddVoter, "server-id", hraft.ServerID("n4"),
+		"server-addr", hraft.ServerAddress("10.0.0.4:7000"), "servers", hclog.Fmt("%+v", servers))
+	l.Info("formatted", "command", hclog.Fmt("%v", hraft.AddVoter))
+	l.Info("a number", "command", uint8(hraft.AddVoter))
+	l.Info("a pointer", "command", &hraft.AppendEntriesRequest{Entries: []*hraft.Log{{Data: []byte("payload-4711")}}})
+
+	lines := logLines(t, logs)
+	if len(lines) != 4 {
+		t.Fatalf("logged %d lines, want 4: %s", len(lines), logs)
+	}
+	if lines[0]["command"] != "AddVoter" || lines[0]["server-id"] != "n4" || lines[0]["server-addr"] != "10.0.0.4:7000" ||
+		!strings.Contains(lines[0]["servers"].(string), "10.0.0.4:7000") {
+		t.Errorf("a change of configuration logged %v, want its kind, the server and the servers", lines[0])
+	}
+	for _, line := range lines[1:] {
+		if line["command"] != redacted {
+			t.Errorf("a command that is no change of configuration logged %v, want it redacted", line)
+		}
+	}
+	if strings.Contains(logs.String(), "payload-4711") {
+		t.Errorf("the log holds the payload: %s", logs)
+	}
+}
+
+// zerolog writes the time, the level and the message of every event, and the
+// adapter the component. A pair of hashicorp/raft with one of these keys, such as
+// the "time" of a contact lost for that long, gets the prefix raft_: the event
+// has each key once, and the timestamp of the line stays the one operators read.
+func TestHCLogAdapterKeepsTheKeysOfZerolog(t *testing.T) {
+	logs := &logBuffer{}
+	l := newHCLog(zerolog.New(logs).With().Timestamp().Logger(), "raft")
+	l.Warn("failed to contact", "server-id", hraft.ServerID("n2"), "time", 3*time.Second)
+	l.Info("every key", "level", "x", "message", "y", "component", "z", "time", "w")
+
+	raw := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(raw) != 2 {
+		t.Fatalf("logged %d lines, want 2: %s", len(raw), logs)
+	}
+	for _, line := range raw {
+		for _, key := range []string{"time", "level", "message", "component"} {
+			if n := strings.Count(line, `"`+key+`":`); n != 1 {
+				t.Errorf("the line has the key %q %d times: %s", key, n, line)
+			}
+		}
+	}
+	lines := logLines(t, logs)
+	if stamp, _ := lines[0]["time"].(string); lines[0]["raft_time"] != "3s" || lines[0]["server-id"] != "n2" ||
+		lines[0]["level"] != "warn" || lines[0]["message"] != "failed to contact" || lines[0]["component"] != "raft" {
+		t.Errorf("the line of a lost contact is %v", lines[0])
+	} else if _, err := time.Parse(zerolog.TimeFieldFormat, stamp); err != nil {
+		t.Errorf("the time of the line is %q, not a timestamp: %v", stamp, err)
+	}
+	for key, want := range map[string]any{"level": "info", "message": "every key", "component": "raft", "raft_level": "x", "raft_message": "y", "raft_component": "z", "raft_time": "w"} {
+		if lines[1][key] != want {
+			t.Errorf("%s = %v, want %v: %v", key, lines[1][key], want, lines[1])
+		}
+	}
+}
+
 // captureStderr sends everything written to os.Stderr from now on to a buffer,
 // and returns what stop reads from it once os.Stderr is back. The test's
 // cleanup stops it too.

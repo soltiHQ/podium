@@ -33,6 +33,14 @@ var ErrNotLeader = errors.New("this replica is not the leader")
 // one is known.
 var ErrLeadershipLost = errors.New("this replica lost leadership while the write was committing")
 
+// IsLeadershipError reports whether err says that a write met the wrong
+// leadership, [ErrNotLeader] or [ErrLeadershipLost]. That is a routing condition,
+// not a failure of this replica: the transports answer it with the leader's
+// address, and log it as a warning.
+func IsLeadershipError(err error) bool {
+	return errors.Is(err, ErrNotLeader) || errors.Is(err, ErrLeadershipLost)
+}
+
 // Peer is a cluster member. ID is stable across reconnects; Address is a
 // host:port the peer listens on for internal RPC.
 type Peer struct {

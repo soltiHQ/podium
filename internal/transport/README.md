@@ -46,7 +46,7 @@ Main listener (`app.buildMainHandler`), outermost first:
        mux
         │  per route:
   RequestID      ── installs request id + error slot (API routes and the event stream only)
-   Logger        ── reads the slot back after the handler returns (same routes)
+   Logger        ── reads the slot back after the handler returns (same routes); logs 5xx at ERROR, but a 503 with X-Leader at WARN
     Auth / OptionalAuth / RequirePermission  ── 503 when credentials cannot be checked, logged at ERROR; a refresh that needs the
                                                  raft leader (auth.rotate_refresh on a follower) is 503 + X-Leader, logged at WARN
      handler/api.go | ui.go
@@ -124,6 +124,8 @@ Downstream code never sniffs gRPC/HTTP details - it just calls `errkind.Classify
 It goes out on:
 - the 503 of a write that reached a follower (`cluster.ErrNotLeader`) or lost leadership while it was committing (`cluster.ErrLeadershipLost`), answered by `response.FromError`; the refresh of a session on a follower with `auth.rotate_refresh` is one;
 - the 502 the `Leader` middleware answers when it cannot reach the leader it forwards a write to.
+
+A 503 that carries it is a routing condition, not a failure of the node, so the access log (`Logger`) records it at WARN, where any other 5xx is an ERROR.
 
 It is never sent when that address cannot be derived: this node is the leader, no leader is known, or the port of the listener is not known (`LeaderOptions.ForwardPort` is 0, which answers a write on a follower with a 503 without it). The leader's raft address is not sent in its place.
 

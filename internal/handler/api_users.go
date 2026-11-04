@@ -266,8 +266,8 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 			// The user does not exist or was deleted meanwhile, or a role it names does not exist.
 			response.NotFound(w, r, mode)
 		default:
-			a.logger.Error().Err(err).Str("user_id", uid).Msg("user upsert failed")
-			response.Unavailable(w, r, mode)
+			a.failure(err).Str("user_id", uid).Msg("user upsert failed")
+			response.StoreFailed(w, r, mode, err)
 		}
 		return
 	}
@@ -328,8 +328,8 @@ func (a *API) userDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		if writeUserAccessError(w, r, mode, err) {
 			return
 		}
-		a.logger.Error().Err(err).Str("user_id", id).Msg("user delete failed")
-		response.Unavailable(w, r, mode)
+		a.failure(err).Str("user_id", id).Msg("user delete failed")
+		response.StoreFailed(w, r, mode, err)
 		return
 	}
 	a.logger.Info().Str("user_id", id).Msg("user deleted")
@@ -356,8 +356,8 @@ func (a *API) userSetStatus(w http.ResponseWriter, r *http.Request, mode httpctx
 			response.NotFound(w, r, mode)
 			return
 		}
-		a.logger.Error().Err(err).Str("user_id", userID).Msg("user status update failed")
-		response.Unavailable(w, r, mode)
+		a.failure(err).Str("user_id", userID).Msg("user status update failed")
+		response.StoreFailed(w, r, mode, err)
 		return
 	}
 	a.logger.Info().Str("user_id", userID).Msg("user status changed")
@@ -400,8 +400,8 @@ func (a *API) userSetPassword(w http.ResponseWriter, r *http.Request, mode httpc
 		case errors.Is(err, auth.ErrUserDisabled):
 			response.BadRequestMsg(w, r, mode, "user is disabled")
 		default:
-			a.logger.Error().Err(err).Str("user_id", userID).Msg("password change failed")
-			response.Unavailable(w, r, mode)
+			a.failure(err).Str("user_id", userID).Msg("password change failed")
+			response.StoreFailed(w, r, mode, err)
 		}
 		return
 	}
@@ -429,8 +429,8 @@ func (a *API) userRevokeSession(w http.ResponseWriter, r *http.Request, mode htt
 		if writeUserAccessError(w, r, mode, err) {
 			return
 		}
-		a.logger.Error().Err(err).Str("session_id", id).Msg("session revoke failed")
-		response.Unavailable(w, r, mode)
+		a.failure(err).Str("session_id", id).Msg("session revoke failed")
+		response.StoreFailed(w, r, mode, err)
 		return
 	}
 

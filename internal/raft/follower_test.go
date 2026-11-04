@@ -160,8 +160,8 @@ func TestClusterError(t *testing.T) {
 // by the Auth middleware, on a GET as well, and the rotation of its refresh
 // token is a write. On a follower the refresh fails with ErrNotLeader before it
 // consumes the token: the request answers 503 with the leader's address in
-// X-Leader and sets no cookie, the follower logs a WARN, and the same cookies
-// refresh at the leader.
+// X-Leader and sets no cookie, the follower logs WARN lines, from Auth and from
+// the access log, and no ERROR, and the same cookies refresh at the leader.
 func TestRotatingRefreshOnAFollowerAsksForTheLeader(t *testing.T) {
 	const (
 		httpPort = 18080
@@ -195,14 +195,17 @@ func TestRotatingRefreshOnAFollowerAsksForTheLeader(t *testing.T) {
 		return err == nil
 	})
 
-	// chain is the Auth middleware over a node's own store, behind the Leader middleware.
+	// chain is the middleware of an API route over a node's own store: Leader,
+	// RequestID, the access log and Auth.
 	secret, clock := []byte("test-only-raft-refresh-signing-key"), token.RealClock()
 	chain := func(n *loopbackNode, logs *logBuffer) http.Handler {
 		store := n.profile.Store()
+		logger := zerolog.New(logs)
 		svc := session.New(store, jwt.NewHSIssuer(secret, clock), clock, session.Config{AccessTTL: time.Hour, RefreshTTL: 24 * time.Hour, Issuer: "raft-test", Audience: "raft-test", RotateRefresh: true}, rbac.NewResolver(store), nil)
-		auth := middleware.Auth(jwt.NewHSVerifier("raft-test", "raft-test", secret, clock), svc, func(*http.Request) bool { return false }, zerolog.New(logs))
+		auth := middleware.Auth(jwt.NewHSVerifier("raft-test", "raft-test", secret, clock), svc, func(*http.Request) bool { return false }, logger)
 		next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-		return middleware.Leader(n.profile.Leadership(), middleware.LeaderOptions{ForwardPort: httpPort})(auth(next))
+		return middleware.Leader(n.profile.Leadership(), middleware.LeaderOptions{ForwardPort: httpPort})(
+			middleware.RequestID()(middleware.Logger(logger)(auth(next))))
 	}
 	get := func(h http.Handler) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(http.MethodGet, "/ui/specs", nil)
@@ -218,12 +221,16 @@ func TestRotatingRefreshOnAFollowerAsksForTheLeader(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable || w.Header().Get("X-Leader") != net.JoinHostPort("127.0.0.1", strconv.Itoa(httpPort)) || len(w.Result().Cookies()) != 0 {
 		t.Fatalf("the follower answered %d with X-Leader %q and %d cookies, want 503 with the leader's address and none", w.Code, w.Header().Get("X-Leader"), len(w.Result().Cookies()))
 	}
+	// The WARN of Auth and the access log's own line, a WARN as its 503 carries X-Leader.
 	lines := logLines(t, logs)
-	if len(lines) != 1 {
-		t.Fatalf("the follower logged %v, want one WARN about auth.rotate_refresh", lines)
+	if len(lines) != 2 {
+		t.Fatalf("the follower logged %v, want a WARN from Auth and a WARN from the access log", lines)
 	}
 	if message, _ := lines[0]["message"].(string); lines[0]["level"] != "warn" || !strings.Contains(message, "auth.rotate_refresh") {
-		t.Fatalf("the follower logged %v, want one WARN about auth.rotate_refresh", lines)
+		t.Fatalf("the follower logged %v, want a WARN about auth.rotate_refresh first", lines)
+	}
+	if lines[1]["level"] != "warn" || lines[1]["message"] != "http request" || lines[1]["status"] != float64(http.StatusServiceUnavailable) {
+		t.Fatalf("the follower logged %v, want the access log's WARN for the 503", lines)
 	}
 	if w := get(chain(leader, &logBuffer{})); w.Code != http.StatusNoContent || len(w.Result().Cookies()) != 3 {
 		t.Fatalf("the leader answered %d with %d cookies, want 204 with the three auth cookies", w.Code, len(w.Result().Cookies()))

@@ -64,13 +64,14 @@ func OptionalAuth(verifier token.Verifier, sessionSvc *session.Service, secure f
 
 // checkFailed answers 503 to a request whose credentials could not be checked.
 // It logs why at ERROR: the method, the path and the error, never a cookie or a
-// token. The one exception is a refresh that needs the leader (cluster.ErrNotLeader),
-// which every refresh does on a follower when auth.rotate_refresh is on: the
-// follower cannot rotate the refresh token, a write. That is the deployment's
-// routing, not a failure of this node, so it is logged at WARN, and the 503
-// carries the leader's address in X-Leader (response.FromError).
+// token. The one exception is a refresh that needs the leader
+// (cluster.IsLeadershipError), which every refresh does on a follower when
+// auth.rotate_refresh is on: the follower cannot rotate the refresh token, a
+// write. That is the deployment's routing, not a failure of this node, so it is
+// logged at WARN, and the 503 carries the leader's address in X-Leader
+// (response.FromError), which makes the access log (Logger) a WARN as well.
 func checkFailed(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, logger zerolog.Logger, err error) {
-	if errors.Is(err, cluster.ErrNotLeader) {
+	if cluster.IsLeadershipError(err) {
 		logger.Warn().Err(err).Str("method", r.Method).Str("path", r.URL.Path).
 			Msg("auth refresh needs the leader: a follower cannot rotate a refresh token, so with auth.rotate_refresh route browsers to the leader (X-Leader), or turn rotation off")
 		response.FromError(w, r, mode, err)

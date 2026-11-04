@@ -148,19 +148,25 @@ hashicorp/raft error for `errors.Is`: `ErrLeadershipLost` is
 `storage.ErrUnavailable`. They classify as `Unavailable` too
 (`TestClusterError`). A write that fails with `cluster.ErrLeadershipLost` is
 ambiguous, as it may still commit, so only a write that is safe to repeat should
-be retried.
+be retried. The barrier that starts a transaction writes nothing, so one that
+fails with `ErrLeadershipLost` is `ErrNotLeader`, which is safe to retry
+(`TestAwaitBarrierLeadershipLostIsNotLeader`).
 
 For HTTP the 503 of `ErrNotLeader` and `ErrLeadershipLost`
-(`response.FromError`) carries `X-Leader`, as the `Leader` middleware hands every
-request it passes through the means to ask where the leader is
+(`response.FromError`) carries `X-Leader`, as the `Leader` middleware hands
+every request it passes through the means to ask where the leader is
 (`TestFollowerWriteIsUnavailableWithLeaderHint`). What the header means, and
 when it is not sent, is described once, under "Leader hint" in
 `internal/transport/README.md`.
 
 The `Leader` middleware forwards the writes of a follower, so a follower's
 handlers meet the error only when leadership moves under a request that began
-on the leader, or when a read writes. A handler that answers a failed store with
-`response.Unavailable` instead of `response.FromError` still answers 503, but
+on the leader, or when a read writes. The write handlers of the API answer a
+failed store with `response.StoreFailed`, or with `response.FromError`, and log
+a leadership error as a WARN: 503 with `X-Leader`, where every other error is
+answered and logged as before
+(`TestWriteHandlersAnswerLeadershipErrorsWithTheLeader`). The logout and the
+HTTP discovery sync still answer `response.Unavailable` for every error, 503
 without the header. gRPC discovery keeps the `x-leader` hint of its
 interceptors.
 
@@ -169,9 +175,13 @@ A read that writes is the refresh of a browser session with
 request whose access token is missing or expired, whatever its method, and the
 rotation of the refresh token is a transaction. On a follower it fails with
 `ErrNotLeader` before it consumes the token: the request answers 503 with
-`X-Leader`, no cookie is set, and the follower logs one WARN, not an ERROR. The
-same cookies then refresh at the leader
-(`TestRotatingRefreshOnAFollowerAsksForTheLeader`, and
+`X-Leader`, no cookie is set, and the follower logs a WARN from `Auth`, not an
+ERROR. On an API route the access log wraps `Auth` and logs every 5xx at ERROR,
+except a 503 that carries `X-Leader`, which it logs at WARN: that header is set
+only for a routing condition, so the refresh leaves no ERROR line
+(`TestAccessLogLevelFollowsTheStatus`,
+`TestFollowerRefreshThroughTheAccessLogLogsNoError`). The same cookies then
+refresh at the leader (`TestRotatingRefreshOnAFollowerAsksForTheLeader`, and
 `TestRefreshOnAFollowerAsksForTheLeader` in the middleware package). So with
 `auth.rotate_refresh: true` a raft deployment needs leader-sticky routing: its
 load balancer must send browsers to the leader, or retry a request that gets
@@ -203,8 +213,10 @@ refuses what the FSM would refuse when it applies the operation. So the delete
 of an absent row gives its caller `ErrNotFound` and no command reaches the log,
 and a bulk delete that matches nothing proposes nothing
 (`TestSingleWritesAreValidatedBeforeTheyAreProposed`). Like every transaction it
-starts with a barrier, an entry that carries no write, so a refused write still
-costs one round trip. The session clock the operations carry is the overlay's
+starts with a barrier, an entry that carries no write: every accepted single
+write now costs a barrier entry plus its command, two log entries and two round
+trips, a refused one a barrier alone, and `snapshot_threshold` counts entries,
+barriers included. The session clock the operations carry is the overlay's
 (`TestSingleWritesKeepTheSessionClock`). So a command that fails to apply is a
 corrupted entry or a version skew: a node that does not know an operation
 cannot apply a command a newer node proposed, and the replicas diverge, which
@@ -244,9 +256,16 @@ WARN and ERROR levels and drops its TRACE and DEBUG lines, the elections and
 the replication chatter. Each line carries
 `profile=raft`, the name of the component that logged it as `component` (`raft`,
 `snapshot` or `raft-net`), and the key and value pairs of hashicorp's line as
-fields. No command payload reaches the log: a byte slice is only counted, and
-the value of `command`, under which raft prints a request it did not expect
-whole, is `[redacted]` (`TestHCLogAdapterRedactsPayloads`).
+fields. A key that zerolog or the adapter writes itself, `time`, `level`,
+`message` or `component`, gets the prefix `raft_`: raft logs how long a peer has
+been out of contact as `time`, which must not be a second timestamp on the line
+(`TestHCLogAdapterKeepsTheKeysOfZerolog`). No command payload reaches the log: a
+byte slice is only counted, and the value of `command`, under which raft prints
+a request it did not expect whole, is `[redacted]`
+(`TestHCLogAdapterRedactsPayloads`). The one exception is the kind of a change
+of the configuration, such as `AddVoter`, which operators need to see next to
+the ID and the address of the server it changes
+(`TestHCLogAdapterShowsConfigurationChanges`).
 
 Every connection that the transport refuses or that times out in its handshake
 is one ERROR line, `failed to decode incoming command` from `raft-net`, with the

@@ -63,8 +63,14 @@ func newAPIFixture(t *testing.T) *apiFixture {
 // wrap is set; the fixture seeds and reads the inner store.
 func newAPIFixtureOver(t *testing.T, wrap func(storage.Storage) storage.Storage) *apiFixture {
 	t.Helper()
+	return newAPIFixtureLogging(t, wrap, zerolog.Nop())
+}
+
+// newAPIFixtureLogging is newAPIFixtureOver with the API and its services logging
+// into logger.
+func newAPIFixtureLogging(t *testing.T, wrap func(storage.Storage) storage.Storage, logger zerolog.Logger) *apiFixture {
+	t.Helper()
 	ctx := context.Background()
-	logger := zerolog.Nop()
 	store := inmemory.New()
 	for _, br := range enum.BuiltinRoles {
 		role, err := model.NewRole(br.ID, br.Name)

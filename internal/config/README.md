@@ -211,8 +211,9 @@ is a write, so in raft mode only the leader can make it. A browser whose access
 token has expired (`auth.access_ttl`, 15m by default) and whose request, a GET
 included, reaches a follower gets 503 with `X-Leader` (see "Leader hint" in
 `internal/transport/README.md`) instead of a new token, and sets no cookie; the
-follower logs one WARN, `auth refresh needs the leader`, with the method and the
-path. So with rotation on, a raft deployment needs leader-sticky routing: its
+follower logs a WARN, `auth refresh needs the leader`, with the method and the
+path, and the access log of an API route records the 503 as a WARN too: the
+refresh leaves no ERROR line. So with rotation on, a raft deployment needs leader-sticky routing: its
 load balancer must send browsers to the leader, or retry a request that gets
 `X-Leader` on the node it names. Without rotation a refresh only reads, and
 works on every node, as does a request whose access token is still valid.

@@ -151,3 +151,34 @@ func TestSetLeader(t *testing.T) {
 		})
 	}
 }
+
+// StoreFailed answers a write the store failed as Unavailable does, 503 whatever
+// the error, which FromError would answer 500 or 404 or 409; only a leadership
+// error goes through FromError, so that its 503 carries the leader's address.
+func TestStoreFailed(t *testing.T) {
+	hint := func() string { return "10.0.0.2:8080" }
+	tests := []struct {
+		name string
+		err  error
+		want string // X-Leader
+	}{
+		{"not the leader", fmt.Errorf("raft: WithTx: %w", cluster.ErrNotLeader), "10.0.0.2:8080"},
+		{"leadership lost", fmt.Errorf("raft: apply: %w", cluster.ErrLeadershipLost), "10.0.0.2:8080"},
+		{"an unknown error", errors.New("boom"), ""},
+		{"an unavailable store", storage.ErrUnavailable, ""},
+		{"a conflict, which FromError answers 409", storage.ErrConflict, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/", nil)
+			r = r.WithContext(httpctx.WithLeader(r.Context(), hint))
+			w := httptest.NewRecorder()
+
+			StoreFailed(w, r, httpctx.RenderBlock, tt.err)
+
+			if w.Code != http.StatusServiceUnavailable || w.Header().Get(LeaderHeader) != tt.want {
+				t.Fatalf("HTTP %d with %s %q, want 503 with %q", w.Code, LeaderHeader, w.Header().Get(LeaderHeader), tt.want)
+			}
+		})
+	}
+}
