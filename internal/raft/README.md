@@ -83,10 +83,16 @@ it catches up the state written before it joined
 (`TestJoiningNodeWaitsToBeAdded`). Validation accepts a joining node that
 `discovery.peers` does not list, and an empty list, though a list that is set
 must still parse. A node with raft state loads its configuration from its own
-log whatever the flag says, so a flag left set changes nothing at a restart. A
-node that replaces another, or whose data directory was wiped, starts with the
-flag, so that it does not bootstrap a configuration of its own from the static
-list.
+log whatever the flag says, so a flag left set changes nothing at a restart.
+Clearing it is another matter: without the flag, validation needs
+`discovery.peers` to list the node as its `node_id` at its advertise address,
+and with the dns driver needs its `node_id` and advertise address to be its
+`ip:<discovery.port>`. So a node the API added keeps the flag set until its
+`discovery.peers` lists it, and with dns until its `node_id` matches too:
+cleared earlier, the flag's absence fails every start of the node at
+validation. A node that replaces
+another, or whose data directory was wiped, starts with the flag, so that it
+does not bootstrap a configuration of its own from the static list.
 
 ## Leadership terms
 
@@ -136,8 +142,27 @@ writes, and every race leaves the index it gives behind, never ahead: a change
 against a stale index changes nothing. The index is the one the change's
 `IndexFuture` gave (`TestConfigurationIndexIsTheChangesIndex`), and it stays
 right once a snapshot compacted the log past the configuration's entry
-(`TestConfigurationIndexSurvivesCompaction`). The read scans the entries since
-the latest snapshot, once per change, on the leader; the status reads the copy.
+(`TestConfigurationIndexSurvivesCompaction`). The read scans and decodes every
+entry above the latest snapshot, once per change, on the leader; the status
+reads the copy. Under heavy writes that is up to `snapshot_threshold` entries
+plus what `snapshot_interval` times the write rate adds between two snapshot
+checks; nothing has measured what it costs on a large log. While a snapshot is
+being written, the snapshot store's `List` can log hashicorp/raft's WARN `found
+temporary snapshot`.
+
+A leader's configuration is at index 1 at least, the bootstrap entry, and lists
+the leader. A read that fails, or gives index 0 or no server, is refused, and
+logged at ERROR as `cannot read the raft configuration`: index 0 as `prevIndex`
+would turn hashicorp/raft's check off, and an empty list would let every check
+pass, so that an existing voter's ID added at another address would silently
+move that voter. The API answers it 500, an internal error
+(`TestUnreadableConfigurationRefusesEveryChange`). That happens when no
+snapshot's `meta.json` is readable, which hashicorp/raft's snapshot store skips
+with a WARN, after compaction dropped the configuration's entry. When an older
+snapshot's meta is still readable, the read falls back to it instead, and if
+the configuration changed after that snapshot, its index is stale: every
+change is then refused as `configuration changed, retry`, 409, however often it
+is retried, until the node writes a new snapshot.
 
 hashicorp/raft refuses a change against an index that is no longer the latest
 with `configuration changed since %v (latest is %v)`, which has no sentinel:
@@ -148,19 +173,40 @@ an upgrade words it otherwise.
 
 ### Adding a voter
 
-The leader refuses an ID that a member has, and an address that another member
-uses, compared as written, and then probes the address (`Admin.Probe`): it
-dials it as the transport dials a peer, within 5 s, and over TLS checks the
-peer's certificate against the cluster CA for the host of the address as
-written, as raft does. It then closes its writing side and reads until the
-peer closes, so a peer that refuses this node's certificate, which TLS 1.3
-tells only after the client's side of the handshake, fails the probe too. A
-node it probes logs no error for it (`TestProbeDialsAsRaftDoes`). A failed
-probe changes nothing: `cluster.ErrPeerUnreachable`, a failed precondition,
-which the API answers 422. Without it, a typo would add a voter nobody
-reaches, which raises the quorum: three voters need two, four need three.
-hashicorp/raft v1.8.0 makes the new server a voter at once, with no staging
-step, and it catches up from the leader's log or a snapshot.
+The leader refuses an ID that a member has, and an address at which a member
+answers already: the member's address as written, or another name of an
+ip:port where the member answers. It resolves the host of the new address and
+the host of every member, as the transport dials them, an IP to itself, and
+refuses a shared ip:port with 409, naming the member. A member's host that does
+not resolve, such as the name of a dead member, counts for nothing, and a new
+address whose host does not resolve is left to the probe, which then fails.
+Without this check, a member listed by its IP whose certificate also names its
+DNS host could be added a second time under that host: two voters on one node,
+four voters on three nodes, so the quorum rises to three and the node's
+failure takes two votes, which stops writes (`TestRefusedChangesChangeNothing`,
+`TestAddMemberRules`).
+
+It then probes the address (`Admin.Probe`): it dials it as the transport dials
+a peer, within 5 s, and over TLS checks the peer's certificate against the
+cluster CA for the host of the address as written, as raft does. It then
+closes its writing side and reads until the peer closes, so a peer that refuses
+this node's certificate, which TLS 1.3 tells only after the client's side of
+the handshake, fails the probe too. A node it probes logs no error for it
+(`TestProbeDialsAsRaftDoes`). On plain TCP, with `allow_insecure_transport`,
+the probe proves less: only that something accepted the connection and closed
+it at the end of the stream; a node that runs TLS passes it, and then cannot
+talk to the cluster. A failed probe changes nothing:
+`cluster.ErrPeerUnreachable`, a failed precondition, which the API answers 422.
+Without it, a typo would add a voter nobody reaches, which raises the quorum:
+three voters need two, four need three. hashicorp/raft v1.8.0 makes the new
+server a voter at once, with no staging step, and it catches up from the
+leader's log or a snapshot.
+
+A change that lost leadership while it committed (`cluster.ErrLeadershipLost`)
+can still take effect: the service logs one WARN, `cluster membership change
+outcome unknown`, with the actor, the operation, the member and `force`, the
+fields of the INFO line of a change that committed
+(`TestAChangeOfUnknownOutcomeIsLogged`); read the status to know.
 
 ### Removing a member
 
@@ -176,16 +222,36 @@ the leader refuses every write, barrier and configuration change with
 `cluster.ErrNotLeader` (see "Follower writes"). The node then waits, up to
 5 s, until it knows the new leader, and answers that the leadership moved,
 having removed nothing: the API answers 503 with `X-Leader`, and the removal is
-repeated at the new leader, where it removes a follower. So no removal commits
-while the node leads: hashicorp/raft makes a leader that commits its own
-removal step down only then, and its followers would wait an election timeout
-for the next leader. A transfer can pick a dead voter, when nothing was
-written since it died: it then fails, nothing is removed, and the node still
-leads, so remove dead members first. `TestRemoveLeaderTransfersFirst` shows the
+repeated at the new leader, where it removes a follower. When the wait ends
+with no leader known, the 503 has no `X-Leader` and says to retry. So no
+removal commits while the node leads: hashicorp/raft makes a leader that
+commits its own removal step down only then, and its followers would wait an
+election timeout for the next leader. A transfer can pick a dead voter, when
+nothing was written since it died: it then fails and nothing is removed, so
+remove dead members first. A transfer that fails on its timeout may have told
+its target to start an election already, so the node may lose its leadership
+after the failure all the same. `TestRemoveLeaderTransfersFirst` shows the
 order on three nodes: after the first call another node leads while every node
 still lists the old leader, and after the repeated one the old leader is out
 of every member's configuration, its raft never logged `removed ourself`, and
 writes commit.
+
+### Replacing a dead member
+
+A dead member is replaced by a removal and then an addition, which is what
+`TestReplaceDeadMember` does on three nodes:
+
+1. `DELETE /api/v1/cluster/members/<id>?force=true` at any node: on a
+   three-node cluster the removal leaves two voters, so it needs `force`.
+2. Start the replacement with `cluster.raft.join: true` and an empty
+   `data_dir`, and a certificate of the cluster CA for its advertise host.
+3. `POST /api/v1/cluster/members` with its `node_id` and advertise address:
+   the leader probes the address, adds the node as a voter, and the node
+   catches up from the leader's log or a snapshot.
+4. Keep `join` set on the replacement until its `discovery.peers` lists it
+   (see "Joining a running cluster").
+
+### A removed node
 
 A removed node's raft keeps running, outside the cluster. hashicorp/raft shuts
 a node down at its removal (`ShutdownOnRemove`, which podium leaves on) only

@@ -101,10 +101,12 @@ func (a *API) clusterMemberRemove(w http.ResponseWriter, r *http.Request, mode h
 // clusterChangeFailed answers a membership change that the cluster service
 // refused or that did not take place. Each changed nothing, but a change that
 // lost leadership while it committed (cluster.ErrLeadershipLost), which may
-// still take effect: like every leadership error it answers 503 with X-Leader.
-// id is the member's, and address the address of a member to add, which a
-// failed probe names.
+// still take effect: like every leadership error it answers 503 with X-Leader,
+// and the service logged it, with its actor, as of unknown outcome. id is the
+// member's, and address the address of a member to add, which a failed probe
+// names.
 func (a *API) clusterChangeFailed(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, err error, id, address string) {
+	var inUse *clustersvc.AddressInUseError
 	switch {
 	case errors.Is(err, clustersvc.ErrInvalidMember):
 		response.BadRequestMsg(w, r, mode, "A member needs an id without /, =, a comma or surrounding spaces, and an address host:port with a port from 1 to 65535.")
@@ -112,8 +114,8 @@ func (a *API) clusterChangeFailed(w http.ResponseWriter, r *http.Request, mode h
 		response.NotFound(w, r, mode)
 	case errors.Is(err, clustersvc.ErrMemberExists):
 		response.Conflict(w, r, mode, "A member of the cluster has this id already.")
-	case errors.Is(err, clustersvc.ErrAddressInUse):
-		response.Conflict(w, r, mode, "Another member of the cluster uses this address.")
+	case errors.As(err, &inUse):
+		response.Conflict(w, r, mode, fmt.Sprintf("Member %s of the cluster answers at %s already.", inUse.Member, inUse.At))
 	case errors.Is(err, clustersvc.ErrForceRequired):
 		response.Conflict(w, r, mode, "The removal would leave fewer than 3 voters: repeat it with force=true to remove the member anyway.")
 	case errors.Is(err, clustersvc.ErrLastVoter):
@@ -122,11 +124,20 @@ func (a *API) clusterChangeFailed(w http.ResponseWriter, r *http.Request, mode h
 		response.Conflict(w, r, mode, "configuration changed, retry")
 	case errors.Is(err, cluster.ErrPeerUnreachable):
 		response.UnprocessableEntity(w, r, mode, fmt.Sprintf("No raft node of this cluster answers at %s: check the address, that the node runs, and its certificate. Nothing was changed.", address))
+	case errors.Is(err, clustersvc.ErrLeadershipMoved) && httpctx.Leader(r.Context()) == "":
+		// No new leader known within the wait, or none derivable: no X-Leader to name.
+		response.UnavailableMsg(w, r, mode, "Leadership moved; no leader is known yet, retry.")
 	case errors.Is(err, clustersvc.ErrLeadershipMoved):
 		response.NotLeader(w, r, mode, "This node handed its leadership over and is still a member: repeat the request, at the leader that X-Leader names, to remove it.")
 	case errors.Is(err, clustersvc.ErrTransferFailed):
 		a.logger.Warn().Err(err).Str("member_id", id).Msg("cluster member removal failed: the leadership transfer failed, nothing was removed")
 		response.UnavailableMsg(w, r, mode, "The leadership transfer failed, so nothing was removed: remove any dead member first, then retry.")
+	case errors.Is(err, clustersvc.ErrConfigurationUnreadable):
+		// The service logged it at ERROR.
+		response.FromError(w, r, mode, err)
+	case errors.Is(err, cluster.ErrLeadershipLost):
+		// The service logged it, with its actor, as of unknown outcome.
+		response.StoreFailed(w, r, mode, err)
 	default:
 		a.failure(err).Str("member_id", id).Msg("cluster membership change failed")
 		response.StoreFailed(w, r, mode, err)

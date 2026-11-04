@@ -492,8 +492,14 @@ for the leader of the running cluster to add it with `POST
 /api/v1/cluster/members` (see "Cluster" in `internal/handler/README.md`). A
 node that replaces a removed one, or whose `data_dir` was wiped, starts with
 it: without it, a first start bootstraps a configuration of its own from the
-static list. Once the node holds raft state the flag changes nothing: a
-restart loads the configuration from the node's own log, join or not.
+static list. Once the node holds raft state, a restart loads the configuration
+from the node's own log, so leaving the flag set changes nothing. Clearing it
+does: without it, configuration loading needs `discovery.peers` to list the
+node as its `node_id` at its advertise address, and with `discovery.driver:
+dns` needs `node_id` and the advertise address to be the node's
+`ip:<discovery.port>`, as for any node. So keep the flag set until
+`discovery.peers` lists the node, or with dns until its `node_id` matches too;
+see "Replacing a dead member" in `internal/raft/README.md`.
 
 ### Raft transport security
 

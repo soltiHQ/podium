@@ -173,8 +173,9 @@ the rules) with `WithCluster`. Standalone registers none, so its cluster paths a
 page route takes: 404 to an authenticated GET, 405 to an authenticated POST or DELETE, and 401 without credentials, as
 before raft mode had them (`TestClusterRoutesAbsentInStandalone`). `cluster:get` and `cluster:manage` exist in both modes,
 and appear in both among the permissions a user may be given, but they guard only these raft-mode routes. Of the built-in
-roles only Admin holds them, as it holds `enum.All`; bootstrap reconciles a stored Admin role to it at a standalone start
-and at each raft leadership term (`TestClusterRoutesNeedPermission`).
+roles only Admin holds them, as it holds `enum.All` (`TestClusterRoutesNeedPermission`). Bootstrap resets a stored Admin
+role that differs to its definition (`TestBuiltinRolesReconciled` in `internal/bootstrap`), which it runs at a standalone
+start and at each raft leadership term (see `internal/bootstrap/README.md`).
 
 `GET /api/v1/cluster` is a read, so the node that gets it answers it itself, a follower included: its cluster as it sees
 it. `node_id`, `role` (`leader`, `follower`, `candidate` or `shutdown`), `leader_id` and `leader_address`, the raft
@@ -193,22 +194,26 @@ a change of the configuration in between refuses it instead of slipping past the
 |--------|--------------------------------------------------------------------------------------------------------------|
 | 400    | a body without `id` or `address`; an `id` with `/`, `=`, a comma or spaces around it, which the member's route or `discovery.peers` could not name; an `address` that is not `host:port` with a port from 1 to 65535 or names no host; a `force` that is no boolean |
 | 404    | no member has the `id` to remove                                                                             |
-| 409    | a member has the `id`, or the `address` as written, already; a removal that leaves fewer than 3 voters, without `force=true`, which the message names; the last voter, `The last voter cannot be removed.`, force or not; a configuration that changed after the leader read it, `configuration changed, retry` |
+| 409    | a member has the `id` already; a member answers at the `address` already, as written or under another name of the ip:port it answers at, which the message names with the member, `Member n2 of the cluster answers at 10.0.0.2:7000 already.`: the leader resolves the host of the `address` and of every member, skips a member whose host does not resolve, and refuses a shared ip:port, as one node must not be two voters; a removal that leaves fewer than 3 voters, without `force=true`, which the message names; the last voter, `The last voter cannot be removed.`, force or not; a configuration that changed after the leader read it, `configuration changed, retry` |
 | 415    | a body that is not declared as JSON                                                                          |
 | 422    | no raft node of the cluster answers at the `address`, which the message names: before it adds a voter, the leader dials the address as the raft transport would and checks the certificate there as raft does, so that a typo never adds a voter nobody reaches, which raises the quorum |
+| 500    | the leader cannot read its configuration: a read of its stores that fails, or gives index 0 or no server, logged at ERROR as `cannot read the raft configuration` (see "Membership" in `internal/raft/README.md`) |
 | 503    | the write met a follower or lost leadership: with `X-Leader`, as every write (see "Leader hint" in `internal/transport/README.md`); the leader's own removal, below |
 
 The leader asked to remove itself first hands its leadership over to another voter, with hashicorp/raft's leadership
 transfer, so that writes resume without an election timeout, and removes nothing yet. Once it knows the new leader, it
 answers 503 with `X-Leader` and the message `This node handed its leadership over and is still a member: repeat the
 request, at the leader that X-Leader names, to remove it.`. The request repeated there, or at the same node, which now
-forwards it, removes a follower. So the removal of the leader takes two calls. A transfer that fails, as one to a dead
-voter that hashicorp/raft picked, removes nothing and answers 503 without `X-Leader`: remove dead members first. See
-"Membership" in `internal/raft/README.md`, which also says what becomes of a removed node, whose process must be stopped.
+forwards it, removes a follower. So the removal of the leader takes two calls. When no new leader is known after 5 s, or
+none can be named, the 503 has no `X-Leader` and says `Leadership moved; no leader is known yet, retry.`. A transfer that
+fails, as one to a dead voter that hashicorp/raft picked, removes nothing and answers 503 without `X-Leader`: remove dead
+members first. See "Membership" in `internal/raft/README.md`, which also says how to replace a dead member, and what
+becomes of a removed node, whose process must be stopped.
 
 Every change that commits logs one INFO line, `cluster membership changed`, with `actor_user_id`, `operation` (`add` or
-`remove`), `member_id`, `member_address` and `force`; a hand-over logs one too, with the `transfer` operation. No line
-names a token.
+`remove`), `member_id`, `member_address` and `force`; a hand-over logs one too, with the `transfer` operation. A change
+that lost leadership while it committed, which may still take effect, logs one WARN line with the same fields instead,
+`cluster membership change outcome unknown`. No line names a token.
 
 ### Other
 | Method | Path                    | Permission                                                           |

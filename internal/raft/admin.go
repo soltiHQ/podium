@@ -97,7 +97,9 @@ func (a *Admin) RemoveServer(id string, prevIndex uint64) (uint64, error) {
 // LeadershipTransfer, which picks the voter with the highest next index and
 // returns once this node left its leader loop, or after a failed transfer. That
 // can pick a dead voter, if nothing was written since it died: the transfer
-// then fails. A node that does not lead, or hands over already, refuses with
+// then fails. A transfer that fails on its timeout may have sent its TimeoutNow
+// already, so the target can still win and the node lose its leadership after
+// the error. A node that does not lead, or hands over already, refuses with
 // cluster.ErrNotLeader (clusterError).
 func (a *Admin) TransferLeadership() error {
 	return clusterError(a.p.raft.LeadershipTransfer().Error())
@@ -136,9 +138,15 @@ func suffrage(s hraft.ServerSuffrage) cluster.Suffrage {
 // compaction during the scan. A change against a stale index is refused, as
 // cluster.ErrConfigurationChanged, and changes nothing. A gap in the log, which
 // the LogStore contract permits after a snapshot restore, or an entry compacted
-// meanwhile, is skipped. The scan reads every entry since the latest snapshot,
-// which compaction keeps near snapshot_threshold, so it runs once per change, on
-// the leader, and not for a status.
+// meanwhile, is skipped. A store that gives no configuration at all, such as no
+// readable snapshot meta once compaction dropped the configuration's entry,
+// gives an empty one at index 0, which the cluster service refuses.
+//
+// The scan reads and decodes every entry above the latest snapshot: up to
+// snapshot_threshold, plus what snapshot_interval times the write rate adds
+// between two checks, under heavy writes. So it runs once per change, on the
+// leader, and never for a status. While a snapshot is being written, List can
+// log hashicorp/raft's WARN "found temporary snapshot".
 func latestConfiguration(logs hraft.LogStore, snaps hraft.SnapshotStore) (hraft.Configuration, uint64, error) {
 	var (
 		floor uint64

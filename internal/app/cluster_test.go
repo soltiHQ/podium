@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -209,11 +210,14 @@ func (a *changedAfterRead) Configuration() (cluster.Configuration, error) {
 }
 
 // On a real cluster the changes that the rules refuse change nothing: an added
-// ID or address that a member has, an address where no node answers, and a
-// removal that needs force. Nor does a change whose configuration changed
-// between the read of its rules and its proposal: hashicorp/raft refuses it by
-// the index the rules read, which the API answers 409 "configuration changed,
-// retry". After each, the configuration is the one before it, at its index.
+// ID that a member has, an address at which a member answers, as written or
+// under another name, localhost, which the member's certificate names as well,
+// so that the probe alone would let it in as a second voter on the member's
+// node, an address where no node answers, and a removal that needs force. Nor
+// does a change whose configuration changed between the read of its rules and
+// its proposal: hashicorp/raft refuses it by the index the rules read, which the
+// API answers 409 "configuration changed, retry". After each, the configuration
+// is the one before it, at its index.
 func TestRefusedChangesChangeNothing(t *testing.T) {
 	leader, followers := raftCluster(t, "n1", "n2", "n3")
 	svc := clusterOf(leader)
@@ -223,27 +227,44 @@ func TestRefusedChangesChangeNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	closed := loopbackAddrs(t, 1)[0]
+	_, port, err := net.SplitHostPort(followers[0].addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alias := net.JoinHostPort("localhost", port)
+	if err := leader.admin.Probe(ctx, alias); err != nil {
+		t.Fatalf("probe of %s, another name of %s: %v, want the member to answer there", alias, followers[0].id, err)
+	}
 	for _, tc := range []struct {
 		name   string
 		change func() error
 		want   error
+		holder string // the member an AddressInUseError names
 	}{
 		{"the ID of a member", func() error {
 			return svc.AddMember(ctx, operator, clustersvc.AddRequest{ID: followers[0].id, Address: closed})
-		}, clustersvc.ErrMemberExists},
+		}, clustersvc.ErrMemberExists, ""},
 		{"the address of a member", func() error {
 			return svc.AddMember(ctx, operator, clustersvc.AddRequest{ID: "n9", Address: followers[0].addr})
-		}, clustersvc.ErrAddressInUse},
+		}, clustersvc.ErrAddressInUse, followers[0].id},
+		{"another name of a member", func() error {
+			return svc.AddMember(ctx, operator, clustersvc.AddRequest{ID: "n9", Address: alias})
+		}, clustersvc.ErrAddressInUse, followers[0].id},
 		{"an address where no node answers", func() error {
 			return svc.AddMember(ctx, operator, clustersvc.AddRequest{ID: "n9", Address: closed})
-		}, cluster.ErrPeerUnreachable},
+		}, cluster.ErrPeerUnreachable, ""},
 		{"a removal that needs force", func() error {
 			return svc.RemoveMember(ctx, operator, clustersvc.RemoveRequest{ID: followers[0].id})
-		}, clustersvc.ErrForceRequired},
+		}, clustersvc.ErrForceRequired, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := tc.change(); !errors.Is(err, tc.want) {
+			err := tc.change()
+			if !errors.Is(err, tc.want) {
 				t.Fatalf("%v, want %v", err, tc.want)
+			}
+			var inUse *clustersvc.AddressInUseError
+			if tc.holder != "" && (!errors.As(err, &inUse) || inUse.Member != tc.holder) {
+				t.Fatalf("%v, want the member %s named", err, tc.holder)
 			}
 			after, err := leader.admin.Configuration()
 			if err != nil || after.Index != before.Index || !slices.Equal(after.Servers, before.Servers) {

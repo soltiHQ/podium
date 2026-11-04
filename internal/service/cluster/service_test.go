@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"slices"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/cluster"
+	"github.com/soltiHQ/control-plane/internal/transport/errkind"
 )
 
 // change is a change of the configuration a stubAdmin was asked for.
@@ -39,7 +41,7 @@ type stubAdmin struct {
 	asks       int            // the asks for the leader
 	conf       cluster.Configuration
 
-	probeErr, addErr, removeErr, transferErr error
+	confErr, probeErr, addErr, removeErr, transferErr error
 
 	probes    []string
 	changes   []change
@@ -82,7 +84,7 @@ func (s *stubAdmin) LastIndex() uint64 { return 42 }
 func (s *stubAdmin) Servers() []cluster.Server { return slices.Clone(s.conf.Servers) }
 
 func (s *stubAdmin) Configuration() (cluster.Configuration, error) {
-	return cluster.Configuration{Index: s.conf.Index, Servers: slices.Clone(s.conf.Servers)}, nil
+	return cluster.Configuration{Index: s.conf.Index, Servers: slices.Clone(s.conf.Servers)}, s.confErr
 }
 
 func (s *stubAdmin) Probe(_ context.Context, address string) error {
@@ -117,59 +119,101 @@ func (s *stubAdmin) TransferLeadership() error {
 	return nil
 }
 
+// names is the DNS of these tests: a resolver that knows its names, each at its
+// IPs, and no other name.
+type names map[string][]string
+
+func (n names) LookupIPAddr(_ context.Context, host string) ([]net.IPAddr, error) {
+	ips, ok := n[host]
+	if !ok {
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	out := make([]net.IPAddr, 0, len(ips))
+	for _, ip := range ips {
+		out = append(out, net.IPAddr{IP: net.ParseIP(ip)})
+	}
+	return out, nil
+}
+
+// newService is New over raft, which looks hosts up in the names of the tests:
+// podium-2.podium is at 10.0.0.2, where leading puts n2, and podium-4.podium at
+// 10.0.0.4.
+func newService(raft *stubAdmin, logger zerolog.Logger) *Service {
+	svc := New(raft, logger)
+	svc.resolver = names{"podium-2.podium": {"10.0.0.2"}, "podium-4.podium": {"10.0.0.4"}}
+	return svc
+}
+
 // admin is the actor of the changes, with credentials of its session that no
 // log line may name.
 var admin = &identity.Identity{UserID: "user-admin", Subject: "admin", TokenID: "token-id-never-logged", SessionID: "session-id-never-logged"}
 
 // The rules of an addition refuse, before anything changes: a member without an
 // ID or a host:port address, an ID that discovery.peers or the member's route
-// cannot name, an ID or an address that a member has already, and an address
-// where no node of the cluster answers. A node that does not lead refuses too,
-// as not the leader. An addition that passes them is applied against the index
-// of the configuration the rules read.
+// cannot name, an ID that a member has already, an address at which a member
+// answers already, as written or under another name of its ip:port, which the
+// refusal names, and an address where no node of the cluster answers. A
+// member's name that does not resolve, as a dead member's can, counts for
+// nothing, and a new name that does not resolve is left to the probe. A node
+// that does not lead refuses too, as not the leader. An addition that passes
+// them is applied against the index of the configuration the rules read.
 func TestAddMemberRules(t *testing.T) {
 	unreachable := fmt.Errorf("raft: probe 10.0.0.4:7000: %w", cluster.ErrPeerUnreachable)
 	for _, tc := range []struct {
 		name     string
 		req      AddRequest
 		setup    func(*stubAdmin)
-		want     error // nil: added
-		probed   bool  // the address was probed
-		proposed bool  // AddVoter was called
+		want     error  // nil: added
+		holder   string // the member an AddressInUseError names
+		probed   bool   // the address was probed
+		proposed bool   // AddVoter was called
 	}{
-		{"a new voter", AddRequest{ID: "n4", Address: "10.0.0.4:7000"}, nil, nil, true, true},
-		{"a host name", AddRequest{ID: "n4", Address: "podium-4.podium:7000"}, nil, nil, true, true},
-		{"an IPv6 address", AddRequest{ID: "n4", Address: "[fd00::4]:7000"}, nil, nil, true, true},
-		{"no ID", AddRequest{Address: "10.0.0.4:7000"}, nil, ErrInvalidMember, false, false},
-		{"no address", AddRequest{ID: "n4"}, nil, ErrInvalidMember, false, false},
-		{"an address without a port", AddRequest{ID: "n4", Address: "10.0.0.4"}, nil, ErrInvalidMember, false, false},
-		{"port 0", AddRequest{ID: "n4", Address: "10.0.0.4:0"}, nil, ErrInvalidMember, false, false},
-		{"a port out of range", AddRequest{ID: "n4", Address: "10.0.0.4:65536"}, nil, ErrInvalidMember, false, false},
-		{"no host", AddRequest{ID: "n4", Address: ":7000"}, nil, ErrInvalidMember, false, false},
-		{"every interface", AddRequest{ID: "n4", Address: "0.0.0.0:7000"}, nil, ErrInvalidMember, false, false},
-		{"an ID with a /", AddRequest{ID: "n/4", Address: "10.0.0.4:7000"}, nil, ErrInvalidMember, false, false},
-		{"an ID with a =", AddRequest{ID: "n=4", Address: "10.0.0.4:7000"}, nil, ErrInvalidMember, false, false},
-		{"an ID with a comma", AddRequest{ID: "n,4", Address: "10.0.0.4:7000"}, nil, ErrInvalidMember, false, false},
-		{"an ID with surrounding spaces", AddRequest{ID: " n4", Address: "10.0.0.4:7000"}, nil, ErrInvalidMember, false, false},
-		{"the ID of a member", AddRequest{ID: "n2", Address: "10.0.0.4:7000"}, nil, ErrMemberExists, false, false},
-		{"the address of a member", AddRequest{ID: "n4", Address: "10.0.0.2:7000"}, nil, ErrAddressInUse, false, false},
-		{"no node answers", AddRequest{ID: "n4", Address: "10.0.0.4:7000"}, func(s *stubAdmin) { s.probeErr = unreachable }, cluster.ErrPeerUnreachable, true, false},
-		{"not the leader", AddRequest{ID: "n4", Address: "10.0.0.4:7000"}, func(s *stubAdmin) { s.role = cluster.RoleFollower }, cluster.ErrNotLeader, false, false},
+		{"a new voter", AddRequest{ID: "n4", Address: "10.0.0.4:7000"}, nil, nil, "", true, true},
+		{"a host name", AddRequest{ID: "n4", Address: "podium-4.podium:7000"}, nil, nil, "", true, true},
+		{"an IPv6 address", AddRequest{ID: "n4", Address: "[fd00::4]:7000"}, nil, nil, "", true, true},
+		{"no ID", AddRequest{Address: "10.0.0.4:7000"}, nil, ErrInvalidMember, "", false, false},
+		{"no address", AddRequest{ID: "n4"}, nil, ErrInvalidMember, "", false, false},
+		{"an address without a port", AddRequest{ID: "n4", Address: "10.0.0.4"}, nil, ErrInvalidMember, "", false, false},
+		{"port 0", AddRequest{ID: "n4", Address: "10.0.0.4:0"}, nil, ErrInvalidMember, "", false, false},
+		{"a port out of range", AddRequest{ID: "n4", Address: "10.0.0.4:65536"}, nil, ErrInvalidMember, "", false, false},
+		{"no host", AddRequest{ID: "n4", Address: ":7000"}, nil, ErrInvalidMember, "", false, false},
+		{"every interface", AddRequest{ID: "n4", Address: "0.0.0.0:7000"}, nil, ErrInvalidMember, "", false, false},
+		{"an ID with a /", AddRequest{ID: "n/4", Address: "10.0.0.4:7000"}, nil, ErrInvalidMember, "", false, false},
+		{"an ID with a =", AddRequest{ID: "n=4", Address: "10.0.0.4:7000"}, nil, ErrInvalidMember, "", false, false},
+		{"an ID with a comma", AddRequest{ID: "n,4", Address: "10.0.0.4:7000"}, nil, ErrInvalidMember, "", false, false},
+		{"an ID with surrounding spaces", AddRequest{ID: " n4", Address: "10.0.0.4:7000"}, nil, ErrInvalidMember, "", false, false},
+		{"the ID of a member", AddRequest{ID: "n2", Address: "10.0.0.4:7000"}, nil, ErrMemberExists, "", false, false},
+		{"the address of a member", AddRequest{ID: "n4", Address: "10.0.0.2:7000"}, nil, ErrAddressInUse, "n2", false, false},
+		{"another name of a member", AddRequest{ID: "n4", Address: "podium-2.podium:7000"}, nil, ErrAddressInUse, "n2", false, false},
+		{"the IP of a member listed by name", AddRequest{ID: "n4", Address: "10.0.0.2:7000"}, func(s *stubAdmin) {
+			s.conf.Servers[1].Address = "podium-2.podium:7000"
+		}, ErrAddressInUse, "n2", false, false},
+		{"another name of a member's host, at another port", AddRequest{ID: "n4", Address: "podium-2.podium:7009"}, nil, nil, "", true, true},
+		{"a dead member listed by a name that does not resolve", AddRequest{ID: "n4", Address: "10.0.0.4:7000"}, func(s *stubAdmin) {
+			s.conf.Servers[2].Address = "podium-3.podium:7000"
+		}, nil, "", true, true},
+		{"a new name that does not resolve, left to the probe", AddRequest{ID: "n4", Address: "podium-9.podium:7000"}, nil, nil, "", true, true},
+		{"no node answers", AddRequest{ID: "n4", Address: "10.0.0.4:7000"}, func(s *stubAdmin) { s.probeErr = unreachable }, cluster.ErrPeerUnreachable, "", true, false},
+		{"not the leader", AddRequest{ID: "n4", Address: "10.0.0.4:7000"}, func(s *stubAdmin) { s.role = cluster.RoleFollower }, cluster.ErrNotLeader, "", false, false},
 		{"a configuration changed meanwhile", AddRequest{ID: "n4", Address: "10.0.0.4:7000"}, func(s *stubAdmin) {
 			s.addErr = fmt.Errorf("raft: %w", cluster.ErrConfigurationChanged)
-		}, cluster.ErrConfigurationChanged, true, true},
+		}, cluster.ErrConfigurationChanged, "", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raft := leading("n1", "n2", "n3")
 			if tc.setup != nil {
 				tc.setup(raft)
 			}
-			err := New(raft, zerolog.Nop()).AddMember(context.Background(), admin, tc.req)
+			err := newService(raft, zerolog.Nop()).AddMember(context.Background(), admin, tc.req)
 			switch {
 			case tc.want == nil && err != nil:
 				t.Fatalf("AddMember(%+v) = %v, want nil", tc.req, err)
 			case tc.want != nil && !errors.Is(err, tc.want):
 				t.Fatalf("AddMember(%+v) = %v, want %v", tc.req, err, tc.want)
+			}
+			var inUse *AddressInUseError
+			if tc.holder != "" && (!errors.As(err, &inUse) || inUse.Member != tc.holder) {
+				t.Fatalf("AddMember(%+v) = %v, want the member %s named", tc.req, err, tc.holder)
 			}
 			if probed := len(raft.probes) > 0; probed != tc.probed || (probed && raft.probes[0] != tc.req.Address) {
 				t.Fatalf("probes %v, want a probe of %s: %v", raft.probes, tc.req.Address, tc.probed)
@@ -209,7 +253,7 @@ func TestRemoveMemberForceGuard(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raft := leading(tc.voters...)
-			err := New(raft, zerolog.Nop()).RemoveMember(context.Background(), admin, RemoveRequest{ID: tc.id, Force: tc.force})
+			err := newService(raft, zerolog.Nop()).RemoveMember(context.Background(), admin, RemoveRequest{ID: tc.id, Force: tc.force})
 			switch {
 			case tc.want == nil && err != nil:
 				t.Fatalf("RemoveMember(%s, force %v) = %v, want nil", tc.id, tc.force, err)
@@ -237,7 +281,7 @@ func TestRemovingTheLeaderHandsItsLeadershipOverFirst(t *testing.T) {
 	ctx := context.Background()
 	t.Run("transferred", func(t *testing.T) {
 		raft := leading("n1", "n2", "n3")
-		err := New(raft, zerolog.Nop()).RemoveMember(ctx, admin, RemoveRequest{ID: "n1", Force: true})
+		err := newService(raft, zerolog.Nop()).RemoveMember(ctx, admin, RemoveRequest{ID: "n1", Force: true})
 		if !errors.Is(err, ErrLeadershipMoved) || !errors.Is(err, cluster.ErrNotLeader) {
 			t.Fatalf("RemoveMember(n1) = %v, want %v, a not-the-leader error", err, ErrLeadershipMoved)
 		}
@@ -251,7 +295,7 @@ func TestRemovingTheLeaderHandsItsLeadershipOverFirst(t *testing.T) {
 	t.Run("the new leader known later", func(t *testing.T) {
 		raft := leading("n1", "n2", "n3")
 		raft.unknownFor = 3
-		if err := New(raft, zerolog.Nop()).RemoveMember(ctx, admin, RemoveRequest{ID: "n1", Force: true}); !errors.Is(err, ErrLeadershipMoved) {
+		if err := newService(raft, zerolog.Nop()).RemoveMember(ctx, admin, RemoveRequest{ID: "n1", Force: true}); !errors.Is(err, ErrLeadershipMoved) {
 			t.Fatalf("RemoveMember(n1) = %v, want %v", err, ErrLeadershipMoved)
 		}
 		raft.mu.Lock()
@@ -263,7 +307,7 @@ func TestRemovingTheLeaderHandsItsLeadershipOverFirst(t *testing.T) {
 	t.Run("no new leader within the bound", func(t *testing.T) {
 		raft := leading("n1", "n2", "n3")
 		raft.next = cluster.Server{}
-		svc := New(raft, zerolog.Nop())
+		svc := newService(raft, zerolog.Nop())
 		svc.leaderWait = 20 * time.Millisecond
 		if err := svc.RemoveMember(ctx, admin, RemoveRequest{ID: "n1", Force: true}); !errors.Is(err, ErrLeadershipMoved) {
 			t.Fatalf("RemoveMember(n1) = %v, want %v once the bound passed", err, ErrLeadershipMoved)
@@ -272,7 +316,7 @@ func TestRemovingTheLeaderHandsItsLeadershipOverFirst(t *testing.T) {
 	t.Run("a failed transfer", func(t *testing.T) {
 		raft := leading("n1", "n2", "n3")
 		raft.transferErr = errors.New("leadership transfer timeout")
-		err := New(raft, zerolog.Nop()).RemoveMember(ctx, admin, RemoveRequest{ID: "n1", Force: true})
+		err := newService(raft, zerolog.Nop()).RemoveMember(ctx, admin, RemoveRequest{ID: "n1", Force: true})
 		if !errors.Is(err, ErrTransferFailed) || errors.Is(err, cluster.ErrNotLeader) {
 			t.Fatalf("RemoveMember(n1) = %v, want %v and no not-the-leader error", err, ErrTransferFailed)
 		}
@@ -282,7 +326,7 @@ func TestRemovingTheLeaderHandsItsLeadershipOverFirst(t *testing.T) {
 	})
 	t.Run("refused by the guard", func(t *testing.T) {
 		raft := leading("n1", "n2", "n3")
-		if err := New(raft, zerolog.Nop()).RemoveMember(ctx, admin, RemoveRequest{ID: "n1"}); !errors.Is(err, ErrForceRequired) {
+		if err := newService(raft, zerolog.Nop()).RemoveMember(ctx, admin, RemoveRequest{ID: "n1"}); !errors.Is(err, ErrForceRequired) {
 			t.Fatalf("RemoveMember(n1) = %v, want %v", err, ErrForceRequired)
 		}
 		if raft.transfers != 0 {
@@ -297,7 +341,7 @@ func TestRemovingTheLeaderHandsItsLeadershipOverFirst(t *testing.T) {
 func TestMembershipChangesLogOneInfoLine(t *testing.T) {
 	var logs bytes.Buffer
 	raft := leading("n1", "n2", "n3", "n4")
-	svc := New(raft, zerolog.New(&logs))
+	svc := newService(raft, zerolog.New(&logs))
 	ctx := context.Background()
 	if err := svc.AddMember(ctx, admin, AddRequest{ID: "n5", Address: "10.0.0.5:7000"}); err != nil {
 		t.Fatal(err)
@@ -339,12 +383,139 @@ func TestMembershipChangesLogOneInfoLine(t *testing.T) {
 	}
 }
 
+// logLines parses what a service logged, one JSON object per line.
+func logLines(t *testing.T, logs *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var lines []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var fields map[string]any
+		if err := json.Unmarshal([]byte(line), &fields); err != nil {
+			t.Fatalf("%q: %v", line, err)
+		}
+		lines = append(lines, fields)
+	}
+	return lines
+}
+
+// A leader whose stores give no configuration to check a change against
+// refuses every change before it probes or proposes anything, as
+// ErrConfigurationUnreadable, which errkind classifies as Internal, with one
+// ERROR line: a read that fails, a configuration at index 0, which as prevIndex
+// would turn hashicorp/raft's check off, and one with no server, which every
+// rule would pass.
+func TestUnreadableConfigurationRefusesEveryChange(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*stubAdmin)
+	}{
+		{"a read that fails", func(s *stubAdmin) { s.confErr = errors.New("raft: read log 9: bolt: database not open") }},
+		{"index 0", func(s *stubAdmin) { s.conf.Index = 0 }},
+		{"no server", func(s *stubAdmin) { s.conf.Servers = nil }},
+	} {
+		for _, change := range []struct {
+			name string
+			run  func(*Service) error
+		}{
+			{"add", func(svc *Service) error {
+				return svc.AddMember(context.Background(), admin, AddRequest{ID: "n4", Address: "10.0.0.4:7000"})
+			}},
+			{"remove", func(svc *Service) error {
+				return svc.RemoveMember(context.Background(), admin, RemoveRequest{ID: "n3", Force: true})
+			}},
+		} {
+			t.Run(tc.name+", "+change.name, func(t *testing.T) {
+				raft := leading("n1", "n2", "n3")
+				tc.setup(raft)
+				var logs bytes.Buffer
+				err := change.run(newService(raft, zerolog.New(&logs)))
+				if !errors.Is(err, ErrConfigurationUnreadable) {
+					t.Fatalf("%v, want %v", err, ErrConfigurationUnreadable)
+				}
+				if kind := errkind.Classify(err); kind != errkind.Internal {
+					t.Fatalf("errkind.Classify(%v) = %v, want Internal", err, kind)
+				}
+				if len(raft.probes) != 0 || len(raft.changes) != 0 || raft.transfers != 0 {
+					t.Fatalf("probes %v, changes %v and %d transfers, want none", raft.probes, raft.changes, raft.transfers)
+				}
+				lines := logLines(t, &logs)
+				if len(lines) != 1 || lines[0]["level"] != "error" || !strings.HasPrefix(fmt.Sprint(lines[0]["message"]), "cannot read the raft configuration") {
+					t.Fatalf("logged %v, want one ERROR line: cannot read the raft configuration", lines)
+				}
+			})
+		}
+	}
+}
+
+// A change that lost leadership while it committed can still take effect: it
+// logs one WARN line that its outcome is unknown, with who changed what, the
+// fields of the INFO line of a change, and no such INFO line. A change that
+// failed otherwise, refused for a configuration that changed, logs none.
+func TestAChangeOfUnknownOutcomeIsLogged(t *testing.T) {
+	lost := fmt.Errorf("raft: %w", cluster.ErrLeadershipLost)
+	changed := fmt.Errorf("raft: %w", cluster.ErrConfigurationChanged)
+	add := func(svc *Service) error {
+		return svc.AddMember(context.Background(), admin, AddRequest{ID: "n5", Address: "10.0.0.5:7000"})
+	}
+	remove := func(svc *Service) error {
+		return svc.RemoveMember(context.Background(), admin, RemoveRequest{ID: "n4", Force: true})
+	}
+	for _, tc := range []struct {
+		name   string
+		setup  func(*stubAdmin)
+		change func(*Service) error
+		want   error
+		line   map[string]any // the WARN line, nil for none
+	}{
+		{
+			"an addition that lost leadership", func(s *stubAdmin) { s.addErr = lost }, add, cluster.ErrLeadershipLost,
+			map[string]any{"actor_user_id": "user-admin", "operation": "add", "member_id": "n5", "member_address": "10.0.0.5:7000", "force": false},
+		},
+		{
+			"a removal that lost leadership", func(s *stubAdmin) { s.removeErr = lost }, remove, cluster.ErrLeadershipLost,
+			map[string]any{"actor_user_id": "user-admin", "operation": "remove", "member_id": "n4", "member_address": "10.0.0.4:7000", "force": true},
+		},
+		{"a removal refused for a configuration that changed", func(s *stubAdmin) { s.removeErr = changed }, remove, cluster.ErrConfigurationChanged, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raft := leading("n1", "n2", "n3", "n4")
+			tc.setup(raft)
+			var logs bytes.Buffer
+			if err := tc.change(newService(raft, zerolog.New(&logs))); !errors.Is(err, tc.want) {
+				t.Fatalf("%v, want %v", err, tc.want)
+			}
+			lines := logLines(t, &logs)
+			if tc.line == nil {
+				if len(lines) != 0 {
+					t.Fatalf("logged %v, want nothing", lines)
+				}
+				return
+			}
+			if len(lines) != 1 || lines[0]["level"] != "warn" || !strings.Contains(fmt.Sprint(lines[0]["message"]), "outcome unknown") {
+				t.Fatalf("logged %v, want one WARN line of an outcome unknown", lines)
+			}
+			for key, value := range tc.line {
+				if lines[0][key] != value {
+					t.Fatalf("the WARN line has %s = %v, want %v: %v", key, lines[0][key], value, lines[0])
+				}
+			}
+			for _, secret := range []string{admin.TokenID, admin.SessionID} {
+				if strings.Contains(logs.String(), secret) {
+					t.Fatalf("the log names %q: %s", secret, logs.String())
+				}
+			}
+		})
+	}
+}
+
 // The status is the node's own view: its ID and role, the leader it knows, the
 // servers of its latest configuration and the last index of its log.
 func TestStatusIsTheNodesView(t *testing.T) {
 	raft := leading("n1", "n2", "n3")
 	raft.role, raft.leader = cluster.RoleFollower, cluster.Server{ID: "n2", Address: "10.0.0.2:7000"}
-	got := New(raft, zerolog.Nop()).Status(context.Background())
+	got := newService(raft, zerolog.Nop()).Status(context.Background())
 	want := Status{NodeID: "n1", Role: cluster.RoleFollower, LeaderID: "n2", LeaderAddr: "10.0.0.2:7000", Members: raft.conf.Servers, LastIndex: 42}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("Status() = %+v, want %+v", got, want)

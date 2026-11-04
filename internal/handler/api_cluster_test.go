@@ -182,14 +182,17 @@ func TestClusterStatusAnswer(t *testing.T) {
 // A membership change answers 204 once raft made it, and every refusal has its
 // answer: 400 for a body without an id or an address, or an address that is not
 // host:port, 415 for a body that is not JSON, 404 for the removal of an unknown
-// member, 409 for an id or an address in use, the force guard, the last voter
+// member, 409 for an id in use, an address where a member answers, as written or
+// under another name, which the message names, the force guard, the last voter
 // and a configuration that changed since it was read, 422 for an address where
-// no node answers, naming it, and 503 with X-Leader on a follower or for a change
-// that lost leadership while it committed. The rules refuse before raft is asked
-// for any change; a configuration that changed is raft's refusal of the change
-// it was asked for. The leader asked to remove itself hands its leadership over,
-// removes nothing and answers 503 with X-Leader and a message to repeat the
-// request; a transfer that fails answers 503 without it.
+// no node answers, naming it, 500 for a configuration the leader cannot read,
+// and 503 with X-Leader on a follower or for a change that lost leadership while
+// it committed. The rules refuse before raft is asked for any change; a
+// configuration that changed is raft's refusal of the change it was asked for.
+// The leader asked to remove itself hands its leadership over, removes nothing
+// and answers 503 with X-Leader and a message to repeat the request, or, when no
+// leader is known yet, a message to retry and no X-Leader; a transfer that fails
+// answers 503 without it.
 func TestClusterRouteAnswers(t *testing.T) {
 	const (
 		post, del = http.MethodPost, http.MethodDelete
@@ -207,6 +210,7 @@ func TestClusterRouteAnswers(t *testing.T) {
 		setup                       func(*clusterAdmin)
 		code                        int
 		message, leader             string // the error body's message; X-Leader
+		noLeader                    bool   // the Leader middleware knows no leader
 		changes                     []string
 		transfers                   int
 	}{
@@ -240,7 +244,17 @@ func TestClusterRouteAnswers(t *testing.T) {
 		},
 		{
 			name: "add the address of a member", method: post, target: members, ctype: jsonBody, body: `{"id":"n4","address":"10.0.0.2:7000"}`,
-			code: http.StatusConflict, message: "Another member of the cluster uses this address.",
+			code: http.StatusConflict, message: "Member n2 of the cluster answers at 10.0.0.2:7000 already.",
+		},
+		{
+			name: "add another name of a member", method: post, target: members, ctype: jsonBody, body: `{"id":"n4","address":"localhost:7002"}`,
+			setup: func(a *clusterAdmin) { a.conf.Servers[1].Address = "127.0.0.1:7002" },
+			code:  http.StatusConflict, message: "Member n2 of the cluster answers at 127.0.0.1:7002 already.",
+		},
+		{
+			name: "add while the configuration cannot be read", method: post, target: members, ctype: jsonBody, body: newMember,
+			setup: func(a *clusterAdmin) { a.conf.Index = 0 },
+			code:  http.StatusInternalServerError, message: "internal error",
 		},
 		{
 			name: "add where no node answers", method: post, target: members, ctype: jsonBody, body: newMember,
@@ -290,6 +304,11 @@ func TestClusterRouteAnswers(t *testing.T) {
 			message: "This node handed its leadership over and is still a member: repeat the request, at the leader that X-Leader names, to remove it.",
 		},
 		{
+			name: "remove the leader, no leader known yet", method: del, target: members + "/n1?force=true",
+			noLeader: true, code: http.StatusServiceUnavailable, transfers: 1,
+			message: "Leadership moved; no leader is known yet, retry.",
+		},
+		{
 			name: "remove the leader, the transfer fails", method: del, target: members + "/n1?force=true",
 			setup: func(a *clusterAdmin) { a.transferErr = errors.New("leadership transfer timeout") },
 			code:  http.StatusServiceUnavailable, transfers: 1,
@@ -321,7 +340,12 @@ func TestClusterRouteAnswers(t *testing.T) {
 			}
 			// The Leader middleware tells where the leader is; it is asked only for a
 			// write that met the wrong leadership.
-			ctx := httpctx.WithLeader(r.Context(), func() string { return hint })
+			ctx := httpctx.WithLeader(r.Context(), func() string {
+				if tc.noLeader {
+					return ""
+				}
+				return hint
+			})
 			r = r.WithContext(transportctx.WithIdentity(ctx, operator))
 			w := httptest.NewRecorder()
 			f.mux.ServeHTTP(w, r)

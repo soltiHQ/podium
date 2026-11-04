@@ -66,9 +66,10 @@ func raftCluster(t *testing.T, ids ...string) (leader *raftNode, followers []*ra
 
 // raftConfigs returns the configuration of one raft node per ID, on loopback
 // ports with mutual TLS: each presents a certificate of one CA for 127.0.0.1,
-// keeps its state in a data directory of its own, and lists all of them as
-// id=127.0.0.1:port peers. Nothing starts: a test can start each node when it
-// wants, through startRaftNode or New.
+// and for localhost, which a test can dial a node at as well, keeps its state in
+// a data directory of its own, and lists all of them as id=127.0.0.1:port peers.
+// Nothing starts: a test can start each node when it wants, through
+// startRaftNode or New.
 func raftConfigs(t *testing.T, ids ...string) []cluster.Config {
 	t.Helper()
 	ca := newTestCA(t)
@@ -79,7 +80,7 @@ func raftConfigs(t *testing.T, ids ...string) []cluster.Config {
 	}
 	cfgs := make([]cluster.Config, 0, len(ids))
 	for i, id := range ids {
-		cert, key := ca.issue(t, "127.0.0.1")
+		cert, key := ca.issue(t, "127.0.0.1", "localhost")
 		cfg := cluster.DefaultConfig()
 		cfg.Backend = cluster.BackendRaft
 		cfg.Raft = cluster.RaftConfig{

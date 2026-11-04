@@ -96,6 +96,7 @@ type Admin interface {
 	RemoveServer(id string, prevIndex uint64) (uint64, error)
 	// TransferLeadership hands this node's leadership over to another voter and
 	// returns once this node no longer leads, or with the error of a transfer
-	// that failed, after which it still leads.
+	// that failed. After a failure the node may lead or not: a transfer that
+	// timed out can still see its target win the election it was told to start.
 	TransferLeadership() error
 }
