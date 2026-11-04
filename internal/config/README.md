@@ -367,6 +367,7 @@ cluster:
     bind_addr: 0.0.0.0:7000         # where the raft transport listens
     advertise_addr: 10.0.0.1:7000   # where peers dial it; default bind_addr
     data_dir: /var/lib/solti/raft
+    join: false                     # true: a new node waits for the leader to add it
     election_timeout_ms: 1000       # 0 keeps hashicorp/raft's 1 s
     heartbeat_timeout_ms: 500       # 0 keeps hashicorp/raft's 1 s
     snapshot_interval: 120s         # how often to check whether to snapshot; 0s keeps 120s
@@ -386,7 +387,8 @@ cluster:
 
 Env equivalents: `SOLTI_CLUSTER_BACKEND`, `SOLTI_CLUSTER_RAFT_NODE_ID`,
 `SOLTI_CLUSTER_RAFT_BIND_ADDR`, `SOLTI_CLUSTER_RAFT_ADVERTISE_ADDR`,
-`SOLTI_CLUSTER_RAFT_DATA_DIR`, `SOLTI_CLUSTER_RAFT_ELECTION_TIMEOUT_MS`,
+`SOLTI_CLUSTER_RAFT_DATA_DIR`, `SOLTI_CLUSTER_RAFT_JOIN`,
+`SOLTI_CLUSTER_RAFT_ELECTION_TIMEOUT_MS`,
 `SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS`, `SOLTI_CLUSTER_RAFT_SNAPSHOT_INTERVAL`,
 `SOLTI_CLUSTER_RAFT_SNAPSHOT_THRESHOLD`, `SOLTI_CLUSTER_RAFT_TRAILING_LOGS`,
 `SOLTI_CLUSTER_RAFT_TLS_CERT_FILE`, `SOLTI_CLUSTER_RAFT_TLS_KEY_FILE`,
@@ -453,6 +455,11 @@ Configuration loading fails, and nothing in `data_dir` is opened, when:
 - an entry is bare and `node_id` is not this node's advertise address. To
   choose IDs, write every entry as `id=host:port`.
 
+A node with `raft.join: true` asks discovery for nothing (see "Joining a
+cluster" below), so of the last two rules only the syntax of each entry is
+checked: its `peers` may leave it out, or be empty. With `discovery.driver:
+dns` only `discovery.hostname` and `discovery.port` are checked for it.
+
 With `discovery.driver: dns`, each address that `discovery.hostname` resolves
 to is a peer at `ip:<discovery.port>`, named by that address. So
 `discovery.hostname` and a `discovery.port` from 1 to 65535 are required, the
@@ -475,6 +482,18 @@ again. Later starts load the configuration from the node's own log and do not
 ask discovery, so a discovery outage does not keep a restarting node down;
 validation still checks a static list on every start. See
 `internal/raft/README.md`.
+
+### Joining a cluster
+
+`cluster.raft.join: true` (env `SOLTI_CLUSTER_RAFT_JOIN`) starts a node whose
+`data_dir` holds no raft state without a bootstrap: it asks discovery for
+nothing, writes no configuration, logs one INFO line that it waits, and waits
+for the leader of the running cluster to add it with `POST
+/api/v1/cluster/members` (see "Cluster" in `internal/handler/README.md`). A
+node that replaces a removed one, or whose `data_dir` was wiped, starts with
+it: without it, a first start bootstraps a configuration of its own from the
+static list. Once the node holds raft state the flag changes nothing: a
+restart loads the configuration from the node's own log, join or not.
 
 ### Raft transport security
 
@@ -566,6 +585,11 @@ node:
 - `chmod -R go-rwx` on `data_dir`. A node refuses a `data_dir` or `snapshots`
   directory that is still open to the group or others; it makes the snapshots
   in it private by itself at its next start.
+
+This version also adds the permissions `cluster:get` and `cluster:manage`, in
+standalone too, which the Admin role gets when bootstrap reconciles it, and a
+user who holds every permission directly, not through the Admin role, needs the
+two new permissions to keep counting as an administrator.
 
 ## Observed run history
 

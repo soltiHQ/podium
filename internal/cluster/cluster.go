@@ -6,6 +6,9 @@
 //   - [Discovery]  — how replicas find one another
 //   - [Leadership] — which replica runs singleton work
 //
+// Raft also implements [Membership], the members of its configuration, and
+// [Admin], through which the cluster service changes them (admin.go).
+//
 // Storage atomicity is part of [storage.TxStore.WithTx], not this package.
 //
 // Drivers live in sub-packages: internal/cluster/discovery,

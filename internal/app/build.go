@@ -34,6 +34,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/server/runner/base"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
+	clustersvc "github.com/soltiHQ/control-plane/internal/service/cluster"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
 	"github.com/soltiHQ/control-plane/internal/service/history"
 	"github.com/soltiHQ/control-plane/internal/service/role"
@@ -61,6 +62,8 @@ type services struct {
 	spec       *spec.Service
 	user       *user.Service
 	role       *role.Service
+	// cluster is the membership service of a raft node, nil in standalone.
+	cluster *clustersvc.Service
 }
 
 // initServices constructs the domain services. agentAuth gives the agent
@@ -93,10 +96,12 @@ func hubOptions(cfg config.Config) []event.Option {
 // by cfg. In raft mode the hub is also wired to replicate mutations through
 // the Raft log. hubOpts configure the hub, before the Raft node can apply the
 // first event to it. Returns the store/leadership/hub the rest of the app uses,
-// plus a shutdown function for the storage resources (nil for ephemeral standalone).
-func buildCluster(cfg cluster.Config, logger zerolog.Logger, hubOpts ...event.Option) (storage.Storage, cluster.Leadership, *event.Hub, func(), error) {
+// plus a shutdown function for the storage resources (nil for ephemeral standalone)
+// and, in raft mode, the node's cluster administration, which the cluster service
+// changes the membership through (nil in standalone).
+func buildCluster(cfg cluster.Config, logger zerolog.Logger, hubOpts ...event.Option) (storage.Storage, cluster.Leadership, *event.Hub, func(), cluster.Admin, error) {
 	if err := cfg.Validate(); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("cluster: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("cluster: %w", err)
 	}
 	inner := inmemory.New()
 	hub := event.NewHub(logger, hubOpts...)
@@ -104,7 +109,7 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger, hubOpts ...event.Op
 	case "", cluster.BackendStandalone:
 		if cfg.Ephemeral() {
 			logger.Warn().Msg("standalone.ephemeral=true: control-plane state will be lost on restart")
-			return inner, standalone.NewLeadership(), hub, nil, nil
+			return inner, standalone.NewLeadership(), hub, nil, nil, nil
 		}
 		store, err := durable.Open(cfg.Standalone.DataDir,
 			durable.WithSnapshotThreshold(cfg.Standalone.SnapshotThreshold),
@@ -115,7 +120,7 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger, hubOpts ...event.Op
 		)
 		if err != nil {
 			hub.Close()
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
 		if store.Migrated() {
 			// Once: the migrated file is in format 2 from here on.
@@ -127,19 +132,19 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger, hubOpts ...event.Op
 			if err := store.Close(); err != nil {
 				logger.Error().Err(err).Msg("close standalone storage")
 			}
-		}, nil
+		}, nil, nil
 	case cluster.BackendRaft:
 		disco, err := discovery.New(cfg.Discovery)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
 		p, err := raftpkg.New(raftNodeConfig(cfg.Raft), inner, hub, disco, logger)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
-		return p.Store(), p.Leadership(), hub, func() { _ = p.Shutdown() }, nil
+		return p.Store(), p.Leadership(), hub, func() { _ = p.Shutdown() }, p.Admin(), nil
 	default:
-		return nil, nil, nil, nil, fmt.Errorf("cluster: unknown backend %q", cfg.Backend)
+		return nil, nil, nil, nil, nil, fmt.Errorf("cluster: unknown backend %q", cfg.Backend)
 	}
 }
 
@@ -157,6 +162,7 @@ func raftNodeConfig(cfg cluster.RaftConfig) raftpkg.Config {
 		TrailingLogs:           entries(cfg.TrailingLogs),
 		TLS:                    cfg.TLS,
 		AllowInsecureTransport: cfg.AllowInsecureTransport,
+		Join:                   cfg.Join,
 	}
 }
 
@@ -211,14 +217,19 @@ func seedingRunner(cfg config.Config, logger zerolog.Logger, leadership cluster.
 // login limiter. Cross-origin browser mutations are refused before any route,
 // and on a follower before the Leader middleware forwards anything to the
 // leader, so a refused request never crosses nodes. A follower forwards writes
-// to the leader with forwardTLS, see [leaderOptions].
+// to the leader with forwardTLS, see [leaderOptions]. The cluster routes exist
+// only with a cluster service, which a raft node alone has.
 func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership, resolver *clientip.Resolver, forwardTLS *tls.Config) (http.Handler, *loghub.Hub) {
+	var apiOpts []handler.APIOption
+	if svc.cluster != nil {
+		apiOpts = append(apiOpts, handler.WithCluster(svc.cluster))
+	}
 	var (
 		secure                 = cookieSecure(cfg.Auth.CookieSecure, resolver)
 		logHub                 = buildLogHub(logger, svc.agent, proxyPool, cfg.Streams)
 		streamLimit            = middleware.NewStreamLimiter(cfg.Streams.MaxPerIP, resolver)
 		logAccess, eventAccess = streamChecks(authModel, logger)
-		apiHandler             = handler.NewAPI(logger, svc.user, svc.access, svc.session, svc.credential, svc.agent, svc.spec, svc.history, proxyPool, eventHub, logHub, streamLimit, logAccess)
+		apiHandler             = handler.NewAPI(logger, svc.user, svc.access, svc.session, svc.credential, svc.agent, svc.spec, svc.history, proxyPool, eventHub, logHub, streamLimit, logAccess, apiOpts...)
 		authMW                 = middleware.Auth(authModel.Verifier, authModel.Session, secure, logger)
 		optAuthMW              = middleware.OptionalAuth(authModel.Verifier, authModel.Session, secure, logger)
 		uiHandler              = handler.NewUI(logger, svc.access, svc.spec, eventHub, resolver, secure)

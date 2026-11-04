@@ -158,7 +158,7 @@ func TestLeaderForwardingToALeaderNamedByHost(t *testing.T) {
 		TLS: cluster.RaftTLSConfig{CertFile: raftCert, KeyFile: raftKey, CAFile: ca.file},
 	}
 	raftCfg.Discovery.Peers = []string{"n1=" + advertise}
-	_, leadership, hub, shutdown, err := buildCluster(raftCfg, zerolog.Nop())
+	_, leadership, hub, shutdown, _, err := buildCluster(raftCfg, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}

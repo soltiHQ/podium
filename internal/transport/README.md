@@ -143,6 +143,7 @@ Downstream code never sniffs gRPC/HTTP details - it just calls `errkind.Classify
 
 It goes out on:
 - the 503 of a write that reached a follower (`cluster.ErrNotLeader`) or lost leadership while it was committing (`cluster.ErrLeadershipLost`), answered by `response.FromError`; the refresh of a session on a follower with `auth.rotate_refresh` is one;
+- the 503 of the removal of the leader through the membership API, which hands the leadership over first and answers with `response.NotLeader`, so that the removal is repeated at the new leader (see "Cluster" in `internal/handler/README.md`);
 - the 502 the `Leader` middleware answers when it cannot reach the leader it forwards a write to;
 - the 503 the `Leader` middleware of a follower answers for a write another node forwarded already: a forward carries
   `X-Podium-Forwarded`, and a follower never forwards a write that carries it again, so a write crosses one node at most,

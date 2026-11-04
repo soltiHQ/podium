@@ -135,6 +135,44 @@ func TestPreconditionFailedNegotiates(t *testing.T) {
 	}
 }
 
+// UnprocessableEntity and NotLeader answer with the message they are given:
+// 422, and 503 with the leader's HTTP address in X-Leader when the Leader
+// middleware knows it, none otherwise. UnavailableMsg is the 503 without it.
+func TestAnswersWithAMessage(t *testing.T) {
+	const msg = "a message of the handler"
+	hint := func() string { return "10.0.0.2:8080" }
+	for _, tt := range []struct {
+		name   string
+		answer func(http.ResponseWriter, *http.Request, httpctx.RenderMode, string)
+		leader func() string // what the Leader middleware tells, nil without it
+		code   int
+		header string // X-Leader
+	}{
+		{"unprocessable", UnprocessableEntity, hint, http.StatusUnprocessableEntity, ""},
+		{"not the leader", NotLeader, hint, http.StatusServiceUnavailable, "10.0.0.2:8080"},
+		{"not the leader, no leader known", NotLeader, nil, http.StatusServiceUnavailable, ""},
+		{"unavailable", UnavailableMsg, hint, http.StatusServiceUnavailable, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/", nil)
+			if tt.leader != nil {
+				r = r.WithContext(httpctx.WithLeader(r.Context(), tt.leader))
+			}
+			w := httptest.NewRecorder()
+
+			tt.answer(w, r, httpctx.RenderBlock, msg)
+
+			var body errorBody
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || w.Code != tt.code || body.Code != tt.code || body.Message != msg {
+				t.Fatalf("HTTP %d %s (%v), want %d with %q", w.Code, w.Body.String(), err, tt.code, msg)
+			}
+			if got := w.Header().Get(LeaderHeader); got != tt.header {
+				t.Fatalf("%s = %q, want %q", LeaderHeader, got, tt.header)
+			}
+		})
+	}
+}
+
 // SetLeader is the one place that sets X-Leader, and an empty address, which a
 // node that does not know the leader's HTTP address has, sets nothing.
 func TestSetLeader(t *testing.T) {

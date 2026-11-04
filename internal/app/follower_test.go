@@ -47,6 +47,7 @@ type raftNode struct {
 	store      storage.Storage
 	leadership cluster.Leadership
 	hub        *event.Hub
+	admin      cluster.Admin
 	stop       func() // shuts the node down, once; the end of the test does too
 }
 
@@ -96,11 +97,17 @@ func raftConfigs(t *testing.T, ids ...string) []cluster.Config {
 // and stops it when the test ends, if stop did not first.
 func startRaftNode(t *testing.T, cfg cluster.Config) *raftNode {
 	t.Helper()
-	store, leadership, hub, shutdown, err := buildCluster(cfg, zerolog.Nop())
+	return startRaftNodeLogging(t, cfg, zerolog.Nop())
+}
+
+// startRaftNodeLogging is startRaftNode with the node logging into logger.
+func startRaftNodeLogging(t *testing.T, cfg cluster.Config, logger zerolog.Logger) *raftNode {
+	t.Helper()
+	store, leadership, hub, shutdown, admin, err := buildCluster(cfg, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := &raftNode{id: cfg.Raft.NodeID, addr: cfg.Raft.BindAddr, store: store, leadership: leadership, hub: hub}
+	n := &raftNode{id: cfg.Raft.NodeID, addr: cfg.Raft.BindAddr, store: store, leadership: leadership, hub: hub, admin: admin}
 	n.stop = sync.OnceFunc(func() {
 		hub.Close()
 		shutdown()
@@ -591,7 +598,7 @@ func TestRaftHostNamesAreTrustedAtTheirAddresses(t *testing.T) {
 		TLS: cluster.RaftTLSConfig{CertFile: raftCert, KeyFile: raftKey, CAFile: ca.file},
 	}
 	raftCfg.Discovery.Peers = []string{"n1=" + advertise}
-	_, leadership, hub, shutdown, err := buildCluster(raftCfg, zerolog.Nop())
+	_, leadership, hub, shutdown, _, err := buildCluster(raftCfg, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"sync"
@@ -32,6 +33,10 @@ var errNotAdvertisable = errors.New("local bind address is not advertisable")
 // It is a variable so that tests can shorten it; New reads it when it opens the
 // transport.
 var handshakeTimeout = transportTimeout
+
+// probeTimeout bounds a probe of a peer's address (see probe): the dial, the TLS
+// handshake and the close.
+const probeTimeout = 5 * time.Second
 
 // ErrNodeCertificate indicates a node certificate its peers would refuse: not
 // signed by the CA of ca_file, outside its validity period, not for both server
@@ -182,6 +187,45 @@ func (l *streamLayer) Dial(address hraft.ServerAddress, timeout time.Duration) (
 
 // Addr implements net.Listener with the advertise address as written.
 func (l *streamLayer) Addr() net.Addr { return l.advertise }
+
+// probe dials address as Dial does, within ctx: over TLS, the handshake verifies
+// the peer's certificate against the cluster CA, for the host of address as
+// written, as a dial of raft would. It then closes its writing side, with a
+// close_notify over TLS, and reads until the peer closes too: over TLS 1.3 a
+// client's handshake ends before the server has checked the client's
+// certificate, so a peer that refuses this node's certificate fails the probe
+// with its alert only then. The transport of a node it probes reads the end of
+// a stream, and logs no error for it. security nil probes plain TCP.
+func probe(ctx context.Context, address string, security *transportTLS) error {
+	var (
+		conn net.Conn
+		err  error
+	)
+	dialer := &net.Dialer{}
+	if security == nil {
+		conn, err = dialer.DialContext(ctx, "tcp", address)
+	} else {
+		conn, err = (&tls.Dialer{NetDialer: dialer, Config: security.client}).DialContext(ctx, "tcp", address)
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			return err
+		}
+	}
+	half, ok := conn.(interface{ CloseWrite() error })
+	if !ok {
+		return fmt.Errorf("%T cannot close its writing side", conn)
+	}
+	if err := half.CloseWrite(); err != nil {
+		return err
+	}
+	_, err = io.Copy(io.Discard, conn)
+	return err
+}
 
 // serverConn is a TLS connection the node accepted. Its handshake, which
 // tls.Conn would run unbounded on the first read or write, must finish within

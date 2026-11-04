@@ -15,8 +15,9 @@ import (
 // from status 400 and at ERROR from 500. The exception is a 503 that carries
 // X-Leader, which is logged at WARN: a write that reached a follower, or lost
 // leadership, is a routing condition and not a failure of this node, and only
-// response.FromError and the Leader middleware set that header. Any other 5xx stays
-// an ERROR. It never logs cookies: the session_id cookie authenticates a refresh.
+// response.FromError, response.NotLeader and the Leader middleware set that
+// header. Any other 5xx stays an ERROR. It never logs cookies: the session_id
+// cookie authenticates a refresh.
 func Logger(logger zerolog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

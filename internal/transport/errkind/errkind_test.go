@@ -51,6 +51,8 @@ func TestClassify(t *testing.T) {
 		{"wrapped leadership lost", fmt.Errorf("raft: apply: %w", cluster.ErrLeadershipLost), Unavailable},
 		{"leadership lost with its cause", errors.Join(cluster.ErrLeadershipLost, errors.New("leadership lost while committing log")), Unavailable},
 		{"unavailable with its cause", errors.Join(storage.ErrUnavailable, errors.New("timed out enqueuing operation")), Unavailable},
+		{"configuration changed → conflict", fmt.Errorf("raft: remove n3: %w", cluster.ErrConfigurationChanged), Conflict},
+		{"peer unreachable → failed precondition", fmt.Errorf("raft: probe 10.0.0.4:7000: %w", cluster.ErrPeerUnreachable), FailedPrecondition},
 		{"wrapped sentinel is unwrapped", fmt.Errorf("load: %w", storage.ErrNotFound), NotFound},
 	}
 	for _, tt := range tests {

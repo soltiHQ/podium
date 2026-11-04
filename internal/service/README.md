@@ -9,6 +9,7 @@ service/
 │
 ├── access/           authentication: login, logout, permission listing
 ├── agent/            agent CRUD, label patching, heartbeat preservation
+├── cluster/          raft membership: status, adding and removing members (over cluster.Admin, not storage)
 ├── credential/       credential lifecycle, password creation, verifier cascade
 ├── role/             role CRUD
 ├── session/          session retrieval, revocation, bulk deletion
@@ -42,6 +43,8 @@ Every sub-package follows the same structure:
 ```
 Services depend on `storage.Storage` (interface), never on `inmemory` or any concrete backend.
 Filters are created by the caller (handler) and passed through the service to the store.
+The one exception is `cluster`, which changes no state of the store: it depends on `cluster.Admin` (interface), the
+administration of a raft node, never on hashicorp/raft, and exists in raft mode only.
 
 ## Shared helpers
 | Function             | Purpose                                                                  |

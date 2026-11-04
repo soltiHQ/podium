@@ -39,6 +39,10 @@ const (
 	ApiDashboard       = "/api/v1/dashboard"
 	ApiDashboardIssues = "/api/v1/dashboard/issues"
 	ApiEventStream     = "/api/v1/events/stream"
+
+	ApiCluster        = "/api/v1/cluster"
+	ApiClusterMembers = "/api/v1/cluster/members"
+	ApiClusterMember  = "/api/v1/cluster/members/"
 )
 
 // Every ID below is data: each helper path-escapes it as one URL segment, so
@@ -82,6 +86,10 @@ func ApiSpecDeploy(id string) string      { return ApiSpec + url.PathEscape(id) 
 func ApiSpecPlacement(id string) string   { return ApiSpec + url.PathEscape(id) + "/placement" }
 func ApiSpecSync(id string) string        { return ApiSpec + url.PathEscape(id) + "/sync" }
 func ApiSpecForceDelete(id string) string { return ApiSpec + url.PathEscape(id) + "/force" }
+
+// Cluster.
+
+func ApiClusterMemberByID(id string) string { return ApiClusterMember + url.PathEscape(id) }
 
 // CursorURL appends optional cursor and query parameters to a base API path.
 func CursorURL(base, cursor, q string) string {

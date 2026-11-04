@@ -24,6 +24,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
 	syncrunner "github.com/soltiHQ/control-plane/internal/server/runner/sync"
+	clustersvc "github.com/soltiHQ/control-plane/internal/service/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
@@ -66,7 +67,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		}
 	}
 
-	store, leadership, eventHub, raftShutdown, err := buildCluster(cfg.Cluster, logger, hubOptions(cfg)...)
+	store, leadership, eventHub, raftShutdown, admin, err := buildCluster(cfg.Cluster, logger, hubOptions(cfg)...)
 	if err != nil {
 		return nil, err
 	}
@@ -76,6 +77,11 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 	if err != nil {
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
+	}
+	// A raft node serves the membership API through its cluster administration;
+	// standalone has none, and registers no cluster route.
+	if admin != nil {
+		svc.cluster = clustersvc.New(admin, logger)
 	}
 
 	// Default users/roles/credentials seeding must run through the store, on the

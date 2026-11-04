@@ -118,10 +118,11 @@ func TestFollowerWriteIsUnavailableWithLeaderHint(t *testing.T) {
 
 // The errors of hashicorp/raft that mean the cluster cannot take a write now are
 // given their meaning, and keep their cause for errors.Is: ErrNotLeader is
-// cluster.ErrNotLeader, ErrLeadershipLost cluster.ErrLeadershipLost, and
-// ErrEnqueueTimeout and ErrRaftShutdown storage.ErrUnavailable. All of them
-// classify as Unavailable, which hashicorp's own errors do not. Any other error
-// stays as it is.
+// cluster.ErrNotLeader, and so is ErrLeadershipTransferInProgress, which a leader
+// gives every write while it hands its leadership over; ErrLeadershipLost is
+// cluster.ErrLeadershipLost, and ErrEnqueueTimeout and ErrRaftShutdown
+// storage.ErrUnavailable. All of them classify as Unavailable, which hashicorp's
+// own errors do not. Any other error stays as it is.
 func TestClusterError(t *testing.T) {
 	boom := errors.New("boom")
 	for _, tc := range []struct {
@@ -132,6 +133,7 @@ func TestClusterError(t *testing.T) {
 	}{
 		{"not the leader", hraft.ErrNotLeader, hraft.ErrNotLeader, cluster.ErrNotLeader},
 		{"wrapped, not the leader", fmt.Errorf("barrier: %w", hraft.ErrNotLeader), hraft.ErrNotLeader, cluster.ErrNotLeader},
+		{"leadership transfer in progress", hraft.ErrLeadershipTransferInProgress, hraft.ErrLeadershipTransferInProgress, cluster.ErrNotLeader},
 		{"leadership lost", hraft.ErrLeadershipLost, hraft.ErrLeadershipLost, cluster.ErrLeadershipLost},
 		{"enqueue timeout", hraft.ErrEnqueueTimeout, hraft.ErrEnqueueTimeout, storage.ErrUnavailable},
 		{"shutdown", hraft.ErrRaftShutdown, hraft.ErrRaftShutdown, storage.ErrUnavailable},

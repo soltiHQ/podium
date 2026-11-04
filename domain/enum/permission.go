@@ -25,6 +25,12 @@ const (
 	SpecsEdit   Permission = "taskspecs:edit"
 	SpecsDeploy Permission = "taskspecs:deploy"
 	SpecsDelete Permission = "taskspecs:delete"
+
+	// ClusterGet reads the status of a raft cluster, and ClusterManage adds and
+	// removes its members. Both exist in every mode, and guard only the cluster
+	// routes, which a raft node alone serves.
+	ClusterGet    Permission = "cluster:get"
+	ClusterManage Permission = "cluster:manage"
 )
 
 // All contains all declared permissions.
@@ -42,4 +48,7 @@ var All = []Permission{
 	SpecsEdit,
 	SpecsDeploy,
 	SpecsDelete,
+
+	ClusterGet,
+	ClusterManage,
 }

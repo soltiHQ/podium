@@ -6,6 +6,7 @@ HTTP and gRPC request handlers for the control plane.
 handler/
 ├── handler.go      package documentation
 ├── api.go          API — REST + HTMX endpoints (users, agents, specs, sessions, roles)
+├── api_cluster.go  API — the cluster status and membership routes of a raft node
 ├── discovery.go    HTTPDiscovery + GRPCDiscovery — agent heartbeat / sync
 ├── ui.go           UI — full-page HTML renders (login, dashboard, detail pages)
 └── static.go       Static — embedded file serving (CSS, JS, images)
@@ -15,7 +16,7 @@ handler/
 
 | Handler           | Transport | Constructor           | Dependencies                                                         |
 |-------------------|-----------|-----------------------|----------------------------------------------------------------------|
-| `API`             | HTTP      | `NewAPI`              | user, access, session, credential, agent, spec services + proxy.Pool |
+| `API`             | HTTP      | `NewAPI`              | user, access, session, credential, agent, spec services + proxy.Pool; the cluster service in raft mode (`WithCluster`) |
 | `HTTPDiscovery`   | HTTP      | `NewHTTPDiscovery`    | agent service, discovery limiter, client IP resolver                 |
 | `GRPCDiscovery`   | gRPC      | `NewGRPCDiscovery`    | agent service, discovery limiter, client IP resolver (raft mode)     |
 | `UI`              | HTTP      | `NewUI`               | access + spec services, client IP resolver, cookie Secure policy     |
@@ -54,8 +55,8 @@ UI checks permissions **at registration** (per-route granularity).
 `TestRoutePermissionMatrix` (`route_permissions_test.go`) holds this table as code and checks it against the
 registered routes: every new `/api/v1` route needs a row there.
 
-Endpoints that read a JSON body (user create, update and password, agent labels, spec create and update) require
-`Content-Type: application/json`, parameters allowed; any other type gets 415 `Content-Type must be
+Endpoints that read a JSON body (user create, update and password, agent labels, spec create and update, cluster member
+add) require `Content-Type: application/json`, parameters allowed; any other type gets 415 `Content-Type must be
 application/json.`. A cross-site HTML form cannot send that type. In front of every route, `app` refuses
 cross-origin browser mutations with 403 (see `internal/config`, "Browser sessions").
 
@@ -159,6 +160,55 @@ Every event kind maps to a subject (`event.SubjectOf`):
 | spec    | `spec_created`, `spec_updated`, `spec_deployed`, `sync_failed`             | `SpecsGet`  | `SpecsEdit`  |
 | user    | `user_*`, `session_created`, `rate_limited`                                | `UsersGet`  | `UsersEdit`  |
 | unknown | `issue_closed` (it can name any subject) and unknown kinds                 | all three   | all three    |
+
+### Cluster `/api/v1/cluster`
+| Method | Path                           | Permission      |
+|--------|--------------------------------|-----------------|
+| GET    | `/api/v1/cluster`              | `ClusterGet`    |
+| POST   | `/api/v1/cluster/members`      | `ClusterManage` |
+| DELETE | `/api/v1/cluster/members/{id}` | `ClusterManage` |
+
+Only a raft node registers these routes: `app` gives the API its cluster service (`internal/service/cluster`, which holds
+the rules) with `WithCluster`. Standalone registers none, so its cluster paths answer as any path that the UI's catch-all
+page route takes: 404 to an authenticated GET, 405 to an authenticated POST or DELETE, and 401 without credentials, as
+before raft mode had them (`TestClusterRoutesAbsentInStandalone`). `cluster:get` and `cluster:manage` exist in both modes,
+and appear in both among the permissions a user may be given, but they guard only these raft-mode routes. Of the built-in
+roles only Admin holds them, as it holds `enum.All`; bootstrap reconciles a stored Admin role to it at a standalone start
+and at each raft leadership term (`TestClusterRoutesNeedPermission`).
+
+`GET /api/v1/cluster` is a read, so the node that gets it answers it itself, a follower included: its cluster as it sees
+it. `node_id`, `role` (`leader`, `follower`, `candidate` or `shutdown`), `leader_id` and `leader_address`, the raft
+address of the leader it knows, both left out while it knows none, `members`, each with its `id`, its raft `address` as
+the configuration writes it, and its `suffrage` (`voter`, `nonvoter` or `staging`), and `last_index`, the index of the last
+entry of its log (`TestClusterStatusAnswer`).
+
+`POST /api/v1/cluster/members` takes `{"id": "n4", "address": "10.0.0.4:7000"}`, a node's `node_id` and raft advertise
+address, and adds it as a voter. `DELETE /api/v1/cluster/members/{id}`, with `?force=true` where the guard asks for it,
+removes a member. Both are writes, which a follower forwards to the leader, and both answer 204 once the change committed.
+The leader checks a change against its latest configuration, read with its index, and applies it against that index, so
+a change of the configuration in between refuses it instead of slipping past the checks. Every refusal changes nothing
+(`TestClusterRouteAnswers`):
+
+| Status | When                                                                                                         |
+|--------|--------------------------------------------------------------------------------------------------------------|
+| 400    | a body without `id` or `address`; an `id` with `/`, `=`, a comma or spaces around it, which the member's route or `discovery.peers` could not name; an `address` that is not `host:port` with a port from 1 to 65535 or names no host; a `force` that is no boolean |
+| 404    | no member has the `id` to remove                                                                             |
+| 409    | a member has the `id`, or the `address` as written, already; a removal that leaves fewer than 3 voters, without `force=true`, which the message names; the last voter, `The last voter cannot be removed.`, force or not; a configuration that changed after the leader read it, `configuration changed, retry` |
+| 415    | a body that is not declared as JSON                                                                          |
+| 422    | no raft node of the cluster answers at the `address`, which the message names: before it adds a voter, the leader dials the address as the raft transport would and checks the certificate there as raft does, so that a typo never adds a voter nobody reaches, which raises the quorum |
+| 503    | the write met a follower or lost leadership: with `X-Leader`, as every write (see "Leader hint" in `internal/transport/README.md`); the leader's own removal, below |
+
+The leader asked to remove itself first hands its leadership over to another voter, with hashicorp/raft's leadership
+transfer, so that writes resume without an election timeout, and removes nothing yet. Once it knows the new leader, it
+answers 503 with `X-Leader` and the message `This node handed its leadership over and is still a member: repeat the
+request, at the leader that X-Leader names, to remove it.`. The request repeated there, or at the same node, which now
+forwards it, removes a follower. So the removal of the leader takes two calls. A transfer that fails, as one to a dead
+voter that hashicorp/raft picked, removes nothing and answers 503 without `X-Leader`: remove dead members first. See
+"Membership" in `internal/raft/README.md`, which also says what becomes of a removed node, whose process must be stopped.
+
+Every change that commits logs one INFO line, `cluster membership changed`, with `actor_user_id`, `operation` (`add` or
+`remove`), `member_id`, `member_address` and `force`; a hand-over logs one too, with the `transfer` operation. No line
+names a token.
 
 ### Other
 | Method | Path                    | Permission                                                           |

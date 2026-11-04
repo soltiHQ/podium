@@ -77,11 +77,18 @@ const (
 // entries have piled up since its last snapshot, and a snapshot leaves
 // TrailingLogs entries in the log. A zero value keeps the default; a negative
 // one is refused, and so is a SnapshotInterval under MinRaftSnapshotInterval.
+//
+// Join starts a node that holds no raft state yet without bootstrapping a
+// cluster: it waits for the leader of a running cluster to add it, through the
+// membership API. Discovery is then not asked, so the peers need not list the
+// node and may be empty. A node with raft state rejoins its cluster from its
+// own log whatever Join says.
 type RaftConfig struct {
 	NodeID             string `yaml:"node_id"           envconfig:"NODE_ID"`
 	BindAddr           string `yaml:"bind_addr"         envconfig:"BIND_ADDR"`
 	AdvertiseAddr      string `yaml:"advertise_addr"    envconfig:"ADVERTISE_ADDR"`
 	DataDir            string `yaml:"data_dir"          envconfig:"DATA_DIR"`
+	Join               bool   `yaml:"join"              envconfig:"JOIN"`
 	ElectionTimeoutMs  int    `yaml:"election_timeout_ms" envconfig:"ELECTION_TIMEOUT_MS"`
 	HeartbeatTimeoutMs int    `yaml:"heartbeat_timeout_ms" envconfig:"HEARTBEAT_TIMEOUT_MS"`
 
@@ -326,7 +333,7 @@ func (c Config) Validate() error {
 // snapshot interval is one hashicorp/raft accepts;
 // bind_addr and advertise_addr are host:port, and a bind_addr on every interface
 // needs an advertise_addr; the peers must list this node as node_id at its
-// advertise address.
+// advertise address, unless it joins a running cluster (see validateJoining).
 func (c Config) validateRaft() error {
 	r := c.Raft
 	for _, setting := range []struct{ key, value string }{
@@ -372,7 +379,39 @@ func (c Config) validateRaft() error {
 			return fmt.Errorf("raft.advertise_addr %q names no host for peers to dial", r.AdvertiseAddr)
 		}
 	}
+	if r.Join {
+		return c.Discovery.validateJoining()
+	}
 	return c.Discovery.validate(r.NodeID, r.advertise())
+}
+
+// validateJoining checks the discovery of a node that joins a running cluster
+// (RaftConfig.Join). The node bootstraps nothing and never asks discovery for
+// its peers, so the static list need not list it and may be empty, and DNS
+// answers need not name it. What is set must still be usable, as the node builds
+// its discovery all the same: a static list that parses, a known driver, and the
+// host name and port of dns.
+func (d DiscoveryConfig) validateJoining() error {
+	switch d.Driver {
+	case "", DriverStatic:
+		_, _, err := d.staticPeers()
+		return err
+	case DriverDNS:
+		return d.checkDNS()
+	default:
+		return fmt.Errorf("unknown discovery.driver %q", d.Driver)
+	}
+}
+
+// checkDNS requires the host name and the port that the dns driver resolves.
+func (d DiscoveryConfig) checkDNS() error {
+	if strings.TrimSpace(d.Hostname) == "" {
+		return errors.New("discovery.hostname is required with discovery.driver dns")
+	}
+	if d.Port < 1 || d.Port > 65535 {
+		return fmt.Errorf("discovery.port %d is not a port from 1 to 65535", d.Port)
+	}
+	return nil
 }
 
 // validate checks the peers against this node's ID and advertise address.
@@ -392,11 +431,8 @@ func (d DiscoveryConfig) validate(nodeID, advertise string) error {
 		_, err = ServerList(peers, nodeID, advertise)
 		return err
 	case DriverDNS:
-		if strings.TrimSpace(d.Hostname) == "" {
-			return errors.New("discovery.hostname is required with discovery.driver dns")
-		}
-		if d.Port < 1 || d.Port > 65535 {
-			return fmt.Errorf("discovery.port %d is not a port from 1 to 65535", d.Port)
+		if err := d.checkDNS(); err != nil {
+			return err
 		}
 		host, _, _ := net.SplitHostPort(advertise)
 		if ip := net.ParseIP(host); ip == nil || advertise != net.JoinHostPort(ip.String(), strconv.Itoa(d.Port)) {
@@ -409,6 +445,20 @@ func (d DiscoveryConfig) validate(nodeID, advertise string) error {
 	default:
 		return fmt.Errorf("unknown discovery.driver %q", d.Driver)
 	}
+}
+
+// CheckDialAddress says what is wrong with addr as an address that peers dial,
+// if anything: it must be host:port with a port from 1 to 65535, and name one
+// host, as raft.advertise_addr must, not none or every interface.
+func CheckDialAddress(addr string) error {
+	host, err := hostPort(addr)
+	if err != nil {
+		return err
+	}
+	if everyInterface(host) {
+		return fmt.Errorf("%q names no host for peers to dial", addr)
+	}
+	return nil
 }
 
 // hostPort splits addr, which must be host:port with a port from 1 to 65535,

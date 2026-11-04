@@ -2,6 +2,7 @@ package raft
 
 import (
 	"errors"
+	"strings"
 
 	hraft "github.com/hashicorp/raft"
 
@@ -21,6 +22,10 @@ var ErrNotLeader = cluster.ErrNotLeader
 //
 //   - ErrNotLeader is [cluster.ErrNotLeader]: this node is not the leader, and
 //     the write changed nothing.
+//   - ErrLeadershipTransferInProgress is [cluster.ErrNotLeader] as well: a
+//     leader refuses every write, barrier and configuration change while it
+//     hands its leadership over (leaderLoop in v1.8.0), so the write changed
+//     nothing, and the next leader can take it.
 //   - ErrLeadershipLost is [cluster.ErrLeadershipLost]: the node lost
 //     leadership while the write was committing, which may still commit.
 //   - ErrEnqueueTimeout and ErrRaftShutdown are [storage.ErrUnavailable]: raft
@@ -30,7 +35,7 @@ var ErrNotLeader = cluster.ErrNotLeader
 func clusterError(err error) error {
 	var meaning error
 	switch {
-	case errors.Is(err, hraft.ErrNotLeader):
+	case errors.Is(err, hraft.ErrNotLeader), errors.Is(err, hraft.ErrLeadershipTransferInProgress):
 		meaning = cluster.ErrNotLeader
 	case errors.Is(err, hraft.ErrLeadershipLost):
 		meaning = cluster.ErrLeadershipLost
@@ -48,6 +53,24 @@ type meant struct{ meaning, cause error }
 
 func (e meant) Error() string   { return e.cause.Error() }
 func (e meant) Unwrap() []error { return []error{e.meaning, e.cause} }
+
+// configurationChanged begins the error that hashicorp/raft v1.8.0 gives a
+// configuration change whose prevIndex is no longer the index of the latest
+// configuration: "configuration changed since %v (latest is %v)", from
+// nextConfiguration in its configuration.go. The error has no sentinel, so
+// membershipError tells it by this text, and the mapping is tied to v1.8.0:
+// TestStaleConfigurationIndexConflicts fails when an upgrade words it otherwise.
+const configurationChanged = "configuration changed since "
+
+// membershipError is clusterError for a change of the configuration: a change
+// refused because the configuration changed since its prevIndex is
+// [cluster.ErrConfigurationChanged], and still the error of hashicorp/raft.
+func membershipError(err error) error {
+	if err != nil && strings.HasPrefix(err.Error(), configurationChanged) {
+		return meant{meaning: cluster.ErrConfigurationChanged, cause: err}
+	}
+	return clusterError(err)
+}
 
 // barrierError is clusterError for the error of the barrier that starts a
 // transaction. A barrier writes nothing, so one that fails with ErrLeadershipLost

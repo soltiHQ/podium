@@ -28,12 +28,15 @@ func TestBuildStandaloneDurableAndEphemeral(t *testing.T) {
 			if persistent {
 				cfg.Standalone.DataDir = filepath.Join(t.TempDir(), "state")
 			}
-			store, leader, hub, shutdown, err := buildCluster(cfg, zerolog.Nop())
+			store, leader, hub, shutdown, admin, err := buildCluster(cfg, zerolog.Nop())
 			if err != nil {
 				t.Fatal(err)
 			}
 			if !leader.AmLeader() {
 				t.Fatal("standalone must be leader")
+			}
+			if admin != nil {
+				t.Fatal("standalone has a cluster administration, which serves the cluster routes")
 			}
 			_, isDurable := store.(*durable.Store)
 			if isDurable != persistent {
@@ -51,7 +54,7 @@ func TestBuildStandaloneDurableAndEphemeral(t *testing.T) {
 			if shutdown != nil {
 				shutdown()
 			}
-			store, _, hub, shutdown, err = buildCluster(cfg, zerolog.Nop())
+			store, _, hub, shutdown, _, err = buildCluster(cfg, zerolog.Nop())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -93,7 +96,7 @@ func TestBuildClusterLogsTheMigrationOnce(t *testing.T) {
 		warns int
 	}{{"first start", 1}, {"second start", 0}} {
 		var logs bytes.Buffer
-		_, _, hub, shutdown, err := buildCluster(cfg, zerolog.New(&logs))
+		_, _, hub, shutdown, _, err := buildCluster(cfg, zerolog.New(&logs))
 		if err != nil {
 			t.Fatalf("%s: %v", start.name, err)
 		}
@@ -118,7 +121,7 @@ func TestBuildClusterLogsTheMigrationOnce(t *testing.T) {
 func TestBuildClusterRefusesImplicitEphemeral(t *testing.T) {
 	cfg := cluster.DefaultConfig()
 	cfg.Standalone.DataDir = ""
-	if _, _, _, _, err := buildCluster(cfg, zerolog.Nop()); err == nil {
+	if _, _, _, _, _, err := buildCluster(cfg, zerolog.Nop()); err == nil {
 		t.Fatal("blank data directory silently selected ephemeral state")
 	}
 }
@@ -134,11 +137,13 @@ func TestMsToDuration(t *testing.T) {
 }
 
 // The raft node gets every setting of the raft configuration, the compaction
-// settings with it, and a number of log entries of zero or less is left to raft.New.
+// settings and join with it, and a number of log entries of zero or less is left
+// to raft.New.
 func TestRaftNodeConfig(t *testing.T) {
 	files := cluster.RaftTLSConfig{CertFile: "n1.crt", KeyFile: "n1.key", CAFile: "ca.crt"}
 	got := raftNodeConfig(cluster.RaftConfig{
 		NodeID: "n1", BindAddr: "0.0.0.0:7000", AdvertiseAddr: "10.0.0.1:7000", DataDir: "/var/lib/solti/raft",
+		Join:              true,
 		ElectionTimeoutMs: 1000, HeartbeatTimeoutMs: 500,
 		SnapshotInterval: 30 * time.Second, SnapshotThreshold: 4096, TrailingLogs: 2048,
 		TLS: files, AllowInsecureTransport: true,
@@ -147,7 +152,7 @@ func TestRaftNodeConfig(t *testing.T) {
 		NodeID: "n1", BindAddr: "0.0.0.0:7000", AdvertiseAddr: "10.0.0.1:7000", DataDir: "/var/lib/solti/raft",
 		ElectionTimeout: time.Second, HeartbeatTimeout: 500 * time.Millisecond,
 		SnapshotInterval: 30 * time.Second, SnapshotThreshold: 4096, TrailingLogs: 2048,
-		TLS: files, AllowInsecureTransport: true,
+		TLS: files, AllowInsecureTransport: true, Join: true,
 	}
 	if got != want {
 		t.Fatalf("raftNodeConfig() = %+v, want %+v", got, want)
@@ -214,7 +219,7 @@ func TestRaftCompactionValidatedBeforeStoreOpens(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, dir := unopenedRaftConfig(t)
 			tc.mutate(&cfg.Raft)
-			_, _, hub, shutdown, err := buildCluster(cfg, zerolog.Nop())
+			_, _, hub, shutdown, _, err := buildCluster(cfg, zerolog.Nop())
 			if err == nil {
 				hub.Close()
 				shutdown()
@@ -256,7 +261,7 @@ func TestRaftConfigValidatedBeforeStoreOpens(t *testing.T) {
 			cfg, dir := unopenedRaftConfig(t)
 			tc.mutate(&cfg)
 
-			_, _, hub, shutdown, err := buildCluster(cfg, zerolog.Nop())
+			_, _, hub, shutdown, _, err := buildCluster(cfg, zerolog.Nop())
 			if err == nil {
 				hub.Close()
 				shutdown()

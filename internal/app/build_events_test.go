@@ -29,7 +29,7 @@ func TestHubOptionsKeepTheDefaultWindowForZero(t *testing.T) {
 	cfg.Events.Coalesce = 0
 	cc := cluster.DefaultConfig()
 	cc.Standalone.Ephemeral = true
-	_, _, hub, _, err := buildCluster(cc, zerolog.Nop(), hubOptions(cfg)...)
+	_, _, hub, _, _, err := buildCluster(cc, zerolog.Nop(), hubOptions(cfg)...)
 	if err != nil {
 		t.Fatal(err)
 	}

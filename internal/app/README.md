@@ -45,13 +45,13 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   Options.Check()                 ← raft only: what any seed needs, before anything starts
         │
         ▼
-  buildCluster()                  ← store + leadership + event-hub (+ Raft node if cfg.Cluster.Backend=raft)
+  buildCluster()                  ← store + leadership + event-hub (+ Raft node and its cluster.Admin if cfg.Cluster.Backend=raft)
         │
         ▼
   kit.New(store, cfg.Auth)        ← auth composition root (JWT, sessions, RBAC, rate-limit)
         │
         ▼
-  initServices()                  ← user, role, credential, session, agent, spec, access
+  initServices()                  ← user, role, credential, session, agent, spec, access; then cluster over the Admin if raft
         │
    ┌────┴───────────────┬────────────────────────────────────────┐
    │ standalone         │ raft                                   │

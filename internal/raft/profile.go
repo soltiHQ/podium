@@ -11,7 +11,8 @@
 // only its owner can enter, as are the snapshots.
 // Peer bootstrap: from [cluster.Discovery] — on first start every node
 // bootstraps the cluster with the same list, every peer Discovery reports
-// sorted by ID, which must name this node. Subsequent starts join a
+// sorted by ID, which must name this node; a node that joins a running cluster
+// bootstraps nothing, and the leader adds it ([Admin]). Subsequent starts join a
 // pre-existing cluster and reuse the on-disk log.
 // Logging: hashicorp/raft, its snapshot store and its transport log through the
 // logger given to New, at their own levels from INFO, and write nothing to stderr.
@@ -80,6 +81,12 @@ type Config struct {
 	// AllowInsecureTransport permits plain TCP when TLS names no file. New
 	// logs a WARN when the transport runs it.
 	AllowInsecureTransport bool
+
+	// Join starts a node whose DataDir holds no raft state without
+	// bootstrapping: it neither asks the discovery nor writes a configuration,
+	// and waits for the leader of a running cluster to add it. A node with
+	// raft state ignores it.
+	Join bool
 }
 
 // ErrDataDirNotPrivate indicates a data directory, or a snapshots directory in
@@ -101,6 +108,7 @@ type Profile struct {
 	leadership *Leadership
 	raft       *hraft.Raft
 	transport  *hraft.NetworkTransport
+	security   *transportTLS // the transport's mutual TLS, nil on plain TCP; Admin probes with it
 	logStore   *boltdb.BoltStore
 	stable     *boltdb.BoltStore
 	snap       hraft.SnapshotStore
@@ -119,8 +127,10 @@ type Profile struct {
 // On first start (empty DataDir) the node derives its server list from
 // disco.Peers() (see bootstrapServers) before its transport listens, and
 // writes it into its stores as the bootstrap configuration before raft runs.
-// On subsequent starts the on-disk state is loaded and the cluster re-formed
-// automatically, without asking disco.
+// A node that joins (Config.Join) does neither on its first start: it starts
+// raft with no configuration, and the leader of a running cluster adds it. On
+// subsequent starts the on-disk state is loaded and the cluster re-formed
+// automatically, without asking disco, join or not.
 func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discovery, logger zerolog.Logger) (*Profile, error) {
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("raft: NodeID is required")
@@ -243,11 +253,13 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 	if err != nil {
 		return nil, fmt.Errorf("raft: has existing state: %w", err)
 	}
-	// Bootstrap if log is empty (first start in this DataDir). The server
-	// list comes first, so a list this node cannot bootstrap with fails the
-	// start before the transport listens and before the node keeps any state.
+	// Bootstrap if log is empty (first start in this DataDir), unless the node
+	// joins a running cluster. The server list comes first, so a list this node
+	// cannot bootstrap with fails the start before the transport listens and
+	// before the node keeps any state.
+	bootstrap := !hasState && !cfg.Join
 	var servers []hraft.Server
-	if !hasState {
+	if bootstrap {
 		if servers, err = bootstrapServers(cfg, hraft.ServerAddress(advertise), disco); err != nil {
 			return nil, err
 		}
@@ -264,10 +276,14 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 	// transport listens already, but nothing consumes its RPCs before NewRaft,
 	// so no vote request can persist a term first, which would give the node
 	// state and make the bootstrap fail with ErrCantBootstrap.
-	if !hasState {
+	if bootstrap {
 		if err := hraft.BootstrapCluster(rcfg, logStore, stable, snap, transport, hraft.Configuration{Servers: servers}); err != nil {
 			return nil, fmt.Errorf("raft: bootstrap cluster: %w", err)
 		}
+	}
+	if !hasState && cfg.Join {
+		logger.Info().Str("node_id", cfg.NodeID).Str("advertise_addr", advertise).
+			Msg("cluster.raft.join is true and the node has no raft state: it bootstraps nothing, and waits for the leader to add it (POST /api/v1/cluster/members)")
 	}
 
 	fsm := NewFSM(inner, hub, logger)
@@ -282,6 +298,7 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 		hub:        hub,
 		raft:       r,
 		transport:  transport,
+		security:   security,
 		logStore:   logStore,
 		stable:     stable,
 		snap:       snap,

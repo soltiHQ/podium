@@ -29,7 +29,9 @@ data directory is opened (`TestRaftConfigValidatedBeforeStoreOpens`):
 interface needs an `advertise_addr`, bare entries need `node_id` to be the
 advertise address, and so does the dns driver, whose advertise address must be
 the node's `ip:<discovery.port>`. A static list must also pass the checks of
-`cluster.ServerList` below.
+`cluster.ServerList` below. A node that joins a running cluster asks discovery
+for nothing, so only the syntax of its peers is checked, and the host name and
+port of dns (`TestJoiningNodeValidation`, see "Joining a running cluster").
 
 ## Bootstrap
 
@@ -69,6 +71,23 @@ Later starts load the configuration from the node's own log and do not ask
 discovery: a node restarted while discovery fails rejoins its cluster
 (`TestRestartDoesNotAskDiscovery`).
 
+### Joining a running cluster
+
+`cluster.raft.join: true` (`Config.Join`) starts a node whose data directory
+holds no raft state without a bootstrap: `New` neither asks discovery nor writes
+a configuration, logs one INFO line that the node waits to be added, and starts
+raft with no configuration, so the node leads nothing. The leader of the running
+cluster adds it through the membership API (`POST /api/v1/cluster/members`, see
+"Membership" below); the leader's log, or a snapshot, then reaches the node, and
+it catches up the state written before it joined
+(`TestJoiningNodeWaitsToBeAdded`). Validation accepts a joining node that
+`discovery.peers` does not list, and an empty list, though a list that is set
+must still parse. A node with raft state loads its configuration from its own
+log whatever the flag says, so a flag left set changes nothing at a restart. A
+node that replaces another, or whose data directory was wiped, starts with the
+flag, so that it does not bootstrap a configuration of its own from the static
+list.
+
 ## Leadership terms
 
 `Leadership.WhenLeader` runs its function while the node leads, with a context
@@ -90,6 +109,94 @@ barrier no longer ends a runner, and with it the server
 (`TestWhenLeaderRetriesWaitReadyUntilItsContextEndsOrRaftCloses`). Both tests
 run on one node on loopback TCP with mutual TLS, each with a `Leadership` of
 its own over the node's raft, whose barrier they replace.
+
+## Membership
+
+`Profile.Admin` returns the node's cluster administration (`admin.go`): the
+narrow `cluster.Admin` of the cluster service (`internal/service/cluster`)
+behind the membership API, which never hands out the hashicorp/raft node. It
+reads the node's ID, role, leader, last index and members, adds a voter, removes
+a server, transfers the leadership, and probes an address. The API is in
+"Cluster" of `internal/handler/README.md`.
+
+### The configuration and its index
+
+A change is checked against the latest configuration and applied against its
+index, hashicorp/raft's `prevIndex`: a change of the configuration in between
+refuses it, instead of letting it slip past the checks. hashicorp/raft v1.8.0
+has no call that gives that index: `GetConfiguration` reads a copy of the
+configuration that holds none, and its `Index` is always 0, which as a
+`prevIndex` checks nothing. So `Admin.Configuration` reads the configuration
+and its index from the node's own stores, as `NewRaft` rebuilds them at start:
+the last `LogConfiguration` entry above the latest snapshot's index, decoded
+with `DecodeConfiguration`, or else the snapshot's configuration and
+configuration index. That is Raft's latest configuration, committed or not,
+which hashicorp/raft compares a `prevIndex` with. The read runs while raft
+writes, and every race leaves the index it gives behind, never ahead: a change
+against a stale index changes nothing. The index is the one the change's
+`IndexFuture` gave (`TestConfigurationIndexIsTheChangesIndex`), and it stays
+right once a snapshot compacted the log past the configuration's entry
+(`TestConfigurationIndexSurvivesCompaction`). The read scans the entries since
+the latest snapshot, once per change, on the leader; the status reads the copy.
+
+hashicorp/raft refuses a change against an index that is no longer the latest
+with `configuration changed since %v (latest is %v)`, which has no sentinel:
+`Admin` gives it as `cluster.ErrConfigurationChanged` by that text, a conflict,
+which the API answers 409 `configuration changed, retry`. The mapping is tied
+to v1.8.0: `TestStaleConfigurationIndexConflicts` pins the text, and fails when
+an upgrade words it otherwise.
+
+### Adding a voter
+
+The leader refuses an ID that a member has, and an address that another member
+uses, compared as written, and then probes the address (`Admin.Probe`): it
+dials it as the transport dials a peer, within 5 s, and over TLS checks the
+peer's certificate against the cluster CA for the host of the address as
+written, as raft does. It then closes its writing side and reads until the
+peer closes, so a peer that refuses this node's certificate, which TLS 1.3
+tells only after the client's side of the handshake, fails the probe too. A
+node it probes logs no error for it (`TestProbeDialsAsRaftDoes`). A failed
+probe changes nothing: `cluster.ErrPeerUnreachable`, a failed precondition,
+which the API answers 422. Without it, a typo would add a voter nobody
+reaches, which raises the quorum: three voters need two, four need three.
+hashicorp/raft v1.8.0 makes the new server a voter at once, with no staging
+step, and it catches up from the leader's log or a snapshot.
+
+### Removing a member
+
+A removal that leaves fewer than three voters needs `force`, and the last
+voter cannot be removed, force or not: hashicorp/raft refuses a configuration
+without a voter (`checkConfiguration` in v1.8.0).
+
+The leader asked to remove itself first transfers its leadership, with
+hashicorp/raft's `LeadershipTransfer`, which picks the voter with the highest
+next index and returns once the node left its leader loop. While it transfers,
+the leader refuses every write, barrier and configuration change with
+`ErrLeadershipTransferInProgress`, which `clusterError` gives as
+`cluster.ErrNotLeader` (see "Follower writes"). The node then waits, up to
+5 s, until it knows the new leader, and answers that the leadership moved,
+having removed nothing: the API answers 503 with `X-Leader`, and the removal is
+repeated at the new leader, where it removes a follower. So no removal commits
+while the node leads: hashicorp/raft makes a leader that commits its own
+removal step down only then, and its followers would wait an election timeout
+for the next leader. A transfer can pick a dead voter, when nothing was
+written since it died: it then fails, nothing is removed, and the node still
+leads, so remove dead members first. `TestRemoveLeaderTransfersFirst` shows the
+order on three nodes: after the first call another node leads while every node
+still lists the old leader, and after the repeated one the old leader is out
+of every member's configuration, its raft never logged `removed ourself`, and
+writes commit.
+
+A removed node's raft keeps running, outside the cluster. hashicorp/raft shuts
+a node down at its removal (`ShutdownOnRemove`, which podium leaves on) only
+when the node commits its own removal as the leader, which the transfer
+avoids. The leader stops replicating to a member as soon as it dispatches the
+member's removal, so the node may never learn that it was removed. It cannot
+disrupt the members: they refuse its pre-votes, as it is not in their
+configuration. Once it no longer hears from a leader its writes answer 503,
+while its reads answer from a state that no longer follows the cluster. It
+logs election WARNs, and every member logs a WARN for each pre-vote it
+refuses, until the node's process is stopped, which the operator must do.
 
 ## Transport security
 
@@ -165,10 +272,12 @@ answers `codes.Unavailable` and HTTP answers 503.
 
 The other errors of hashicorp/raft that mean the cluster cannot take a write
 now are given a meaning in the same way (`clusterError`), and still are the
-hashicorp/raft error for `errors.Is`: `ErrLeadershipLost` is
-`cluster.ErrLeadershipLost`, and `ErrEnqueueTimeout` and `ErrRaftShutdown` are
-`storage.ErrUnavailable`. They classify as `Unavailable` too
-(`TestClusterError`). A write that fails with `cluster.ErrLeadershipLost` is
+hashicorp/raft error for `errors.Is`: `ErrLeadershipTransferInProgress`, which a
+leader gives every write while it hands its leadership over (see "Removing a
+member"), is `cluster.ErrNotLeader`, as the write changed nothing;
+`ErrLeadershipLost` is `cluster.ErrLeadershipLost`, and `ErrEnqueueTimeout` and
+`ErrRaftShutdown` are `storage.ErrUnavailable`. They classify as `Unavailable`
+too (`TestClusterError`). A write that fails with `cluster.ErrLeadershipLost` is
 ambiguous, as it may still commit, so only a write that is safe to repeat should
 be retried. The barrier that starts a transaction writes nothing, so one that
 fails with `ErrLeadershipLost` is `ErrNotLeader`, which is safe to retry

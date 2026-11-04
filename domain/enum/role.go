@@ -32,7 +32,8 @@ const (
 
 // BuiltinRoles contains all roles the control-plane seeds on the first startup.
 var BuiltinRoles = []BuiltinRole{
-	// Global
+	// Global. Admin holds All, ClusterGet and ClusterManage included, which no
+	// other built-in role holds; bootstrap reconciles a stored Admin role to All.
 	{RoleAdminID, "Admin", All},
 	{RoleEditorID, "Editor", []Permission{
 		AgentsGet, AgentsEdit,

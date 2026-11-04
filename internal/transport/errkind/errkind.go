@@ -65,6 +65,11 @@ func Classify(err error) Kind {
 	case errors.Is(err, auth.ErrUserDisabled):
 		return FailedPrecondition
 
+	case errors.Is(err, cluster.ErrConfigurationChanged):
+		return Conflict
+	case errors.Is(err, cluster.ErrPeerUnreachable):
+		return FailedPrecondition
+
 	case errors.Is(err, storage.ErrNotFound):
 		return NotFound
 	case errors.Is(err, storage.ErrAlreadyExists):

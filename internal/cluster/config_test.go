@@ -483,6 +483,69 @@ func TestRaftPeersListThisNodeOnce(t *testing.T) {
 	}
 }
 
+// cluster.raft.join, env SOLTI_CLUSTER_RAFT_JOIN, starts a node that bootstraps
+// nothing: the leader adds it. Its peers are never asked, so they need not list
+// it and may be empty, while a list that is set must still parse and the driver
+// must be one there is. Every other raft setting is checked as for any node, and
+// a node that does not join still needs its peers to list it.
+func TestJoiningNodeValidation(t *testing.T) {
+	t.Run("loads", func(t *testing.T) {
+		cfg := cluster.DefaultConfig()
+		if err := yaml.Unmarshal([]byte("raft:\n  join: true\n"), &cfg); err != nil {
+			t.Fatal(err)
+		}
+		if !cfg.Raft.Join {
+			t.Fatal("YAML raft.join not loaded")
+		}
+		cfg = cluster.DefaultConfig()
+		t.Setenv("SOLTI_CLUSTER_RAFT_JOIN", "true")
+		if err := envconfig.Process("SOLTI_CLUSTER", &cfg); err != nil {
+			t.Fatal(err)
+		}
+		if !cfg.Raft.Join {
+			t.Fatal("SOLTI_CLUSTER_RAFT_JOIN not loaded")
+		}
+	})
+	for _, tc := range []struct {
+		name   string
+		join   bool
+		mutate func(*cluster.Config)
+		want   error
+	}{
+		{"joining, not listed", true, func(c *cluster.Config) {
+			c.Discovery.Peers = []string{"n2=10.0.0.2:7000", "n3=10.0.0.3:7000"}
+		}, nil},
+		{"joining, no peers", true, func(c *cluster.Config) { c.Discovery.Peers = nil }, nil},
+		{"joining, listed", true, func(*cluster.Config) {}, nil},
+		{"joining, dns", true, func(c *cluster.Config) {
+			c.Discovery = cluster.DiscoveryConfig{Driver: cluster.DriverDNS, Hostname: "podium.svc", Port: 7000}
+		}, nil},
+		{"joining, a malformed entry", true, func(c *cluster.Config) {
+			c.Discovery.Peers = []string{"n2=10.0.0.2"}
+		}, cluster.ErrInvalidPeer},
+		{"joining, an unknown driver", true, func(c *cluster.Config) { c.Discovery.Driver = "consul" }, errAny},
+		{"joining, dns without a host name", true, func(c *cluster.Config) {
+			c.Discovery = cluster.DiscoveryConfig{Driver: cluster.DriverDNS, Port: 7000}
+		}, errAny},
+		{"joining, no data_dir", true, func(c *cluster.Config) { c.Raft.DataDir = "" }, cluster.ErrRaftRequired},
+		{"joining, no transport security", true, func(c *cluster.Config) { c.Raft.TLS = cluster.RaftTLSConfig{} }, cluster.ErrRaftTLSRequired},
+		{"joining, every interface without advertise_addr", true, func(c *cluster.Config) {
+			c.Raft.BindAddr = "0.0.0.0:7000"
+		}, cluster.ErrAdvertiseRequired},
+		{"not joining, not listed", false, func(c *cluster.Config) {
+			c.Discovery.Peers = []string{"n2=10.0.0.2:7000", "n3=10.0.0.3:7000"}
+		}, cluster.ErrNodeNotListed},
+		{"not joining, no peers", false, func(c *cluster.Config) { c.Discovery.Peers = nil }, cluster.ErrNodeNotListed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := raftConfig()
+			cfg.Raft.Join = tc.join
+			tc.mutate(&cfg)
+			checkValidate(t, cfg.Validate(), tc.want)
+		})
+	}
+}
+
 // Standalone reads no raft or discovery setting, so invalid ones do not fail
 // its validation.
 func TestStandaloneIgnoresRaftConfig(t *testing.T) {

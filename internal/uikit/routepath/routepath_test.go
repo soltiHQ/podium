@@ -40,6 +40,7 @@ func TestEveryIDHelperEscapesItsSegment(t *testing.T) {
 		{"ApiSpecPlacement", ApiSpecPlacement, "/api/v1/specs/{id}/placement"},
 		{"ApiSpecSync", ApiSpecSync, "/api/v1/specs/{id}/sync"},
 		{"ApiSpecForceDelete", ApiSpecForceDelete, "/api/v1/specs/{id}/force"},
+		{"ApiClusterMemberByID", ApiClusterMemberByID, "/api/v1/cluster/members/{id}"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := tc.fn(hostileID)

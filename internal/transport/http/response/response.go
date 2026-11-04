@@ -308,6 +308,59 @@ func Unavailable(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode
 	})
 }
 
+// UnavailableMsg renders a 503 response with a custom message.
+func UnavailableMsg(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, msg string) {
+	transportctx.SetError(r.Context(), msg)
+	httpctx.Responder(r.Context()).Respond(w, r, http.StatusServiceUnavailable, &responder.View{
+		Data: errorBody{
+			Code:      http.StatusServiceUnavailable,
+			Message:   msg,
+			RequestID: transportctx.TryRequestID(r.Context()),
+		},
+		Component: func(m httpctx.RenderMode) templ.Component {
+			if m == httpctx.RenderPage {
+				return renderErrorPage(
+					http.StatusServiceUnavailable,
+					"Service unavailable",
+					msg,
+				)
+			}
+			return nil
+		}(mode),
+	})
+}
+
+// NotLeader answers, with msg, a write that this node no longer leads the
+// cluster to serve: 503, with the leader's HTTP address in LeaderHeader when the
+// Leader middleware knows it, as FromError answers cluster.ErrNotLeader.
+func NotLeader(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, msg string) {
+	SetLeader(w, httpctx.Leader(r.Context()))
+	UnavailableMsg(w, r, mode, msg)
+}
+
+// UnprocessableEntity renders a 422 response with a custom message: a request
+// that is well formed, but that the server cannot carry out as it stands.
+func UnprocessableEntity(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, msg string) {
+	transportctx.SetError(r.Context(), msg)
+	httpctx.Responder(r.Context()).Respond(w, r, http.StatusUnprocessableEntity, &responder.View{
+		Data: errorBody{
+			Code:      http.StatusUnprocessableEntity,
+			Message:   msg,
+			RequestID: transportctx.TryRequestID(r.Context()),
+		},
+		Component: func(m httpctx.RenderMode) templ.Component {
+			if m == httpctx.RenderPage {
+				return renderErrorPage(
+					http.StatusUnprocessableEntity,
+					"Request not carried out",
+					msg,
+				)
+			}
+			return nil
+		}(mode),
+	})
+}
+
 // Internal renders a 500 response.
 func Internal(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
 	transportctx.SetError(r.Context(), "internal error")
