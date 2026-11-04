@@ -17,7 +17,7 @@ handler/
 |-------------------|-----------|-----------------------|----------------------------------------------------------------------|
 | `API`             | HTTP      | `NewAPI`              | user, access, session, credential, agent, spec services + proxy.Pool |
 | `HTTPDiscovery`   | HTTP      | `NewHTTPDiscovery`    | agent service, discovery limiter, client IP resolver                 |
-| `GRPCDiscovery`   | gRPC      | `NewGRPCDiscovery`    | agent service, discovery limiter                                     |
+| `GRPCDiscovery`   | gRPC      | `NewGRPCDiscovery`    | agent service, discovery limiter, client IP resolver (raft mode)     |
 | `UI`              | HTTP      | `NewUI`               | access + spec services, client IP resolver, cookie Secure policy     |
 | `Static`          | HTTP      | `NewStatic`           | embedded `ui.Static` filesystem                                      |
 
@@ -199,7 +199,9 @@ at WARN with the agent ID and the ways out; with an enrollment secret they name 
 per `auth.rate_window` for a pair. Both transports share one limiter, so failures over HTTP count toward gRPC
 and back. `auth.rate_attempts` failures block that pair for `auth.rate_window`: HTTP answers 429, gRPC `ResourceExhausted`.
 There is no per-IP limit, so agents behind one egress IP (NAT, Kubernetes) never block each other.
-HTTP takes the client IP from `trusted_proxies`; gRPC uses the peer address.
+HTTP takes the client IP from `trusted_proxies`, and in raft mode from the hosts of the raft configuration too. gRPC takes it
+from the `x-forwarded-for` metadata of those hosts in raft mode, where a follower forwards a sync to the leader with the
+agent's address in it (`grpcClientIP`), and uses the peer address in standalone.
 
 ## UI pages
 | Path                | Handler          | Auth | Permission  |

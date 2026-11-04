@@ -47,8 +47,9 @@ tls:
 Env equivalents: `SOLTI_TLS_SERVER_CERT_FILE`, `SOLTI_TLS_CLIENT_CA_FILE`, etc.
 
 In raft mode a follower forwards the writes it gets on the HTTP and
-HTTP-discovery listeners to the leader, at the host of the leader's raft
-advertise address, as written, and this node's port of that listener. With
+HTTP-discovery listeners, and the syncs it gets on the gRPC listener, to the
+leader, at the host of the leader's raft advertise address, as written, and
+this node's port of that listener (see "Cluster"). With
 `tls.server` set it forwards over TLS with `tls.client`: `ca_file` must also
 hold the CA of the replicas' server certificates, which must name each
 replica's raft advertise host as written, an IP SAN for `10.0.0.1:7000` and a
@@ -185,11 +186,23 @@ TCP peer is in the list:
 RFC 7239 `Forwarded` is not supported: behind a proxy that sends only
 `Forwarded`, the proxy is the client. List only proxies that append the peer
 to `X-Forwarded-For` (or replace the header); a listed host that passes a
-client's header through unchanged lets that client pick its own IP. In raft
-mode, list the replicas too: a follower forwards writes to the leader, which
-otherwise sees the follower as the client.
+client's header through unchanged lets that client pick its own IP.
 
-gRPC discovery ignores this setting and always uses the peer address.
+In raft mode a follower forwards writes to the leader, which then sees the
+follower as the peer, so every node also trusts, besides this list, the hosts
+of its current raft configuration: there is no need to list the replicas. A
+host written as an IP counts as soon as the configuration holds it, and stops
+counting as soon as it leaves; a host written as a name counts at the addresses
+it resolves to, looked up every 10 s, so its trust is only as good as the DNS
+answers the node gets; where DNS cannot be trusted that far, write the
+advertise addresses as IPs. Each node must connect to the others from the
+address its raft address names, or resolves to. Any process on a node's host
+can then pick the client IP of its requests, as behind any listed proxy. See
+"Forwarding and trusted hosts" in `internal/raft/README.md`.
+
+gRPC discovery reads the client IP from the `x-forwarded-for` metadata of a
+trusted host only in raft mode, where a follower sets it when it forwards a
+sync. In standalone it ignores this setting and always uses the peer address.
 
 ## Browser sessions
 
@@ -402,6 +415,17 @@ Each `discovery.peers` entry is `id=host:port`: a node's `node_id` and the
 address its peers dial. A bare `host:port` names the node by its address.
 Spaces around an entry, its ID and its address are trimmed. List every node,
 this one included: a one-node cluster lists itself.
+
+Every node must serve `http.addr`, `http_discovery.addr` and `grpc.addr` on the
+same ports as the others (the same-port assumption): a follower knows the
+leader by its raft address only, so it forwards a write, or a gRPC discovery
+sync, to the host of the leader's raft advertise address with its own port of
+the listener the request came in on, and names that address in the HTTP
+`X-Leader` and the gRPC `x-leader` hints. Nothing checks the assumption: on a
+node whose port differs, forwards go to a port the leader does not serve, and
+fail (HTTP 502, gRPC `Unavailable`), or reach another node that shares the
+leader's host. A gRPC call is forwarded once at most, so it never goes round
+nodes, but the HTTP forward has no such bound.
 
 Configuration loading fails, and nothing in `data_dir` is opened, when:
 

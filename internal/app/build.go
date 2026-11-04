@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -227,9 +228,10 @@ func waitForLeader(ctx context.Context, l cluster.Leadership) bool {
 // the login limiter and the stream limiter, and tells the auth and device
 // cookies whether the client used HTTPS. The listener has no limit on failed authentication:
 // its tokens and session IDs cannot be guessed, and passwords go through the
-// login limiter. Cross-origin browser mutations are refused before any route.
-// A follower forwards writes to the leader with forwardTLS, see
-// [leaderOptions].
+// login limiter. Cross-origin browser mutations are refused before any route,
+// and on a follower before the Leader middleware forwards anything to the
+// leader, so a refused request never crosses nodes. A follower forwards writes
+// to the leader with forwardTLS, see [leaderOptions].
 func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership, resolver *clientip.Resolver, forwardTLS *tls.Config) (http.Handler, *loghub.Hub) {
 	var (
 		secure                 = cookieSecure(cfg.Auth.CookieSecure, resolver)
@@ -255,10 +257,12 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 
 	route.HandleFunc(mux, routepath.ApiEventStream, eventHub.SSEHandler(eventAccess), ridMW, logMW, authMW, middleware.StreamLimit(streamLimit))
 
+	// Outermost first: Recovery, CORS, Negotiate, CrossOrigin, Leader. CrossOrigin
+	// answers through the Responder that Negotiate picks, and runs before Leader.
 	var h http.Handler = mux
+	h = middleware.Leader(leadership, leaderOptions(addrPort(cfg.HTTP.Addr), cfg.TLS.Server.Enabled(), forwardTLS))(h)
 	h = middleware.CrossOrigin(cfg.CORS, logger)(h)
 	h = middleware.Negotiate(responder.NewJSON(), responder.NewHTML())(h)
-	h = middleware.Leader(leadership, leaderOptions(addrPort(cfg.HTTP.Addr), cfg.TLS.Server.Enabled(), forwardTLS))(h)
 	h = middleware.CORS(cfg.CORS)(h)
 	h = middleware.Recovery(logger)(h)
 	return h, logHub
@@ -302,11 +306,18 @@ func warnOpenDiscovery(logger zerolog.Logger, cfg config.Config) {
 
 // buildDiscoveryListeners wires the HTTP and gRPC discovery listeners around one
 // failure limiter: both count agent token failures per (client IP, agent ID), so
-// an agent has one budget whichever transport it uses.
-func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, cfg config.Config, resolver *clientip.Resolver, serverTLS, forwardTLS *tls.Config) (http.Handler, *grpc.Server) {
+// an agent has one budget whichever transport it uses. resolver gives both the
+// client IP; gRPC discovery reads it from x-forwarded-for only in raft mode, where
+// a follower forwards its syncs to the leader with forwarder, while standalone
+// keeps the peer address, as before.
+func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, cfg config.Config, resolver *clientip.Resolver, serverTLS, forwardTLS *tls.Config, forwarder *interceptor.Forwarder) (http.Handler, *grpc.Server) {
 	limiter := kit.NewLimiter(cfg.Auth)
+	var grpcClients *clientip.Resolver
+	if _, raft := leadership.(cluster.Membership); raft {
+		grpcClients = resolver
+	}
 	return buildDiscoveryHandler(logger, agentSVC, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), limiter, resolver, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled(), forwardTLS),
-		buildGRPCServer(logger, agentSVC, eventHub, leadership, limiter, serverTLS, cfg.AgentAuth.Require)
+		buildGRPCServer(logger, agentSVC, eventHub, leadership, limiter, grpcClients, serverTLS, cfg.AgentAuth.Require, addrPort(cfg.GRPC.Addr), forwarder)
 }
 
 // buildDiscoveryHandler wires the HTTP discovery listener. It has no per-IP
@@ -382,16 +393,21 @@ func addrPort(addr string) int {
 	return n
 }
 
-// buildGRPCServer wires the gRPC discovery listener. Like HTTP discovery, it
-// has no per-IP limit: the Sync handler counts authentication failures per
-// (peer IP, agent ID) in limiter.
-func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, limiter *ratelimit.Limiter, serverTLS *tls.Config, requireAuth bool) *grpc.Server {
+// buildGRPCServer wires the gRPC discovery listener, which serves on port. Like
+// HTTP discovery, it has no per-IP limit: the Sync handler counts authentication
+// failures per (client IP, agent ID) in limiter, with the client IP resolver
+// gives (nil: the peer). On a follower, forwarder sends a Sync to the leader's
+// gRPC listener, at the host of the leader's raft address and port, which every
+// replica is assumed to serve it on; a write it does not forward answers
+// Unavailable with that address in the x-leader hint.
+func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, limiter *ratelimit.Limiter, resolver *clientip.Resolver, serverTLS *tls.Config, requireAuth bool, port int, forwarder *interceptor.Forwarder) *grpc.Server {
 	// Write methods (must run on leader). Sync is the only agent-facing
 	// mutation; everything else is pure read.
 	writeMethods := map[string]struct{}{
 		discoverv1.DiscoverService_Sync_FullMethodName: {},
 	}
 	isWrite := func(full string) bool { _, ok := writeMethods[full]; return ok }
+	leaderOpts := interceptor.LeaderOptions{IsWrite: isWrite, Port: port, Forwarder: forwarder}
 
 	opts := []grpc.ServerOption{
 		// Same message and header caps as the HTTP sync; bounded streams, pings and idle connections.
@@ -404,13 +420,13 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *e
 			interceptor.UnaryRecovery(logger),
 			interceptor.UnaryRequestID(),
 			interceptor.UnaryLogger(logger),
-			interceptor.UnaryLeader(leadership, interceptor.LeaderOptions{IsWrite: isWrite}),
+			interceptor.UnaryLeader(leadership, leaderOpts),
 		),
 		grpc.ChainStreamInterceptor(
 			interceptor.StreamRecovery(logger),
 			interceptor.StreamRequestID(),
 			interceptor.StreamLogger(logger),
-			interceptor.StreamLeader(leadership, interceptor.LeaderOptions{IsWrite: isWrite}),
+			interceptor.StreamLeader(leadership, leaderOpts),
 		),
 	}
 	if serverTLS != nil {
@@ -419,8 +435,80 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *e
 
 	var (
 		srv           = grpc.NewServer(opts...)
-		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC, eventHub, limiter, requireAuth)
+		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC, eventHub, limiter, resolver, requireAuth)
 	)
 	discoverv1.RegisterDiscoverServiceServer(srv, grpcDiscovery)
 	return srv
+}
+
+// syncForwarder returns the forwarder of a follower's gRPC discovery syncs in raft
+// mode, nil in standalone. It sends a Sync through the generated client, over TLS
+// with forwardTLS, the tls.client configuration, when the gRPC listener serves TLS
+// (tls.server), as the HTTP listeners forward their writes. The caller closes it.
+func syncForwarder(cfg config.Config, leadership cluster.Leadership, forwardTLS *tls.Config) *interceptor.Forwarder {
+	if _, raft := leadership.(cluster.Membership); !raft {
+		return nil
+	}
+	return interceptor.NewForwarder(cfg.TLS.Server.Enabled(), forwardTLS, map[string]interceptor.ForwardFunc{
+		discoverv1.DiscoverService_Sync_FullMethodName: forwardSync,
+	})
+}
+
+// forwardSync forwards a Sync with the generated client.
+func forwardSync(ctx context.Context, conn grpc.ClientConnInterface, req any, opts ...grpc.CallOption) (any, error) {
+	in, ok := req.(*discoverv1.SyncRequest)
+	if !ok {
+		return nil, fmt.Errorf("forward sync: the request is a %T", req)
+	}
+	return discoverv1.NewDiscoverServiceClient(conn).Sync(ctx, in, opts...)
+}
+
+// clientResolver returns the client IP resolver of cfg, which trusts the
+// forwarding headers of trusted_proxies, and in raft mode, where a follower
+// forwards writes to the leader, of the hosts of the current raft configuration
+// as well (raftHosts). Those hosts' names are looked up until the returned
+// function, nil in standalone, closes them.
+func clientResolver(cfg config.Config, leadership cluster.Leadership) (*clientip.Resolver, func(), error) {
+	membership, raft := leadership.(cluster.Membership)
+	if !raft {
+		resolver, err := clientip.New(cfg.TrustedProxies)
+		return resolver, nil, err
+	}
+	hosts := clientip.NewHosts(raftHosts(membership))
+	resolver, err := clientip.New(cfg.TrustedProxies, clientip.TrustHosts(hosts))
+	if err != nil {
+		hosts.Close()
+		return nil, nil, err
+	}
+	return resolver, hosts.Close, nil
+}
+
+// raftHosts lists the hosts of the members of membership's current configuration,
+// as written: the host of each member's raft address.
+func raftHosts(membership cluster.Membership) func() []string {
+	return func() []string {
+		members := membership.Members()
+		hosts := make([]string, 0, len(members))
+		for _, m := range members {
+			if host, _, err := net.SplitHostPort(m.Address); err == nil && host != "" {
+				hosts = append(hosts, host)
+			}
+		}
+		return hosts
+	}
+}
+
+// before returns a function that runs first, then then; either may be nil, and
+// so is the result when both are.
+func before(first, then func()) func() {
+	switch {
+	case first == nil:
+		return then
+	case then == nil:
+		return first
+	}
+	return func() {
+		first()
+		then()
+	}
 }

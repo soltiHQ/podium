@@ -37,12 +37,14 @@ Main listener (`app.buildMainHandler`), outermost first:
         ▼
   Recovery       ── turns a panic into 503
    CORS          ── answers preflights, adds the CORS headers
-    Leader       ── raft only: forwards writes to the leader, over TLS with tls.client when tls.server is set;
+    Negotiate    ── picks the Responder (JSON vs HTML), stores it in ctx
+     CrossOrigin ── refuses cross-origin browser mutations: 403 through that Responder.
+                    It runs before any route, so a refusal gets no request id and no
+                    access-log line; CrossOrigin logs it at WARN instead. It also runs
+                    before Leader, so a follower refuses such a request itself: it never
+                    reaches the leader.
+      Leader     ── raft only: forwards writes to the leader, over TLS with tls.client when tls.server is set;
                     stores where the leader serves this listener in ctx (httpctx.Leader), for X-Leader
-     Negotiate   ── picks the Responder (JSON vs HTML), stores it in ctx
-      CrossOrigin ── refuses cross-origin browser mutations: 403 through that Responder.
-                     It runs before any route, so a refusal gets no request id and no
-                     access-log line; CrossOrigin logs it at WARN instead.
        mux
         │  per route:
   RequestID      ── installs request id + error slot (API routes and the event stream only)
@@ -61,6 +63,10 @@ Main listener (`app.buildMainHandler`), outermost first:
 `RenderMode` (full page vs HTMX fragment) is a pure function of the request header, derived on demand via `httpctx.ModeFromRequest(r)`: 
 only the negotiated `Responder` is stored in context.
 
+`Negotiate` and `CrossOrigin` run ahead of `Leader`, and nothing depended on the old order: `Negotiate` only stores a
+`Responder`, which the leader picks again for a request a follower forwards, `Leader` answers its own 502 and 503 in plain
+text without it, and `CORS` stays outermost, as before.
+
 ### gRPC
 
 ```text
@@ -68,6 +74,8 @@ only the negotiated `Responder` is stored in context.
         ▼
   UnaryRecovery → UnaryRequestID → UnaryLogger → UnaryLeader
         │   (UnaryAuth / UnaryRequirePermission exist but are not chained yet)
+        │   UnaryLeader, raft only: a follower forwards a Sync to the leader (Forwarder) and
+        │   answers with the leader's answer; any other write is Unavailable + x-leader
         ▼
   handler/discovery.go (GRPCDiscovery)
         │
@@ -80,13 +88,19 @@ only the negotiated `Responder` is stored in context.
 
 ## Client IP
 
-`clientip.Resolver` decides who the client of an HTTP request is (`trusted_proxies`, see `internal/config`):
+`clientip.Resolver` decides who the client of a request is (`trusted_proxies`, see `internal/config`):
 - `IP(r)` - the TCP peer; when the peer is a trusted proxy, the right-most `X-Forwarded-For` entry that is not itself trusted.
+- `Forwarded(peer, values)` - the same walk over any forwarding values, such as the gRPC `x-forwarded-for` metadata.
 - `HTTPS(r)` - direct TLS, or `X-Forwarded-Proto: https` from a trusted proxy. With `auth.cookie_secure: auto` it decides
   whether the auth and device cookies are `Secure`; `app` builds that decision once and hands it to every cookie writer.
 
+In raft mode the trusted proxies are `trusted_proxies` and the hosts of the current raft configuration (`clientip.Hosts`),
+since a follower forwards writes to the leader: the leader believes the forwarding headers of another node, and of nobody
+else. See "Forwarding and trusted hosts" in `internal/raft/README.md` for the rule, names included.
+
 RFC 7239 `Forwarded` is not supported. The login limiter, `middleware.StreamLimit` and HTTP discovery take the client IP from the resolver.
-gRPC requests carry no forwarding headers: gRPC discovery uses the peer address.
+gRPC discovery does too in raft mode, from the peer and its `x-forwarded-for` metadata, which a follower sets when it
+forwards a sync; standalone gRPC discovery uses the peer address, whatever metadata the call carries.
 
 ## Rate limits
 
@@ -129,7 +143,11 @@ A 503 that carries it is a routing condition, not a failure of the node, so the 
 
 It is never sent when that address cannot be derived: this node is the leader, no leader is known, or the port of the listener is not known (`LeaderOptions.ForwardPort` is 0, which answers a write on a follower with a 503 without it). The leader's raft address is not sent in its place.
 
-Every answer sets it through `response.SetLeader`, from the one derivation of the address (`leaderHTTPAddr` in the `Leader` middleware, which is also where a write is forwarded to). The middleware hands it to the handlers as a function in the request context (`httpctx.Leader`), asked when the answer is written, since the leader can change while a request runs. The gRPC interceptors' `x-leader` metadata is another hint: it carries the leader's raft address.
+Every answer sets it through `response.SetLeader`, from the one derivation of the address (`cluster.LeaderAddr`, which the `Leader` middleware also forwards a write to). The middleware hands it to the handlers as a function in the request context (`httpctx.Leader`), asked when the answer is written, since the leader can change while a request runs.
+
+### gRPC: `x-leader`
+
+The gRPC `x-leader` header metadata has the same meaning for the gRPC listener: the **gRPC address of the leader, `host:port`**, the host of the leader's raft advertise address, as written, with this node's gRPC port (`grpc.addr`), from the same derivation, so the same-port assumption holds for gRPC too. It goes out with the `Unavailable` of a write the follower does not forward: a write stream, a unary write the `Forwarder` has no call for, a call another node forwarded already (`x-podium-forwarded`, so a call crosses one node at most), and a forward the leader never answered (`leader unreachable`). A `Sync` that a follower forwards gets the leader's own answer instead, without the hint. As for HTTP, it is not sent when no leader is known or the gRPC port is unknown, and the raft address is never sent in its place.
 
 ## TLS
 
@@ -138,6 +156,8 @@ Both halves are opt-in (empty = plaintext):
 - `tls.server` → the CP's serving identity for the HTTP, HTTP-discovery, and gRPC listeners (`client_ca_file` enables mTLS - client cert required).
 - `tls.client` → the CP as a client when dialing agents (proxy); verifies agent certs and optionally presents a client cert.
 
-Applied uniformly: one server `*tls.Config` for all listeners, one client config for the proxy pool and for the `Leader` middleware,
-whose follower forwards writes to the leader over TLS when `tls.server` is set (`LeaderOptions.TLSClientConfig`).
+Applied uniformly: one server `*tls.Config` for all listeners, one client config for the proxy pool, for the `Leader` middleware,
+whose follower forwards writes to the leader over TLS when `tls.server` is set (`LeaderOptions.TLSClientConfig`), and for the
+gRPC `Forwarder`, which forwards a follower's syncs under the same rule: TLS with `tls.client` when `tls.server` is set, checked
+for the leader's raft host, with `tls.client`'s certificate presented when the leader asks for one.
 The raft transport between nodes has TLS of its own, `cluster.raft.tls` (see `internal/raft`).

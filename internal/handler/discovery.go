@@ -168,15 +168,18 @@ type GRPCDiscovery struct {
 	agentSVC    *agent.Service
 	hub         *event.Hub
 	limiter     *ratelimit.Limiter
+	resolver    *clientip.Resolver
 	requireAuth bool
 }
 
 // NewGRPCDiscovery creates a new gRPC discovery handler.
 //
 // requireAuth turns on per-agent bearer-token authentication on every sync,
-// as for NewHTTPDiscovery. limiter bounds the token checks of each (peer IP,
-// agent ID) pair, see verifyAgentToken.
-func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event.Hub, limiter *ratelimit.Limiter, requireAuth bool) *GRPCDiscovery {
+// as for NewHTTPDiscovery. limiter bounds the token checks of each (client IP,
+// agent ID) pair, see verifyAgentToken. resolver gives the client IP from the
+// peer and its x-forwarded-for metadata, see grpcClientIP; nil trusts no peer,
+// so the peer is the client.
+func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event.Hub, limiter *ratelimit.Limiter, resolver *clientip.Resolver, requireAuth bool) *GRPCDiscovery {
 	if agentSVC == nil {
 		panic(service.ErrNilService)
 	}
@@ -191,6 +194,7 @@ func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event
 		agentSVC:    agentSVC,
 		hub:         hub,
 		limiter:     limiter,
+		resolver:    resolver,
 		requireAuth: requireAuth,
 	}
 }
@@ -203,7 +207,7 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 	}
 
 	if g.requireAuth {
-		if err := verifyAgentToken(ctx, g.logger, g.agentSVC, g.limiter, grpcPeerIP(ctx), req.GetId(), grpcBearerToken(ctx)); err != nil {
+		if err := verifyAgentToken(ctx, g.logger, g.agentSVC, g.limiter, grpcClientIP(ctx, g.resolver), req.GetId(), grpcBearerToken(ctx)); err != nil {
 			switch {
 			case errors.Is(err, agent.ErrTokenTooLong):
 				return nil, status.Errorf(ctx, codes.InvalidArgument, "agent token is too long")
@@ -340,14 +344,18 @@ func bearerToken(header string) string {
 	return ""
 }
 
-// grpcPeerIP returns the canonical IP of the gRPC peer. gRPC requests carry no
-// forwarding headers, so the peer address is the client.
-func grpcPeerIP(ctx context.Context) string {
+// grpcClientIP returns the canonical client IP of a gRPC call: its peer, or, from
+// a peer resolver trusts, such as a follower that forwarded the call, the
+// right-most entry of its x-forwarded-for metadata that resolver does not trust
+// (clientip.Resolver.Forwarded). A nil resolver trusts no peer: the peer is the
+// client, whatever metadata it sends.
+func grpcClientIP(ctx context.Context, resolver *clientip.Resolver) string {
 	var addr string
 	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
 		addr = p.Addr.String()
 	}
-	return clientip.FromAddr(addr)
+	md, _ := metadata.FromIncomingContext(ctx)
+	return resolver.Forwarded(addr, md.Get(clientip.ForwardedForKey))
 }
 
 // grpcBearerToken extracts the bearer token from incoming gRPC "authorization"

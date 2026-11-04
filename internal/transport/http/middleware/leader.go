@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/soltiHQ/control-plane/internal/cluster"
@@ -139,23 +137,11 @@ func leaderAddress(leadership cluster.Leadership, port int) string {
 }
 
 // leaderHTTPAddr is the HTTP address, host:port, at which the leader whose raft address is leaderAddr serves
-// this listener: its host, with port, which every replica is assumed to serve the listener on. It is the one
-// derivation of that address, the forward target and X-Leader alike. It is empty without a leader or a port:
-// the address cannot be derived, and no X-Leader goes out.
+// this listener: its host, with port, which every replica is assumed to serve the listener on
+// ([cluster.LeaderAddr], the derivation the gRPC x-leader hint shares). It is the forward target and X-Leader
+// alike. It is empty without a leader or a port: the address cannot be derived, and no X-Leader goes out.
 func leaderHTTPAddr(leaderAddr string, port int) string {
-	if leaderAddr == "" || port == 0 {
-		return ""
-	}
-	return hostWithPort(leaderHost(leaderAddr), port)
-}
-
-// leaderHost returns the host of the leader's raft address, without the brackets of an IPv6 one.
-func leaderHost(leaderAddr string) string {
-	host := leaderAddr
-	if i := strings.LastIndex(leaderAddr, ":"); i > 0 {
-		host = leaderAddr[:i]
-	}
-	return strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	return cluster.LeaderAddr(leaderAddr, port)
 }
 
 func buildTarget(leaderAddr string, port int, tls bool) (*url.URL, error) {
@@ -172,13 +158,6 @@ func buildTarget(leaderAddr string, port int, tls bool) (*url.URL, error) {
 		return nil, err
 	}
 	return u, nil
-}
-
-func hostWithPort(host string, port int) string {
-	if strings.Contains(host, ":") {
-		return "[" + host + "]:" + strconv.Itoa(port)
-	}
-	return host + ":" + strconv.Itoa(port)
 }
 
 func defaultIsWrite(r *http.Request) bool {

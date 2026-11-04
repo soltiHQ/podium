@@ -26,7 +26,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
 	syncrunner "github.com/soltiHQ/control-plane/internal/server/runner/sync"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
@@ -123,11 +122,15 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		Msg("tls configuration")
 	warnOpenDiscovery(logger, cfg)
 
-	resolver, err := clientip.New(cfg.TrustedProxies)
+	// In raft mode the resolver trusts the hosts of the raft configuration too, so
+	// the leader believes the client a follower forwards a write for. Those hosts
+	// live as long as the raft node, and close with it.
+	resolver, closeHosts, err := clientResolver(cfg, leadership)
 	if err != nil {
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
+	raftShutdown = before(closeHosts, raftShutdown)
 
 	proxyPool := proxy.NewPool(clientTLS, cfg.AgentAuth.Require)
 
@@ -173,7 +176,13 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	discoveryHandler, grpcSrv := buildDiscoveryListeners(logger, svc.agent, eventHub, leadership, cfg, resolver, serverTLS, clientTLS)
+	// A follower forwards its gRPC discovery syncs to the leader over one client
+	// connection, which closes with the raft node, after the listeners stopped.
+	forwarder := syncForwarder(cfg, leadership, clientTLS)
+	if forwarder != nil {
+		raftShutdown = before(func() { _ = forwarder.Close() }, raftShutdown)
+	}
+	discoveryHandler, grpcSrv := buildDiscoveryListeners(logger, svc.agent, eventHub, leadership, cfg, resolver, serverTLS, clientTLS, forwarder)
 	discoveryCfg := cfg.HTTPDiscovery
 	discoveryCfg.TLSConfig = serverTLS
 	httpDiscoveryRunner, err := httpserver.New(discoveryCfg, logger, discoveryHandler)

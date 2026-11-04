@@ -28,6 +28,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 )
 
 // syncHTTP posts one proto-JSON heartbeat, with a bearer token when token is set.
@@ -108,7 +109,7 @@ func TestGRPCDiscoveryRejectsInvalidAgent(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), true)
+	g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer agent-token"))
 	tooMuchMetadata := make(map[string]string, 65)
 	for i := range 65 {
@@ -164,7 +165,7 @@ func TestDiscoveryRequiresTokenByDefault(t *testing.T) {
 	if enrolled.Endpoint() != "http://10.0.0.5:8085" {
 		t.Fatalf("re-sync with a different token replaced the endpoint: %s", enrolled.Endpoint())
 	}
-	g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), requireAuth)
+	g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), nil, requireAuth)
 	_, err = g.Sync(ctx, &discoverv1.SyncRequest{Id: "grpc-agent", Endpoint: "10.0.0.6:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})
 	if grpcstatus.Code(err) != codes.Unauthenticated {
 		t.Fatalf("tokenless gRPC sync with default config: %v, want Unauthenticated", err)
@@ -235,12 +236,45 @@ func TestDiscoveryAuthFailuresBlockOnlyThatAgent(t *testing.T) {
 	}
 }
 
+// gRPC discovery takes its client IP from the x-forwarded-for metadata of a peer
+// the resolver trusts, such as a follower that forwarded the call, walked as
+// X-Forwarded-For is, and is the peer otherwise. A nil resolver trusts no peer.
+func TestGRPCClientIP(t *testing.T) {
+	trusting, err := clientip.New([]string{"10.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name     string
+		resolver *clientip.Resolver
+		peer     string
+		xff      []string // the x-forwarded-for values of the call
+		want     string
+	}{
+		{"a trusted peer", trusting, "10.0.0.1", []string{"203.0.113.9"}, "203.0.113.9"},
+		{"values walked from the right", trusting, "10.0.0.1", []string{"192.0.2.66", "203.0.113.9, 10.0.0.1"}, "203.0.113.9"},
+		{"a peer it does not trust", trusting, "192.0.2.50", []string{"203.0.113.9"}, "192.0.2.50"},
+		{"a trusted peer without the metadata", trusting, "10.0.0.1", nil, "10.0.0.1"},
+		{"a nil resolver", nil, "10.0.0.1", []string{"203.0.113.9"}, "10.0.0.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := peer.NewContext(context.Background(), &peer.Peer{Addr: &net.TCPAddr{IP: net.ParseIP(tc.peer), Port: 40000}})
+			if tc.xff != nil {
+				ctx = metadata.NewIncomingContext(ctx, metadata.MD{clientip.ForwardedForKey: tc.xff})
+			}
+			if got := grpcClientIP(ctx, tc.resolver); got != tc.want {
+				t.Fatalf("grpcClientIP = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestGRPCDiscoveryAuthFailuresBlockOnlyThatAgent(t *testing.T) {
 	logger := zerolog.Nop()
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), true)
+	g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
 	sync := func(peerIP, id, token string) error {
 		ctx := peer.NewContext(context.Background(), &peer.Peer{Addr: &net.TCPAddr{IP: net.ParseIP(peerIP), Port: 40000}})
 		ctx = metadata.NewIncomingContext(ctx, metadata.Pairs("authorization", "Bearer "+token))
@@ -321,7 +355,7 @@ func TestDiscoveryBoundsConcurrentTokenChecks(t *testing.T) {
 			}
 		}},
 		{"grpc", func(svc *agent.Service, hub *event.Hub) func(string) syncOutcome {
-			g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), true)
+			g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), nil, true)
 			from := peer.NewContext(context.Background(), &peer.Peer{Addr: &net.TCPAddr{IP: net.ParseIP("203.0.113.9"), Port: 40000}})
 			return func(token string) syncOutcome {
 				ctx := metadata.NewIncomingContext(from, metadata.Pairs("authorization", "Bearer "+token))
@@ -469,7 +503,7 @@ func TestDiscoveryRejectsOverlongToken(t *testing.T) {
 		svc := agent.New(inmemory.New(), logger)
 		hub := event.NewHub(logger)
 		defer hub.Close()
-		g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), true)
+		g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
 		sync := func(id, token string) error {
 			ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
 			_, err := g.Sync(ctx, &discoverv1.SyncRequest{Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})
@@ -528,7 +562,7 @@ func TestTokenlessSyncWarns(t *testing.T) {
 			}
 		}},
 		{"grpc", func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func() bool {
-			g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), true)
+			g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
 			return func() bool {
 				_, err := g.Sync(context.Background(), &discoverv1.SyncRequest{Id: "agent-a", Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})
 				code := grpcstatus.Code(err)
@@ -609,7 +643,7 @@ func TestRefusedEnrollmentWarns(t *testing.T) {
 			}
 		}},
 		{"grpc", "203.0.113.9", func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func(string, string) syncOutcome {
-			g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), true)
+			g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
 			return func(id, token string) syncOutcome {
 				ctx := peer.NewContext(context.Background(), &peer.Peer{Addr: &net.TCPAddr{IP: net.ParseIP("203.0.113.9"), Port: 40000}})
 				if token != "" {
@@ -711,7 +745,7 @@ func TestEnrollRequiresDerivedTokenWhenSecretSet(t *testing.T) {
 			}
 		}},
 		{"grpc", func(svc *agent.Service, hub *event.Hub) func(string, string) syncOutcome {
-			g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), true)
+			g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), nil, true)
 			return func(id, token string) syncOutcome {
 				ctx := context.Background()
 				if token != "" {
@@ -800,7 +834,7 @@ func TestDeletedAgentSyncsAgainWithItsStoredToken(t *testing.T) {
 			}
 		}},
 		{"grpc", func(svc *agent.Service, hub *event.Hub) func(string) syncOutcome {
-			g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), true)
+			g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), nil, true)
 			return func(token string) syncOutcome {
 				ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
 				_, err := g.Sync(ctx, &discoverv1.SyncRequest{Id: "agent-1", Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})

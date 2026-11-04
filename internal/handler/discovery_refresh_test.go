@@ -36,7 +36,7 @@ var syncTransports = []struct {
 		}
 	}},
 	{"grpc", func(svc *agent.Service, hub *event.Hub) func(*discoverv1.SyncRequest) error {
-		g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), false)
+		g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), nil, false)
 		return func(req *discoverv1.SyncRequest) error {
 			_, err := g.Sync(context.Background(), req)
 			return err

@@ -19,7 +19,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
-	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 )
 
 // mainHandlerSecret signs the access tokens of the listeners mainHandlerOver builds.
@@ -39,6 +38,7 @@ func mainHandlerOver(t *testing.T, cfg config.Config, store storage.Storage, log
 
 // mainHandlerOf builds the main listener of a node led as leadership says,
 // which forwards writes with forwardTLS, from cfg over store, logging to logger.
+// Its client IP resolver is the one New builds for leadership.
 func mainHandlerOf(t *testing.T, cfg config.Config, store storage.Storage, logger zerolog.Logger, leadership cluster.Leadership, forwardTLS *tls.Config) http.Handler {
 	t.Helper()
 	cfg.Auth.JWTSecret = mainHandlerSecret
@@ -51,9 +51,12 @@ func mainHandlerOf(t *testing.T, cfg config.Config, store storage.Storage, logge
 	t.Cleanup(func() { _ = pool.Close() })
 	events := event.NewHub(logger)
 	t.Cleanup(events.Close)
-	resolver, err := clientip.New(cfg.TrustedProxies)
+	resolver, closeHosts, err := clientResolver(cfg, leadership)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if closeHosts != nil {
+		t.Cleanup(closeHosts)
 	}
 	handler, logs := buildMainHandler(cfg, logger, svc, authModel, pool, events, leadership, resolver, forwardTLS)
 	t.Cleanup(logs.Close)

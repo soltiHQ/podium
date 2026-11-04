@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -185,7 +186,7 @@ func newDiscoveryClientsFor(t *testing.T, cfg config.Config) discoveryClients {
 	}
 	hub := event.NewHub(logger)
 	t.Cleanup(hub.Close)
-	h, srv := buildDiscoveryListeners(logger, svc.agent, hub, standalone.NewLeadership(), cfg, nil, nil, nil)
+	h, srv := buildDiscoveryListeners(logger, svc.agent, hub, standalone.NewLeadership(), cfg, nil, nil, nil, nil)
 	return discoveryClients{http: h, grpc: serveDiscovery(t, srv), agents: svc.agent}
 }
 
@@ -214,7 +215,7 @@ func TestGRPCDiscoveryRejectsOversizedMessage(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), nil, false))
+	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), nil, nil, false, 0, nil))
 	sync := func(id string, osBytes int) error {
 		_, err := client.Sync(ctx, &discoverv1.SyncRequest{
 			Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1,
@@ -241,7 +242,7 @@ func TestGRPCDiscoveryCapsHeaders(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), nil, false))
+	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), nil, nil, false, 0, nil))
 	sync := func(id string, padding int) error {
 		md := metadata.AppendToOutgoingContext(ctx, "x-padding", strings.Repeat("p", padding))
 		_, err := client.Sync(md, &discoverv1.SyncRequest{
@@ -369,6 +370,67 @@ func TestDiscoveryEnrollmentUsesTheConfiguredSecret(t *testing.T) {
 		if token, err := c.agents.AgentToken(ctx, id); err != nil || token != want {
 			t.Fatalf("stored token of %s: %q %v, want its derived token", id, token, err)
 		}
+	}
+}
+
+// Standalone gRPC discovery takes its client IP from the peer, as it did before
+// followers forwarded syncs: x-forwarded-for counts for nothing, even from a
+// host that trusted_proxies lists, while HTTP discovery believes that host's
+// X-Forwarded-For. Each attempt names an address of its own; over gRPC the
+// limiter still counts all of them at the peer.
+func TestStandaloneGRPCDiscoveryIgnoresForwardedFor(t *testing.T) {
+	cfg := config.Default()
+	cfg.TrustedProxies = []string{"127.0.0.1"} // the address of the test's own client
+	logger := zerolog.Nop()
+	leadership := standalone.NewLeadership()
+	resolver, closeHosts, err := clientResolver(cfg, leadership)
+	if err != nil || closeHosts != nil {
+		t.Fatalf("clientResolver in standalone: %v, with a closer: %v", err, closeHosts != nil)
+	}
+	svc := agent.New(inmemory.New(), logger)
+	hub := event.NewHub(logger)
+	t.Cleanup(hub.Close)
+	h, srv := buildDiscoveryListeners(logger, svc, hub, leadership, cfg, resolver, nil, nil, nil)
+	client := serveDiscovery(t, srv)
+	forged := func(attempt int) string { return fmt.Sprintf("198.51.100.%d", attempt+1) }
+	for _, tc := range []struct {
+		name string
+		sync func(attempt int, id, token string) error
+		want func(err error) bool // the end of the sixth attempt, after five failures
+	}{
+		{"grpc", func(attempt int, id, token string) error {
+			ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer "+token, "x-forwarded-for", forged(attempt))
+			_, err := client.Sync(ctx, &discoverv1.SyncRequest{Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})
+			return err
+		}, func(err error) bool { return status.Code(err) == codes.ResourceExhausted }},
+		{"http", func(attempt int, id, token string) error {
+			body := `{"id":"` + id + `","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
+			r := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/sync", strings.NewReader(body))
+			r.RemoteAddr = "127.0.0.1:40000"
+			r.Header.Set("Authorization", "Bearer "+token)
+			r.Header.Set("X-Forwarded-For", forged(attempt))
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != http.StatusOK {
+				return fmt.Errorf("HTTP %d", w.Code)
+			}
+			return nil
+		}, func(err error) bool { return err == nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := "agent-" + tc.name
+			if err := tc.sync(0, id, "token-"+id); err != nil {
+				t.Fatalf("enroll: %v", err)
+			}
+			for attempt := 1; attempt <= 5; attempt++ {
+				if err := tc.sync(attempt, id, "stale-token"); err == nil {
+					t.Fatalf("bad token %d accepted", attempt)
+				}
+			}
+			if err := tc.sync(6, id, "token-"+id); !tc.want(err) {
+				t.Fatalf("the sixth attempt, as %s: %v", forged(6), err)
+			}
+		})
 	}
 }
 

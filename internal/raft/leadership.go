@@ -9,7 +9,10 @@ import (
 	"github.com/soltiHQ/control-plane/internal/cluster"
 )
 
-var _ cluster.Leadership = (*Leadership)(nil)
+var (
+	_ cluster.Leadership = (*Leadership)(nil)
+	_ cluster.Membership = (*Leadership)(nil)
+)
 
 // Leadership is backed by the Raft node's authoritative state. Each
 // WhenLeader caller observes transitions independently: LeaderCh is a single
@@ -28,6 +31,24 @@ func NewLeadership(r *hraft.Raft) *Leadership {
 func (l *Leadership) WaitReady(ctx context.Context) error { return awaitApplied(ctx, l.r) }
 func (l *Leadership) AmLeader() bool                      { return l.r.State() == hraft.Leader }
 func (l *Leadership) CurrentLeader() string               { addr, _ := l.r.LeaderWithID(); return string(addr) }
+
+// Members implements cluster.Membership: the servers of the node's latest
+// configuration, voters or not, in its order, with their addresses as the
+// configuration writes them. hashicorp/raft keeps a copy of that configuration
+// apart from its main loop (GetConfiguration in v1.8.0), so a call reads it
+// without waiting on raft.
+func (l *Leadership) Members() []cluster.Peer {
+	future := l.r.GetConfiguration()
+	if future.Error() != nil {
+		return nil
+	}
+	servers := future.Configuration().Servers
+	members := make([]cluster.Peer, 0, len(servers))
+	for _, s := range servers {
+		members = append(members, cluster.Peer{ID: string(s.ID), Address: string(s.Address)})
+	}
+	return members
+}
 
 func (l *Leadership) WhenLeader(ctx context.Context, fn func(context.Context) error) error {
 	if fn == nil || ctx.Err() != nil {

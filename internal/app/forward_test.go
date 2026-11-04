@@ -248,7 +248,7 @@ func TestLeaderForwardingTrustsClusterCA(t *testing.T) {
 		{"discovery", "/api/v1/discovery/sync", func(c *config.Config) *string { return &c.HTTPDiscovery.Addr }, func(t *testing.T, cfg config.Config, forwardTLS *tls.Config) http.Handler {
 			hub := event.NewHub(zerolog.Nop())
 			t.Cleanup(hub.Close)
-			h, srv := buildDiscoveryListeners(zerolog.Nop(), agent.New(inmemory.New(), zerolog.Nop()), hub, follower{leader: "127.0.0.1:7000"}, cfg, nil, nil, forwardTLS)
+			h, srv := buildDiscoveryListeners(zerolog.Nop(), agent.New(inmemory.New(), zerolog.Nop()), hub, follower{leader: "127.0.0.1:7000"}, cfg, nil, nil, forwardTLS, nil)
 			t.Cleanup(srv.Stop)
 			return h
 		}},

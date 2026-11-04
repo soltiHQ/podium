@@ -15,6 +15,8 @@ package cluster
 import (
 	"context"
 	"errors"
+	"strconv"
+	"strings"
 )
 
 // ErrNotLeader indicates a write that reached a replica which is not the
@@ -75,6 +77,36 @@ type Leadership interface {
 // operations. Leadership alone must not be used as a replay readiness check.
 type LeaderReadiness interface {
 	WaitReady(ctx context.Context) error
+}
+
+// Membership is implemented by drivers whose leadership knows the members of
+// its cluster: raft, from its configuration. Standalone has none.
+type Membership interface {
+	// Members returns the members of the latest configuration, committed or
+	// not, each with the address the others reach it at, as written. Every
+	// call reads the configuration anew, cheaply.
+	Members() []Peer
+}
+
+// LeaderAddr is the address, host:port, at which the leader whose raft address
+// is leaderAddr serves a listener that every replica serves on port (the
+// same-port assumption): the host of the raft address, as written, with port.
+// It is the one derivation of that address: the target a follower forwards a
+// write to, the HTTP X-Leader header and the gRPC x-leader hint alike. It is
+// empty without a leader or a port, since the address cannot be derived.
+func LeaderAddr(leaderAddr string, port int) string {
+	if leaderAddr == "" || port == 0 {
+		return ""
+	}
+	host := leaderAddr
+	if i := strings.LastIndex(leaderAddr, ":"); i > 0 {
+		host = leaderAddr[:i]
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if strings.Contains(host, ":") {
+		return "[" + host + "]:" + strconv.Itoa(port)
+	}
+	return host + ":" + strconv.Itoa(port)
 }
 
 // AwaitLeaderReady establishes the read-ready boundary before leader work.

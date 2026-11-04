@@ -167,8 +167,8 @@ a leadership error as a WARN: 503 with `X-Leader`, where every other error is
 answered and logged as before
 (`TestWriteHandlersAnswerLeadershipErrorsWithTheLeader`). The logout and the
 HTTP discovery sync still answer `response.Unavailable` for every error, 503
-without the header. gRPC discovery keeps the `x-leader` hint of its
-interceptors.
+without the header. A gRPC discovery sync on a follower is forwarded to the
+leader too, see "Forwarding and trusted hosts" below.
 
 A read that writes is the refresh of a browser session with
 `auth.rotate_refresh` on: the `Auth` and `OptionalAuth` middleware refresh a
@@ -187,6 +187,78 @@ refresh at the leader (`TestRotatingRefreshOnAFollowerAsksForTheLeader`, and
 load balancer must send browsers to the leader, or retry a request that gets
 `X-Leader` on the node it names. With `auth.rotate_refresh` off, as it is by
 default, a refresh only reads and works on every node.
+
+## Forwarding and trusted hosts
+
+A follower sends the writes it gets to the leader, at the host of the leader's
+raft address, as written, and the port of the listener the write came in on,
+which every node is assumed to serve that listener on (`cluster.LeaderAddr`,
+see "Cluster" in `internal/config/README.md`). The HTTP listeners forward with
+the `Leader` middleware; gRPC discovery forwards a unary `DiscoverService.Sync`
+with the `UnaryLeader` interceptor's `Forwarder`, through the generated client:
+
+- over TLS with `tls.client` when `tls.server` is set, checked for the leader's
+  raft host and presenting `tls.client`'s certificate when the leader asks for
+  one, as the HTTP forward does;
+- with the caller's own deadline, and none when the caller set none;
+- with `authorization`, unchanged, the only metadata the discovery handler
+  reads, the request ID, so that both nodes log the call under one,
+  `x-forwarded-for`, the caller's own values with its peer appended, and
+  `x-podium-forwarded`, and nothing else of the call's metadata;
+- over one client connection, kept while the leader keeps its address, replaced
+  when the leader moves, which closes the former leader's, and closed when the
+  node shuts down (`TestForwarderKeepsOneConnectionPerLeader`).
+
+The leader's answer, an error included, is the follower's
+(`TestFollowerForwardsGRPCSync`, `TestUnaryLeaderForwardsAWriteWithItsMetadata`,
+`TestForwardedCallKeepsTheCallersDeadline`). A forward the leader never
+answers, as it cannot be reached, is `Unavailable` `leader unreachable` with the
+`x-leader` hint, the leader's gRPC address. A follower never forwards a call
+that carries `x-podium-forwarded`: it answers it `Unavailable` with the hint, so
+a call crosses one node at most, even when a stale view of the leader or nodes
+that serve gRPC on different ports would send it round
+(`TestUnaryLeaderAnswersWithTheLeadersGRPCAddress`). A mark that a client sets
+itself only keeps its own call from being forwarded.
+
+The leader then counts the agent where the agent is: the client IP resolver
+trusts the hosts of the node's current raft configuration as proxies, besides
+`trusted_proxies`. Their `X-Forwarded-For`, which the `Leader` middleware's
+reverse proxy appends the caller to, and their gRPC `x-forwarded-for` count, so
+the discovery limiter keys the agent's token failures on the agent's own
+address, not on the follower's (`TestForwardedSyncKeepsClientIPForLimiter`),
+and so does the login limiter on a browser's. A host that is in neither list is
+its own client, whatever it sends (`TestUntrustedForwardedHeaderIgnored`). Trust
+is decided per request from the TCP peer, as for `trusted_proxies`:
+
+- The configuration is read anew on every check (`Leadership.Members`, a read
+  of the copy hashicorp/raft keeps apart from its main loop,
+  `TestLeadershipListsTheMembers`), so a host that leaves it is trusted no
+  more, and one written as an IP that joins it is trusted, at once
+  (`TestHostsFollowTheListAndTheLookups`).
+- A host written as a name is trusted at the addresses the name resolves to,
+  through the system resolver, as the nodes dial one another. The names are
+  looked up in the background, every 10 s and at once when a check meets a name
+  not looked up yet, never on the request path; a name whose last lookup failed
+  is trusted at no address (`TestHostsFollowTheListAndTheLookups`,
+  `TestHostsLookUpANewNameAtOnce`,
+  `TestRaftHostNamesAreTrustedAtTheirAddresses`). So the trust of a name is
+  only as good as the DNS answers the node gets, and up to 10 s late: a node
+  that moves is trusted at its new address after the next lookup, and at its old
+  one until then. Raft's mutual TLS does not cover it, as it checks a peer's
+  certificate, not which address a name gives. Where DNS cannot be trusted that
+  far, write the advertise addresses as IPs.
+- The trust is a node's, not a connection's: every process on a node's host can
+  name any client in those headers, as behind any trusted proxy, and the address
+  the node connects to the others from must be the one its raft address names,
+  or resolves to, for its forwards to count.
+
+In standalone the resolver trusts `trusted_proxies` only, and gRPC discovery
+reads no forwarding metadata: its client is the peer, as before
+(`TestStandaloneGRPCDiscoveryIgnoresForwardedFor`).
+
+The main listener refuses a cross-origin browser mutation before the `Leader`
+middleware runs, so a follower answers it 403 itself and the request never
+reaches the leader (`TestCrossOriginRefusedOnFollower`).
 
 ## Apply failures
 
