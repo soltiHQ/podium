@@ -26,6 +26,7 @@ import (
 	discoverv1 "github.com/soltiHQ/control-plane/api/gen/solti/discover/v1"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/cluster"
+	"github.com/soltiHQ/control-plane/internal/cluster/standalone"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
@@ -478,6 +479,52 @@ func TestCrossOriginRefusedOnFollower(t *testing.T) {
 	}
 	if refusals != 2 {
 		t.Fatalf("the follower logged %d refusals at WARN, want 2:\n%s", refusals, logs.String())
+	}
+}
+
+// A follower's CORS middleware answers a cross-origin client for the write it
+// forwards, and the leader's own CORS headers are dropped from the forwarded
+// answer: it carries Access-Control-Allow-Origin once, and Origin once in Vary,
+// as a browser needs to accept it.
+func TestForwardedWriteCarriesTheCORSHeadersOnce(t *testing.T) {
+	const origin = "https://app.example.com"
+	cfg := config.Default()
+	cfg.CORS.AllowOrigins = []string{origin}
+	cfg.CORS.AllowCredentials = true
+	leader := httptest.NewServer(mainHandlerOf(t, cfg, inmemory.New(), zerolog.Nop(), standalone.NewLeadership(), nil))
+	t.Cleanup(leader.Close)
+	_, port, err := net.SplitHostPort(leader.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.HTTP.Addr = ":" + port
+	h := mainHandlerOf(t, cfg, inmemory.New(), zerolog.Nop(), follower{leader: "127.0.0.1:7000"}, nil)
+
+	r := browserRequest(http.MethodPost, "/api/v1/users", jsonType, `{"subject":"carol"}`, nil)
+	r.Header.Set("Origin", origin)
+	r.Header.Set("Sec-Fetch-Site", "cross-site")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	// The leader refuses the write, which carries no credentials: an answer of the
+	// leader all the same, with the request ID that only its routes set.
+	if w.Code != http.StatusUnauthorized || w.Header().Get("X-Request-Id") == "" {
+		t.Fatalf("follower answered %d with request ID %q, want the leader's 401", w.Code, w.Header().Get("X-Request-Id"))
+	}
+	for _, name := range []string{"Access-Control-Allow-Origin", "Access-Control-Allow-Credentials", "Access-Control-Expose-Headers"} {
+		if got := w.Header().Values(name); len(got) != 1 {
+			t.Errorf("%s %q, want one value", name, got)
+		}
+	}
+	origins := 0
+	for _, line := range w.Header().Values("Vary") {
+		for _, token := range strings.Split(line, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "Origin") {
+				origins++
+			}
+		}
+	}
+	if origins != 1 {
+		t.Errorf("Vary %q names Origin %d times, want once", w.Header().Values("Vary"), origins)
 	}
 }
 

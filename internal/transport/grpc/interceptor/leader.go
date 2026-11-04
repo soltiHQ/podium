@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -56,8 +57,9 @@ type LeaderOptions struct {
 // UnaryLeader routes the write RPCs that reach a follower, as the HTTP Leader middleware routes writes:
 //   - Reads, and writes on the leader: pass through.
 //   - A write that LeaderOptions.Forwarder forwards, on a follower that knows the leader's gRPC address: sent there
-//     (see Forwarder), and the leader's answer, an error included, is the answer. A forward the leader never
-//     answers is codes.Unavailable "leader unreachable" with the x-leader hint.
+//     (see Forwarder), and the leader's answer, an error included, is the answer, with the x-leader hint of an
+//     Unavailable that carries one. A forward the leader never answers is codes.Unavailable "leader unreachable"
+//     with the x-leader hint.
 //   - Any other write on a follower, one that another node forwarded included (see ForwardedKey):
 //     codes.Unavailable "not the leader" with the x-leader hint.
 //
@@ -84,10 +86,27 @@ func UnaryLeader(leadership cluster.Leadership, opts LeaderOptions) grpc.UnarySe
 
 func allWrites(string) bool { return true }
 
-// setLeaderHint sets the x-leader hint to leader, the leader's gRPC address, unless it is empty.
+// hintKey is the context key of a hintSlot.
+type hintKey struct{}
+
+// hintSlot records that a call answered with the x-leader hint. UnaryLogger installs it, outside the interceptors
+// that route writes, which mark it, and reads it back once the call returns.
+type hintSlot struct{ set atomic.Bool }
+
+// withHintSlot installs an empty hintSlot in ctx.
+func withHintSlot(ctx context.Context) (context.Context, *hintSlot) {
+	slot := &hintSlot{}
+	return context.WithValue(ctx, hintKey{}, slot), slot
+}
+
+// setLeaderHint sets the x-leader hint to leader, the leader's gRPC address, unless it is empty, and marks the
+// hintSlot of ctx once the hint is set.
 func setLeaderHint(ctx context.Context, leader string) {
-	if leader != "" {
-		_ = grpc.SetHeader(ctx, metadata.Pairs(LeaderKey, leader))
+	if leader == "" || grpc.SetHeader(ctx, metadata.Pairs(LeaderKey, leader)) != nil {
+		return
+	}
+	if slot, ok := ctx.Value(hintKey{}).(*hintSlot); ok {
+		slot.set.Store(true)
 	}
 }
 
@@ -148,6 +167,11 @@ func (f *Forwarder) forward(ctx context.Context, leader, method string, req any)
 		// The leader's interceptors send header metadata, its request ID, with every answer: a call that got
 		// none never reached them.
 		if callErr == nil || len(header) > 0 {
+			if hint := header.Get(LeaderKey); status.Code(callErr) == codes.Unavailable && len(hint) > 0 {
+				// A node that does not lead refused the forwarded call: its view of the leader goes on to
+				// the caller, and the answer stays a routing answer.
+				setLeaderHint(ctx, hint[0])
+			}
 			return resp, callErr
 		}
 		err = callErr

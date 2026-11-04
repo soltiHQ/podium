@@ -5,7 +5,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
@@ -140,6 +142,107 @@ func TestLeaderAnswersCarryTheLeadersHTTPAddressOrNone(t *testing.T) {
 				t.Fatalf("%s = %q, want %q", response.LeaderHeader, w.Header().Get(response.LeaderHeader), tt.leader)
 			}
 		})
+	}
+}
+
+// hopNode is a node of TestLeaderForwardsAWriteOnce: the Leader middleware over a
+// handler that serves a write, behind a count of the requests that reach it. A
+// node reached more than three times answers 508, so that a write going round
+// ends.
+type hopNode struct {
+	srv     *httptest.Server
+	reached atomic.Int32
+}
+
+func newHopNode(t *testing.T) *hopNode {
+	t.Helper()
+	n := &hopNode{srv: httptest.NewUnstartedServer(nil)}
+	t.Cleanup(n.srv.Close)
+	return n
+}
+
+func (n *hopNode) port() int { return n.srv.Listener.Addr().(*net.TCPAddr).Port }
+
+// start serves the Leader middleware of leadership, forwarding to port.
+func (n *hopNode) start(leadership stubLeadership, port int) {
+	served := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	leader := Leader(leadership, LeaderOptions{ForwardPort: port})(served)
+	n.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if n.reached.Add(1) > 3 {
+			w.WriteHeader(http.StatusLoopDetected)
+			return
+		}
+		leader.ServeHTTP(w, r)
+	})
+	n.srv.Start()
+}
+
+// A follower marks a write it forwards, and never forwards a marked write
+// again: it answers 503 with X-Leader, as a follower that cannot forward. So two
+// followers that each take the other for the leader, as a stale view or
+// replicas on mixed ports can, pass a write on once and then answer 503,
+// instead of sending it round. A client that sends the mark itself only keeps
+// its own write from being forwarded, and the leader serves a marked write.
+func TestLeaderForwardsAWriteOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		leading bool   // a, the node the client sends the write to, leads
+		mark    bool   // the client marks the write
+		status  int    // the answer to the client
+		reached [2]int // the requests that reached a and b
+	}{
+		{"two followers that take each other for the leader", false, false, http.StatusServiceUnavailable, [2]int{1, 1}},
+		{"a write the client marked", false, true, http.StatusServiceUnavailable, [2]int{1, 0}},
+		{"a marked write on the leader", true, true, http.StatusNoContent, [2]int{1, 0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := newHopNode(t), newHopNode(t)
+			// Each knows the leader by the raft host 127.0.0.1, and forwards to the
+			// other's port: each one's view of the leader is the other.
+			a.start(stubLeadership{leading: tc.leading, leader: "127.0.0.1:7000"}, b.port())
+			b.start(stubLeadership{leader: "127.0.0.1:7000"}, a.port())
+
+			r, err := http.NewRequest(http.MethodPost, a.srv.URL+"/api/v1/users", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.mark {
+				r.Header.Set(ForwardedHeader, "1")
+			}
+			resp, err := a.srv.Client().Do(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if reached := [2]int{int(a.reached.Load()), int(b.reached.Load())}; resp.StatusCode != tc.status || reached != tc.reached {
+				t.Fatalf("answered %d after reaching a and b %v times, want %d after %v", resp.StatusCode, reached, tc.status, tc.reached)
+			}
+			// The node that refused the write names the leader as it sees it.
+			want := map[bool]string{true: net.JoinHostPort("127.0.0.1", strconv.Itoa(b.port())), false: net.JoinHostPort("127.0.0.1", strconv.Itoa(a.port()))}[tc.mark]
+			if tc.status == http.StatusServiceUnavailable && resp.Header.Get(response.LeaderHeader) != want {
+				t.Fatalf("%s = %q, want %q", response.LeaderHeader, resp.Header.Get(response.LeaderHeader), want)
+			}
+		})
+	}
+}
+
+// The leader's answer to a forwarded write loses its CORS headers, whatever the
+// case of their names: every Access-Control-* header, and the Origin token of
+// Vary. Every other header, and every other Vary token, stays as it was.
+func TestDropCORSKeepsTheRest(t *testing.T) {
+	res := &http.Response{Header: http.Header{
+		"Access-Control-Allow-Origin":      {"https://app.example.com"},
+		"Access-Control-Allow-Credentials": {"true"},
+		"access-control-expose-headers":    {"ETag"},
+		"Vary":                             {"Origin", "Accept-Encoding, origin", " HX-Request "},
+		"X-Request-Id":                     {"request-1"},
+	}}
+	if err := dropCORS(res); err != nil {
+		t.Fatal(err)
+	}
+	want := http.Header{"Vary": {"Accept-Encoding", "HX-Request"}, "X-Request-Id": {"request-1"}}
+	if !reflect.DeepEqual(res.Header, want) {
+		t.Fatalf("headers %v, want %v", res.Header, want)
 	}
 }
 

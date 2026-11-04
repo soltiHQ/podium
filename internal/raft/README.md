@@ -217,8 +217,19 @@ answers, as it cannot be reached, is `Unavailable` `leader unreachable` with the
 that carries `x-podium-forwarded`: it answers it `Unavailable` with the hint, so
 a call crosses one node at most, even when a stale view of the leader or nodes
 that serve gRPC on different ports would send it round
-(`TestUnaryLeaderAnswersWithTheLeadersGRPCAddress`). A mark that a client sets
-itself only keeps its own call from being forwarded.
+(`TestUnaryLeaderAnswersWithTheLeadersGRPCAddress`). The follower that forwarded
+the call passes that answer on with its hint, the refusing node's view of the
+leader. An HTTP forward carries `X-Podium-Forwarded`, which the `Leader`
+middleware of a follower answers the same way, 503 with `X-Leader`
+(`TestLeaderForwardsAWriteOnce`). Either mark that a client sets itself only
+keeps its own request from being forwarded, and the leader serves a marked
+request as any other. `UnaryLogger` logs an `Unavailable` that carries the hint
+at WARN, as the access log does a 503 with `X-Leader`
+(`TestUnaryLoggerLogsRoutingAnswersAtWarn`).
+
+The HTTP forward also drops the CORS headers of the leader's answer, which the
+reverse proxy would add to the follower's own: the answer names the client's
+origin once (`TestForwardedWriteCarriesTheCORSHeadersOnce`).
 
 The leader then counts the agent where the agent is: the client IP resolver
 trusts the hosts of the node's current raft configuration as proxies, besides

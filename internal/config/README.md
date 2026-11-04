@@ -424,8 +424,9 @@ the listener the request came in on, and names that address in the HTTP
 `X-Leader` and the gRPC `x-leader` hints. Nothing checks the assumption: on a
 node whose port differs, forwards go to a port the leader does not serve, and
 fail (HTTP 502, gRPC `Unavailable`), or reach another node that shares the
-leader's host. A gRPC call is forwarded once at most, so it never goes round
-nodes, but the HTTP forward has no such bound.
+leader's host. A write, or a gRPC call, is forwarded once at most, so it never
+goes round nodes: a follower that gets one another node forwarded answers
+HTTP 503 or gRPC `Unavailable`, with the hint.
 
 Configuration loading fails, and nothing in `data_dir` is opened, when:
 

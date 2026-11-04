@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/soltiHQ/control-plane/internal/cluster"
@@ -16,6 +17,12 @@ import (
 
 // defaultForwardTimeout bounds a single proxied writing to the leader when LeaderOptions.ForwardTimeout is left unset.
 const defaultForwardTimeout = 30 * time.Second
+
+// ForwardedHeader marks a write that a follower forwarded to the leader, as the gRPC x-podium-forwarded metadata
+// marks a call. A follower never forwards a marked write again, so a write crosses one node at most: neither a stale
+// view of the leader nor replicas that serve this listener on different ports can send it round. A client that sets
+// the mark itself only keeps its own write from being forwarded.
+const ForwardedHeader = "X-Podium-Forwarded"
 
 // defaultWriteMethods: mutations require leader authority.
 var defaultWriteMethods = map[string]struct{}{
@@ -60,11 +67,14 @@ type LeaderOptions struct {
 // Leader routes write requests to the cluster leader.
 //
 //   - Reads: pass through.
-//   - Writes on leader: pass through.
+//   - Writes on leader: pass through, marked or not.
 //   - Writes on the follower with ForwardPort == 0: 503, without X-Leader.
+//   - Writes on the follower that carry ForwardedHeader, which another node forwarded already: 503, with the
+//     leader's HTTP address in X-Leader. They are not forwarded again.
 //   - Writes on follower with ForwardPort > 0: transparent reverse-proxy to http://<leader-host>:<ForwardPort>,
-//     or https:// with TargetTLS, verified and authenticated with TLSClientConfig. A leader it cannot reach is a 502
-//     with the leader's HTTP address in X-Leader.
+//     or https:// with TargetTLS, verified and authenticated with TLSClientConfig, marked with ForwardedHeader. A
+//     leader it cannot reach is a 502 with the leader's HTTP address in X-Leader. The leader's answer goes back
+//     without its CORS headers (see dropCORS).
 //
 // A request that passes through carries, in its context, where the leader serves this listener
 // (httpctx.Leader, see leaderAddress), so that a write that reaches a follower anyway, such as a
@@ -110,6 +120,12 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 				http.Error(w, "cluster: not leader", http.StatusServiceUnavailable)
 				return
 			}
+			if r.Header.Get(ForwardedHeader) != "" {
+				// Forwarded once already, to a node that leads no more, or never did on this port.
+				response.SetLeader(w, leaderHTTPAddr(leaderAddr, opts.ForwardPort))
+				http.Error(w, "cluster: not leader", http.StatusServiceUnavailable)
+				return
+			}
 
 			target, err := buildTarget(leaderAddr, opts.ForwardPort, opts.TargetTLS)
 			if err != nil {
@@ -118,11 +134,15 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 			}
 			proxy := httputil.NewSingleHostReverseProxy(target)
 			proxy.Transport = transport
+			proxy.ModifyResponse = dropCORS
 			proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
 				response.SetLeader(w, leaderHTTPAddr(leaderAddr, opts.ForwardPort))
 				http.Error(w, "cluster: leader unreachable", http.StatusBadGateway)
 			}
-			proxy.ServeHTTP(w, r)
+			// The mark goes on a copy, which the proxy forwards: a handler must not change the request it gets.
+			marked := r.Clone(r.Context())
+			marked.Header.Set(ForwardedHeader, "1")
+			proxy.ServeHTTP(w, marked)
 		})
 	}
 }
@@ -142,6 +162,35 @@ func leaderAddress(leadership cluster.Leadership, port int) string {
 // alike. It is empty without a leader or a port: the address cannot be derived, and no X-Leader goes out.
 func leaderHTTPAddr(leaderAddr string, port int) string {
 	return cluster.LeaderAddr(leaderAddr, port)
+}
+
+// dropCORS removes the CORS headers from the leader's answer to a forwarded write: every Access-Control-* header,
+// and the Origin token of Vary, whose other tokens stay. The follower's own CORS middleware, which runs before the
+// forward, owns these headers and has set them already, and the reverse proxy adds the leader's headers to the
+// follower's: a browser refuses an answer that names its origin twice in Access-Control-Allow-Origin.
+func dropCORS(res *http.Response) error {
+	for name := range res.Header {
+		if strings.HasPrefix(http.CanonicalHeaderKey(name), "Access-Control-") {
+			delete(res.Header, name)
+		}
+	}
+	var vary []string
+	for _, line := range res.Header.Values("Vary") {
+		var kept []string
+		for _, token := range strings.Split(line, ",") {
+			if token = strings.TrimSpace(token); token != "" && !strings.EqualFold(token, "Origin") {
+				kept = append(kept, token)
+			}
+		}
+		if len(kept) > 0 {
+			vary = append(vary, strings.Join(kept, ", "))
+		}
+	}
+	res.Header.Del("Vary")
+	for _, line := range vary {
+		res.Header.Add("Vary", line)
+	}
+	return nil
 }
 
 func buildTarget(leaderAddr string, port int, tls bool) (*url.URL, error) {

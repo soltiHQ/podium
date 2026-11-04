@@ -43,7 +43,9 @@ Main listener (`app.buildMainHandler`), outermost first:
                     access-log line; CrossOrigin logs it at WARN instead. It also runs
                     before Leader, so a follower refuses such a request itself: it never
                     reaches the leader.
-      Leader     ── raft only: forwards writes to the leader, over TLS with tls.client when tls.server is set;
+      Leader     ── raft only: forwards writes to the leader, over TLS with tls.client when tls.server is set,
+                    marked X-Podium-Forwarded, and never forwards a marked write again; drops the leader's CORS
+                    headers from its answer, as CORS above has set the follower's;
                     stores where the leader serves this listener in ctx (httpctx.Leader), for X-Leader
        mux
         │  per route:
@@ -65,7 +67,9 @@ only the negotiated `Responder` is stored in context.
 
 `Negotiate` and `CrossOrigin` run ahead of `Leader`, and nothing depended on the old order: `Negotiate` only stores a
 `Responder`, which the leader picks again for a request a follower forwards, `Leader` answers its own 502 and 503 in plain
-text without it, and `CORS` stays outermost, as before.
+text without it, and `CORS` stays outermost, as before. The reverse proxy adds the leader's headers to the ones the follower
+set, so `Leader` drops the leader's CORS headers, every `Access-Control-*` header and the `Origin` token of `Vary`, and
+keeps the rest: an answer that names the origin twice is one a browser refuses (`TestForwardedWriteCarriesTheCORSHeadersOnce`).
 
 ### gRPC
 
@@ -76,6 +80,7 @@ text without it, and `CORS` stays outermost, as before.
         │   (UnaryAuth / UnaryRequirePermission exist but are not chained yet)
         │   UnaryLeader, raft only: a follower forwards a Sync to the leader (Forwarder) and
         │   answers with the leader's answer; any other write is Unavailable + x-leader
+        │   UnaryLogger logs a failed call at ERROR, but an Unavailable with x-leader at WARN
         ▼
   handler/discovery.go (GRPCDiscovery)
         │
@@ -137,7 +142,12 @@ Downstream code never sniffs gRPC/HTTP details - it just calls `errkind.Classify
 
 It goes out on:
 - the 503 of a write that reached a follower (`cluster.ErrNotLeader`) or lost leadership while it was committing (`cluster.ErrLeadershipLost`), answered by `response.FromError`; the refresh of a session on a follower with `auth.rotate_refresh` is one;
-- the 502 the `Leader` middleware answers when it cannot reach the leader it forwards a write to.
+- the 502 the `Leader` middleware answers when it cannot reach the leader it forwards a write to;
+- the 503 the `Leader` middleware of a follower answers for a write another node forwarded already: a forward carries
+  `X-Podium-Forwarded`, and a follower never forwards a write that carries it again, so a write crosses one node at most,
+  even when two followers take each other for the leader, through a stale view or ports that differ between nodes
+  (`TestLeaderForwardsAWriteOnce`). A client that sends the header itself only keeps its own write from being forwarded;
+  the leader serves a marked write as any other. gRPC marks a forwarded call the same way, see below.
 
 A 503 that carries it is a routing condition, not a failure of the node, so the access log (`Logger`) records it at WARN, where any other 5xx is an ERROR.
 
@@ -147,7 +157,9 @@ Every answer sets it through `response.SetLeader`, from the one derivation of th
 
 ### gRPC: `x-leader`
 
-The gRPC `x-leader` header metadata has the same meaning for the gRPC listener: the **gRPC address of the leader, `host:port`**, the host of the leader's raft advertise address, as written, with this node's gRPC port (`grpc.addr`), from the same derivation, so the same-port assumption holds for gRPC too. It goes out with the `Unavailable` of a write the follower does not forward: a write stream, a unary write the `Forwarder` has no call for, a call another node forwarded already (`x-podium-forwarded`, so a call crosses one node at most), and a forward the leader never answered (`leader unreachable`). A `Sync` that a follower forwards gets the leader's own answer instead, without the hint. As for HTTP, it is not sent when no leader is known or the gRPC port is unknown, and the raft address is never sent in its place.
+The gRPC `x-leader` header metadata has the same meaning for the gRPC listener: the **gRPC address of the leader, `host:port`**, the host of the leader's raft advertise address, as written, with this node's gRPC port (`grpc.addr`), from the same derivation, so the same-port assumption holds for gRPC too. It goes out with the `Unavailable` of a write the follower does not forward: a write stream, a unary write the `Forwarder` has no call for, a call another node forwarded already (`x-podium-forwarded`, so a call crosses one node at most; as with `X-Podium-Forwarded`, a client that sends it itself only keeps its own call from being forwarded), and a forward the leader never answered (`leader unreachable`). A `Sync` that a follower forwards gets the leader's own answer instead, and its hint when that answer is the `Unavailable` of a node that does not lead, which refused the call as a forwarded one. As for HTTP, it is not sent when no leader is known or the gRPC port is unknown, and the raft address is never sent in its place.
+
+An `Unavailable` that carries the hint is a routing condition, so `UnaryLogger` logs it at WARN, where any other failure, an `Unavailable` without the hint included, is an ERROR (`TestUnaryLoggerLogsRoutingAnswersAtWarn`). That takes in `leader unreachable`, which HTTP answers 502 and logs at ERROR. `StreamLogger` logs every stream at INFO, a failed one included, as before.
 
 ## TLS
 
