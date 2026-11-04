@@ -71,20 +71,25 @@ discovery: a node restarted while discovery fails rejoins its cluster
 
 ## Leadership terms
 
-`Leadership.WhenLeader` runs its function once in each leadership term of the
-node, with a context that the end of the term cancels, and only once a barrier
-(`WaitReady`) saw every committed write applied, so the work of a term reads
-what every earlier term wrote. The background runners use it: the lifecycle,
-sync and history runners tick in the term, and the `bootstrap` runner seeds at
-its start, see `internal/bootstrap/README.md`; nothing waits for a leader at
-start. A barrier that fails while the node still leads, one that timed out on a
-slow quorum for instance, is no leadership loss: one WARN, `raft: the applied
-state is not ready at the start of a leadership term: waiting again`, a pause of
-a second, and another barrier, as long as the term lasts
-(`TestWhenLeaderRetriesAFailedWaitReady`). Only the caller's context, a raft
-that shuts down, or an error of the function ends `WhenLeader`, so such a
+`Leadership.WhenLeader` runs its function while the node leads, with a context
+that the end of the term cancels, and only once a barrier (`WaitReady`) saw
+every committed write applied, so the work of a term reads what every earlier
+term wrote. A function that returns while the node still leads runs again,
+after another barrier, so it must return only once its context ends: one that
+returns early runs again and again, and each barrier is an entry in the raft
+log. The background runners use it: the lifecycle, sync and history runners
+tick until the term ends, and the `bootstrap` runner seeds at its start and then
+waits for the term to end, see `internal/bootstrap/README.md`; nothing waits
+for a leader at start. A barrier that fails while the node still leads, one
+that timed out on a slow quorum for instance, is no leadership loss: one WARN,
+`raft: the applied state is not ready at the start of a leadership term:
+waiting again`, a pause of a second, and another barrier, as long as the term
+lasts (`TestWhenLeaderRetriesAFailedWaitReady`). Only the caller's context, a
+raft that shuts down, or an error of the function ends `WhenLeader`, so such a
 barrier no longer ends a runner, and with it the server
-(`TestWhenLeaderRetriesWaitReadyUntilItsContextEndsOrRaftCloses`).
+(`TestWhenLeaderRetriesWaitReadyUntilItsContextEndsOrRaftCloses`). Both tests
+run on one node on loopback TCP with mutual TLS, each with a `Leadership` of
+its own over the node's raft, whose barrier they replace.
 
 ## Transport security
 

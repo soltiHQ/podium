@@ -19,7 +19,7 @@ type App struct { /* opaque */ }
 
 func New(ctx, cfg, logger) (*App, error)   // build; standalone seeds here, raft never waits for a leader
 func (a *App) Run(ctx) error               // start runners; block until ctx done or runner exits
-func (a *App) Shutdown()                   // release resources; idempotent
+func (a *App) Shutdown(ctx) error          // release resources; idempotent
 ```
 
 - `New` returns a ready-to-run [`App`]. Standalone seeds the initial data in

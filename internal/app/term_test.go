@@ -28,9 +28,16 @@ const (
 	// passwordGenerated is what bootstrap logs once it stored a password it
 	// generated and wrote to the password file.
 	passwordGenerated = "bootstrap: admin password generated: read it from the file, log in and change it"
-	// termTaskDone is what a runner that works once per leadership term logs
-	// when its work of the term is done.
-	termTaskDone = "runner task done for this leadership term"
+	// storeFailed begins the error of a seed that failed after it wrote its
+	// password file, which the error names next.
+	storeFailed = "bootstrap: store the admin password written to "
+	// What the bootstrap runner, a term task, logs: at the start of each term it
+	// leads, once its work of the term is done, for a failed run it retries, and
+	// for a run that the end of its term ended.
+	acquiredLeadership = "runner acquired leadership"
+	termTaskDone       = "runner task done for this leadership term"
+	termTaskRetry      = "runner task failed: retrying"
+	termTaskEnded      = "runner task ended with its leadership term: the next term runs it again"
 	// newStartLimit bounds how long New may take to start a raft node: it
 	// starts the node and waits for nothing, a leader least of all.
 	newStartLimit = 5 * time.Second
@@ -99,25 +106,53 @@ func (n *clusterNode) start(t *testing.T) {
 	}
 }
 
-// logged returns the lines n logged that hold every field of want.
-func (n *clusterNode) logged(t *testing.T, want map[string]any) []map[string]any {
+// logLine is a line that a node logged: its index among the node's lines, and
+// its fields.
+type logLine struct {
+	index  int
+	fields map[string]any
+}
+
+// logged returns, in order, the lines n logged that hold every field of want.
+func (n *clusterNode) logged(t *testing.T, want map[string]any) []logLine {
 	t.Helper()
-	var out []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(n.logs.String()), "\n") {
+	var out []logLine
+	for i, line := range strings.Split(strings.TrimSpace(n.logs.String()), "\n") {
 		if line == "" {
 			continue
 		}
-		var entry map[string]any
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+		var fields map[string]any
+		if err := json.Unmarshal([]byte(line), &fields); err != nil {
 			t.Fatalf("%s logged %q: %v", n.id, line, err)
 		}
 		matches := true
 		for key, value := range want {
-			matches = matches && entry[key] == value
+			matches = matches && fields[key] == value
 		}
 		if matches {
-			out = append(out, entry)
+			out = append(out, logLine{index: i, fields: fields})
 		}
+	}
+	return out
+}
+
+// failedSeeds returns the lines in which n's bootstrap runner reported a seed
+// that failed after it wrote n's password file: the WARN of a run it retries,
+// or the INFO of a run that the end of its term ended, whose error names the
+// file.
+func (n *clusterNode) failedSeeds(t *testing.T) []logLine {
+	t.Helper()
+	var out []logLine
+	for _, line := range n.logged(t, map[string]any{"runner": "bootstrap"}) {
+		text, _ := line.fields["error"].(string)
+		rest, wrote := strings.CutPrefix(text, storeFailed)
+		if message := line.fields["message"]; !wrote || (message != termTaskRetry && message != termTaskEnded) {
+			continue
+		}
+		if path, _, _ := strings.Cut(rest, ": "); path != n.passwordFilePath() {
+			t.Fatalf("%s reported a seed that wrote %s, not its own password file", n.id, path)
+		}
+		out = append(out, line)
 	}
 	return out
 }
@@ -192,48 +227,111 @@ func verifiesAdmin(t *testing.T, store storage.Storage, password string) bool {
 	return credentials.VerifyPassword(c, v, password) == nil
 }
 
-// waitForSeed waits until every node of nodes holds the administrator and its
-// password, and returns the one node that logged a generated password.
-func waitForSeed(t *testing.T, nodes []*clusterNode) *clusterNode {
+// seedOutcome is a seed read as the bootstrap README tells an operator to read
+// it: the node whose password file to trust, the line of its log that names
+// that file, and the administrator's stored password hash, the same on every
+// node.
+type seedOutcome struct {
+	node *clusterNode
+	line logLine
+	hash string
+}
+
+// waitForSeed waits until every node holds the same administrator and some
+// bootstrap run finished after the seed, then reads the seed as the bootstrap
+// README tells an operator to. The file to trust is the one of the node that
+// logged "admin password generated"; when no node did, it is the file named by
+// a seed that failed after writing it, and whose write took effect. A
+// leadership change during the seed leaves either outcome: one generated
+// password and a stale file on the leader whose seed failed, or no generated
+// password and a valid file on the leader whose store returned a leadership
+// error. waitForSeed fails the test unless every node holds exactly one
+// administrator with the same stored password, the trusted file holds that
+// password, no more than one password was generated, and every other password
+// file belongs to a node whose seed failed after writing it. The node whose
+// file it trusts logged the start of its bootstrap runner's term before the
+// line that names the file.
+func waitForSeed(t *testing.T, nodes []*clusterNode) seedOutcome {
 	t.Helper()
-	generated := map[string]any{"message": passwordGenerated}
-	waitFor(t, 20*time.Second, "a seed that every node holds", func() bool {
-		seeded := false
-		for _, n := range nodes {
-			if _, err := seededAdmin(n.app.store); err != nil {
+	var hash string
+	waitFor(t, 20*time.Second, "an administrator that every node holds alike, and a bootstrap run done after its seed", func() bool {
+		for i, n := range nodes {
+			got, err := seededAdmin(n.app.store)
+			if err != nil || (i > 0 && got != hash) {
 				return false
 			}
-			seeded = seeded || len(n.logged(t, generated)) > 0
+			hash = got
 		}
-		return seeded
-	})
-	var seeders []*clusterNode
-	for _, n := range nodes {
-		if lines := n.logged(t, generated); len(lines) > 0 {
-			if len(lines) > 1 {
-				t.Fatalf("%s generated a password %d times, want once", n.id, len(lines))
+		for _, n := range nodes {
+			if len(n.logged(t, map[string]any{"runner": "bootstrap", "message": termTaskDone})) > 0 {
+				return true
 			}
-			seeders = append(seeders, n)
+		}
+		return false
+	})
+
+	seed := seedOutcome{hash: hash}
+	for _, n := range nodes {
+		lines := n.logged(t, map[string]any{"message": passwordGenerated})
+		if len(lines) > 1 || (len(lines) == 1 && seed.node != nil) {
+			t.Fatal("a password was generated twice")
+		}
+		if len(lines) == 1 {
+			seed.node, seed.line = n, lines[0]
 		}
 	}
-	if len(seeders) != 1 {
-		t.Fatalf("%d nodes generated a password, want one", len(seeders))
+	if seed.node != nil {
+		if path := seed.line.fields["path"]; path != seed.node.passwordFilePath() {
+			t.Fatalf("%s logged its generated password in %v, want %s", seed.node.id, path, seed.node.passwordFilePath())
+		}
+		if password, ok := seed.node.passwordFile(t); !ok || !verifiesAdmin(t, seed.node.app.store, password) {
+			t.Fatalf("the password file of %s, which generated the password, does not hold the stored one", seed.node.id)
+		}
+	} else {
+		// No node generated a password: a seed that failed after writing its
+		// file took effect, and its file holds the stored password.
+		for _, n := range nodes {
+			failed := n.failedSeeds(t)
+			if len(failed) == 0 {
+				continue
+			}
+			if password, ok := n.passwordFile(t); ok && verifiesAdmin(t, n.app.store, password) {
+				seed.node, seed.line = n, failed[len(failed)-1]
+				break
+			}
+		}
+		if seed.node == nil {
+			t.Fatal("no node generated a password, and no file that a failed seed wrote holds the stored one")
+		}
 	}
-	return seeders[0]
+	if id := seed.line.fields["node_id"]; id != seed.node.id {
+		t.Fatalf("the line that names the password file of %s names node %v", seed.node.id, id)
+	}
+	acquired := seed.node.logged(t, map[string]any{"runner": "bootstrap", "message": acquiredLeadership})
+	if len(acquired) == 0 || acquired[0].index > seed.line.index {
+		t.Fatalf("%s seeded before its bootstrap runner acquired leadership", seed.node.id)
+	}
+	for _, n := range nodes {
+		if _, ok := n.passwordFile(t); ok && n != seed.node && len(n.failedSeeds(t)) == 0 {
+			t.Fatalf("%s has a password file, though it generated no password and failed no seed after writing one", n.id)
+		}
+	}
+	return seed
 }
 
 // A node that starts alone has no quorum: New starts it without waiting for a
 // leader, and nothing is seeded while no node can lead. The other two nodes
 // start several election timeouts later, so no window that opens at a node's
 // start could see the quorum form, and the leader of the quorum seeds at its
-// leadership gain: exactly one administrator, whose generated password lies in
-// the data directory of the node that logged it, named by its node ID and the
-// file's absolute path, and on no other node.
+// leadership gain: exactly one administrator, the same on every node, whose
+// password lies in the password file the bootstrap README says to trust, which
+// the line that names it ties to its node.
 func TestLateQuorumStillSeedsOnce(t *testing.T) {
 	nodes := clusterNodes(t, "n1", "n2", "n3")
 	first := nodes[0]
 	first.start(t)
 
+	// A fixed delay: n1's raft term is out of this package's reach, and pre-vote keeps it still.
 	time.Sleep(8 * raftTimeoutMs * time.Millisecond)
 	if first.app.leadership.AmLeader() {
 		t.Fatal("a node without a quorum leads")
@@ -248,69 +346,40 @@ func TestLateQuorumStillSeedsOnce(t *testing.T) {
 	for _, n := range nodes[1:] {
 		n.start(t)
 	}
-	seeder := waitForSeed(t, nodes)
-	line := seeder.logged(t, map[string]any{"message": passwordGenerated})[0]
-	if line["node_id"] != seeder.id || line["path"] != seeder.passwordFilePath() {
-		t.Fatalf("the generated password line names node %v and path %v, want %s and %s", line["node_id"], line["path"], seeder.id, seeder.passwordFilePath())
-	}
-	if len(seeder.logged(t, map[string]any{"runner": "bootstrap", "message": "runner acquired leadership"})) == 0 {
-		t.Fatalf("%s seeded without a leadership term of its bootstrap runner", seeder.id)
-	}
-	password, ok := seeder.passwordFile(t)
-	if !ok {
-		t.Fatalf("%s logged a generated password but has no password file", seeder.id)
-	}
-	if !verifiesAdmin(t, seeder.app.store, password) {
-		t.Fatalf("the password in %s's file does not log in", seeder.id)
-	}
-	hash, err := seededAdmin(seeder.app.store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, n := range nodes {
-		if got, err := seededAdmin(n.app.store); err != nil || got != hash {
-			t.Fatalf("%s holds another administrator password than %s stored (%v)", n.id, seeder.id, err)
-		}
-		if _, ok := n.passwordFile(t); ok && n != seeder {
-			t.Fatalf("%s has a password file, though %s seeded", n.id, seeder.id)
-		}
-	}
+	waitForSeed(t, nodes)
 }
 
-// Once the administrator is seeded, a new leader runs bootstrap at the start of
-// its own term and changes nothing: one administrator, the same stored
-// password, and no password file on the new leader, nor on the third node. The
-// seeder's file stays in its data directory.
+// Once the administrator is seeded, another node runs bootstrap and changes
+// nothing: one administrator, the same stored password, no password generated,
+// and no password file on another node but one whose seed failed after writing
+// it. The file to trust stays in its data directory.
 func TestSeedingIsIdempotentAcrossLeaders(t *testing.T) {
 	nodes := clusterNodes(t, "n1", "n2", "n3")
 	for _, n := range nodes {
 		n.start(t)
 	}
-	seeder := waitForSeed(t, nodes)
-	hash, err := seededAdmin(seeder.app.store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	password, ok := seeder.passwordFile(t)
+	seed := waitForSeed(t, nodes)
+	password, ok := seed.node.passwordFile(t)
 	if !ok {
-		t.Fatalf("%s seeded without a password file", seeder.id)
+		t.Fatalf("the password file of %s went away", seed.node.id)
 	}
 	var others []*clusterNode
-	done := map[string]any{"runner": "bootstrap", "message": termTaskDone}
-	terms := map[*clusterNode]int{}
 	for _, n := range nodes {
-		if n != seeder {
+		if n != seed.node {
 			others = append(others, n)
-			terms[n] = len(n.logged(t, done))
 		}
 	}
 
-	// Leadership leaves the seeder.
-	seeder.stop()
+	// The node whose file holds the password stops, and leadership leaves it if
+	// it still leads. A bootstrap run that another node finished found the
+	// administrator seeded, whatever its term: a run with something to seed
+	// generates a password or fails, and neither logs "done".
+	seed.node.stop()
+	done := map[string]any{"runner": "bootstrap", "message": termTaskDone}
 	var next *clusterNode
-	waitFor(t, 15*time.Second, "bootstrap done in a leadership term of another node", func() bool {
+	waitFor(t, 15*time.Second, "bootstrap done on another node", func() bool {
 		for _, n := range others {
-			if len(n.logged(t, done)) > terms[n] {
+			if len(n.logged(t, done)) > 0 {
 				next = n
 				return true
 			}
@@ -320,20 +389,20 @@ func TestSeedingIsIdempotentAcrossLeaders(t *testing.T) {
 	for _, n := range others {
 		got, err := seededAdmin(n.app.store)
 		if err != nil {
-			t.Fatalf("%s after the term of %s: %v", n.id, next.id, err)
+			t.Fatalf("%s after bootstrap ran on %s: %v", n.id, next.id, err)
 		}
-		if got != hash {
-			t.Fatalf("%s holds another password after the term of %s: the seed ran again", n.id, next.id)
+		if got != seed.hash {
+			t.Fatalf("%s holds another password after bootstrap ran on %s: the seed ran again", n.id, next.id)
 		}
-		if _, ok := n.passwordFile(t); ok {
-			t.Fatalf("%s has a password file after the term of %s: only the seeder writes one", n.id, next.id)
+		if _, ok := n.passwordFile(t); ok && len(n.failedSeeds(t)) == 0 {
+			t.Fatalf("%s has a password file, though it failed no seed after writing one", n.id)
 		}
 		if lines := n.logged(t, map[string]any{"message": passwordGenerated}); len(lines) != 0 {
-			t.Fatalf("%s generated a password: %v", n.id, lines)
+			t.Fatalf("%s generated a password", n.id)
 		}
 	}
-	if got, ok := seeder.passwordFile(t); !ok || got != password {
-		t.Fatalf("the password file of %s changed or went away", seeder.id)
+	if got, ok := seed.node.passwordFile(t); !ok || got != password {
+		t.Fatalf("the password file of %s changed or went away", seed.node.id)
 	}
 }
 
@@ -342,9 +411,10 @@ func TestSeedingIsIdempotentAcrossLeaders(t *testing.T) {
 // runner, built by lifecycle.New as New builds it, from the same start. The
 // agent last synced an hour ago, and delete_after is short. The first leader
 // counts the silence from its own term, and stops halfway to deleting the
-// agent. Counted from its process start, the next leader would delete the agent
-// at most delete_after/2 into its term; it keeps the agent for a full
-// delete_after into its term instead, and only then deletes it.
+// agent. The next term starts after that stop, so a leader that counts from
+// its term keeps the agent for a full delete_after after it, where one that
+// counted from its process start would delete the agent about delete_after/2
+// after it. The next leader then deletes the agent.
 func TestNewLeaderGivesAgentsAGrace(t *testing.T) {
 	const (
 		heartbeat   = 100 * time.Millisecond
@@ -390,24 +460,31 @@ func TestNewLeaderGivesAgentsAGrace(t *testing.T) {
 	}
 	started := time.Now()
 
+	// A deliberate delay, not a wait for a condition: the first leader leads a
+	// while, so that the runners' start lies well before the next term.
 	time.Sleep(deleteAfter / 2)
 	if !stored(leader) {
 		t.Fatalf("%s deleted the agent %s after the runners started, before delete_after", leader.id, time.Since(started))
 	}
-	// The leader stops as its process would: its runners first, then raft.
+	// The leader stops as its process would: its runners first, then raft. The
+	// next term starts after stopAt.
+	stopAt := time.Now()
 	if err = runners[leader].Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
 	leader.stop()
 	next, _ := readyLeader(t, followers)
-	tookOver := time.Now()
 
-	// Counting from its process start, the next leader would delete the agent
-	// delete_after after the runners started: at most delete_after/2 into its term.
-	for time.Since(tookOver) < deleteAfter*7/10 {
-		if !stored(next) {
-			t.Fatalf("%s deleted the agent %s into its term, %s after its runner started: it counted silence from before its term",
-				next.id, time.Since(tookOver), time.Since(started))
+	// Only a read that missed the agent, and ended before delete_after passed
+	// since stopAt, fails the test: the time is taken after each read.
+	for {
+		present := stored(next)
+		if time.Since(stopAt) >= deleteAfter {
+			break
+		}
+		if !present {
+			t.Fatalf("%s deleted the agent %s after the first leader stopped, %s after its runner started: it counted silence from before its term",
+				next.id, time.Since(stopAt), time.Since(started))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

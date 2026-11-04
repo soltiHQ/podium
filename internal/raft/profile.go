@@ -286,7 +286,7 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 		stable:     stable,
 		snap:       snap,
 		logger:     logger,
-		leadership: newLeadership(r, logger),
+		leadership: NewLeadership(r, logger),
 	}
 	p.store = NewStore(inner, r)
 	// Plug the event-writer so hub mutations replicate through Raft. From

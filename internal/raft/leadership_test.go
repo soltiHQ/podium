@@ -59,7 +59,7 @@ func newLeadershipTestCluster(t *testing.T) []*leadershipTestNode {
 		if err != nil {
 			t.Fatal(err)
 		}
-		n.leadership = NewLeadership(n.r)
+		n.leadership = NewLeadership(n.r, zerolog.Nop())
 		configuration.Servers = append(configuration.Servers, hraft.Server{ID: n.id, Address: n.transport.LocalAddr(), Suffrage: hraft.Voter})
 	}
 	for _, n := range nodes {
@@ -279,18 +279,25 @@ var errBarrierTimedOut = errors.New("raft: wait for applied state: context deadl
 // warnings counts the WARN lines in logs.
 func warnings(logs *logBuffer) int { return strings.Count(logs.String(), `"level":"warn"`) }
 
+// leadershipOf is a Leadership of its own over the raft of p, which logs into
+// logs and pauses retryPause after a failed WaitReady: a test replaces its
+// barrier and leaves the Leadership of p as it is.
+func leadershipOf(p *Profile, logs *logBuffer, retryPause time.Duration) *Leadership {
+	l := NewLeadership(p.raft, zerolog.New(logs))
+	l.retryPause = retryPause
+	return l
+}
+
 // A WaitReady that fails while the node still leads is no leadership loss, and
 // does not end WhenLeader: WhenLeader logs one WARN, pauses and waits again, and
 // runs fn once the applied state is ready.
 func TestWhenLeaderRetriesAFailedWaitReady(t *testing.T) {
-	nodes := newLeadershipTestCluster(t)
-	leader := leadershipTestLeader(t, nodes)
+	p := newSingleNode(t)
 	logs := &logBuffer{}
-	leader.leadership.logger = zerolog.New(logs)
-	leader.leadership.retryPause = 10 * time.Millisecond
-	barrier := leader.leadership.ready
+	leadership := leadershipOf(p, logs, 10*time.Millisecond)
+	barrier := leadership.ready
 	var waits atomic.Int32
-	leader.leadership.ready = func(ctx context.Context) error {
+	leadership.ready = func(ctx context.Context) error {
 		if waits.Add(1) == 1 {
 			return errBarrierTimedOut
 		}
@@ -301,7 +308,7 @@ func TestWhenLeaderRetriesAFailedWaitReady(t *testing.T) {
 	ran := make(chan struct{}, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- leader.leadership.WhenLeader(ctx, func(term context.Context) error {
+		done <- leadership.WhenLeader(ctx, func(term context.Context) error {
 			select {
 			case ran <- struct{}{}:
 			default:
@@ -335,19 +342,17 @@ func TestWhenLeaderRetriesAFailedWaitReady(t *testing.T) {
 // keeps failing while the node leads: WhenLeader logs a WARN for each failure,
 // never runs fn, and returns nil once its context ends, or once raft shuts down.
 func TestWhenLeaderRetriesWaitReadyUntilItsContextEndsOrRaftCloses(t *testing.T) {
-	nodes := newLeadershipTestCluster(t)
-	leader := leadershipTestLeader(t, nodes)
+	p := newSingleNode(t)
 	logs := &logBuffer{}
-	leader.leadership.logger = zerolog.New(logs)
-	leader.leadership.retryPause = 5 * time.Millisecond
-	leader.leadership.ready = func(context.Context) error { return errBarrierTimedOut }
+	leadership := leadershipOf(p, logs, 5*time.Millisecond)
+	leadership.ready = func(context.Context) error { return errBarrierTimedOut }
 	fn := func(context.Context) error { t.Error("fn ran while WaitReady failed"); return nil }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	byContext, byShutdown := make(chan error, 1), make(chan error, 1)
-	go func() { byContext <- leader.leadership.WhenLeader(ctx, fn) }()
-	go func() { byShutdown <- leader.leadership.WhenLeader(context.Background(), fn) }()
+	go func() { byContext <- leadership.WhenLeader(ctx, fn) }()
+	go func() { byShutdown <- leadership.WhenLeader(context.Background(), fn) }()
 	waitFor(t, 3*time.Second, "warnings for several failed WaitReady", func() bool { return warnings(logs) >= 6 })
 	for _, ch := range []chan error{byContext, byShutdown} {
 		select {
@@ -362,7 +367,7 @@ func TestWhenLeaderRetriesWaitReadyUntilItsContextEndsOrRaftCloses(t *testing.T)
 		ch   chan error
 	}{
 		{"its context ended", cancel, byContext},
-		{"raft shut down", func() { _ = leader.r.Shutdown().Error() }, byShutdown},
+		{"raft shut down", func() { _ = p.raft.Shutdown().Error() }, byShutdown},
 	} {
 		end.do()
 		select {

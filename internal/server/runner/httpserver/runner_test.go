@@ -20,7 +20,9 @@ func TestStopAnIdleServer(t *testing.T) {
 	started := make(chan error, 1)
 	go func() { started <- r.Start(context.Background()) }()
 	<-r.ready
-	// Long enough for Serve to ask for the base context.
+	// A deliberate delay, not a wait for a condition: Serve asks for the base
+	// context without a signal, and Stop must come after that to meet the race
+	// that Start once had.
 	time.Sleep(20 * time.Millisecond)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

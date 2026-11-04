@@ -33,11 +33,8 @@ type Leadership struct {
 	retryPause time.Duration
 }
 
-// NewLeadership returns the leadership of r, which logs nothing.
-func NewLeadership(r *hraft.Raft) *Leadership { return newLeadership(r, zerolog.Nop()) }
-
-// newLeadership returns the leadership of r, which logs into logger.
-func newLeadership(r *hraft.Raft, logger zerolog.Logger) *Leadership {
+// NewLeadership returns the leadership of r, which logs its warnings into logger.
+func NewLeadership(r *hraft.Raft, logger zerolog.Logger) *Leadership {
 	if r == nil {
 		panic("raft: nil raft")
 	}
@@ -73,10 +70,13 @@ func (l *Leadership) Members() []cluster.Peer {
 	return members
 }
 
-// WhenLeader implements cluster.Leadership: it runs fn once in each leadership
-// term of this node, with a context canceled when the term ends, after WaitReady
-// saw every committed write applied. A WaitReady that fails while the node
-// still leads is no leadership loss and ends nothing: WhenLeader logs one WARN,
+// WhenLeader implements cluster.Leadership: while this node leads, it runs fn
+// with a context canceled when the term ends, once WaitReady saw every committed
+// write applied. If fn returns while the node still leads, WhenLeader calls it
+// again, after another WaitReady, so fn must return only once its context ends:
+// one that returns early runs again and again, each time after a barrier, an
+// entry raft writes to its log. A WaitReady that fails while the node still
+// leads is no leadership loss and ends nothing: WhenLeader logs one WARN,
 // pauses, and waits again, as long as the term lasts. Only ctx ending, raft
 // shutting down or an error of fn ends WhenLeader.
 func (l *Leadership) WhenLeader(ctx context.Context, fn func(context.Context) error) error {

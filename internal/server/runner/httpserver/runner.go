@@ -61,13 +61,8 @@ func (r *Runner) Start(_ context.Context) error {
 
 	// Stop cancels the base context of every connection. It is made here, before
 	// ready closes, so that Stop, which waits for ready, sees its cancel: Serve
-	// would ask for it only later, on this goroutine. Config.BaseContext gets the
-	// TCP listener.
-	parent := context.Background()
-	if r.cfg.BaseContext != nil {
-		parent = r.cfg.BaseContext(ln)
-	}
-	baseCtx, cancel := context.WithCancel(parent)
+	// would ask for it only later, on this goroutine.
+	baseCtx, cancel := context.WithCancel(context.Background())
 	r.cancelCtx = cancel
 
 	r.srv = &http.Server{

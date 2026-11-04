@@ -19,7 +19,8 @@ import (
 
 // leaderTerms is a Leadership that leads for n terms, one after the other,
 // each ended by end. term is the current one, from 1; the task reads it on the
-// goroutine of WhenLeader.
+// goroutine of WhenLeader. As raft's WhenLeader does, it calls fn again when fn
+// returns while the term lasts.
 type leaderTerms struct {
 	n    int
 	term int
@@ -37,10 +38,15 @@ func (l *leaderTerms) WhenLeader(ctx context.Context, fn func(context.Context) e
 		l.mu.Lock()
 		l.cancel = cancel
 		l.mu.Unlock()
-		err := fn(term)
+		for term.Err() == nil {
+			if err := fn(term); err != nil {
+				cancel()
+				return err
+			}
+		}
 		cancel()
-		if err != nil {
-			return err
+		if ctx.Err() != nil {
+			return nil
 		}
 	}
 	return nil
@@ -95,10 +101,11 @@ func field(lines []map[string]any, key string) []any {
 }
 
 // A term task runs at the start of each leadership term until it succeeds, then
-// waits for the term to end. A failure while the replica leads logs one WARN and
-// is tried again after a pause that doubles, up to its cap. A leadership loss,
-// or the end of the term, ends the term's attempts with one INFO and no pause,
-// however long the term lasts after it: the next term runs the task again.
+// waits for the term to end, which WhenLeader needs to call it once per term. A
+// failure while the replica leads logs one WARN and is tried again after a pause
+// that doubles, up to its cap. A leadership loss, or the end of the term, ends
+// the term's attempts with one INFO and no pause, however long the term lasts
+// after it: the next term runs the task again.
 func TestTermTaskRetriesWhileLeaderAndRunsAgainEachTerm(t *testing.T) {
 	leadership := &leaderTerms{n: 3}
 	errStore := errors.New("store unavailable")
