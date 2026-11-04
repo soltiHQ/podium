@@ -57,12 +57,13 @@ func (a *API) clusterStatus(w http.ResponseWriter, r *http.Request, mode httpctx
 	}
 	response.OK(w, r, mode, &responder.View{
 		Data: restv1.Cluster{
-			NodeID:        st.NodeID,
-			Role:          st.Role,
-			LeaderID:      st.LeaderID,
-			LeaderAddress: st.LeaderAddr,
-			Members:       members,
-			LastIndex:     st.LastIndex,
+			NodeID:            st.NodeID,
+			Role:              st.Role,
+			LeaderID:          st.LeaderID,
+			LeaderAddress:     st.LeaderAddr,
+			Members:           members,
+			LastIndex:         st.LastIndex,
+			ConfigFingerprint: st.Fingerprint,
 		},
 	})
 }

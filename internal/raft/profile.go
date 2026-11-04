@@ -87,6 +87,14 @@ type Config struct {
 	// and waits for the leader of a running cluster to add it. A node with
 	// raft state ignores it.
 	Join bool
+
+	// ConfigDigests are the digests of the settings that every replica must
+	// share ([cluster.SharedSettings]). The node answers a peer's configuration
+	// request on its raft port with them, and its configuration check
+	// ([Admin.ConfigCheck]) compares them with its leader's. A node without
+	// them answers no such request, as a version without the check does, and
+	// has no check.
+	ConfigDigests *cluster.Digests
 }
 
 // ErrDataDirNotPrivate indicates a data directory, or a snapshots directory in
@@ -264,7 +272,7 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 			return nil, err
 		}
 	}
-	transport, err = newTransport(cfg.BindAddr, advertise, advTCP, security, logger)
+	transport, err = newTransport(cfg.BindAddr, advertise, advTCP, security, configAnswer(cfg.ConfigDigests), logger)
 	if err != nil {
 		return nil, fmt.Errorf("raft: transport on %s: %w", cfg.BindAddr, err)
 	}

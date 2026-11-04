@@ -153,9 +153,14 @@ func TestClusterRoutesNeedPermission(t *testing.T) {
 	}
 }
 
+// fixtureFingerprint is the fingerprint of the settings every replica must
+// share that the cluster service of an apiFixture gives.
+const fixtureFingerprint = "3c4d9e0f1a2b3c4d9e0f1a2b3c4d9e0f1a2b3c4d9e0f1a2b3c4d9e0f1a2b3c4d"
+
 // GET /api/v1/cluster answers the cluster as the node sees it: its ID and role,
 // the leader it knows by ID and raft address, every member with its address and
-// suffrage, and the last index of its log.
+// suffrage, the last index of its log, and the fingerprint of its settings
+// that every replica must share.
 func TestClusterStatusAnswer(t *testing.T) {
 	f := newAPIFixture(t)
 	f.cluster.role, f.cluster.leaderID, f.cluster.leader = cluster.RoleFollower, "n2", "10.0.0.2:7000"
@@ -173,6 +178,7 @@ func TestClusterStatusAnswer(t *testing.T) {
 	want := map[string]any{
 		"node_id": "n1", "role": "follower", "leader_id": "n2", "leader_address": "10.0.0.2:7000",
 		"members": []any{member(1), member(2), member(3)}, "last_index": float64(42),
+		"config_fingerprint": fixtureFingerprint,
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("GET /api/v1/cluster = %v, want %v", got, want)

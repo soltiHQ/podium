@@ -483,6 +483,46 @@ ask discovery, so a discovery outage does not keep a restarting node down;
 validation still checks a static list on every start. See
 `internal/raft/README.md`.
 
+### Settings every replica must share
+
+These settings must be the same on every node of a raft cluster, as a request
+may reach any of them:
+
+- `auth.jwt_secret` (env `SOLTI_AUTH_JWT_SECRET`) and `auth.cookie_secure`: a
+  token one node signed fails on another, and cookies are marked otherwise;
+- `agent_auth.require` and `agent_auth.enroll_secret` (env
+  `SOLTI_AGENT_AUTH_ENROLL_SECRET` only): the nodes authenticate and enroll
+  agents otherwise, and send agents tokens or not;
+- `trusted_proxies`: a proxy one node trusts is a client on another, and the
+  limiters key its clients otherwise;
+- `cors.*`: a browser origin one node allows, another refuses.
+
+Every raft node digests them, group by group, and its `config-check` runner
+compares the digests with its leader's at each change of leader. A node whose
+settings differ logs one ERROR per leader, `configuration check: this node's
+configuration differs from the leader's in settings that every replica must
+share`, naming the groups that differ (`auth`, `agent auth`, `proxies`,
+`CORS`) and never a value; a drifted leader is reported by each of its
+followers. `GET /api/v1/cluster` shows each node's fingerprint of these
+settings as `config_fingerprint`: nodes whose fingerprints differ do not share
+them. Lists that apply alike count alike: `trusted_proxies` and
+`cors.allow_origins` in any order, a proxy as an IP or its /32, and a CORS list
+left empty or set to the defaults it gets. Overlapping proxy prefixes are not
+merged, though: write the lists alike on every node.
+
+Whoever reads the fingerprint and knows the other settings can confirm a guess
+of a weak `jwt_secret` or `enroll_secret` offline, as the fingerprint of every
+guess can be computed. So both must be long random values, which is why the
+fingerprint is served only behind `cluster:get` and is never logged.
+
+Nothing compares the other settings. Those of the runners that only the leader
+runs, `lifecycle.*`, `sync.*` and `history.*`, change what the cluster does
+each time the leadership moves to a node configured otherwise, and the others,
+such as `auth.issuer`, `auth.audience` or the token lifetimes, can break
+requests that cross nodes just as well: keep every node's configuration the
+same, and change it on all of them. See "Configuration drift" in
+`internal/raft/README.md`.
+
 ### Joining a cluster
 
 `cluster.raft.join: true` (env `SOLTI_CLUSTER_RAFT_JOIN`) starts a node whose

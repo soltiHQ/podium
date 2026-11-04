@@ -159,18 +159,24 @@ type streamLayer struct {
 	advertise    advertiseAddr
 	security     *transportTLS // nil for plain TCP
 	handshake    time.Duration // the bound of an accepted connection's handshake
+	answer       []byte        // the answer to a configuration request, nil for none (see answerConn)
 }
 
 // Accept implements net.Listener. A TLS connection's handshake runs on its
 // first read or write, in the goroutine the transport gives the connection,
 // and must finish within the handshake bound (see serverConn). It never runs
 // here: hashicorp/raft accepts in one loop, which a stalled peer would hold up.
+// Every connection, over TLS or plain TCP, answers a configuration request
+// before hashicorp/raft reads it, and passes every RPC through (answerConn).
 func (l *streamLayer) Accept() (net.Conn, error) {
 	conn, err := l.Listener.Accept()
-	if err != nil || l.security == nil {
+	if err != nil {
 		return conn, err
 	}
-	return &serverConn{Conn: tls.Server(conn, l.security.server), timeout: l.handshake}, nil
+	if l.security != nil {
+		conn = &serverConn{Conn: tls.Server(conn, l.security.server), timeout: l.handshake}
+	}
+	return &answerConn{Conn: conn, answer: l.answer}, nil
 }
 
 // Dial implements hraft.StreamLayer. Over TLS the client side sets no
@@ -188,25 +194,26 @@ func (l *streamLayer) Dial(address hraft.ServerAddress, timeout time.Duration) (
 // Addr implements net.Listener with the advertise address as written.
 func (l *streamLayer) Addr() net.Addr { return l.advertise }
 
-// probe dials address as Dial does, within ctx: over TLS, the handshake verifies
-// the peer's certificate against the cluster CA, for the host of address as
-// written, as a dial of raft would. It then closes its writing side, with a
-// close_notify over TLS, and reads until the peer closes too: over TLS 1.3 a
-// client's handshake ends before the server has checked the client's
-// certificate, so a peer that refuses this node's certificate fails the probe
-// with its alert only then. The transport of a node it probes reads the end of
-// a stream, and logs no error for it. security nil probes plain TCP.
-func probe(ctx context.Context, address string, security *transportTLS) error {
-	var (
-		conn net.Conn
-		err  error
-	)
+// dialPeer dials address as Dial does, within ctx: over TLS, the handshake
+// verifies the peer's certificate against the cluster CA, for the host of
+// address as written, as a dial of raft would, and presents this node's
+// certificate. security nil dials plain TCP.
+func dialPeer(ctx context.Context, address string, security *transportTLS) (net.Conn, error) {
 	dialer := &net.Dialer{}
 	if security == nil {
-		conn, err = dialer.DialContext(ctx, "tcp", address)
-	} else {
-		conn, err = (&tls.Dialer{NetDialer: dialer, Config: security.client}).DialContext(ctx, "tcp", address)
+		return dialer.DialContext(ctx, "tcp", address)
 	}
+	return (&tls.Dialer{NetDialer: dialer, Config: security.client}).DialContext(ctx, "tcp", address)
+}
+
+// probe dials address as Dial does, within ctx (dialPeer). It then closes its
+// writing side, with a close_notify over TLS, and reads until the peer closes
+// too: over TLS 1.3 a client's handshake ends before the server has checked the
+// client's certificate, so a peer that refuses this node's certificate fails the
+// probe with its alert only then. The transport of a node it probes reads the
+// end of a stream, and logs no error for it. security nil probes plain TCP.
+func probe(ctx context.Context, address string, security *transportTLS) error {
+	conn, err := dialPeer(ctx, address, security)
 	if err != nil {
 		return err
 	}
@@ -267,9 +274,11 @@ func (c *serverConn) Write(b []byte) (int, error) {
 
 // newTransport opens the raft transport on bind, over mutual TLS, or plain TCP
 // when security is nil. Peers reach it at advertise, as written, which resolves
-// to resolved: an address they can dial. The transport logs into logger: every
-// connection it refuses or that times out in its handshake is one ERROR line.
-func newTransport(bind, advertise string, resolved *net.TCPAddr, security *transportTLS, logger zerolog.Logger) (*hraft.NetworkTransport, error) {
+// to resolved: an address they can dial. It answers a configuration request
+// with answer, or answers none when answer is nil (see answerConn). The
+// transport logs into logger: every connection it refuses or that times out in
+// its handshake is one ERROR line.
+func newTransport(bind, advertise string, resolved *net.TCPAddr, security *transportTLS, answer []byte, logger zerolog.Logger) (*hraft.NetworkTransport, error) {
 	if resolved.IP == nil || resolved.IP.IsUnspecified() {
 		return nil, errNotAdvertisable
 	}
@@ -283,6 +292,7 @@ func newTransport(bind, advertise string, resolved *net.TCPAddr, security *trans
 			advertise: advertiseAddr(advertise),
 			security:  security,
 			handshake: handshakeTimeout,
+			answer:    answer,
 		},
 		MaxPool: transportMaxPool,
 		Timeout: transportTimeout,

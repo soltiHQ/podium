@@ -511,12 +511,14 @@ func TestAChangeOfUnknownOutcomeIsLogged(t *testing.T) {
 }
 
 // The status is the node's own view: its ID and role, the leader it knows, the
-// servers of its latest configuration and the last index of its log.
+// servers of its latest configuration, the last index of its log, and the
+// fingerprint of its settings that every replica must share.
 func TestStatusIsTheNodesView(t *testing.T) {
+	const fingerprint = "6a1f7c0e9d2b4f8a6a1f7c0e9d2b4f8a6a1f7c0e9d2b4f8a6a1f7c0e9d2b4f8a"
 	raft := leading("n1", "n2", "n3")
 	raft.role, raft.leader = cluster.RoleFollower, cluster.Server{ID: "n2", Address: "10.0.0.2:7000"}
-	got := newService(raft, zerolog.Nop()).Status(context.Background())
-	want := Status{NodeID: "n1", Role: cluster.RoleFollower, LeaderID: "n2", LeaderAddr: "10.0.0.2:7000", Members: raft.conf.Servers, LastIndex: 42}
+	got := New(raft, zerolog.Nop(), WithFingerprint(fingerprint)).Status(context.Background())
+	want := Status{NodeID: "n1", Role: cluster.RoleFollower, LeaderID: "n2", LeaderAddr: "10.0.0.2:7000", Members: raft.conf.Servers, LastIndex: 42, Fingerprint: fingerprint}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("Status() = %+v, want %+v", got, want)
 	}

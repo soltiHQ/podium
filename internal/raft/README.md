@@ -310,6 +310,137 @@ start; without either, `New` refuses the node
 earlier. See "Raft transport security" in `internal/config/README.md` for the
 certificates.
 
+Every accepted connection, over TLS or plain TCP, also answers a configuration
+request before hashicorp/raft reads it, and passes every RPC through untouched;
+see "Configuration drift" below.
+
+## Configuration drift
+
+Some settings must be the same on every replica, or the nodes act otherwise
+whichever of them a request reaches: a token one signed fails on another, a
+proxy one trusts is a client on another. They come in four groups, by the names
+the logs give them:
+
+| Group        | Settings                                          |
+|--------------|---------------------------------------------------|
+| `auth`       | `auth.jwt_secret`, `auth.cookie_secure`           |
+| `agent auth` | `agent_auth.require`, `agent_auth.enroll_secret`  |
+| `proxies`    | `trusted_proxies`                                 |
+| `CORS`       | `cors.*`                                          |
+
+`Config.ConfigDigests` holds one digest per group (`cluster.Digests`), which
+`app` computes in raft mode only from the node's configuration
+(`cluster.SharedSettings`): the SHA-256 of a canonical encoding of the group,
+which starts with `podium-config-fingerprint-v1` and the group's name and writes
+each setting in a fixed order, every string and list after its length. A secret
+enters it only as HMAC-SHA256(secret, `podium-config-fingerprint-v1`), an unset
+one included, so no digest holds a secret or its plain SHA-256
+(`TestFingerprintRevealsNoSecret`). Settings that apply alike encode alike
+(`TestFingerprintChangesWithEachSetting`):
+
+- `auth.cookie_secure` as written (`auto` or `always`, all validation allows);
+  `agent_auth.require` and `cors.allow_credentials` as booleans;
+- `trusted_proxies` as the set of prefixes the client IP resolver trusts
+  (`clientip.ParseTrusted`): trimmed, an IP as its /32 or /128, IPv4-mapped
+  entries unmapped, prefixes masked, sorted, without duplicates. Overlapping or
+  adjacent prefixes are not merged: `10.0.0.0/8` and `10.0.0.0/8, 10.1.0.0/16`
+  trust the same addresses and still count as different;
+- `cors.allow_origins` as the set of origins as written, as CORS compares them
+  with a request's `Origin` exactly;
+- `cors.allow_methods`, `cors.allow_headers` and `cors.expose_headers` with the
+  defaults CORS applies to an empty list, as the sets of names their header
+  lists carry: the entries joined and split on commas, trimmed, empty names
+  dropped, header names in lower case, methods as written;
+- `cors.max_age` with CORS's 12 hours for zero, in the whole seconds CORS sends.
+
+Every setting of `cors` counts even while `allow_origins` is empty, when the
+others have no effect. `cluster.Fingerprint` is the hex SHA-256 over the four
+digests in order. The status, `GET /api/v1/cluster`, shows it as
+`config_fingerprint`, behind `cluster:get` (see "Cluster" in
+`internal/handler/README.md`); the group digests travel only from node to node,
+and no log line holds a digest, the fingerprint or a value. Whoever reads the
+fingerprint and knows the other settings can still confirm a guess of a weak
+secret offline, by computing the fingerprint of the guess, as the encoding is
+public: so the secrets must be strong, random values, not words.
+
+### The configuration request
+
+A node fetches a peer's digests over the raft port, authenticated as raft is,
+by mutual TLS: a follower has no credential of the API. The request is one
+byte, `0xF0` (240), as the first byte of a connection. hashicorp/raft reads
+that byte as the type of an RPC, and v1.8.0 numbers its types from 0 to 4
+(`rpcAppendEntries` to `rpcRequestPreVote`, by iota in `net_transport.go`), so
+the stream layer answers the request itself (`answerConn`), on the first read
+of the connection that gives data, which over TLS comes only after the
+handshake verified the peer's certificate. It writes the answer, closes the
+connection and returns the end of the stream, which hashicorp/raft's
+`handleConn` drops without a log line. Any other first byte, and every later
+byte, passes through untouched, so raft's RPCs of every type, and the probe of
+a membership change, which reads a quiet end of stream, work as before
+(`TestRaftPortAnswersConfigRequests`, `TestOnlyTheFirstByteIsAConfigRequest`).
+The answer has a fixed format, version 1: the byte 1, then the four digests in
+the order above, 32 bytes each, 129 bytes in all (`TestConfigAnswerFormat`).
+The fetch dials the peer as the probe does, sends the byte, and reads until the
+peer closes, within 5 s for the dial, the handshake, the request and the
+answer; the node's write of its answer has the same bound. A request is the
+byte alone: a peer that sends more, which the node leaves unread, may see the
+connection reset before it reads the answer.
+
+A peer with a certificate of another CA, with none, over TLS 1.2 or over plain
+TCP gets no answer. With `allow_insecure_transport` the answer is as open as
+the rest of the raft port: any host that reaches it gets the digests, without a
+certificate (`TestPlainTCPAnswersConfigRequests`), which is one more reason to
+keep that port to the cluster's nodes. A node without digests, such as one of a
+version without the check, answers nothing: its hashicorp/raft refuses the byte
+as an unknown RPC type, with one ERROR line, `failed to decode incoming command`
+with `unknown rpc type 240`, and closes the connection
+(`TestNodeWithoutDigestsAnswersNoConfigRequest`).
+
+### The check
+
+The `config-check` runner, which `app` adds in raft mode, compares the node's
+digests with its leader's (`Admin.ConfigCheck`). It checks once a leader other
+than this node is known, and again at each change of the leader the node
+knows, which hashicorp/raft observes, a flap through no leader included: a
+drifted node is caught as the follower of a leader that shares the settings,
+and as the leader of followers that do. A node that leads, or knows no leader,
+checks nothing. Its lines carry `runner=config-check`, `node_id` and the
+leader's `leader_id`:
+
+- a mismatch is one ERROR, `configuration check: this node's configuration
+  differs from the leader's in settings that every replica must share`, with
+  `groups`, the names of the groups that differ, once per leader and digest set:
+  the same leader seen again with the same digests logs it at DEBUG only;
+- a match is a DEBUG line, `configuration check: this node's configuration
+  matches the leader's`, or an INFO line when it follows a mismatch or a failed
+  fetch logged since the last match;
+- a fetch that fails is one WARN per check of a leader, `configuration check:
+  cannot fetch the leader's configuration digests: retrying, at most every
+  minute`, with the error; the check retries after a second, a pause that
+  doubles after each failure up to a minute, until a fetch succeeds or the
+  leader changes, which ends the pause
+  (`TestConfigCheckLogsEachMismatchOnce`, `TestConfigCheckRetriesAFailedFetch`).
+
+`TestConfigCheckFollowsTheLeader` moves the leadership of three nodes over
+mutual TLS, two of which share their settings, by hashicorp/raft's transfer to a
+chosen node, and shows each of these lines where it belongs, the drifted node
+leading included; `TestMismatchedReplicaLogsError`, in `internal/app`, runs
+three whole nodes as main runs them. Standalone digests, serves and checks
+nothing.
+
+The check covers exactly the settings above. Nothing compares the others: the
+settings of the runners that only the leader runs, `lifecycle.*`, `sync.*` and
+`history.*`, which change behaviour when the leadership moves, and every other
+setting, such as `auth.issuer`, `auth.audience` or the token lifetimes, may
+differ between nodes without a line. Run every node with one configuration.
+
+During a rolling upgrade from a version without the check, a follower of the
+new version whose leader runs the old one logs the WARN, as the old leader
+answers nothing, and retries, at most every minute; the old leader logs one
+ERROR, `unknown rpc type 240`, for each attempt. A later version that changes
+the encoding would change every digest, so nodes of the two versions would log
+the ERROR for every group until all run the same one.
+
 ## Data directory
 
 The data directory and its `snapshots` directory are made 0700, and `New`
@@ -559,7 +690,8 @@ TLS error. That is expected of a host that is no cluster node and reaches the
 raft port, and nothing limits it: a connect flood is a flood of lines. So the
 raft port, `cluster.raft.bind_addr`, must be reachable only from the cluster's
 nodes, by firewall or network policy. TLS keeps other hosts out of the cluster,
-not off the port.
+not off the port. A configuration request that the node answers leaves no line
+(see "Configuration drift").
 
 ## Multi-node tests
 
@@ -573,8 +705,8 @@ CA the helper makes when the test runs; no key is kept in the repository.
 node first. `leader` waits for exactly one ready leader, and `write` runs a
 write on it, again on the next leader if leadership moves first. A node's
 `stop` and `start` restart it from its data directory (`dir`), with any
-discovery; options to `start` edit the node's `Config`, such as `withTLS` and
-`insecureTransport`, and `open` returns the error of a start a test expects to
+discovery; options to `start` edit the node's `Config`, such as `withTLS`,
+`insecureTransport` and `withConfigDigests`, and `open` returns the error of a start a test expects to
 fail. `capture` makes a node log into a `logBuffer`, which is safe to read while
 the node runs, before it starts: raft's goroutines log through the node's
 logger. The helper's waits poll a condition until a timeout, never a fixed

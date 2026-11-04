@@ -30,7 +30,9 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   acquired (Raft node, event hub) before returning.
 - `Run` delegates to [`server.Server.Run`] which orchestrates lifecycle of
   all runners (HTTP, gRPC, sync, lifecycle, history, and in raft mode
-  bootstrap).
+  bootstrap and config-check, which compares the settings every replica must
+  share with the leader's, see "Configuration drift" in
+  `internal/raft/README.md`).
 - `Shutdown` closes resources in reverse acquisition order: proxy pool →
   event hub → Raft node. Safe to call multiple times. In raft mode the Raft
   node's shutdown first closes the gRPC forwarder of a follower's syncs, its
@@ -45,13 +47,16 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   Options.Check()                 ← raft only: what any seed needs, before anything starts
         │
         ▼
-  buildCluster()                  ← store + leadership + event-hub (+ Raft node and its cluster.Admin if cfg.Cluster.Backend=raft)
+  sharedSettings().Digests()      ← raft only: the digests of the settings every replica must share
+        │
+        ▼
+  buildCluster()                  ← store + leadership + event-hub (+ Raft node, answering its peers with the digests, and its raftpkg.Admin if cfg.Cluster.Backend=raft)
         │
         ▼
   kit.New(store, cfg.Auth)        ← auth composition root (JWT, sessions, RBAC, rate-limit)
         │
         ▼
-  initServices()                  ← user, role, credential, session, agent, spec, access; then cluster over the Admin if raft
+  initServices()                  ← user, role, credential, session, agent, spec, access; then cluster over the Admin, with the fingerprint, if raft
         │
    ┌────┴───────────────┬────────────────────────────────────────┐
    │ standalone         │ raft                                   │
@@ -66,7 +71,7 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   htmx.Configure() + hooks        ← global UI ↔ transport wiring (errorPage, loginPath)
         │
         ▼
-  build runners                   ← lifecycle, sync, history, http, http-discovery, grpc (+ bootstrap if raft)
+  build runners                   ← lifecycle, sync, history, http, http-discovery, grpc (+ bootstrap and config-check if raft)
         │
         ▼
   server.New(runners…)            ← lifecycle orchestrator

@@ -64,7 +64,10 @@ func (c CORSConfig) crossOriginProtection() (*http.CrossOriginProtection, error)
 	return p, nil
 }
 
-func (c CORSConfig) withDefaults() CORSConfig {
+// WithDefaults returns c with the defaults that CORS applies filled in: the
+// methods, request headers and exposed headers listed above for an empty list,
+// and 12 hours for a MaxAge of zero or less.
+func (c CORSConfig) WithDefaults() CORSConfig {
 	if len(c.AllowMethods) == 0 {
 		c.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"}
 	}
@@ -85,7 +88,7 @@ func (c CORSConfig) withDefaults() CORSConfig {
 // Preflight (OPTIONS) requests are answered immediately.
 // Actual requests get CORS headers attached.
 func CORS(cfg CORSConfig) func(http.Handler) http.Handler {
-	cfg = cfg.withDefaults()
+	cfg = cfg.WithDefaults()
 
 	var (
 		maxAge   = strconv.FormatInt(int64(cfg.MaxAge.Seconds()), 10)

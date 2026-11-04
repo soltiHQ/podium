@@ -92,19 +92,49 @@ func hubOptions(cfg config.Config) []event.Option {
 	return []event.Option{event.WithCoalesce(cfg.Events.WithDefaults().Coalesce)}
 }
 
+// clusterOptions are what buildCluster builds with besides its configuration.
+type clusterOptions struct {
+	// hub are the options of the event hub.
+	hub []event.Option
+	// digests are the digests of the settings every replica must share, which a
+	// raft node answers its peers' configuration requests with and checks
+	// against its leader's; nil leaves a raft node without either.
+	digests *cluster.Digests
+}
+
+// clusterOption is an option of buildCluster.
+type clusterOption func(*clusterOptions)
+
+// withHubOptions configures the event hub with opts, before the Raft node can
+// apply the first event to it.
+func withHubOptions(opts ...event.Option) clusterOption {
+	return func(o *clusterOptions) { o.hub = append(o.hub, opts...) }
+}
+
+// withConfigDigests gives a raft node d, the digests of the settings every
+// replica must share (raftpkg.Config.ConfigDigests). Standalone ignores them.
+func withConfigDigests(d cluster.Digests) clusterOption {
+	return func(o *clusterOptions) { o.digests = &d }
+}
+
 // buildCluster assembles the storage + leadership + event-hub trio declared
 // by cfg. In raft mode the hub is also wired to replicate mutations through
-// the Raft log. hubOpts configure the hub, before the Raft node can apply the
-// first event to it. Returns the store/leadership/hub the rest of the app uses,
+// the Raft log. opts configure the hub, and a raft node's configuration
+// digests. Returns the store/leadership/hub the rest of the app uses,
 // plus a shutdown function for the storage resources (nil for ephemeral standalone)
 // and, in raft mode, the node's cluster administration, which the cluster service
-// changes the membership through (nil in standalone).
-func buildCluster(cfg cluster.Config, logger zerolog.Logger, hubOpts ...event.Option) (storage.Storage, cluster.Leadership, *event.Hub, func(), cluster.Admin, error) {
+// changes the membership through and which gives the node's configuration check
+// (nil in standalone).
+func buildCluster(cfg cluster.Config, logger zerolog.Logger, opts ...clusterOption) (storage.Storage, cluster.Leadership, *event.Hub, func(), *raftpkg.Admin, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, nil, nil, nil, nil, fmt.Errorf("cluster: %w", err)
 	}
+	var o clusterOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	inner := inmemory.New()
-	hub := event.NewHub(logger, hubOpts...)
+	hub := event.NewHub(logger, o.hub...)
 	switch cfg.Backend {
 	case "", cluster.BackendStandalone:
 		if cfg.Ephemeral() {
@@ -138,7 +168,9 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger, hubOpts ...event.Op
 		if err != nil {
 			return nil, nil, nil, nil, nil, err
 		}
-		p, err := raftpkg.New(raftNodeConfig(cfg.Raft), inner, hub, disco, logger)
+		node := raftNodeConfig(cfg.Raft)
+		node.ConfigDigests = o.digests
+		p, err := raftpkg.New(node, inner, hub, disco, logger)
 		if err != nil {
 			return nil, nil, nil, nil, nil, err
 		}
@@ -180,6 +212,34 @@ func entries(n int) uint64 {
 		return 0
 	}
 	return uint64(n)
+}
+
+// sharedSettings are the settings of cfg that every replica of a raft cluster
+// must share (cluster.SharedSettings), as the node applies them:
+// trusted_proxies as the client IP resolver parses them, and cors with the
+// defaults that the CORS middleware fills in. cluster.Fingerprint cannot take
+// cfg itself: config imports cluster.
+func sharedSettings(cfg config.Config) (cluster.SharedSettings, error) {
+	proxies, err := clientip.ParseTrusted(cfg.TrustedProxies)
+	if err != nil {
+		return cluster.SharedSettings{}, fmt.Errorf("trusted_proxies: %w", err)
+	}
+	cors := cfg.CORS.WithDefaults()
+	return cluster.SharedSettings{
+		JWTSecret:        cfg.Auth.JWTSecret,
+		CookieSecure:     cfg.Auth.CookieSecure,
+		AgentAuthRequire: cfg.AgentAuth.Require,
+		EnrollSecret:     cfg.AgentAuth.EnrollSecret,
+		TrustedProxies:   proxies,
+		CORS: cluster.CORSSettings{
+			AllowOrigins:     cors.AllowOrigins,
+			AllowMethods:     cors.AllowMethods,
+			AllowHeaders:     cors.AllowHeaders,
+			ExposeHeaders:    cors.ExposeHeaders,
+			AllowCredentials: cors.AllowCredentials,
+			MaxAge:           cors.MaxAge,
+		},
+	}, nil
 }
 
 // bootstrapOptions tells bootstrap where this node keeps its state, which is

@@ -4,14 +4,18 @@ import "github.com/soltiHQ/control-plane/internal/cluster"
 
 // Status is the cluster as one node sees it: its own ID and role, the leader it
 // knows, by ID and raft address, both empty when it knows none, the servers of
-// its latest configuration and the index of the last entry of its log.
+// its latest configuration and the index of the last entry of its log. Its
+// Fingerprint is the fingerprint of the settings every replica must share, as
+// this node holds them (cluster.Fingerprint): nodes whose fingerprints differ
+// do not share them.
 type Status struct {
-	NodeID     string
-	Role       string
-	LeaderID   string
-	LeaderAddr string
-	Members    []cluster.Server
-	LastIndex  uint64
+	NodeID      string
+	Role        string
+	LeaderID    string
+	LeaderAddr  string
+	Members     []cluster.Server
+	LastIndex   uint64
+	Fingerprint string
 }
 
 // AddRequest asks for a voter: its ID and the raft address, host:port, at which

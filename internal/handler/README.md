@@ -180,8 +180,14 @@ start and at each raft leadership term (see `internal/bootstrap/README.md`).
 `GET /api/v1/cluster` is a read, so the node that gets it answers it itself, a follower included: its cluster as it sees
 it. `node_id`, `role` (`leader`, `follower`, `candidate` or `shutdown`), `leader_id` and `leader_address`, the raft
 address of the leader it knows, both left out while it knows none, `members`, each with its `id`, its raft `address` as
-the configuration writes it, and its `suffrage` (`voter`, `nonvoter` or `staging`), and `last_index`, the index of the last
-entry of its log (`TestClusterStatusAnswer`).
+the configuration writes it, and its `suffrage` (`voter`, `nonvoter` or `staging`), `last_index`, the index of the last
+entry of its log, and `config_fingerprint`, the fingerprint of the settings that every replica must share, as this node
+holds them: the hex SHA-256 over the digests of their four groups, `cluster.Fingerprint` (`TestClusterStatusAnswer`).
+Nodes whose fingerprints differ do not share those settings, so comparing the answers of every node shows drift that the
+nodes' `config-check` runners also log (see "Configuration drift" in `internal/raft/README.md`). The fingerprint is no
+secret, but whoever reads it and knows the other settings can confirm a guess of a weak `auth.jwt_secret` or
+`agent_auth.enroll_secret` offline, by computing the fingerprint of the guess: it is served behind `cluster:get` only,
+and the secrets must be strong.
 
 `POST /api/v1/cluster/members` takes `{"id": "n4", "address": "10.0.0.4:7000"}`, a node's `node_id` and raft advertise
 address, and adds it as a voter. `DELETE /api/v1/cluster/members/{id}`, with `?force=true` where the guard asks for it,

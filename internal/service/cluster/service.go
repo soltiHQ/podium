@@ -51,19 +51,36 @@ type Service struct {
 	resolver resolver
 	// leaderWait is defaultLeaderWait; tests shorten it.
 	leaderWait time.Duration
+	// fingerprint is the fingerprint of the settings every replica must share,
+	// as this node holds them, which Status gives.
+	fingerprint string
+}
+
+// Option configures a Service.
+type Option func(*Service)
+
+// WithFingerprint makes Status give fingerprint, the fingerprint of the
+// settings every replica must share, as this node holds them
+// (cluster.Fingerprint).
+func WithFingerprint(fingerprint string) Option {
+	return func(s *Service) { s.fingerprint = fingerprint }
 }
 
 // New creates a cluster service over admin.
-func New(admin cluster.Admin, logger zerolog.Logger) *Service {
+func New(admin cluster.Admin, logger zerolog.Logger, opts ...Option) *Service {
 	if admin == nil {
 		panic("cluster.Service: admin is nil")
 	}
-	return &Service{
+	s := &Service{
 		raft:       admin,
 		logger:     logger.With().Str("service", "cluster").Logger(),
 		resolver:   net.DefaultResolver,
 		leaderWait: defaultLeaderWait,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Status returns the cluster as this node sees it, from the copy of its
@@ -71,12 +88,13 @@ func New(admin cluster.Admin, logger zerolog.Logger) *Service {
 func (s *Service) Status(_ context.Context) Status {
 	leaderID, leaderAddr := s.raft.Leader()
 	return Status{
-		NodeID:     s.raft.NodeID(),
-		Role:       s.raft.Role(),
-		LeaderID:   leaderID,
-		LeaderAddr: leaderAddr,
-		Members:    s.raft.Servers(),
-		LastIndex:  s.raft.LastIndex(),
+		NodeID:      s.raft.NodeID(),
+		Role:        s.raft.Role(),
+		LeaderID:    leaderID,
+		LeaderAddr:  leaderAddr,
+		Members:     s.raft.Servers(),
+		LastIndex:   s.raft.LastIndex(),
+		Fingerprint: s.fingerprint,
 	}
 }
 

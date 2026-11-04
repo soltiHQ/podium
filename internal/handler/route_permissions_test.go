@@ -115,7 +115,7 @@ func newAPIFixtureLogging(t *testing.T, wrap func(storage.Storage) storage.Stora
 		agent.New(st, logger),
 		spec.New(st, logger),
 		archive, pool, hub, logs, streams, allowAccess,
-		WithCluster(clustersvc.New(raft, logger)),
+		WithCluster(clustersvc.New(raft, logger, clustersvc.WithFingerprint(fixtureFingerprint))),
 	)
 	mux := http.NewServeMux()
 	api.Routes(mux, requireIdentity, nil)

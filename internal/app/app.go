@@ -40,6 +40,7 @@ type App struct {
 
 	store        storage.Storage
 	leadership   cluster.Leadership
+	cluster      *clustersvc.Service // a raft node's cluster service, nil in standalone
 	eventHub     *event.Hub
 	raftShutdown func()
 	proxyPool    *proxy.Pool
@@ -58,16 +59,27 @@ type App struct {
 // deferred resources (Raft node, proxy pool, event hub).
 func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, error) {
 	raftMode := cfg.Cluster.Backend == cluster.BackendRaft
-	// A raft node cannot know at start whether a term of its own will seed: it
-	// checks before anything starts what any seed needs, which would otherwise
-	// fail at every term it leads.
+	clusterOpts := []clusterOption{withHubOptions(hubOptions(cfg)...)}
+	// A raft node digests the settings that every replica must share, answers
+	// its peers' configuration requests with the digests, and checks them
+	// against its leader's (raftpkg.Admin.ConfigCheck). Standalone does neither.
+	var digests cluster.Digests
 	if raftMode {
+		// A raft node cannot know at start whether a term of its own will seed:
+		// it checks before anything starts what any seed needs, which would
+		// otherwise fail at every term it leads.
 		if err := bootstrapOptions(cfg).Check(); err != nil {
 			return nil, err
 		}
+		shared, err := sharedSettings(cfg)
+		if err != nil {
+			return nil, err
+		}
+		digests = shared.Digests()
+		clusterOpts = append(clusterOpts, withConfigDigests(digests))
 	}
 
-	store, leadership, eventHub, raftShutdown, admin, err := buildCluster(cfg.Cluster, logger, hubOptions(cfg)...)
+	store, leadership, eventHub, raftShutdown, admin, err := buildCluster(cfg.Cluster, logger, clusterOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -78,10 +90,11 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
-	// A raft node serves the membership API through its cluster administration;
-	// standalone has none, and registers no cluster route.
+	// A raft node serves the membership API through its cluster administration,
+	// and its status names the fingerprint of the settings every replica must
+	// share; standalone has none, and registers no cluster route.
 	if admin != nil {
-		svc.cluster = clustersvc.New(admin, logger)
+		svc.cluster = clustersvc.New(admin, logger, clustersvc.WithFingerprint(digests.Fingerprint()))
 	}
 
 	// Default users/roles/credentials seeding must run through the store, on the
@@ -209,6 +222,11 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 	runners := []server.Runner{httpRunner, httpDiscoveryRunner, grpcRunner, lifecycleRunner, syncRunner, historyRunner}
 	if raftMode {
 		runners = append(runners, seedingRunner(cfg, logger, leadership, svc))
+		// While another node leads, the check compares this node's digests with
+		// the leader's, at each change of leader.
+		if check := admin.ConfigCheck(logger); check != nil {
+			runners = append(runners, check)
+		}
 	}
 	srv, err := server.New(cfg.Server, logger, runners...)
 	if err != nil {
@@ -222,6 +240,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		logger:       logger,
 		store:        store,
 		leadership:   leadership,
+		cluster:      svc.cluster,
 		eventHub:     eventHub,
 		raftShutdown: raftShutdown,
 		proxyPool:    proxyPool,
