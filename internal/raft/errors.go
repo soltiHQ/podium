@@ -29,7 +29,11 @@ var ErrNotLeader = cluster.ErrNotLeader
 //   - ErrLeadershipLost is [cluster.ErrLeadershipLost]: the node lost
 //     leadership while the write was committing, which may still commit.
 //   - ErrEnqueueTimeout and ErrRaftShutdown are [storage.ErrUnavailable]: raft
-//     cannot take the write now.
+//     wrote nothing. That holds for a barrier, which writes nothing, and for a
+//     write that raft never dispatched; the error of a write's own future goes
+//     through writeError first, which gives a write that the leader dispatched,
+//     and whose node shut down before its outcome was known, the meaning
+//     [cluster.ErrLeadershipLost].
 //
 // Any other error, and nil, is returned as it is.
 func clusterError(err error) error {
@@ -62,14 +66,14 @@ func (e meant) Unwrap() []error { return []error{e.meaning, e.cause} }
 // TestStaleConfigurationIndexConflicts fails when an upgrade words it otherwise.
 const configurationChanged = "configuration changed since "
 
-// membershipError is clusterError for a change of the configuration: a change
-// refused because the configuration changed since its prevIndex is
-// [cluster.ErrConfigurationChanged], and still the error of hashicorp/raft.
-func membershipError(err error) error {
+// membershipError is writeError for a change of the configuration whose future
+// is f: a change refused because the configuration changed since its prevIndex
+// is [cluster.ErrConfigurationChanged], and still the error of hashicorp/raft.
+func membershipError(f hraft.IndexFuture, err error) error {
 	if err != nil && strings.HasPrefix(err.Error(), configurationChanged) {
 		return meant{meaning: cluster.ErrConfigurationChanged, cause: err}
 	}
-	return clusterError(err)
+	return writeError(f, err)
 }
 
 // barrierError is clusterError for the error of the barrier that starts a

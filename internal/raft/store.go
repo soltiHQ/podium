@@ -47,6 +47,11 @@ const applyTimeout = 5 * time.Second
 type Store struct {
 	inner storage.Storage
 	raft  *hraft.Raft
+	// propose submits a command to raft: raft.Apply, which tests replace.
+	propose func(cmd []byte, timeout time.Duration) hraft.ApplyFuture
+	// stopped is closed once raft shuts down, which ends the wait for a write
+	// (awaitWrite).
+	stopped <-chan struct{}
 
 	txMu sync.Mutex // single in-flight WithTx at a time
 }
@@ -59,19 +64,23 @@ func NewStore(inner storage.Storage, r *hraft.Raft) *Store {
 	if r == nil {
 		panic("raft: nil raft")
 	}
-	return &Store{inner: inner, raft: r}
+	return &Store{inner: inner, raft: r, propose: r.Apply, stopped: stopSignal(r)}
 }
 
-// apply submits a Command to Raft, waiting up to applyTimeout for commit. Its
-// errors from raft are given their meaning by clusterError. Its caller holds txMu.
+// apply submits a Command to Raft, and waits for its commit until raft
+// answers, or shuts down (awaitWrite); applyTimeout bounds only the enqueueing
+// of the command. Its errors from raft are given their meaning by writeError:
+// a write of unknown outcome, which may have committed, is
+// cluster.ErrLeadershipLost. Its caller holds txMu, which it releases once
+// apply returns.
 func (s *Store) apply(ops []*raftv1.Op) error {
 	data, err := overlay.EncodeCommand(ops)
 	if err != nil {
 		return err
 	}
-	f := s.raft.Apply(data, applyTimeout)
-	if err := f.Error(); err != nil {
-		return fmt.Errorf("raft: apply: %w", clusterError(err))
+	f := s.propose(data, applyTimeout)
+	if err := awaitWrite(f, s.stopped); err != nil {
+		return fmt.Errorf("raft: apply: %w", writeError(f, err))
 	}
 	if resp := f.Response(); resp != nil {
 		if e, ok := resp.(error); ok {

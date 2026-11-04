@@ -73,12 +73,12 @@ func (a *Admin) Probe(ctx context.Context, address string) error {
 }
 
 // AddVoter implements cluster.Admin with hashicorp/raft's AddVoter, which
-// returns once the change committed, or failed. Its errors have the meaning
-// membershipError gives them.
+// returns once the change committed, or failed, or the node shut down first
+// (awaitWrite). Its errors have the meaning membershipError gives them.
 func (a *Admin) AddVoter(id, address string, prevIndex uint64) (uint64, error) {
 	future := a.p.raft.AddVoter(hraft.ServerID(id), hraft.ServerAddress(address), prevIndex, 0)
-	if err := future.Error(); err != nil {
-		return 0, membershipError(err)
+	if err := awaitWrite(future, a.p.store.stopped); err != nil {
+		return 0, membershipError(future, err)
 	}
 	return future.Index(), nil
 }
@@ -87,8 +87,8 @@ func (a *Admin) AddVoter(id, address string, prevIndex uint64) (uint64, error) {
 // RemoveServer.
 func (a *Admin) RemoveServer(id string, prevIndex uint64) (uint64, error) {
 	future := a.p.raft.RemoveServer(hraft.ServerID(id), prevIndex, 0)
-	if err := future.Error(); err != nil {
-		return 0, membershipError(err)
+	if err := awaitWrite(future, a.p.store.stopped); err != nil {
+		return 0, membershipError(future, err)
 	}
 	return future.Index(), nil
 }
@@ -100,7 +100,10 @@ func (a *Admin) RemoveServer(id string, prevIndex uint64) (uint64, error) {
 // then fails. A transfer that fails on its timeout may have sent its TimeoutNow
 // already, so the target can still win and the node lose its leadership after
 // the error. A node that does not lead, or hands over already, refuses with
-// cluster.ErrNotLeader (clusterError).
+// cluster.ErrNotLeader (clusterError). The wait needs no bound of its own: a
+// goroutine of hashicorp/raft v1.8.0 answers the transfer on its timeout, an
+// election timeout, or as the node leaves its leader loop, a shutdown included
+// (leaderLoop).
 func (a *Admin) TransferLeadership() error {
 	return clusterError(a.p.raft.LeadershipTransfer().Error())
 }
