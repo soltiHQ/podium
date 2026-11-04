@@ -68,7 +68,7 @@ func TestFollowerLogsFailedApply(t *testing.T) {
 		},
 		{
 			"a transaction whose second operation fails", transaction,
-			"raft: committed command failed to apply and was dropped on this replica, which stays as it was", "agent_upsert,agent_delete", 2,
+			"raft: committed command failed to apply and was dropped on this replica, which stays as it was (corrupted entry or version skew)", "agent_upsert,agent_delete", 2,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -209,14 +209,14 @@ Any other value, an empty one included, fails configuration loading.
 every refresh of a browser's session replace its refresh token. The replacement
 is a write, so in raft mode only the leader can make it. A browser whose access
 token has expired (`auth.access_ttl`, 15m by default) and whose request, a GET
-included, reaches a follower gets 503 with the HTTP address of the leader in
-`X-Leader` instead of a new token, and sets no cookie; the follower logs one
-WARN, `auth refresh needs the leader`, with the method and the path. So with
-rotation on, a raft deployment needs leader-sticky routing: its load balancer
-must send browsers to the leader, or retry a request that gets `X-Leader` on
-the node it names. Without rotation a refresh only reads, and works on every
-node, as does a request whose access token is still valid. Standalone is
-unaffected. See `internal/raft/README.md`.
+included, reaches a follower gets 503 with `X-Leader` (see "Leader hint" in
+`internal/transport/README.md`) instead of a new token, and sets no cookie; the
+follower logs one WARN, `auth refresh needs the leader`, with the method and the
+path. So with rotation on, a raft deployment needs leader-sticky routing: its
+load balancer must send browsers to the leader, or retry a request that gets
+`X-Leader` on the node it names. Without rotation a refresh only reads, and
+works on every node, as does a request whose access token is still valid.
+Standalone is unaffected. See `internal/raft/README.md`.
 
 The main listener refuses state-changing requests that a browser sends from
 another origin (Go's `http.CrossOriginProtection`) with 403
@@ -387,9 +387,10 @@ compacts its raft log. Every `snapshot_interval` (a duration string such as
 one if so; the snapshot truncates the log down to its last `trailing_logs`
 entries. A follower that is further behind than that catches up from a snapshot
 of the whole state, not from log entries. The defaults are hashicorp/raft's:
-`120s`, 8192 and 10240. Zero keeps the default and a negative value fails
-configuration loading; an interval under 5 ms passes loading but fails the
-start. They are not `cluster.standalone.snapshot_threshold`, which is the
+`120s`, 8192 and 10240. Zero keeps the default; a negative value fails
+configuration loading, and so does an interval under 5 ms, the least that
+hashicorp/raft accepts, which has no other limit on the three settings. They are
+not `cluster.standalone.snapshot_threshold`, which is the
 standalone store's. hashicorp/raft's own logs, of its elections, snapshots and
 transport, go through podium's logger like any other line, at their own INFO,
 WARN and ERROR levels, with `profile=raft` and `component` (`raft`, `snapshot`

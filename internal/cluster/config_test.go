@@ -2,6 +2,7 @@ package cluster_test
 
 import (
 	"errors"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -119,6 +120,10 @@ func TestRaftCompactionConfig(t *testing.T) {
 		}, want: compaction{150 * time.Second, 1024, 200}, valid: true},
 		{name: "env over yaml", yaml: "raft:\n  trailing_logs: 100\n", env: map[string]string{"SOLTI_CLUSTER_RAFT_TRAILING_LOGS": "300"}, want: compaction{120 * time.Second, 8192, 300}, valid: true},
 		{name: "zero keeps the default", yaml: "raft:\n  snapshot_interval: 0s\n  snapshot_threshold: 0\n  trailing_logs: 0\n", want: compaction{0, 0, 0}, valid: true},
+		{name: "interval at the minimum", yaml: "raft:\n  snapshot_interval: 5ms\n", want: compaction{5 * time.Millisecond, 8192, 10240}, valid: true},
+		{name: "interval under the minimum", yaml: "raft:\n  snapshot_interval: 4ms\n", want: compaction{4 * time.Millisecond, 8192, 10240}},
+		{name: "interval of a nanosecond", env: map[string]string{"SOLTI_CLUSTER_RAFT_SNAPSHOT_INTERVAL": "1ns"}, want: compaction{time.Nanosecond, 8192, 10240}},
+		{name: "threshold and trailing logs of one", yaml: "raft:\n  snapshot_threshold: 1\n  trailing_logs: 1\n", want: compaction{120 * time.Second, 1, 1}, valid: true},
 		{name: "negative interval", yaml: "raft:\n  snapshot_interval: -1s\n", want: compaction{-time.Second, 8192, 10240}},
 		{name: "negative threshold", env: map[string]string{"SOLTI_CLUSTER_RAFT_SNAPSHOT_THRESHOLD": "-1"}, want: compaction{120 * time.Second, -1, 10240}},
 		{name: "negative trailing logs", yaml: "raft:\n  trailing_logs: -1\n", want: compaction{120 * time.Second, 8192, -1}},
@@ -139,6 +144,35 @@ func TestRaftCompactionConfig(t *testing.T) {
 			}
 			if err := cfg.Validate(); (err == nil) != tc.valid {
 				t.Fatalf("Validate() = %v, want valid %v", err, tc.valid)
+			}
+		})
+	}
+}
+
+// The compaction settings Validate accepts are the ones hashicorp/raft accepts when
+// the node starts, so a refused value fails before anything is opened. Its
+// ValidateConfig (v1.8.0, config.go) limits only the snapshot interval, to 5ms at
+// least, and none of the number of entries; this pins the minimum to it.
+func TestRaftCompactionLimitsAreHashicorps(t *testing.T) {
+	validate := func(mutate func(*hraft.Config)) error {
+		c := hraft.DefaultConfig()
+		c.LocalID = "n1"
+		mutate(c)
+		return hraft.ValidateConfig(c)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*hraft.Config)
+		want   bool // whether hashicorp/raft accepts it
+	}{
+		{"the minimum interval", func(c *hraft.Config) { c.SnapshotInterval = cluster.MinRaftSnapshotInterval }, true},
+		{"an interval a nanosecond under it", func(c *hraft.Config) { c.SnapshotInterval = cluster.MinRaftSnapshotInterval - 1 }, false},
+		{"the least threshold and trailing logs", func(c *hraft.Config) { c.SnapshotThreshold, c.TrailingLogs = 1, 1 }, true},
+		{"the greatest threshold and trailing logs", func(c *hraft.Config) { c.SnapshotThreshold, c.TrailingLogs = math.MaxInt64, math.MaxInt64 }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validate(tc.mutate); (err == nil) != tc.want {
+				t.Fatalf("hashicorp/raft's ValidateConfig = %v, want accepted %v", err, tc.want)
 			}
 		})
 	}

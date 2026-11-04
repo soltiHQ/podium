@@ -65,7 +65,9 @@ type Config struct {
 	// SnapshotThreshold the number of log entries since the last snapshot that
 	// starts one, and TrailingLogs the number of entries a snapshot leaves in
 	// the log, for a slow follower to catch up from. Zero values use
-	// hashicorp/raft's defaults (120 s, 8192 and 10240).
+	// hashicorp/raft's defaults (120 s, 8192 and 10240). hashicorp/raft refuses
+	// an interval under 5 ms when New starts it, which
+	// [cluster.Config.Validate] refuses earlier.
 	SnapshotInterval  time.Duration
 	SnapshotThreshold uint64
 	TrailingLogs      uint64

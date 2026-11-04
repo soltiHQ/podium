@@ -133,22 +133,29 @@ hashicorp/raft creates the snapshot a leader installs through the same
 ## Follower writes
 
 A write that reaches a node that is not the leader changes nothing and fails
-with `raft.ErrNotLeader`: a single operation, which hashicorp/raft refuses with
-its own `ErrNotLeader`, and a transaction, which fails before its function
-runs. `raft.ErrNotLeader` is `cluster.ErrNotLeader`, which lives in the
-`cluster` package so that the transports can tell it without importing raft
-(`errkind` cannot: raft depends on it through `domain/wire` and the proxy); the
-errors wrap it, so `errors.Is` finds it. `errkind.Classify` gives it
-`Unavailable`, so gRPC answers `codes.Unavailable` and HTTP answers 503.
+with `raft.ErrNotLeader`: a single operation, which is a transaction of one
+operation, and a transaction, which fails before its function runs.
+`raft.ErrNotLeader` is `cluster.ErrNotLeader`, which lives in the `cluster`
+package so that the transports can tell it without importing raft (`errkind`
+cannot: raft depends on it through `domain/wire` and the proxy); the errors wrap
+it, so `errors.Is` finds it. `errkind.Classify` gives it `Unavailable`, so gRPC
+answers `codes.Unavailable` and HTTP answers 503.
 
-For HTTP the 503 of such an error (`response.FromError`) also carries
-`X-Leader`, the HTTP address of the leader as `host:port`, with no scheme: the
-host of its raft advertise address, as written, and the port this node serves
-the listener on. A follower forwards a write to the same host and port, which
-assumes that every node serves a listener on the same port. A request gets the
-address from the `Leader` middleware, which hands every request it passes
-through the means to ask where the leader is; a node that is the leader, or
-knows no leader, sends no header (`TestFollowerWriteIsUnavailableWithLeaderHint`).
+The other errors of hashicorp/raft that mean the cluster cannot take a write
+now are given a meaning in the same way (`clusterError`), and still are the
+hashicorp/raft error for `errors.Is`: `ErrLeadershipLost` is
+`cluster.ErrLeadershipLost`, and `ErrEnqueueTimeout` and `ErrRaftShutdown` are
+`storage.ErrUnavailable`. They classify as `Unavailable` too
+(`TestClusterError`). A write that fails with `cluster.ErrLeadershipLost` is
+ambiguous, as it may still commit, so only a write that is safe to repeat should
+be retried.
+
+For HTTP the 503 of `ErrNotLeader` and `ErrLeadershipLost`
+(`response.FromError`) carries `X-Leader`, as the `Leader` middleware hands every
+request it passes through the means to ask where the leader is
+(`TestFollowerWriteIsUnavailableWithLeaderHint`). What the header means, and
+when it is not sent, is described once, under "Leader hint" in
+`internal/transport/README.md`.
 
 The `Leader` middleware forwards the writes of a follower, so a follower's
 handlers meet the error only when leadership moves under a request that began
@@ -182,25 +189,30 @@ its operations, and nothing it carries, not the error either, as either can
 hold the values of the state:
 
 - `raft: committed command failed to apply and was dropped on this replica,
-  which stays as it was`, with `index`, `kind` (the names in the protocol of its
-  operations, each once, in order: `agent_upsert,agent_delete`) and `ops`;
+  which stays as it was (corrupted entry or version skew)`, with `index`, `kind`
+  (the names in the protocol of its operations, each once, in order:
+  `agent_upsert,agent_delete`) and `ops`;
 - `raft: committed command is not decodable and was dropped on this replica
   (corrupted entry or version skew)`, with `index` and the kind `undecodable`,
   and no count.
 
-`Store` runs a transaction on an overlay of the leader's store before it
-proposes it, so one that cannot apply fails for its caller then. A
-single-operation write is proposed as it is, so one that a concurrent write
-made impossible, such as the delete of an entity another write has deleted
-first, fails on apply, on every replica, and its proposer gets the error as the
-response of `Apply`: that is one line on each node for an ordinary conflict.
-Any other failure is a corrupted entry or a version skew: a node that does not
-know an operation cannot apply a command a newer node proposed, and the
-replicas diverge, which the line is the only sign of
-(`TestFollowerLogsFailedApply`, `TestFSMApplyLogsOnlyTheShapeOfAFailedCommand`).
-A restart replays the log entries since the last snapshot, so a command that
-failed is logged again at each restart until a snapshot compacts it away; the
-`index` tells it is the same entry.
+`Store` checks every write against the state before it proposes it. A
+transaction runs on an overlay of the leader's store, and a single-operation
+write is a transaction of one operation, as in the durable store: the overlay
+refuses what the FSM would refuse when it applies the operation. So the delete
+of an absent row gives its caller `ErrNotFound` and no command reaches the log,
+and a bulk delete that matches nothing proposes nothing
+(`TestSingleWritesAreValidatedBeforeTheyAreProposed`). Like every transaction it
+starts with a barrier, an entry that carries no write, so a refused write still
+costs one round trip. The session clock the operations carry is the overlay's
+(`TestSingleWritesKeepTheSessionClock`). So a command that fails to apply is a
+corrupted entry or a version skew: a node that does not know an operation
+cannot apply a command a newer node proposed, and the replicas diverge, which
+the line is the only sign of (`TestFollowerLogsFailedApply`,
+`TestFSMApplyLogsOnlyTheShapeOfAFailedCommand`). A restart replays the log
+entries since the last snapshot, so a command that failed is logged again at
+each restart until a snapshot compacts it away; the `index` tells it is the
+same entry.
 
 ## Log compaction
 
@@ -213,9 +225,12 @@ last snapshot, and takes one if so; the snapshot then truncates the log down to
 the last `TrailingLogs` entries (10240), which a follower that is slightly
 behind catches up from, in place of a snapshot of the whole state. A zero value
 keeps the default, so the settings are hashicorp/raft's until configured
-(`TestRaftCompactionDefaultsAreHashicorps`); the configuration refuses a
-negative one, and hashicorp/raft refuses, when the node starts, an interval
-under 5 ms. `TestCompactionKnobsApplied` shows the values reach
+(`TestRaftCompactionDefaultsAreHashicorps`). The configuration refuses a
+negative value and an interval under 5 ms, the minimum of hashicorp/raft's
+`ValidateConfig`, which has no other limit on the three settings
+(`TestRaftCompactionLimitsAreHashicorps`), so a refused value fails before
+anything in the data directory is opened. `TestCompactionKnobsApplied` shows the
+values reach
 hashicorp/raft's configuration, and that a node with small ones snapshots on
 its own and truncates its log to the trailing logs.
 

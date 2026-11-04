@@ -59,6 +59,12 @@ const (
 	// DefaultRaftTrailingLogs is the number of log entries a snapshot leaves in
 	// the log, for a slow follower to catch up from.
 	DefaultRaftTrailingLogs = 10240
+
+	// MinRaftSnapshotInterval is the shortest snapshot interval hashicorp/raft
+	// accepts: its ValidateConfig refuses a shorter one when a node starts
+	// (v1.8.0, config.go: SnapshotInterval < 5ms). It has no other limit on the
+	// compaction settings.
+	MinRaftSnapshotInterval = 5 * time.Millisecond
 )
 
 // RaftConfig parametrises the raft backend; no other backend reads it.
@@ -70,7 +76,7 @@ const (
 // compacts its log: it checks every SnapshotInterval whether SnapshotThreshold
 // entries have piled up since its last snapshot, and a snapshot leaves
 // TrailingLogs entries in the log. A zero value keeps the default; a negative
-// one is refused.
+// one is refused, and so is a SnapshotInterval under MinRaftSnapshotInterval.
 type RaftConfig struct {
 	NodeID             string `yaml:"node_id"           envconfig:"NODE_ID"`
 	BindAddr           string `yaml:"bind_addr"         envconfig:"BIND_ADDR"`
@@ -316,7 +322,8 @@ func (c Config) Validate() error {
 
 // validateRaft fails a raft node before it opens anything: node_id, bind_addr
 // and data_dir are required, and so is the transport's mutual TLS or the
-// explicit choice of plain TCP; the compaction settings are not negative;
+// explicit choice of plain TCP; the compaction settings are not negative, and the
+// snapshot interval is one hashicorp/raft accepts;
 // bind_addr and advertise_addr are host:port, and a bind_addr on every interface
 // needs an advertise_addr; the peers must list this node as node_id at its
 // advertise address.
@@ -345,6 +352,9 @@ func (c Config) validateRaft() error {
 		if setting.negative {
 			return fmt.Errorf("%s must not be negative", setting.key)
 		}
+	}
+	if r.SnapshotInterval > 0 && r.SnapshotInterval < MinRaftSnapshotInterval {
+		return fmt.Errorf("raft.snapshot_interval %s is under the %s that hashicorp/raft accepts", r.SnapshotInterval, MinRaftSnapshotInterval)
 	}
 	bindHost, err := hostPort(r.BindAddr)
 	if err != nil {

@@ -2,7 +2,6 @@ package raft
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -12,8 +11,6 @@ import (
 	raftv1 "github.com/soltiHQ/control-plane/api/gen/solti/raft/v1"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
-	"github.com/soltiHQ/control-plane/domain/wire"
-	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/overlay"
 )
@@ -27,22 +24,6 @@ var (
 // applyTimeout bounds the wait for a Raft log entry to be committed.
 const applyTimeout = 5 * time.Second
 
-// ErrNotLeader is [cluster.ErrNotLeader]: what every write of a Store returns on
-// a node that is not the leader, wrapped, so that errors.Is finds it. The write
-// changed nothing, and the transports answer it as unavailable, HTTP with the
-// leader's address.
-var ErrNotLeader = cluster.ErrNotLeader
-
-// leaderError returns ErrNotLeader for the error hashicorp/raft gives an
-// operation only the leader can run, on a node that is not it, and err for
-// every other error.
-func leaderError(err error) error {
-	if errors.Is(err, hraft.ErrNotLeader) {
-		return ErrNotLeader
-	}
-	return err
-}
-
 // Store wraps an inner storage.Storage. Reads go local (eventual
 // consistency). Writes are encoded as protobuf Commands and submitted to
 // raft.Apply; the FSM applies them to the inner store on every replica
@@ -50,11 +31,16 @@ func leaderError(err error) error {
 //
 // Write flow:
 //
-//   - Every single mutation method builds a 1-op Command and submits it.
 //   - WithTx runs fn on an overlay.Tx over the inner store, which records
 //     each write as an op, then submits the ops as one multi-op Command for
 //     atomic replication. fn reads its own writes everywhere: point reads,
 //     index lookups, listings and scans.
+//   - Every single mutation method is a WithTx of that one write, as in the
+//     durable store. The overlay checks the write as the FSM will check the
+//     op when it applies it, before anything is proposed: the delete of an
+//     absent row gives ErrNotFound to its caller and no command is proposed.
+//     So a command that fails to apply is a corrupted log entry or a version
+//     skew.
 //
 // The inner store must be the plain inmemory one and MUST be the same store
 // the FSM applies against. Otherwise leader and followers diverge.
@@ -76,8 +62,8 @@ func NewStore(inner storage.Storage, r *hraft.Raft) *Store {
 	return &Store{inner: inner, raft: r}
 }
 
-// apply submits a Command to Raft, waiting up to applyTimeout for commit. On a
-// node that is not the leader it fails with ErrNotLeader.
+// apply submits a Command to Raft, waiting up to applyTimeout for commit. Its
+// errors from raft are given their meaning by clusterError. Its caller holds txMu.
 func (s *Store) apply(ops []*raftv1.Op) error {
 	data, err := overlay.EncodeCommand(ops)
 	if err != nil {
@@ -85,7 +71,7 @@ func (s *Store) apply(ops []*raftv1.Op) error {
 	}
 	f := s.raft.Apply(data, applyTimeout)
 	if err := f.Error(); err != nil {
-		return fmt.Errorf("raft: apply: %w", leaderError(err))
+		return fmt.Errorf("raft: apply: %w", clusterError(err))
 	}
 	if resp := f.Response(); resp != nil {
 		if e, ok := resp.(error); ok {
@@ -95,22 +81,10 @@ func (s *Store) apply(ops []*raftv1.Op) error {
 	return nil
 }
 
-func (s *Store) applyOp(op *raftv1.Op) error {
-	s.txMu.Lock()
-	defer s.txMu.Unlock()
-	return s.apply([]*raftv1.Op{op})
-}
-
 // === Agents ===
 
 func (s *Store) UpsertAgent(ctx context.Context, a *model.Agent) error {
-	if a == nil {
-		return storage.ErrInvalidArgument
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_AgentUpsert{AgentUpsert: wire.AgentToProto(a)}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.UpsertAgent(ctx, a) })
 }
 
 func (s *Store) GetAgent(ctx context.Context, id string) (*model.Agent, error) {
@@ -122,19 +96,13 @@ func (s *Store) ListAgents(ctx context.Context, f storage.AgentFilter, o storage
 }
 
 func (s *Store) DeleteAgent(ctx context.Context, id string) error {
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_AgentDelete{AgentDelete: id}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.DeleteAgent(ctx, id) })
 }
 
 // === Agent credentials ===
 
 func (s *Store) UpsertAgentCredential(ctx context.Context, c *model.AgentCredential) error {
-	if c == nil {
-		return storage.ErrInvalidArgument
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_AgentCredentialUpsert{AgentCredentialUpsert: wire.AgentCredentialToProto(c)}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.UpsertAgentCredential(ctx, c) })
 }
 
 func (s *Store) GetAgentCredential(ctx context.Context, agentID string) (*model.AgentCredential, error) {
@@ -142,16 +110,13 @@ func (s *Store) GetAgentCredential(ctx context.Context, agentID string) (*model.
 }
 
 func (s *Store) DeleteAgentCredential(ctx context.Context, agentID string) error {
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_AgentCredentialDelete{AgentCredentialDelete: agentID}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.DeleteAgentCredential(ctx, agentID) })
 }
 
 // === Users ===
 
 func (s *Store) UpsertUser(ctx context.Context, u *model.User) error {
-	if u == nil {
-		return storage.ErrInvalidArgument
-	}
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_UserUpsert{UserUpsert: wire.UserToProto(u)}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.UpsertUser(ctx, u) })
 }
 
 func (s *Store) GetUser(ctx context.Context, id string) (*model.User, error) {
@@ -167,16 +132,13 @@ func (s *Store) ListUsers(ctx context.Context, f storage.UserFilter, o storage.L
 }
 
 func (s *Store) DeleteUser(ctx context.Context, id string) error {
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_UserDelete{UserDelete: id}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.DeleteUser(ctx, id) })
 }
 
 // === Roles ===
 
 func (s *Store) UpsertRole(ctx context.Context, r *model.Role) error {
-	if r == nil {
-		return storage.ErrInvalidArgument
-	}
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_RoleUpsert{RoleUpsert: wire.RoleToProto(r)}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.UpsertRole(ctx, r) })
 }
 
 func (s *Store) GetRole(ctx context.Context, id string) (*model.Role, error) {
@@ -196,16 +158,13 @@ func (s *Store) ListRoles(ctx context.Context, f storage.RoleFilter, o storage.L
 }
 
 func (s *Store) DeleteRole(ctx context.Context, id string) error {
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_RoleDelete{RoleDelete: id}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.DeleteRole(ctx, id) })
 }
 
 // === Credentials ===
 
 func (s *Store) UpsertCredential(ctx context.Context, c *model.Credential) error {
-	if c == nil {
-		return storage.ErrInvalidArgument
-	}
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_CredentialUpsert{CredentialUpsert: wire.CredentialToProto(c)}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.UpsertCredential(ctx, c) })
 }
 
 func (s *Store) GetCredential(ctx context.Context, id string) (*model.Credential, error) {
@@ -221,16 +180,13 @@ func (s *Store) ListCredentialsByUser(ctx context.Context, userID string) ([]*mo
 }
 
 func (s *Store) DeleteCredential(ctx context.Context, id string) error {
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_CredentialDelete{CredentialDelete: id}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.DeleteCredential(ctx, id) })
 }
 
 // === Verifiers ===
 
 func (s *Store) UpsertVerifier(ctx context.Context, v *model.Verifier) error {
-	if v == nil {
-		return storage.ErrInvalidArgument
-	}
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_VerifierUpsert{VerifierUpsert: wire.VerifierToProto(v)}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.UpsertVerifier(ctx, v) })
 }
 
 func (s *Store) GetVerifier(ctx context.Context, id string) (*model.Verifier, error) {
@@ -242,20 +198,17 @@ func (s *Store) GetVerifierByCredential(ctx context.Context, credID string) (*mo
 }
 
 func (s *Store) DeleteVerifier(ctx context.Context, id string) error {
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_VerifierDelete{VerifierDelete: id}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.DeleteVerifier(ctx, id) })
 }
 
 func (s *Store) DeleteVerifierByCredential(ctx context.Context, credID string) error {
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_VerifierDeleteByCred{VerifierDeleteByCred: credID}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.DeleteVerifierByCredential(ctx, credID) })
 }
 
 // === Sessions ===
 
 func (s *Store) CreateSession(ctx context.Context, ss *model.Session) error {
-	if ss == nil {
-		return storage.ErrInvalidArgument
-	}
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_SessionCreate{SessionCreate: wire.SessionToProto(ss)}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.CreateSession(ctx, ss) })
 }
 
 func (s *Store) GetSession(ctx context.Context, id string) (*model.Session, error) {
@@ -267,50 +220,37 @@ func (s *Store) ListSessionsByUser(ctx context.Context, userID string) ([]*model
 }
 
 func (s *Store) RotateRefresh(ctx context.Context, sessionID string, newHash []byte, newExpiresAt time.Time) error {
-	return s.RotateRefreshAt(ctx, sessionID, newHash, newExpiresAt, time.Now())
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.RotateRefresh(ctx, sessionID, newHash, newExpiresAt) })
 }
 
+// RotateRefreshAt is RotateRefresh with the modification time its caller chose,
+// which the command carries to every replica (see storage.ClockedSessionRotation).
 func (s *Store) RotateRefreshAt(ctx context.Context, sessionID string, newHash []byte, newExpiresAt, updatedAt time.Time) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if sessionID == "" || len(newHash) == 0 || newExpiresAt.IsZero() {
-		return storage.ErrInvalidArgument
-	}
-	return s.applyOp(overlay.RotateRefreshOp(sessionID, newHash, newExpiresAt, updatedAt))
+	return s.WithTx(ctx, func(tx storage.Storage) error {
+		clocked, ok := tx.(storage.ClockedSessionRotation)
+		if !ok {
+			return fmt.Errorf("%w: explicit session rotation timestamps are unsupported", storage.ErrInternal)
+		}
+		return clocked.RotateRefreshAt(ctx, sessionID, newHash, newExpiresAt, updatedAt)
+	})
 }
 
 func (s *Store) RevokeSession(ctx context.Context, sessionID string, revokedAt time.Time) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if sessionID == "" || revokedAt.IsZero() {
-		return storage.ErrInvalidArgument
-	}
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_SessionRevoke{
-		SessionRevoke: &raftv1.SessionRevokeMsg{Id: sessionID, RevokedAtNs: revokedAt.UnixNano()},
-	}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.RevokeSession(ctx, sessionID, revokedAt) })
 }
 
 func (s *Store) DeleteSession(ctx context.Context, id string) error {
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_SessionDelete{SessionDelete: id}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.DeleteSession(ctx, id) })
 }
 
 func (s *Store) DeleteSessionsByUser(ctx context.Context, userID string) error {
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_SessionDeleteByUser{SessionDeleteByUser: userID}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.DeleteSessionsByUser(ctx, userID) })
 }
 
 // === Specs ===
 
 func (s *Store) UpsertSpec(ctx context.Context, ts *model.Spec) error {
-	if ts == nil {
-		return storage.ErrInvalidArgument
-	}
-	message, err := wire.SpecToProto(ts)
-	if err != nil {
-		return err
-	}
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_SpecUpsert{SpecUpsert: message}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.UpsertSpec(ctx, ts) })
 }
 
 func (s *Store) GetSpec(ctx context.Context, id string) (*model.Spec, error) {
@@ -322,16 +262,13 @@ func (s *Store) ListSpecs(ctx context.Context, f storage.SpecFilter, o storage.L
 }
 
 func (s *Store) DeleteSpec(ctx context.Context, id string) error {
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_SpecDelete{SpecDelete: id}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.DeleteSpec(ctx, id) })
 }
 
 // === Rollouts ===
 
 func (s *Store) UpsertRollout(ctx context.Context, r *model.Rollout) error {
-	if r == nil {
-		return storage.ErrInvalidArgument
-	}
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_RolloutUpsert{RolloutUpsert: wire.RolloutToProto(r)}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.UpsertRollout(ctx, r) })
 }
 
 func (s *Store) GetRollout(ctx context.Context, id string) (*model.Rollout, error) {
@@ -343,11 +280,11 @@ func (s *Store) ListRollouts(ctx context.Context, f storage.RolloutFilter, o sto
 }
 
 func (s *Store) DeleteRollout(ctx context.Context, id string) error {
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_RolloutDelete{RolloutDelete: id}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.DeleteRollout(ctx, id) })
 }
 
 func (s *Store) DeleteRolloutsBySpec(ctx context.Context, specID string) error {
-	return s.applyOp(&raftv1.Op{Op: &raftv1.Op_RolloutDeleteBySpec{RolloutDeleteBySpec: specID}})
+	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.DeleteRolloutsBySpec(ctx, specID) })
 }
 
 // === FilterFactory — passthrough ===

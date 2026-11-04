@@ -34,6 +34,7 @@ func TestFromError(t *testing.T) {
 		{"user disabled → 409", auth.ErrUserDisabled, http.StatusConflict},
 		{"canceled → 503", context.Canceled, http.StatusServiceUnavailable},
 		{"not the leader → 503", cluster.ErrNotLeader, http.StatusServiceUnavailable},
+		{"leadership lost → 503", cluster.ErrLeadershipLost, http.StatusServiceUnavailable},
 		{"unknown → 500", errors.New("boom"), http.StatusInternalServerError},
 	}
 	for _, tt := range tests {
@@ -50,11 +51,13 @@ func TestFromError(t *testing.T) {
 	}
 }
 
-// A write that reached a follower answers 503, with the leader's HTTP address in
-// X-Leader when the Leader middleware told where the leader is. Any other
-// unavailable answer, and one with no leader known, sends no hint.
+// A write that reached a follower, or that lost leadership while it was
+// committing, answers 503, with the leader's HTTP address in X-Leader when the
+// Leader middleware told where the leader is. Any other unavailable answer, and
+// one with no leader known, sends no hint.
 func TestFromErrorNotLeaderCarriesTheLeader(t *testing.T) {
 	notLeader := fmt.Errorf("raft: WithTx: %w", cluster.ErrNotLeader)
+	leadershipLost := fmt.Errorf("raft: apply: %w", cluster.ErrLeadershipLost)
 	tests := []struct {
 		name   string
 		err    error
@@ -65,6 +68,8 @@ func TestFromErrorNotLeaderCarriesTheLeader(t *testing.T) {
 		{"the sentinel itself", cluster.ErrNotLeader, func() string { return "[fd00::2]:8080" }, "[fd00::2]:8080"},
 		{"no leader known", notLeader, func() string { return "" }, ""},
 		{"no hint in the request", notLeader, nil, ""},
+		{"leadership lost, a leader known", leadershipLost, func() string { return "10.0.0.3:8080" }, "10.0.0.3:8080"},
+		{"leadership lost, no leader known", leadershipLost, func() string { return "" }, ""},
 		{"another unavailable error", storage.ErrUnavailable, func() string { return "10.0.0.2:8080" }, ""},
 		{"a canceled request", context.Canceled, func() string { return "10.0.0.2:8080" }, ""},
 	}
@@ -125,6 +130,23 @@ func TestPreconditionFailedNegotiates(t *testing.T) {
 				}
 			} else if w.Body.String() != tt.wantHTML {
 				t.Fatalf("HTML body %q, want %q", w.Body.String(), tt.wantHTML)
+			}
+		})
+	}
+}
+
+// SetLeader is the one place that sets X-Leader, and an empty address, which a
+// node that does not know the leader's HTTP address has, sets nothing.
+func TestSetLeader(t *testing.T) {
+	for _, tt := range []struct{ name, addr, want string }{
+		{"an address", "10.0.0.2:8080", "10.0.0.2:8080"},
+		{"no address", "", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			SetLeader(w, tt.addr)
+			if _, set := w.Header()[LeaderHeader]; set != (tt.want != "") || w.Header().Get(LeaderHeader) != tt.want {
+				t.Fatalf("%s = %q, want %q", LeaderHeader, w.Header().Get(LeaderHeader), tt.want)
 			}
 		})
 	}

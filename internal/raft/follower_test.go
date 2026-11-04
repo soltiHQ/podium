@@ -24,6 +24,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth/session"
 	"github.com/soltiHQ/control-plane/internal/auth/token"
 	"github.com/soltiHQ/control-plane/internal/auth/token/jwt"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
 	grpcstatus "github.com/soltiHQ/control-plane/internal/transport/grpc/status"
@@ -115,24 +116,41 @@ func TestFollowerWriteIsUnavailableWithLeaderHint(t *testing.T) {
 	}
 }
 
-// hashicorp/raft's own ErrNotLeader, wrapped or not, becomes ErrNotLeader, and
-// every other error, such as a leadership lost while committing, stays.
-func TestLeaderError(t *testing.T) {
+// The errors of hashicorp/raft that mean the cluster cannot take a write now are
+// given their meaning, and keep their cause for errors.Is: ErrNotLeader is
+// cluster.ErrNotLeader, ErrLeadershipLost cluster.ErrLeadershipLost, and
+// ErrEnqueueTimeout and ErrRaftShutdown storage.ErrUnavailable. All of them
+// classify as Unavailable, which hashicorp's own errors do not. Any other error
+// stays as it is.
+func TestClusterError(t *testing.T) {
 	boom := errors.New("boom")
 	for _, tc := range []struct {
-		name string
-		err  error
-		want error
+		name    string
+		err     error
+		cause   error // the hashicorp/raft error in err
+		meaning error // what errors.Is must find as well, nil when err stays as it is
 	}{
-		{"nil", nil, nil},
-		{"hashicorp's ErrNotLeader", hraft.ErrNotLeader, ErrNotLeader},
-		{"wrapped", fmt.Errorf("barrier: %w", hraft.ErrNotLeader), ErrNotLeader},
-		{"leadership lost", hraft.ErrLeadershipLost, hraft.ErrLeadershipLost},
-		{"another error", boom, boom},
+		{"not the leader", hraft.ErrNotLeader, hraft.ErrNotLeader, cluster.ErrNotLeader},
+		{"wrapped, not the leader", fmt.Errorf("barrier: %w", hraft.ErrNotLeader), hraft.ErrNotLeader, cluster.ErrNotLeader},
+		{"leadership lost", hraft.ErrLeadershipLost, hraft.ErrLeadershipLost, cluster.ErrLeadershipLost},
+		{"enqueue timeout", hraft.ErrEnqueueTimeout, hraft.ErrEnqueueTimeout, storage.ErrUnavailable},
+		{"shutdown", hraft.ErrRaftShutdown, hraft.ErrRaftShutdown, storage.ErrUnavailable},
+		{"another error", boom, nil, nil},
+		{"nil", nil, nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := leaderError(tc.err); got != tc.want {
-				t.Fatalf("leaderError(%v) = %v, want %v", tc.err, got, tc.want)
+			got := clusterError(tc.err)
+			if tc.meaning == nil {
+				if got != tc.err {
+					t.Fatalf("clusterError(%v) = %v, want it unchanged", tc.err, got)
+				}
+				return
+			}
+			if !errors.Is(got, tc.meaning) || !errors.Is(got, tc.cause) || got.Error() != tc.err.Error() {
+				t.Fatalf("clusterError(%v) = %v, want %v and %v, with the text of the cause", tc.err, got, tc.meaning, tc.cause)
+			}
+			if kind := errkind.Classify(got); kind != errkind.Unavailable {
+				t.Fatalf("errkind.Classify(%v) = %v, want Unavailable", got, kind)
 			}
 		})
 	}

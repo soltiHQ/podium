@@ -9,7 +9,7 @@ import (
 
 // Barrier's timeout only bounds enqueueing, not Future.Error. Bound the entire
 // readiness operation and let Raft finish its future after caller cancellation.
-// A node that is not the leader fails with ErrNotLeader.
+// A node that is not the leader fails with ErrNotLeader (see clusterError).
 func awaitApplied(ctx context.Context, r *hraft.Raft) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -17,7 +17,7 @@ func awaitApplied(ctx context.Context, r *hraft.Raft) error {
 	readyCtx, cancel := context.WithTimeout(ctx, applyTimeout)
 	defer cancel()
 	if err := awaitOperation(readyCtx, func() error { return r.Barrier(applyTimeout).Error() }); err != nil {
-		return fmt.Errorf("raft: wait for applied state: %w", leaderError(err))
+		return fmt.Errorf("raft: wait for applied state: %w", clusterError(err))
 	}
 	return nil
 }

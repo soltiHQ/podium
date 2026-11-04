@@ -38,7 +38,7 @@ Main listener (`app.buildMainHandler`), outermost first:
   Recovery       ── turns a panic into 503
    CORS          ── answers preflights, adds the CORS headers
     Leader       ── raft only: forwards writes to the leader, over TLS with tls.client when tls.server is set;
-                    stores where the leader serves this listener in ctx (httpctx.Leader), for the 503 of a write that reaches a follower
+                    stores where the leader serves this listener in ctx (httpctx.Leader), for X-Leader
      Negotiate   ── picks the Responder (JSON vs HTML), stores it in ctx
       CrossOrigin ── refuses cross-origin browser mutations: 403 through that Responder.
                      It runs before any route, so a refusal gets no request id and no
@@ -54,7 +54,7 @@ Main listener (`app.buildMainHandler`), outermost first:
         │              └─ Responder from ctx → JSON (json.Marshal + sec headers)
         │                                    or HTML (templ.Render + CSP)
         └─ error   → response.FromError(w, r, mode, err)   ← classifies via errkind
-                       ├─ cluster.ErrNotLeader: 503 + X-Leader (httpctx.Leader), when this node knows the leader
+                       ├─ cluster.ErrNotLeader / ErrLeadershipLost: 503 + X-Leader, see "Leader hint" below
                        └─ sets the error slot → Logger appends it to the log line
 ```
 
@@ -116,6 +116,18 @@ Errors coming **from an agent** through the proxy are translated at the boundary
 `internal/proxy` is an anti-corruption layer that reads the agent's gRPC code / HTTP status and tags the error with a `Kind` (`AgentError.ErrorKind()`). 
 Downstream code never sniffs gRPC/HTTP details - it just calls `errkind.Classify`, which trusts the tag. 
 `NotFound` from an agent surfaces to the user as 404 / NotFound.
+
+## Leader hint: `X-Leader`
+
+`X-Leader` tells an HTTP client where the cluster leader is, and it has one meaning: the **HTTP address of the leader, `host:port` with no scheme**. It is the host of the leader's raft advertise address, as written, with the port of the listener the request came in on, which every replica is assumed to serve (the same-port assumption). It is a hint to retry at, not an order.
+
+It goes out on:
+- the 503 of a write that reached a follower (`cluster.ErrNotLeader`) or lost leadership while it was committing (`cluster.ErrLeadershipLost`), answered by `response.FromError`; the refresh of a session on a follower with `auth.rotate_refresh` is one;
+- the 502 the `Leader` middleware answers when it cannot reach the leader it forwards a write to.
+
+It is never sent when that address cannot be derived: this node is the leader, no leader is known, or the port of the listener is not known (`LeaderOptions.ForwardPort` is 0, which answers a write on a follower with a 503 without it). The leader's raft address is not sent in its place.
+
+Every answer sets it through `response.SetLeader`, from the one derivation of the address (`leaderHTTPAddr` in the `Leader` middleware, which is also where a write is forwarded to). The middleware hands it to the handlers as a function in the request context (`httpctx.Leader`), asked when the answer is written, since the leader can change while a request runs. The gRPC interceptors' `x-leader` metadata is another hint: it carries the leader's raft address.
 
 ## TLS
 

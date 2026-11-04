@@ -14,11 +14,22 @@ import (
 )
 
 // LeaderHeader is the response header that carries the HTTP address of the cluster leader: host:port, no scheme.
+// See "Leader hint" in internal/transport/README.md.
 const LeaderHeader = "X-Leader"
 
+// SetLeader adds the leader's HTTP address to an answer as LeaderHeader. Every answer that carries it
+// sets it here. An empty address adds nothing: a node that leads, that knows no leader, or that has no
+// HTTP port to give has none.
+func SetLeader(w http.ResponseWriter, addr string) {
+	if addr != "" {
+		w.Header().Set(LeaderHeader, addr)
+	}
+}
+
 // FromError maps a domain error to the matching HTTP response using the shared errkind classifier.
-// A write that reached a follower (cluster.ErrNotLeader) answers 503 like any unavailable store,
-// with LeaderHeader when the Leader middleware knows who leads.
+// A write that reached a follower (cluster.ErrNotLeader) or lost leadership while it was committing
+// (cluster.ErrLeadershipLost) answers 503 like any unavailable store, with LeaderHeader when the Leader
+// middleware knows who leads.
 func FromError(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, err error) {
 	switch errkind.Classify(err) {
 	case errkind.InvalidArgument:
@@ -36,10 +47,8 @@ func FromError(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, 
 	case errkind.FailedPrecondition:
 		Conflict(w, r, mode, "precondition failed")
 	case errkind.Unavailable, errkind.Canceled, errkind.DeadlineExceeded:
-		if errors.Is(err, cluster.ErrNotLeader) {
-			if leader := httpctx.Leader(r.Context()); leader != "" {
-				w.Header().Set(LeaderHeader, leader)
-			}
+		if errors.Is(err, cluster.ErrNotLeader) || errors.Is(err, cluster.ErrLeadershipLost) {
+			SetLeader(w, httpctx.Leader(r.Context()))
 		}
 		Unavailable(w, r, mode)
 	default:

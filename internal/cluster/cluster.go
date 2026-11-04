@@ -26,6 +26,13 @@ import (
 // cannot, as raft depends on errkind through domain/wire and the proxy.
 var ErrNotLeader = errors.New("this replica is not the leader")
 
+// ErrLeadershipLost indicates a write that was in flight when the replica lost
+// leadership. Unlike [ErrNotLeader] it may still commit: the new leader can have
+// the write in its log, so a client that retries it must be able to repeat it.
+// The transports answer it as unavailable, and HTTP adds the leader's address when
+// one is known.
+var ErrLeadershipLost = errors.New("this replica lost leadership while the write was committing")
+
 // Peer is a cluster member. ID is stable across reconnects; Address is a
 // host:port the peer listens on for internal RPC.
 type Peer struct {

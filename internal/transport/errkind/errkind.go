@@ -74,7 +74,8 @@ func Classify(err error) Kind {
 	case errors.Is(err, storage.ErrInvalidArgument):
 		return InvalidArgument
 	case errors.Is(err, storage.ErrUnavailable),
-		errors.Is(err, cluster.ErrNotLeader):
+		errors.Is(err, cluster.ErrNotLeader),
+		errors.Is(err, cluster.ErrLeadershipLost):
 		return Unavailable
 
 	default:

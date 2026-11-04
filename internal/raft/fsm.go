@@ -95,11 +95,11 @@ const undecodable = "undecodable"
 // a command that does not decode (cmd is nil) has the kind "undecodable" and no
 // count.
 //
-// Every replica applies a log entry the same way, so each one logs the same
-// entry, unless a version skew lets some of them apply what others cannot. The
-// line is then the only sign of the divergence. A single operation that a
-// concurrent write made impossible, such as the delete of an entity another
-// write deleted first, fails on every replica as well.
+// Store checks every write against the state before it proposes it, so a command
+// that fails here is a corrupted log entry or a version skew. Every replica
+// applies a log entry the same way, so each one logs the same entry, unless a
+// version skew lets some of them apply what others cannot. The line is then the
+// only sign of the divergence.
 func (f *FSM) logFailure(index uint64, cmd *raftv1.Command) {
 	if cmd == nil {
 		f.logger.Error().Uint64("index", index).Str("kind", undecodable).
@@ -107,7 +107,7 @@ func (f *FSM) logFailure(index uint64, cmd *raftv1.Command) {
 		return
 	}
 	f.logger.Error().Uint64("index", index).Str("kind", commandKind(cmd)).Int("ops", len(cmd.GetOps())).
-		Msg("raft: committed command failed to apply and was dropped on this replica, which stays as it was")
+		Msg("raft: committed command failed to apply and was dropped on this replica, which stays as it was (corrupted entry or version skew)")
 }
 
 // commandKind names the kinds of the operations of cmd, in order, each once,

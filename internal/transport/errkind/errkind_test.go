@@ -47,6 +47,10 @@ func TestClassify(t *testing.T) {
 		{"storage unavailable", storage.ErrUnavailable, Unavailable},
 		{"not the leader → unavailable", cluster.ErrNotLeader, Unavailable},
 		{"wrapped not the leader", fmt.Errorf("raft: WithTx: %w", cluster.ErrNotLeader), Unavailable},
+		{"leadership lost → unavailable", cluster.ErrLeadershipLost, Unavailable},
+		{"wrapped leadership lost", fmt.Errorf("raft: apply: %w", cluster.ErrLeadershipLost), Unavailable},
+		{"leadership lost with its cause", errors.Join(cluster.ErrLeadershipLost, errors.New("leadership lost while committing log")), Unavailable},
+		{"unavailable with its cause", errors.Join(storage.ErrUnavailable, errors.New("timed out enqueuing operation")), Unavailable},
 		{"wrapped sentinel is unwrapped", fmt.Errorf("load: %w", storage.ErrNotFound), NotFound},
 	}
 	for _, tt := range tests {
