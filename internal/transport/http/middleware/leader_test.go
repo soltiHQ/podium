@@ -181,19 +181,21 @@ func (n *hopNode) start(leadership stubLeadership, port int) {
 // again: it answers 503 with X-Leader, as a follower that cannot forward. So two
 // followers that each take the other for the leader, as a stale view or
 // replicas on mixed ports can, pass a write on once and then answer 503,
-// instead of sending it round. A client that sends the mark itself only keeps
-// its own write from being forwarded, and the leader serves a marked write.
+// instead of sending it round. A write carries the mark when it has the header,
+// whatever its value. A client that sends the mark itself only keeps its own
+// write from being forwarded, and the leader serves a marked write.
 func TestLeaderForwardsAWriteOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		leading bool   // a, the node the client sends the write to, leads
-		mark    bool   // the client marks the write
-		status  int    // the answer to the client
-		reached [2]int // the requests that reached a and b
+		leading bool     // a, the node the client sends the write to, leads
+		mark    []string // the values of the mark the client sends, nil for none
+		status  int      // the answer to the client
+		reached [2]int   // the requests that reached a and b
 	}{
-		{"two followers that take each other for the leader", false, false, http.StatusServiceUnavailable, [2]int{1, 1}},
-		{"a write the client marked", false, true, http.StatusServiceUnavailable, [2]int{1, 0}},
-		{"a marked write on the leader", true, true, http.StatusNoContent, [2]int{1, 0}},
+		{"two followers that take each other for the leader", false, nil, http.StatusServiceUnavailable, [2]int{1, 1}},
+		{"a write the client marked", false, []string{"1"}, http.StatusServiceUnavailable, [2]int{1, 0}},
+		{"a write the client marked with an empty value", false, []string{""}, http.StatusServiceUnavailable, [2]int{1, 0}},
+		{"a marked write on the leader", true, []string{"1"}, http.StatusNoContent, [2]int{1, 0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, b := newHopNode(t), newHopNode(t)
@@ -206,8 +208,8 @@ func TestLeaderForwardsAWriteOnce(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tc.mark {
-				r.Header.Set(ForwardedHeader, "1")
+			for _, value := range tc.mark {
+				r.Header.Add(ForwardedHeader, value)
 			}
 			resp, err := a.srv.Client().Do(r)
 			if err != nil {
@@ -218,7 +220,7 @@ func TestLeaderForwardsAWriteOnce(t *testing.T) {
 				t.Fatalf("answered %d after reaching a and b %v times, want %d after %v", resp.StatusCode, reached, tc.status, tc.reached)
 			}
 			// The node that refused the write names the leader as it sees it.
-			want := map[bool]string{true: net.JoinHostPort("127.0.0.1", strconv.Itoa(b.port())), false: net.JoinHostPort("127.0.0.1", strconv.Itoa(a.port()))}[tc.mark]
+			want := map[bool]string{true: net.JoinHostPort("127.0.0.1", strconv.Itoa(b.port())), false: net.JoinHostPort("127.0.0.1", strconv.Itoa(a.port()))}[tc.mark != nil]
 			if tc.status == http.StatusServiceUnavailable && resp.Header.Get(response.LeaderHeader) != want {
 				t.Fatalf("%s = %q, want %q", response.LeaderHeader, resp.Header.Get(response.LeaderHeader), want)
 			}

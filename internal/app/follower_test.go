@@ -349,9 +349,12 @@ func httpSyncFrom(h http.Handler, ip, forwardedFor, id, token string) *httptest.
 // A follower forwards a sync with the agent's address, in x-forwarded-for over
 // gRPC and in X-Forwarded-For over HTTP, and the leader believes it from a host
 // of its raft configuration: its limiter counts the agent's token failures at
-// the agent's own address, not at the follower's. After five failures from one
-// address the agent is refused there, and still gets in through the same
-// follower from another address.
+// the agent's own address, not at the follower's. Every attempt also names an
+// address of its own in that header, which counts for nothing: the follower
+// appends the agent's address, where the leader's walk stops, as the agent is no
+// trusted host. After five failures from one address the agent is refused
+// there, its sixth attempt naming yet another address included, and still gets
+// in through the same follower from another address.
 func TestForwardedSyncKeepsClientIPForLimiter(t *testing.T) {
 	leader, followers := raftCluster(t, "n1", "n2", "n3")
 	follower := followers[0]
@@ -360,10 +363,11 @@ func TestForwardedSyncKeepsClientIPForLimiter(t *testing.T) {
 	const blocked, other = "203.0.113.9", "198.51.100.7"
 	for _, tc := range []struct {
 		name string
-		// through returns a sync through the follower from an address of the agent.
-		through func(t *testing.T) func(from, id, token string) syncOutcome
+		// through returns a sync through the follower from an address of the
+		// agent, which names forged in its forwarding header.
+		through func(t *testing.T) func(from, forged, id, token string) syncOutcome
 	}{
-		{"grpc", func(t *testing.T) func(string, string, string) syncOutcome {
+		{"grpc", func(t *testing.T) func(string, string, string, string) syncOutcome {
 			cfg := config.Default()
 			leaderLis := listenLoopback(t)
 			cfg.GRPC.Addr = leaderLis.Addr().String()
@@ -373,12 +377,13 @@ func TestForwardedSyncKeepsClientIPForLimiter(t *testing.T) {
 			for _, from := range []string{blocked, other} {
 				clients[from] = discoveryClient(t, serveGRPC(srv, fromIP{Listener: listenLoopback(t), ip: from}), nil, nil)
 			}
-			return func(from, id, token string) syncOutcome {
-				_, err := clients[from].Sync(withToken(context.Background(), token), syncRequest(id))
+			return func(from, forged, id, token string) syncOutcome {
+				ctx := metadata.AppendToOutgoingContext(withToken(context.Background(), token), "x-forwarded-for", forged)
+				_, err := clients[from].Sync(ctx, syncRequest(id))
 				return grpcOutcome(err)
 			}
 		}},
-		{"http", func(t *testing.T) func(string, string, string) syncOutcome {
+		{"http", func(t *testing.T) func(string, string, string, string) syncOutcome {
 			cfg := config.Default()
 			leaderSrv := httptest.NewServer(newNodeDiscovery(t, cfg, leader).http)
 			t.Cleanup(leaderSrv.Close)
@@ -388,26 +393,31 @@ func TestForwardedSyncKeepsClientIPForLimiter(t *testing.T) {
 			}
 			cfg.HTTPDiscovery.Addr = ":" + port
 			h := newNodeDiscovery(t, cfg, follower).http
-			return func(from, id, token string) syncOutcome {
-				return httpOutcome(httpSyncFrom(h, from, "", id, token))
+			return func(from, forged, id, token string) syncOutcome {
+				return httpOutcome(httpSyncFrom(h, from, forged, id, token))
 			}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sync := tc.through(t)
+			through := tc.through(t)
 			id := "agent-" + tc.name
-			if got := sync(blocked, id, "token-"+id); got != synced {
+			attempt := 0
+			sync := func(from, token string) syncOutcome {
+				attempt++
+				return through(from, fmt.Sprintf("192.0.2.%d", attempt), id, token)
+			}
+			if got := sync(blocked, "token-"+id); got != synced {
 				t.Fatalf("enroll through the follower: %s, want %s", got, synced)
 			}
 			for i := range 5 {
-				if got := sync(blocked, id, "stale-token"); got != unauthenticated {
+				if got := sync(blocked, "stale-token"); got != unauthenticated {
 					t.Fatalf("bad token %d through the follower: %s, want %s", i+1, got, unauthenticated)
 				}
 			}
-			if got := sync(blocked, id, "token-"+id); got != limited {
-				t.Fatalf("the agent after five failures from %s: %s, want %s", blocked, got, limited)
+			if got := sync(blocked, "token-"+id); got != limited {
+				t.Fatalf("the agent after five failures from %s, each naming another address: %s, want %s: a forged header counted", blocked, got, limited)
 			}
-			if got := sync(other, id, "token-"+id); got != synced {
+			if got := sync(other, "token-"+id); got != synced {
 				t.Fatalf("the agent from %s through the same follower: %s, want %s: the leader counted the failures at the follower's address", other, got, synced)
 			}
 		})

@@ -27,10 +27,11 @@ const (
 	// address, host:port.
 	LeaderKey = "x-leader"
 
-	// ForwardedKey marks a call that a follower forwarded to the leader. A follower
-	// that gets a marked call does not forward it again, so a call crosses one node
-	// at most: neither a stale view of the leader nor replicas that serve gRPC on
-	// different ports can send it round in circles.
+	// ForwardedKey marks a call that a follower forwarded to the leader: a call that
+	// carries the key is marked, whatever its value, an empty one included. A
+	// follower that gets a marked call does not forward it again, so a call crosses
+	// one node at most: neither a stale view of the leader nor replicas that serve
+	// gRPC on different ports can send it round in circles.
 	ForwardedKey = "x-podium-forwarded"
 )
 
@@ -79,7 +80,7 @@ func UnaryLeader(leadership cluster.Leadership, opts LeaderOptions) grpc.UnarySe
 		if leader != "" && opts.Forwarder.forwards(info.FullMethod) && !forwarded(ctx) {
 			return opts.Forwarder.forward(ctx, leader, info.FullMethod, req)
 		}
-		setLeaderHint(ctx, leader)
+		hintNotLeader(ctx, leader)
 		return nil, status.Error(codes.Unavailable, "not the leader")
 	}
 }
@@ -89,9 +90,9 @@ func allWrites(string) bool { return true }
 // hintKey is the context key of a hintSlot.
 type hintKey struct{}
 
-// hintSlot records that a call answered with the x-leader hint. UnaryLogger installs it, outside the interceptors
-// that route writes, which mark it, and reads it back once the call returns.
-type hintSlot struct{ set atomic.Bool }
+// hintSlot records that a call answered "not the leader" with the x-leader hint, a routing condition. UnaryLogger
+// installs it, outside the interceptors that route writes, which mark it, and reads it back once the call returns.
+type hintSlot struct{ notLeader atomic.Bool }
 
 // withHintSlot installs an empty hintSlot in ctx.
 func withHintSlot(ctx context.Context) (context.Context, *hintSlot) {
@@ -99,14 +100,21 @@ func withHintSlot(ctx context.Context) (context.Context, *hintSlot) {
 	return context.WithValue(ctx, hintKey{}, slot), slot
 }
 
-// setLeaderHint sets the x-leader hint to leader, the leader's gRPC address, unless it is empty, and marks the
-// hintSlot of ctx once the hint is set.
-func setLeaderHint(ctx context.Context, leader string) {
-	if leader == "" || grpc.SetHeader(ctx, metadata.Pairs(LeaderKey, leader)) != nil {
+// setLeaderHint sets the x-leader hint to leader, the leader's gRPC address, unless it is empty, and reports
+// whether it did.
+func setLeaderHint(ctx context.Context, leader string) bool {
+	return leader != "" && grpc.SetHeader(ctx, metadata.Pairs(LeaderKey, leader)) == nil
+}
+
+// hintNotLeader sets the x-leader hint of a write that a follower does not serve, and marks the hintSlot of ctx
+// once the hint is set: the answer is a routing condition, which UnaryLogger logs at WARN. An unreachable leader
+// sets the hint without the mark, and stays an ERROR.
+func hintNotLeader(ctx context.Context, leader string) {
+	if !setLeaderHint(ctx, leader) {
 		return
 	}
 	if slot, ok := ctx.Value(hintKey{}).(*hintSlot); ok {
-		slot.set.Store(true)
+		slot.notLeader.Store(true)
 	}
 }
 
@@ -170,7 +178,7 @@ func (f *Forwarder) forward(ctx context.Context, leader, method string, req any)
 			if hint := header.Get(LeaderKey); status.Code(callErr) == codes.Unavailable && len(hint) > 0 {
 				// A node that does not lead refused the forwarded call: its view of the leader goes on to
 				// the caller, and the answer stays a routing answer.
-				setLeaderHint(ctx, hint[0])
+				hintNotLeader(ctx, hint[0])
 			}
 			return resp, callErr
 		}
@@ -180,6 +188,8 @@ func (f *Forwarder) forward(ctx context.Context, leader, method string, req any)
 		return nil, status.FromContextError(ctxErr).Err()
 	}
 	transportctx.SetError(ctx, "forward to the leader at "+leader+": "+status.Convert(err).Message())
+	// The hint without the not-leader mark: a leader this node cannot reach is a failure, logged at ERROR, as
+	// the HTTP forward logs its 502.
 	setLeaderHint(ctx, leader)
 	return nil, status.Error(codes.Unavailable, "leader unreachable")
 }
@@ -200,7 +210,10 @@ func (f *Forwarder) conn(addr string) (*grpc.ClientConn, error) {
 		return nil, err
 	}
 	if f.client != nil {
-		// The former leader's: a call still on it ends, as that node leads no more.
+		// The former leader's. Closing it ends the calls still in flight on it: each answers its caller
+		// Unavailable "leader unreachable", or Canceled when the former leader had begun to answer. That is
+		// transient, as this node now knows another leader, and the caller retries it as any Unavailable; a Sync
+		// is safe to repeat.
 		_ = f.client.Close()
 	}
 	f.addr, f.client = addr, conn

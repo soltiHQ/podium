@@ -223,8 +223,10 @@ leader. An HTTP forward carries `X-Podium-Forwarded`, which the `Leader`
 middleware of a follower answers the same way, 503 with `X-Leader`
 (`TestLeaderForwardsAWriteOnce`). Either mark that a client sets itself only
 keeps its own request from being forwarded, and the leader serves a marked
-request as any other. `UnaryLogger` logs an `Unavailable` that carries the hint
-at WARN, as the access log does a 503 with `X-Leader`
+request as any other. Either mark counts when it is present, whatever its value.
+`UnaryLogger` logs a `not the leader` answer with the hint at WARN, as the
+access log does a 503 with `X-Leader`, and `leader unreachable`, which keeps its
+hint, at ERROR, as the access log does the 502 of an unreachable leader
 (`TestUnaryLoggerLogsRoutingAnswersAtWarn`).
 
 The HTTP forward also drops the CORS headers of the leader's answer, which the
@@ -261,7 +263,11 @@ is decided per request from the TCP peer, as for `trusted_proxies`:
 - The trust is a node's, not a connection's: every process on a node's host can
   name any client in those headers, as behind any trusted proxy, and the address
   the node connects to the others from must be the one its raft address names,
-  or resolves to, for its forwards to count.
+  or resolves to, for its forwards to count. So a node's host must not relay
+  outside clients at L4, by a port forward, SNAT or kube-proxy for a
+  hostNetwork pod, just as a host in `trusted_proxies` must not pass a client's
+  header through: such a client reaches the leader from the host's address, and
+  its own forwarding headers pick its client IP.
 
 In standalone the resolver trusts `trusted_proxies` only, and gRPC discovery
 reads no forwarding metadata: its client is the peer, as before

@@ -395,11 +395,11 @@ func addrPort(addr string) int {
 
 // buildGRPCServer wires the gRPC discovery listener, which serves on port. Like
 // HTTP discovery, it has no per-IP limit: the Sync handler counts authentication
-// failures per (client IP, agent ID) in limiter, with the client IP resolver
-// gives (nil: the peer). On a follower, forwarder sends a Sync to the leader's
-// gRPC listener, at the host of the leader's raft address and port, which every
-// replica is assumed to serve it on; a write it does not forward answers
-// Unavailable with that address in the x-leader hint.
+// failures per (client IP, agent ID) in limiter, with the client IP that
+// resolver gives (nil: the peer). On a follower, forwarder sends a Sync to the
+// leader's gRPC listener, at the host of the leader's raft address and port,
+// which every replica is assumed to serve it on; a write it does not forward
+// answers Unavailable with that address in the x-leader hint.
 func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, limiter *ratelimit.Limiter, resolver *clientip.Resolver, serverTLS *tls.Config, requireAuth bool, port int, forwarder *interceptor.Forwarder) *grpc.Server {
 	// Write methods (must run on leader). Sync is the only agent-facing
 	// mutation; everything else is pure read.

@@ -80,7 +80,7 @@ keeps the rest: an answer that names the origin twice is one a browser refuses (
         │   (UnaryAuth / UnaryRequirePermission exist but are not chained yet)
         │   UnaryLeader, raft only: a follower forwards a Sync to the leader (Forwarder) and
         │   answers with the leader's answer; any other write is Unavailable + x-leader
-        │   UnaryLogger logs a failed call at ERROR, but an Unavailable with x-leader at WARN
+        │   UnaryLogger logs a failed call at ERROR, but a "not the leader" answer with x-leader at WARN
         ▼
   handler/discovery.go (GRPCDiscovery)
         │
@@ -100,8 +100,9 @@ keeps the rest: an answer that names the origin twice is one a browser refuses (
   whether the auth and device cookies are `Secure`; `app` builds that decision once and hands it to every cookie writer.
 
 In raft mode the trusted proxies are `trusted_proxies` and the hosts of the current raft configuration (`clientip.Hosts`),
-since a follower forwards writes to the leader: the leader believes the forwarding headers of another node, and of nobody
-else. See "Forwarding and trusted hosts" in `internal/raft/README.md` for the rule, names included.
+since a follower forwards writes to the leader: the leader believes the forwarding headers of another node and of the
+proxies `trusted_proxies` lists, and of nobody else. See "Forwarding and trusted hosts" in `internal/raft/README.md` for the
+rule, names included.
 
 RFC 7239 `Forwarded` is not supported. The login limiter, `middleware.StreamLimit` and HTTP discovery take the client IP from the resolver.
 gRPC discovery does too in raft mode, from the peer and its `x-forwarded-for` metadata, which a follower sets when it
@@ -159,7 +160,7 @@ Every answer sets it through `response.SetLeader`, from the one derivation of th
 
 The gRPC `x-leader` header metadata has the same meaning for the gRPC listener: the **gRPC address of the leader, `host:port`**, the host of the leader's raft advertise address, as written, with this node's gRPC port (`grpc.addr`), from the same derivation, so the same-port assumption holds for gRPC too. It goes out with the `Unavailable` of a write the follower does not forward: a write stream, a unary write the `Forwarder` has no call for, a call another node forwarded already (`x-podium-forwarded`, so a call crosses one node at most; as with `X-Podium-Forwarded`, a client that sends it itself only keeps its own call from being forwarded), and a forward the leader never answered (`leader unreachable`). A `Sync` that a follower forwards gets the leader's own answer instead, and its hint when that answer is the `Unavailable` of a node that does not lead, which refused the call as a forwarded one. As for HTTP, it is not sent when no leader is known or the gRPC port is unknown, and the raft address is never sent in its place.
 
-An `Unavailable` that carries the hint is a routing condition, so `UnaryLogger` logs it at WARN, where any other failure, an `Unavailable` without the hint included, is an ERROR (`TestUnaryLoggerLogsRoutingAnswersAtWarn`). That takes in `leader unreachable`, which HTTP answers 502 and logs at ERROR. `StreamLogger` logs every stream at INFO, a failed one included, as before.
+A `not the leader` answer with the hint is a routing condition, so `UnaryLogger` logs it at WARN, where any other failure is an ERROR: an `Unavailable` without the hint, and `leader unreachable`, which keeps its hint but is a failure, as HTTP logs the 502 of an unreachable leader at ERROR (`TestUnaryLoggerLogsRoutingAnswersAtWarn`). `StreamLogger` logs every stream at INFO, a failed one included, as before.
 
 ## TLS
 

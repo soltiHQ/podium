@@ -13,14 +13,15 @@ import (
 )
 
 // UnaryLogger returns a unary server interceptor that logs every completed call: at INFO, and at ERROR when it
-// fails. The exception is an Unavailable that carries the x-leader hint, which is logged at WARN: a write that
-// reached a follower is a routing condition and not a failure of this node, as the HTTP access log has it for a 503
-// with X-Leader, and only the interceptors that route writes set the hint (setLeaderHint), inside this one. Any
-// other failure stays an ERROR, an Unavailable without the hint included.
+// fails. The exception is the Unavailable "not the leader" answer with the x-leader hint, which is logged at WARN: a
+// write that reached a follower is a routing condition and not a failure of this node, as the HTTP access log has
+// it for a 503 with X-Leader, and only the interceptors that route writes, inside this one, mark it
+// (hintNotLeader). Any other failure stays an ERROR: an Unavailable without the hint, and "leader unreachable",
+// which keeps its hint, as the HTTP access log keeps the 502 of an unreachable leader an ERROR.
 func UnaryLogger(logger zerolog.Logger) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		start := time.Now()
-		ctx, hint := withHintSlot(ctx)
+		ctx, slot := withHintSlot(ctx)
 
 		var (
 			resp, err = handler(ctx, req)
@@ -30,7 +31,7 @@ func UnaryLogger(logger zerolog.Logger) grpc.UnaryServerInterceptor {
 			evt  = logger.Info()
 		)
 		switch {
-		case code == codes.Unavailable && hint.set.Load():
+		case code == codes.Unavailable && slot.notLeader.Load():
 			evt = logger.Warn().Err(err)
 		case err != nil:
 			evt = logger.Error().Err(err)

@@ -197,8 +197,12 @@ it resolves to, looked up every 10 s, so its trust is only as good as the DNS
 answers the node gets; where DNS cannot be trusted that far, write the
 advertise addresses as IPs. Each node must connect to the others from the
 address its raft address names, or resolves to. Any process on a node's host
-can then pick the client IP of its requests, as behind any listed proxy. See
-"Forwarding and trusted hosts" in `internal/raft/README.md`.
+can then pick the client IP of its requests, as behind any listed proxy, so a
+raft host must not relay outside clients at L4 (a port forward, SNAT, or
+kube-proxy for a hostNetwork pod), just as a listed proxy must not pass a
+client's header through: such a client would reach the leader from the host's
+address and pick its own IP. See "Forwarding and trusted hosts" in
+`internal/raft/README.md`.
 
 gRPC discovery reads the client IP from the `x-forwarded-for` metadata of a
 trusted host only in raft mode, where a follower sets it when it forwards a

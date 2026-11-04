@@ -350,6 +350,7 @@ func TestUnaryLeaderAnswersWithTheLeadersGRPCAddress(t *testing.T) {
 	}{
 		{"an unreachable leader", &leaderStub{leader: "127.0.0.1:7000"}, unreachable, true, true, nil, codes.Unavailable, "leader unreachable", "127.0.0.1:" + strconv.Itoa(unreachable)},
 		{"a call another node forwarded", &leaderStub{leader: "127.0.0.1:7000"}, leader.port, true, true, metadata.Pairs(ForwardedKey, "1"), codes.Unavailable, "not the leader", "127.0.0.1:" + strconv.Itoa(leader.port)},
+		{"a call marked with an empty value", &leaderStub{leader: "127.0.0.1:7000"}, leader.port, true, true, metadata.Pairs(ForwardedKey, ""), codes.Unavailable, "not the leader", "127.0.0.1:" + strconv.Itoa(leader.port)},
 		{"no leader known", &leaderStub{}, leader.port, true, true, nil, codes.Unavailable, "not the leader", ""},
 		{"no port known", &leaderStub{leader: "127.0.0.1:7000"}, 0, true, true, nil, codes.Unavailable, "not the leader", ""},
 		{"a write it does not forward", &leaderStub{leader: "10.0.0.1:7000"}, 50051, false, true, nil, codes.Unavailable, "not the leader", "10.0.0.1:50051"},

@@ -45,13 +45,13 @@ func (s *logSink) levels(t *testing.T, message string) []string {
 	return levels
 }
 
-// UnaryLogger logs a call at INFO, and one that fails at ERROR, except an
-// Unavailable that carries the x-leader hint, which it logs at WARN: a write that
-// reached a follower is a routing condition, not a failure of the node, as the
-// HTTP access log has it for a 503 with X-Leader. A follower passes on the
+// UnaryLogger logs a call at INFO, and one that fails at ERROR, except the
+// "not the leader" answer with the x-leader hint, which it logs at WARN: a write
+// that reached a follower is a routing condition, not a failure of the node, as
+// the HTTP access log has it for a 503 with X-Leader. A follower passes on the
 // routing answer of a node it forwarded to, that node's hint included, and logs
-// it at WARN too. Every other failure stays an ERROR, an Unavailable without the
-// hint included.
+// it at WARN too. Every other failure stays an ERROR: an Unavailable without the
+// hint, and "leader unreachable", which keeps its hint, as HTTP's 502 does.
 func TestUnaryLoggerLogsRoutingAnswersAtWarn(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -78,7 +78,7 @@ func TestUnaryLoggerLogsRoutingAnswersAtWarn(t *testing.T) {
 		}, codes.Unavailable, "10.0.0.3:50051", "warn"},
 		{"a forward the leader never answers", func(t *testing.T, logged grpc.UnaryServerInterceptor) *node {
 			return serve(t, nil, logged, UnaryLeader(&leaderStub{leader: "127.0.0.1:7000"}, LeaderOptions{Port: unreachable, Forwarder: syncForwarder(t)}))
-		}, codes.Unavailable, "127.0.0.1:" + strconv.Itoa(unreachable), "warn"},
+		}, codes.Unavailable, "127.0.0.1:" + strconv.Itoa(unreachable), "error"},
 		{"a write on a follower that knows no leader", func(t *testing.T, logged grpc.UnaryServerInterceptor) *node {
 			return serve(t, nil, logged, UnaryLeader(&leaderStub{}, LeaderOptions{Port: 50051}))
 		}, codes.Unavailable, "", "error"},

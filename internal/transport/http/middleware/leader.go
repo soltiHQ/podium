@@ -19,9 +19,10 @@ import (
 const defaultForwardTimeout = 30 * time.Second
 
 // ForwardedHeader marks a write that a follower forwarded to the leader, as the gRPC x-podium-forwarded metadata
-// marks a call. A follower never forwards a marked write again, so a write crosses one node at most: neither a stale
-// view of the leader nor replicas that serve this listener on different ports can send it round. A client that sets
-// the mark itself only keeps its own write from being forwarded.
+// marks a call: a write that carries the header is marked, whatever its value, an empty one included. A follower
+// never forwards a marked write again, so a write crosses one node at most: neither a stale view of the leader nor
+// replicas that serve this listener on different ports can send it round. A client that sets the mark itself only
+// keeps its own write from being forwarded.
 const ForwardedHeader = "X-Podium-Forwarded"
 
 // defaultWriteMethods: mutations require leader authority.
@@ -120,7 +121,7 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 				http.Error(w, "cluster: not leader", http.StatusServiceUnavailable)
 				return
 			}
-			if r.Header.Get(ForwardedHeader) != "" {
+			if len(r.Header.Values(ForwardedHeader)) > 0 {
 				// Forwarded once already, to a node that leads no more, or never did on this port.
 				response.SetLeader(w, leaderHTTPAddr(leaderAddr, opts.ForwardPort))
 				http.Error(w, "cluster: not leader", http.StatusServiceUnavailable)
