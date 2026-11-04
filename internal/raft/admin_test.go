@@ -228,9 +228,11 @@ func TestProbeDialsAsRaftDoes(t *testing.T) {
 }
 
 // A node that joins with no raft state bootstraps nothing: it asks no
-// discovery and holds no configuration until the leader adds it, and then
+// discovery, logs one INFO line that it waits to be added, with its ID and
+// address, and holds no configuration until the leader adds it, and then
 // catches up the writes made before. Once it holds raft state, join changes
-// nothing: it restarts into its cluster from its own log.
+// nothing: it restarts into its cluster from its own log, and logs no such
+// line.
 func TestJoiningNodeWaitsToBeAdded(t *testing.T) {
 	c := loopbackNodes(t, "n1", "n2")
 	first, joiner := c.nodes[0], c.nodes[1]
@@ -246,7 +248,22 @@ func TestJoiningNodeWaitsToBeAdded(t *testing.T) {
 	}
 
 	join := func(c *Config) { c.Join = true }
+	logs := joiner.capture()
+	// waits returns the INFO lines in which the joiner said it waits to be added.
+	waits := func() []map[string]any {
+		var lines []map[string]any
+		for _, line := range logLines(t, logs) {
+			message, _ := line["message"].(string)
+			if line["level"] == "info" && strings.HasPrefix(message, "cluster.raft.join is true and the node has no raft state") {
+				lines = append(lines, line)
+			}
+		}
+		return lines
+	}
 	joiner.start(t, failingDiscovery{}, join)
+	if lines := waits(); len(lines) != 1 || lines[0]["node_id"] != joiner.id || lines[0]["advertise_addr"] != joiner.addr {
+		t.Fatalf("%s logged %v, want one INFO line that it waits to be added, with its ID and address", joiner.id, lines)
+	}
 	if servers := joiner.profile.Admin().Servers(); len(servers) != 0 {
 		t.Fatalf("%s joined with the configuration %v, want none until the leader adds it", joiner.id, servers)
 	}
@@ -269,6 +286,9 @@ func TestJoiningNodeWaitsToBeAdded(t *testing.T) {
 
 	joiner.stop()
 	joiner.start(t, failingDiscovery{}, join)
+	if lines := waits(); len(lines) != 1 {
+		t.Fatalf("%s logged %d INFO lines that it waits to be added once it restarted with raft state, want the one of its first start", joiner.id, len(lines))
+	}
 	waitFor(t, 10*time.Second, joiner.id+" follows a leader again", func() bool {
 		id, _ := joiner.profile.Admin().Leader()
 		return id != ""

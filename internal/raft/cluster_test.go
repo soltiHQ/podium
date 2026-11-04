@@ -36,11 +36,9 @@ func testAgent(t *testing.T, id string) *model.Agent {
 var errNoAnswer = errors.New("the write did not return")
 
 // answerWithin runs write and returns its error, or errNoAnswer when it has not
-// returned after timeout, and leaves it running. A write on a leader that shuts
-// down as the write commits can wait for ever: hashicorp/raft v1.8.0 hands a
-// committed write to its FSM goroutine, which returns at shutdown without
-// draining what it was handed (runFSM), and the future of a write waits for no
-// shutdown (ApplyLog sets none).
+// returned after timeout, and leaves it running. A write waits for no longer
+// than its node runs (awaitWrite), so the bound only keeps a regression from
+// hanging the test.
 func answerWithin(timeout time.Duration, write func() error) error {
 	answer := make(chan error, 1)
 	go func() { answer <- write() }()
@@ -59,20 +57,23 @@ func answerWithin(timeout time.Duration, write func() error) error {
 // the leader proposes it, the leader's raft shuts down, and with it its
 // transport. A write that returned nil is acknowledged. A write of unknown
 // outcome, one that failed with cluster.ErrLeadershipLost after it was
-// proposed, or that never returned, may land or not, and is not sent again. A
-// write that failed with cluster.ErrNotLeader, storage.ErrUnavailable or the
-// timeout of its barrier goes to the next leader: the upsert of an agent is
-// the same write the second time. Once the two survivors hold the same state,
-// every acknowledged write is in it, and a write of unknown outcome is on both
-// survivors or on neither.
+// proposed, may land or not, and is not sent again; so may the write that
+// killed its leader if it does not return within its bound, while any other
+// write that does not fails the test. A write that failed with
+// cluster.ErrNotLeader, storage.ErrUnavailable or the timeout of its barrier
+// goes to the next leader: the upsert of an agent is the same write the second
+// time. Writes are acknowledged before the kill and after it, by the new
+// leader. Once the two survivors hold the same state, every acknowledged write
+// is in it, and a write of unknown outcome is on both survivors or on neither.
 func TestFailoverKeepsAcknowledgedWrites(t *testing.T) {
 	const writes, killAt = 200, 100
 	c := newLoopbackCluster(t, "n1", "n2", "n3")
 	ctx := context.Background()
 	var (
-		acknowledged, unknown []string
-		killed                *loopbackNode         // the leader that write killAt killed
-		down                  = make(chan struct{}) // closed once killed is down
+		acknowledged, unknown   []string
+		ackedBefore, ackedAfter int                   // acknowledged writes before write killAt, and after it
+		killed                  *loopbackNode         // the leader that write killAt killed
+		down                    = make(chan struct{}) // closed once killed is down
 	)
 	leader := c.leader(t, 10*time.Second)
 	for i := 1; i <= writes; i++ {
@@ -102,10 +103,11 @@ func TestFailoverKeepsAcknowledgedWrites(t *testing.T) {
 				}
 			}
 			err := answerWithin(2*applyTimeout, write)
+			killedHere := false // this attempt killed its leader
 			if fired != nil {
 				select {
 				case <-fired:
-					killed = leader
+					killed, killedHere = leader, true
 					select {
 					case <-down:
 					case <-time.After(10 * time.Second):
@@ -113,15 +115,20 @@ func TestFailoverKeepsAcknowledgedWrites(t *testing.T) {
 					}
 					killed.stop()
 				default:
-					if errors.Is(err, errNoAnswer) {
-						t.Fatalf("%s did not return, and never reached the kill", agent.ID())
-					}
 				}
 			}
 			retry := false
 			switch {
 			case err == nil:
 				acknowledged = append(acknowledged, agent.ID())
+				switch {
+				case i < killAt:
+					ackedBefore++
+				case i > killAt:
+					ackedAfter++
+				}
+			case errors.Is(err, errNoAnswer) && !killedHere:
+				t.Fatalf("%s did not return within %s on %s, a leader that was not killed", agent.ID(), 2*applyTimeout, leader.id)
 			case errors.Is(err, cluster.ErrLeadershipLost), errors.Is(err, errNoAnswer):
 				unknown = append(unknown, agent.ID())
 			case errors.Is(err, cluster.ErrNotLeader), errors.Is(err, storage.ErrUnavailable), errors.Is(err, context.DeadlineExceeded):
@@ -144,6 +151,9 @@ func TestFailoverKeepsAcknowledgedWrites(t *testing.T) {
 	if got := len(acknowledged) + len(unknown); got != writes {
 		t.Fatalf("%d writes acknowledged and %d of unknown outcome, want %d in all", len(acknowledged), len(unknown), writes)
 	}
+	if ackedBefore == 0 || ackedAfter == 0 {
+		t.Fatalf("%d writes acknowledged before write %d and %d after it, want some of each", ackedBefore, killAt, ackedAfter)
+	}
 
 	var survivors []*loopbackNode
 	for _, n := range c.nodes {
@@ -151,7 +161,8 @@ func TestFailoverKeepsAcknowledgedWrites(t *testing.T) {
 			survivors = append(survivors, n)
 		}
 	}
-	// leader took the last write, and so holds every write it acknowledged.
+	// leader, the node the last write went to, is a survivor: each survivor
+	// converges on the state that leader holds, read again at every poll.
 	for _, n := range survivors {
 		waitFor(t, 10*time.Second, n.id+" holds the state of "+leader.id, func() bool {
 			return bytes.Equal(n.state(t), leader.state(t))

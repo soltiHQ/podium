@@ -542,17 +542,18 @@ keep every node's configuration the same, and change it on all of them. See
 
 `cluster.raft.join: true` (env `SOLTI_CLUSTER_RAFT_JOIN`) starts a node whose
 `data_dir` holds no raft state without a bootstrap: it asks discovery for
-nothing, writes no configuration, and waits for the leader of the running
-cluster to add it with `POST /api/v1/cluster/members` (see "Cluster" in
-`internal/handler/README.md`). A
-node that replaces a removed one, or whose `data_dir` was wiped, starts with
-it: without it, a first start bootstraps a configuration of its own from the
-static list. Once the node holds raft state, a restart loads the configuration
-from the node's own log, so leaving the flag set changes nothing. Clearing it
-does: without it, configuration loading needs `discovery.peers` to list the
-node as its `node_id` at its advertise address, and with `discovery.driver:
-dns` needs `node_id` and the advertise address to be the node's
-`ip:<discovery.port>`, as for any node. So keep the flag set until
+nothing, writes no configuration, logs one INFO line that it waits, and waits
+for the leader of the running cluster to add it with `POST
+/api/v1/cluster/members` (see "Cluster" in `internal/handler/README.md`). A
+node that replaces a removed one starts with it, and so does a node whose
+`data_dir` was wiped, once it was removed from the cluster (see the runbook in
+`internal/raft/README.md`): without it, a first start bootstraps a
+configuration of its own from the static list. Once the node holds raft
+state, a restart loads the configuration from the node's own log, so leaving
+the flag set changes nothing. Clearing it does: without it, configuration
+loading needs `discovery.peers` to list the node as its `node_id` at its
+advertise address, and with `discovery.driver: dns` needs `node_id` and the
+advertise address to be the node's `ip:<discovery.port>`, as for any node. So keep the flag set until
 `discovery.peers` lists the node, or with dns until its `node_id` matches too;
 see "Replacing a dead member" in `internal/raft/README.md`.
 
@@ -580,10 +581,10 @@ password verifiers included, so it runs mutual TLS 1.3 between the nodes:
   of the node for longer.
 
 TLS keeps other hosts out of the cluster, not off the port: every connection
-that the node refuses, from a host that is no cluster node, is one ERROR line in
-the node's log, `failed to decode incoming command`, and nothing limits them.
-So `raft.bind_addr` must be reachable only from the cluster's nodes, by firewall
-or network policy.
+from a host that is no cluster node, refused or timed out in its handshake, is
+one ERROR line in the node's log, `failed to decode incoming command`, and
+nothing limits them. So `raft.bind_addr` must be reachable only from the
+cluster's nodes, by firewall or network policy.
 
 `raft.tls.ca_file` must be a CA that signs raft node certificates only. A node
 accepts every certificate it verifies as a full member of the cluster, whatever
@@ -643,7 +644,11 @@ node:
 - `raft.tls`, with a certificate as above for each node, of a CA kept for raft
   alone, or `raft.allow_insecure_transport: true`, which keeps plain TCP as
   before. A node on TLS and a node on plain TCP cannot reach each other, so a
-  cluster works only while a majority of its nodes runs the same transport.
+  cluster works only while a majority of its nodes runs the same transport,
+  and a rolling upgrade keeps plain TCP: upgrade every node, one at a time,
+  with `allow_insecure_transport: true`, then switch all nodes to `raft.tls`
+  at once, in one full stop and start, during which the cluster takes no write
+  (see "Rolling upgrade" in the runbook of `internal/raft/README.md`).
 - `chmod -R go-rwx` on `data_dir`. A node refuses a `data_dir` or `snapshots`
   directory that is still open to the group or others; it makes the snapshots
   in it private by itself at its next start.

@@ -60,18 +60,22 @@ type clusterNode struct {
 // that the kernel picks when the node runs.
 func clusterNodes(t *testing.T, ids ...string) []*clusterNode {
 	t.Helper()
-	return clusterNodesOf(raftConfigs(t, ids...))
+	return clusterNodesOf(t, raftConfigs(t, ids...))
 }
 
 // clusterNodesOf is clusterNodes with the raft configurations raft, one node
 // each, whose listeners listen on the host of the node's raft address.
-func clusterNodesOf(raft []cluster.Config) []*clusterNode {
+func clusterNodesOf(t *testing.T, raft []cluster.Config) []*clusterNode {
+	t.Helper()
 	nodes := make([]*clusterNode, 0, len(raft))
 	for _, r := range raft {
 		cfg := config.Default()
 		cfg.Cluster = r
 		cfg.Auth.JWTSecret = strings.Repeat("leadership-term-test-secret", 2)
-		host, _, _ := net.SplitHostPort(r.Raft.BindAddr)
+		host, _, err := net.SplitHostPort(r.Raft.BindAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
 		listen := net.JoinHostPort(host, "0")
 		cfg.HTTP.Addr, cfg.HTTPDiscovery.Addr, cfg.GRPC.Addr = listen, listen, listen
 		nodes = append(nodes, &clusterNode{id: r.Raft.NodeID, cfg: cfg, logs: &syncBuffer{}})

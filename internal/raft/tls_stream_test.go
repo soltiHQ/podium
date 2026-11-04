@@ -362,14 +362,29 @@ var partialClientHello = []byte{0x16, 0x03, 0x01, 0x00, 0x80, 0x01, 0x00, 0x00, 
 // A node closes a connection it accepted whose TLS handshake does not finish
 // within handshakeTimeout: a host that connects and stays silent, or stops
 // halfway through its ClientHello, holds the goroutine, the file and the buffer
-// the transport gives the connection for no longer. A connection whose
-// handshake finished may sit idle past that bound and still carry RPCs.
+// the transport gives the connection for no longer, and each such connection
+// is one ERROR line of the transport. A connection whose handshake finished may
+// sit idle past that bound and still carry RPCs.
 func TestRaftBoundsInboundHandshakes(t *testing.T) {
 	bound := handshakeTimeout
 	handshakeTimeout = 200 * time.Millisecond
 	t.Cleanup(func() { handshakeTimeout = bound })
-	c := newLoopbackCluster(t, "n1")
+	c := loopbackNodes(t, "n1")
 	node := c.nodes[0]
+	logs := node.capture()
+	node.start(t, c.discovery(t))
+	// dropped counts the ERROR lines of the transport about a connection it
+	// gave up on.
+	dropped := func() int {
+		count := 0
+		for _, line := range logLines(t, logs) {
+			message, _ := line["message"].(string)
+			if line["level"] == "error" && line["component"] == "raft-net" && strings.HasPrefix(message, "failed to decode incoming command") {
+				count++
+			}
+		}
+		return count
+	}
 	member := peerTransport(t, &tls.Config{
 		MinVersion:   tls.VersionTLS13,
 		RootCAs:      c.ca.pool(),
@@ -386,6 +401,7 @@ func TestRaftBoundsInboundHandshakes(t *testing.T) {
 		{"half a ClientHello", partialClientHello},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			before := dropped()
 			conn, err := net.Dial("tcp", node.addr)
 			if err != nil {
 				t.Fatal(err)
@@ -402,6 +418,10 @@ func TestRaftBoundsInboundHandshakes(t *testing.T) {
 			if _, err := conn.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
 				t.Fatalf("the node kept the connection open for 2s, with a handshake bound of %s: %v", handshakeTimeout, err)
 			}
+			// The connection it closed is one ERROR line of the transport.
+			waitFor(t, 5*time.Second, "the node logs the connection whose handshake timed out", func() bool {
+				return dropped() == before+1
+			})
 		})
 	}
 	// The member's pooled connection has sat idle for as long as the hosts'.

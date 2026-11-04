@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -420,14 +421,18 @@ func readyNodes(t *testing.T, nodes []*clusterNode) (leader *clusterNode, follow
 // is answered; the leader's access log, not the follower's, holds the creation
 // of the user. A read with the login's cookies is the follower's own: it checks
 // the access token against its own store and serves the read itself. The test
-// needs 127.0.0.2 and 127.0.0.3, which Linux gives every host as loopback, and
-// skips where they cannot be bound.
+// needs 127.0.0.2 and 127.0.0.3, which Linux gives every host as loopback: it
+// skips on another system, and fails on Linux when either cannot be bound, so
+// that the gate, which runs on Linux, never loses it.
 func TestFollowerHTTPAndGRPCWritesLand(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skipf("each node needs a loopback IP of its own, which Linux gives every host (127.0.0.0/8) and %s may not", runtime.GOOS)
+	}
 	hosts := []string{"127.0.0.1", "127.0.0.2", "127.0.0.3"}
 	for _, host := range hosts[1:] {
 		l, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 		if err != nil {
-			t.Skipf("each node needs a loopback IP of its own, and %s cannot be bound here: %v", host, err)
+			t.Fatalf("each node needs a loopback IP of its own, and %s cannot be bound on Linux: %v", host, err)
 		}
 		_ = l.Close()
 	}
@@ -436,7 +441,7 @@ func TestFollowerHTTPAndGRPCWritesLand(t *testing.T) {
 	for _, host := range hosts {
 		raftAddrs = append(raftAddrs, net.JoinHostPort(host, ports[0]))
 	}
-	nodes := clusterNodesOf(raftConfigsAt(t, raftAddrs, "n1", "n2", "n3"))
+	nodes := clusterNodesOf(t, raftConfigsAt(t, raftAddrs, "n1", "n2", "n3"))
 	for i, n := range nodes {
 		n.cfg.HTTP.Addr = net.JoinHostPort(hosts[i], ports[1])
 		n.cfg.HTTPDiscovery.Addr = net.JoinHostPort(hosts[i], ports[2])
