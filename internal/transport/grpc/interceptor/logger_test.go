@@ -145,10 +145,10 @@ func retryInfo(t *testing.T, code codes.Code) error {
 
 // A ResourceExhausted that carries RetryInfo is a throttle: a client sent more
 // than its share and was told when to come back, which any client can cause at
-// will, so UnaryLogger logs it at DEBUG, where an ERROR per call would flood the
-// log. Any other ResourceExhausted stays an ERROR, and only ResourceExhausted
-// is a throttle. A follower passes on the leader's answer with its details, and
-// logs a forwarded throttle at DEBUG too.
+// will, so UnaryLogger logs it at DEBUG, one line per call, not as the ERROR of a
+// failed call. Any other ResourceExhausted stays an ERROR, and only
+// ResourceExhausted is a throttle. A follower passes on the leader's answer with
+// its details, and logs a forwarded throttle at DEBUG too.
 func TestUnaryLoggerLogsAThrottleAtDebug(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

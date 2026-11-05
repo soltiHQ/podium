@@ -343,9 +343,10 @@ func grpcSyncFailed(ctx context.Context, err error) error {
 // token check, so a sync of a throttled agent is refused whatever token it
 // carries and before the store is touched, and takes nothing from the bucket of
 // an agent that has tokens left. That shows the throttling state of an agent ID
-// to a caller that has not authenticated, and costs nothing else. The look can
-// race a concurrent sync: chargeSync decides. The refusal logs what logSyncLimited
-// says.
+// to a caller that has not authenticated, and lets that caller cause the WARN of
+// the refusal, at most once a minute for the ID; a look takes no token, so it
+// drains nothing. The look can race a concurrent sync: chargeSync decides. The
+// refusal logs what logSyncLimited says.
 func syncOverRate(logger zerolog.Logger, syncs *ratelimit.Buckets, now time.Time, agentID string) bool {
 	ok, notice := syncs.Peek(now, agentID)
 	logSyncLimited(logger, agentID, ok, notice)
@@ -366,7 +367,8 @@ func chargeSync(logger zerolog.Logger, syncs *ratelimit.Buckets, now time.Time, 
 // logSyncLimited logs a WARN with the agent ID, never a token, for a refusal of
 // the bucket that asks to be logged: the first one of an agent ID, and then at
 // most one per syncLimitNotice for each ID, whichever of syncOverRate and
-// chargeSync refused.
+// chargeSync refused. The first runs before the token check, so the WARN can come
+// from a caller that has not authenticated.
 func logSyncLimited(logger zerolog.Logger, agentID string, ok, notice bool) {
 	if !ok && notice {
 		logger.Warn().Str("agent_id", agentID).Msg(syncLimitedAnswer)

@@ -105,12 +105,18 @@ value at most 1024 bytes) and at most 256 workloads (`api_version` at most 317
 bytes, `kind` at most 128 bytes). A sync that breaks one is refused with HTTP
 400 / gRPC `InvalidArgument`, naming the field, as in `agent
 capabilities.runners[1].labels has a value over 1024 bytes`, and nothing is
-enrolled or stored. The SDK treats a 400 as permanent, so none of the limits is
-below what the SDK itself lets an agent send: its label keys and `api_version`
-are qualified names of at most 317 bytes (a DNS prefix of 253 bytes, a slash and
-63 bytes), and it sets no limit on how many there are. `os`, `arch` and
-`platform` are never refused for their length: each is cut to 256 bytes, on a
-rune boundary, and the sync lands (the SDK sends the `PRETTY_NAME` of the host's
+enrolled or stored. The SDK treats a 400 as permanent and does not retry it, so
+an agent that breaks one stays refused until it sends data within the limits.
+No byte limit is below the SDK's own: there a label key is a qualified name, an
+optional DNS prefix of at most 253 bytes, a slash and a name of at most 63, and
+an `api_version` is a CRD group of at most 253 bytes, a slash and a version of
+at most 63, so both are 317 bytes at most, and its runner names, label values
+and kinds are 63 bytes at most. The counts are below what the SDK lets an agent
+send, since it sets no limit on how many runners, labels or workloads there
+are: an agent with more than 64 runners, or more than 256 labels or 256
+workloads in one runner, gets that 400. `os`, `arch` and `platform` are never
+refused for their length: each is cut to 256 bytes, on a rune boundary, and the
+sync lands (on Linux the SDK sends the `PRETTY_NAME` of the host's
 `/etc/os-release` as `os`, and does not bound it). The limits apply to what
 agents send, not to rows already stored. Whatever the limits, a sync is still
 bounded by the 256 KiB of its body.
@@ -390,13 +396,15 @@ buckets, which hold nothing for the syncs the former leader served. A bucket
 that was not used for 10 minutes is dropped, so memory follows the agents that
 sync. The first refused sync of an agent ID logs a WARN with the agent ID, and
 then at most one more a minute for that ID. The access loggers record each
-refused sync at DEBUG, not as the WARN of an HTTP 4xx or the ERROR of a failed
-gRPC call, so that an agent that keeps syncing cannot flood the log: the HTTP
-429 carries `Retry-After` and the gRPC status carries `RetryInfo`, and the
-loggers take those for a throttle. A follower that proxies or forwards a
-leader's refusal logs it at DEBUG too. A sync that fails in another way keeps
-its level: a wrong token (WARN over HTTP, ERROR over gRPC) and the 429 /
-`ResourceExhausted` of the failure limiter.
+refused sync at DEBUG, one line for each, in place of the WARN of an HTTP 4xx or
+the ERROR of a failed gRPC call. That is the level of the line and not the number
+of lines: podium sets no minimum log level (`cmd/main.go` builds its logger with
+none), so a DEBUG line is written like any other, and an agent that keeps
+syncing writes one for each refused sync. The HTTP 429 carries `Retry-After` and
+the gRPC status carries `RetryInfo`, and the loggers take those for a throttle. A
+follower that proxies or forwards a leader's refusal logs it at DEBUG too. A
+sync that fails in another way keeps its level: a wrong token (WARN over HTTP,
+ERROR over gRPC) and the 429 / `ResourceExhausted` of the failure limiter.
 
 ## First administrator
 

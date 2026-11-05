@@ -119,8 +119,9 @@ func TestValidateAgentEndpointRejectsUnsafeForms(t *testing.T) {
 // runner its name, labels and workloads. Each row is a value at its limit, which
 // passes, or one over it, which is refused with the field named. The runner and
 // the workload that break a limit come second, to show the index in the name.
-// The limits are never below what the SDK lets an agent send (a label key and an
-// api_version of 317 bytes), because it treats a refusal as permanent.
+// No byte limit is below the SDK's own (a label key and an api_version of 317
+// bytes), because the SDK treats a refusal as permanent; the counts are caps that
+// the SDK does not have.
 func TestNewAgentFromEnforcesCapabilityLimits(t *testing.T) {
 	text := func(n int) string { return strings.Repeat("x", n) }
 	// labels builds entries with distinct zero-padded keys of exactly keyBytes.

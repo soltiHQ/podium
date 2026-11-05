@@ -77,7 +77,7 @@ func TestAccessLogLevelFollowsTheStatus(t *testing.T) {
 
 // A 429 that carries Retry-After is a throttle: a client sent more than its
 // share and was told when to come back, which any client can cause at will, so
-// the access log records it at DEBUG, where a WARN per call would flood it. Any
+// the access log records it at DEBUG, one line per call, not as a WARN. Any
 // other 429, such as the login limiter's, stays a WARN, and only a 429 is a
 // throttle. A follower proxies the leader's answer with its headers, so it logs
 // a forwarded throttle at DEBUG too.

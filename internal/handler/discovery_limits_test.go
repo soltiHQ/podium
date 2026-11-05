@@ -565,10 +565,10 @@ func TestLimitedSyncWarnsOncePerMinutePerAgent(t *testing.T) {
 
 // Each capability field of a sync has a limit. Data that breaks one is refused
 // with HTTP 400 / InvalidArgument, naming the field, before the token is
-// enrolled or anything is written, and it takes nothing from the bucket. The
-// limits sit at what the SDK itself lets an agent send, because it treats a
-// refusal as permanent; os, arch and platform are cut instead, see
-// TestLongPlatformFieldsAreCut.
+// enrolled or anything is written, and it takes nothing from the bucket. The byte
+// limits are not below the SDK's own, because the SDK treats a refusal as
+// permanent; the counts are caps that the SDK does not have. os, arch and
+// platform are cut instead, see TestLongPlatformFieldsAreCut.
 func TestCapabilityCapsRefuseOversizedFields(t *testing.T) {
 	text := func(n int) string { return strings.Repeat("x", n) }
 	labels := func(entries int) map[string]string {
@@ -639,11 +639,11 @@ func TestCapabilityCapsRefuseOversizedFields(t *testing.T) {
 	}
 }
 
-// A valid SDK agent is never refused by a cap: the SDK treats a refusal as
-// permanent. This sync carries the most the SDK allows in each field (a label
-// key and an api_version of a 253-byte DNS prefix, a slash and 63 bytes) and the
-// most the caps allow in each count, as far as the 256 KiB body goes, and it is
-// stored whole.
+// No byte limit is below the SDK's own, because the SDK treats a refusal as
+// permanent. This sync carries the longest label key and api_version the SDK
+// allows (253 + 1 + 63 bytes each) and the counts at the caps, as far as the
+// 256 KiB body goes, and it is stored whole. The counts are caps that the SDK
+// does not have, so this is not every sync an SDK agent can send.
 func TestCapabilityCapsAcceptWhatTheSDKSends(t *testing.T) {
 	text := func(n int) string { return strings.Repeat("x", n) }
 	qualified := func(i int) string { return fmt.Sprintf("%0*d", 317, i) } // 317 bytes, distinct
@@ -666,7 +666,7 @@ func TestCapabilityCapsAcceptWhatTheSDKSends(t *testing.T) {
 		t.Run(tr.name, func(t *testing.T) {
 			env := newLimitEnv(t, inmemory.New())
 			if res := tr.syncer(env)(req, "token-a"); res.outcome != synced {
-				t.Fatalf("sync at the limits of the SDK: %s %q, want synced", res.outcome, res.message)
+				t.Fatalf("sync with the longest key and api_version of the SDK: %s %q, want synced", res.outcome, res.message)
 			}
 			stored, err := env.svc.Get(context.Background(), "agent-a")
 			if err != nil {

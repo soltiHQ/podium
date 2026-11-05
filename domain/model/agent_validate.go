@@ -28,12 +28,15 @@ const (
 // arch and platform, and the runners with their names, labels and workloads.
 //
 // The SDK treats a refusal, HTTP 400 or gRPC InvalidArgument, as permanent, so
-// none of these is below what the SDK itself lets an agent send. A label key
-// and an api_version are qualified names there: a DNS prefix of 253 bytes, a
-// slash and 63 bytes, which is 317; its names, label values and kinds are
-// shorter than the limits here; and it sets no count limit. os, arch and
-// platform are cut, never refused: os is the PRETTY_NAME of the host's
-// /etc/os-release, which the SDK does not bound.
+// no byte limit here is below the SDK's own. A label key there is a qualified
+// name, an optional DNS prefix of at most 253 bytes, a slash and a name of at
+// most 63; an api_version is a CRD group of at most 253 bytes, a slash and a
+// version of at most 63; both are 317 at most. Its runner names, label values
+// and kinds are 63 at most, below the limits here. The counts are another
+// matter: the SDK sets none, so the caps on runners, labels and workloads are
+// below what it lets an agent send, and an agent over them gets a 400 that the
+// SDK does not retry. os, arch and platform are cut, never refused: os is the
+// PRETTY_NAME of the host's /etc/os-release, which the SDK does not bound.
 const (
 	agentPlatformMaxBytes           = 256 // os, arch and platform are cut to this, each
 	agentRunnersMax                 = 64

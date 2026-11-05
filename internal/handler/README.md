@@ -252,9 +252,12 @@ limits of their own: at most 64 runners, each name at most 128 bytes; per runner
 bytes, value at most 1024 bytes) and at most 256 workloads (`api_version` at most 317 bytes, `kind` at most 128 bytes).
 Data that breaks one is answered 400 / `InvalidArgument` naming the field (such as
 `agent capabilities.runners[1].name exceeds 128 bytes`), with nothing enrolled or stored
-(`TestCapabilityCapsRefuseOversizedFields`). None is below what the SDK allows, since it treats a 400 as permanent: a
-label key and an `api_version` are qualified names there, 317 bytes at most. A sync with the longest of both, and the
-most runners, labels and workloads these limits allow, is stored whole (`TestCapabilityCapsAcceptWhatTheSDKSends`).
+(`TestCapabilityCapsRefuseOversizedFields`). The SDK treats a 400 as permanent. No byte limit is below the SDK's own:
+there a label key is a qualified name, an optional DNS prefix of at most 253 bytes, a slash and a name of at most 63, and
+an `api_version` is a CRD group of at most 253 bytes, a slash and a version of at most 63, so both are 317 bytes at most.
+The three counts are below what the SDK lets an agent send, since it sets none: an agent with more than 64 runners, or
+more than 256 labels or 256 workloads in one, gets that 400. A sync with the longest key and `api_version` the SDK
+allows and the counts at the caps is stored whole (`TestCapabilityCapsAcceptWhatTheSDKSends`).
 `os`, `arch` and `platform` are not refused for their length: each is cut to 256 bytes on a rune boundary
 (`TestLongPlatformFieldsAreCut`). The limits are not applied to rows already stored. The upsert reports what
 the sync changed in the stored row (`agent.UpsertResult`), and discovery sends the `agent_update` refresh pulse only
@@ -316,16 +319,19 @@ from the bucket. Nobody can drain a bucket that way, since only a sync that pass
 WARN of the next paragraph can be caused by such a caller too: it names the agent ID, not who sent the sync.
 
 The refusal logs one WARN with the agent ID, the first time for an ID and then at most once a minute for it, whichever of
-the two steps refused; the log never holds a token. The access loggers record each refused call at DEBUG instead of the
-WARN of a 4xx or the ERROR of a failed gRPC call, so that an agent that keeps syncing cannot flood the log: the 429
-carries `Retry-After` (`response.TooManyRequests`), the gRPC status carries `RetryInfo` (`status.Throttled`), and `Logger`
-and `UnaryLogger` take either for a throttle, whichever node wrote it, so a follower that forwards a sync logs the
-leader's refusal at DEBUG too (`TestThrottledSyncsAreLoggedAtDebug`, `TestAccessLogOfAThrottleIsDebug`,
-`TestUnaryLoggerLogsAThrottleAtDebug`). The other refusals keep their levels: a wrong token, and the 429 /
-`ResourceExhausted` of the failure limiter. The buckets are in memory, on the node that runs the handlers: in raft mode
-the leader, where a follower forwards a sync, so the new leader counts from its own after a failover, and a restart
-clears them. A bucket that was not used for 10 minutes is dropped, and a look at a bucket is no use of it. The handlers
-read the time from a `clock` field that the tests replace, so a refill is never waited for.
+the two steps refused; the log never holds a token. The access loggers record each refused call at DEBUG, one line each,
+instead of the WARN of a 4xx or the ERROR of a failed gRPC call. That is the level of the lines, not their number:
+podium sets no minimum log level (`cmd/main.go` builds its logger with none), so a DEBUG line is written like any other,
+and an agent that keeps syncing writes one for each refused sync (`TestThrottledSyncsAreLoggedAtDebug` counts them).
+The 429 carries `Retry-After` (`response.TooManyRequests`), the gRPC status carries `RetryInfo` (`status.Throttled`), and
+`Logger` and `UnaryLogger` take either for a throttle, whichever node wrote it, so a follower that forwards a sync logs
+the leader's refusal at DEBUG too (`TestAccessLogOfAThrottleIsDebug`, `TestUnaryLoggerLogsAThrottleAtDebug`). The other
+refusals keep their levels: a wrong token, and the 429 / `ResourceExhausted` of the failure limiter.
+
+The buckets are in memory, on the node that runs the handlers: in raft mode the leader, where a follower forwards a
+sync, so the new leader counts from its own after a failover, and a restart clears them. A bucket that was not used for 10
+minutes is dropped, and a look at a bucket is no use of it. The handlers read the time from a `clock` field that the
+tests replace, so a refill is never waited for.
 
 ## UI pages
 | Path                | Handler          | Auth | Permission  |

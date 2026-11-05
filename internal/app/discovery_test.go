@@ -463,11 +463,11 @@ func accessLevels(logs *syncBuffer, message string) map[string]int {
 }
 
 // A sync that the rate refuses is logged by the access loggers at DEBUG, not as
-// the WARN of an HTTP 4xx or the ERROR of a failed gRPC call: any agent can cause
-// any number of them, and each line would flood the log. A sync that fails
-// otherwise keeps its level: the 401 / Unauthenticated of a wrong token, and the
-// 429 / ResourceExhausted of the failure limiter, which is no throttle of the
-// rate. The handler's own WARN is not an access line.
+// the WARN of an HTTP 4xx or the ERROR of a failed gRPC call: one DEBUG line for
+// each refused sync, so the level changes and not the number of lines. A sync
+// that fails otherwise keeps its level: the 401 / Unauthenticated of a wrong
+// token, and the 429 / ResourceExhausted of the failure limiter, which is no
+// throttle of the rate. The handler's own WARN is not an access line.
 func TestThrottledSyncsAreLoggedAtDebug(t *testing.T) {
 	const burst, attempts = 10, 40
 	const ok, limited, unauthenticated = "ok", "limited", "unauthenticated"
