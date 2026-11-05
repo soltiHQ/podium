@@ -174,6 +174,12 @@ func TestListingsThatBreakABoundJudgeNothing(t *testing.T) {
 		{"the proxy refuses a page of more tasks than asked", func(int, proxy.TaskFilter) ([]string, string, error) {
 			return nil, "", tooManyItems()
 		}, 1, causeMoreTasks},
+		{"the proxy refuses a page with too many elements", func(int, proxy.TaskFilter) ([]string, string, error) {
+			return nil, "", tooManyElementsErr()
+		}, 1, causeElements},
+		{"the proxy refuses a cursor that is too long", func(int, proxy.TaskFilter) ([]string, string, error) {
+			return nil, "", cursorTooLongErr()
+		}, 1, causeLongCursor},
 		{"a page holds more tasks than the smaller limit asked", func(call int, asked proxy.TaskFilter) ([]string, string, error) {
 			if asked.Limit > 500 {
 				return nil, "", tooLarge()

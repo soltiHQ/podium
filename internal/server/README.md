@@ -175,14 +175,19 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   large (an answer over 4 MiB) is asked again from the same cursor with half
   the limit, down to one task, and the smaller limit holds for the rest of the
   turn; the next turn starts at 1000 again. The listing is bounded, whatever
-  the agent answers. The proxy refuses a page with more tasks than it was asked
-  for, and a task ID over 1024 bytes, before it builds the tasks: a page of empty
-  tasks costs a few KiB, not hundreds of MiB. The runner counts the tasks of a
-  page again, and refuses a cursor over 4096 bytes. A listing that would hold
-  more than 65536 task IDs or 32 MiB of them, or take more than 1024 calls,
-  refused pages included, stops. A synced rollout whose task is missing from
-  the listing is queued for a reinstall, but only a complete listing shows a
-  task missing. If the budget runs out, a page fails or is refused (a task too
+  the agent answers. The proxy bounds what a page builds (see "What an answer
+  may build" in `internal/proxy/README.md`). A page with more tasks than it was
+  asked for, an answer with more than 262144 repeated elements in all (gRPC) and
+  a task with more than 64 conditions (HTTP) are refused before they are built.
+  A gRPC task with more than 64 conditions, a task ID over 1024 bytes and a
+  cursor over 4096 bytes are refused once decoded, at the cost of a page the
+  other bounds have capped. The tests measure a refused flood at 2 to 21 MiB
+  allocated in all, against 86 to 499 MiB unbounded. The runner counts the tasks
+  of a page again, and refuses a cursor over 4096 bytes itself. A listing that
+  would hold more than 65536 task IDs or 32 MiB of them, or take more than 1024
+  calls, refused pages included, stops. A synced rollout whose task is missing
+  from the listing is queued for a reinstall, but only a complete listing shows
+  a task missing. If the budget runs out, a page fails or is refused (a task too
   large to list even alone included), the listing passes a bound, the agent
   returns a cursor it returned before, or its pages name different snapshots
   (resource versions that differ; a page without one is let through), no
@@ -202,7 +207,8 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   agent's listing turns incomplete, the runner logs one warning that names the
   cause (a task too large to list, the budget used, a repeated cursor, pages of
   different snapshots, a page answered with an error, a page with more tasks
-  than asked, a cursor that is too long, a listing over the bounds). When it
+  than asked, a page with too many elements, a cursor that is too long, a
+  listing over the bounds). When it
   turns complete again, one info line names the latest cause. Neither is
   repeated on every tick, and a cause that changes meanwhile is not logged. An
   agent that flips between the two logs a pair of lines for each flip.

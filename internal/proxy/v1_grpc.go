@@ -4,16 +4,12 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
 	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/mem"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/protobuf/encoding/protowire"
-	"google.golang.org/protobuf/proto"
 )
 
 // grpcProxyV1 implements AgentProxy over gRPC (solti.task.v1.TaskService).
@@ -56,22 +52,24 @@ func (p *grpcProxyV1) ListTasks(ctx context.Context, f TaskFilter) (*proxyv1.Lis
 		}
 	}
 
-	// The codec of the call refuses a page of more tasks than the limit before it
-	// builds them. grpc-go flattens what a codec returns into an Internal status,
-	// so the codec says it refused the page and the error is made here.
-	limit := pageBound(f.Limit)
-	codec := &pageCodec{limit: limit}
-	resp, err := client.ListTasks(p.authCtx(ctx), req, grpc.ForceCodecV2(codec))
-	if codec.refused.Load() {
-		return nil, agentError(ErrListTasks, fmt.Errorf("%w: %w", ErrDecode, tooManyItems(limit)))
+	// The codec of the call scans the answer before it is decoded: see answerCodec.
+	// A cursor, a task ID or a task that is over its bound is refused after, when
+	// the page is decoded, which the scan has bounded.
+	answer := newAnswerCodec(tasksField, pageBound(f.Limit))
+	resp, err := client.ListTasks(p.authCtx(ctx), req, answer.option())
+	if refused := answer.refused(); refused != nil {
+		return nil, agentError(ErrListTasks, refused)
 	}
 	if err != nil {
 		return nil, responseError(ErrListTasks, err)
 	}
+	if err = checkCursor(resp.GetContinue()); err != nil {
+		return nil, agentError(ErrListTasks, fmt.Errorf("%w: %w", ErrDecode, err))
+	}
 
 	tasks := make([]proxyv1.Task, len(resp.GetTasks()))
 	for i, t := range resp.GetTasks() {
-		if err = checkTaskID(t.GetMetadata().GetName()); err != nil {
+		if err = checkListed(t); err != nil {
 			return nil, agentError(ErrListTasks, fmt.Errorf("%w: %w", ErrDecode, err))
 		}
 		tasks[i] = taskDataToProxy(t)
@@ -83,79 +81,6 @@ func (p *grpcProxyV1) ListTasks(ctx context.Context, f TaskFilter) (*proxyv1.Lis
 	}, nil
 }
 
-// tasksField is the number of the repeated tasks field of ListTasksResponse.
-const tasksField protowire.Number = 1
-
-// pageCodec is the protobuf codec of one ListTasks call. It counts the tasks of
-// the answer on the wire, before the answer is decoded, and refuses one of more
-// than limit: an empty task takes two bytes there and about a hundred on the heap,
-// so the 4 MiB a client reads holds two million of them. Otherwise it encodes and
-// decodes as grpc-go's own protobuf codec does. A codec is made for each call: it
-// records its refusal.
-type pageCodec struct {
-	limit   int
-	refused atomic.Bool
-}
-
-// Name is empty so that the call keeps the content-type application/grpc that a
-// call without a forced codec sends; a name would add a content-subtype to it.
-func (*pageCodec) Name() string { return "" }
-
-func (*pageCodec) Marshal(v any) (mem.BufferSlice, error) {
-	m, ok := v.(proto.Message)
-	if !ok {
-		return nil, fmt.Errorf("proxy: marshal %T: not a protobuf message", v)
-	}
-	b, err := proto.Marshal(m)
-	if err != nil {
-		return nil, err
-	}
-	return mem.BufferSlice{mem.SliceBuffer(b)}, nil
-}
-
-func (c *pageCodec) Unmarshal(data mem.BufferSlice, v any) error {
-	m, ok := v.(proto.Message)
-	if !ok {
-		return fmt.Errorf("proxy: unmarshal into %T: not a protobuf message", v)
-	}
-	buf := data.MaterializeToBuffer(mem.DefaultBufferPool())
-	defer buf.Free()
-	wire := buf.ReadOnlyData()
-	over, err := holdsMore(wire, tasksField, c.limit)
-	if err != nil {
-		return err
-	}
-	if over {
-		c.refused.Store(true)
-		return tooManyItems(c.limit)
-	}
-	return proto.Unmarshal(wire, m)
-}
-
-// holdsMore reports whether the protobuf message b has more than limit entries of
-// the length-delimited field num at its top level. It reads the tags and skips
-// the values, and stops at the entry past limit: nothing is decoded or built.
-func holdsMore(b []byte, num protowire.Number, limit int) (bool, error) {
-	n := 0
-	for len(b) > 0 {
-		field, kind, size := protowire.ConsumeTag(b)
-		if size < 0 {
-			return false, protowire.ParseError(size)
-		}
-		b = b[size:]
-		if size = protowire.ConsumeFieldValue(field, kind, b); size < 0 {
-			return false, protowire.ParseError(size)
-		}
-		b = b[size:]
-		if field == num && kind == protowire.BytesType {
-			if n++; n > limit {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
-}
-
 func (p *grpcProxyV1) ApplyTask(ctx context.Context, sub TaskSubmission) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -164,9 +89,16 @@ func (p *grpcProxyV1) ApplyTask(ctx context.Context, sub TaskSubmission) (string
 	}
 	client := taskv1.NewTaskServiceClient(p.conn)
 
-	resp, err := client.ApplyTask(p.authCtx(ctx), &taskv1.ApplyTaskRequest{Manifest: sub.Spec, Preconditions: sub.Preconditions})
+	answer := newAnswerCodec(0, 0)
+	resp, err := client.ApplyTask(p.authCtx(ctx), &taskv1.ApplyTaskRequest{Manifest: sub.Spec, Preconditions: sub.Preconditions}, answer.option())
+	if refused := answer.refused(); refused != nil {
+		return "", agentError(ErrApplyTask, refused)
+	}
 	if err != nil {
 		return "", agentError(ErrApplyTask, err)
+	}
+	if err = checkConditions(resp.GetTask()); err != nil {
+		return "", agentError(ErrApplyTask, fmt.Errorf("%w: %w", ErrDecode, err))
 	}
 	taskID := resp.GetTask().GetMetadata().GetName()
 	if taskID == "" {
@@ -186,9 +118,16 @@ func (p *grpcProxyV1) GetTask(ctx context.Context, taskID string) (*proxyv1.GetT
 	defer cancel()
 	client := taskv1.NewTaskServiceClient(p.conn)
 
-	resp, err := client.GetTask(p.authCtx(ctx), &taskv1.GetTaskRequest{Name: taskID})
+	answer := newAnswerCodec(0, 0)
+	resp, err := client.GetTask(p.authCtx(ctx), &taskv1.GetTaskRequest{Name: taskID}, answer.option())
+	if refused := answer.refused(); refused != nil {
+		return nil, agentError(ErrGetTask, refused)
+	}
 	if err != nil {
 		return nil, responseError(ErrGetTask, err)
+	}
+	if err = checkConditions(resp.GetTask()); err != nil {
+		return nil, agentError(ErrGetTask, fmt.Errorf("%w: %w", ErrDecode, err))
 	}
 
 	if resp.GetTask() == nil || resp.GetTask().GetMetadata().GetName() != taskID || resp.GetTask().GetMetadata().GetUid() == "" {
@@ -219,7 +158,11 @@ func (p *grpcProxyV1) DeleteTask(ctx context.Context, taskID string) error {
 	if task.Task == nil || task.Task.UID == "" {
 		return fmt.Errorf("%w: missing task UID", ErrDeleteTask)
 	}
-	_, err = taskv1.NewTaskServiceClient(p.conn).DeleteTask(p.authCtx(ctx), &taskv1.DeleteTaskRequest{Name: taskID, Preconditions: &taskv1.WritePreconditions{Uid: &task.Task.UID}})
+	answer := newAnswerCodec(0, 0)
+	_, err = taskv1.NewTaskServiceClient(p.conn).DeleteTask(p.authCtx(ctx), &taskv1.DeleteTaskRequest{Name: taskID, Preconditions: &taskv1.WritePreconditions{Uid: &task.Task.UID}}, answer.option())
+	if refused := answer.refused(); refused != nil {
+		return agentError(ErrDeleteTask, refused)
+	}
 	if err != nil {
 		return agentError(ErrDeleteTask, err)
 	}
@@ -236,7 +179,11 @@ func (p *grpcProxyV1) CancelTask(ctx context.Context, taskID string) error {
 	if task.Task == nil || task.Task.UID == "" {
 		return fmt.Errorf("%w: missing task UID", ErrDeleteTask)
 	}
-	_, err = taskv1.NewTaskServiceClient(p.conn).CancelTask(p.authCtx(ctx), &taskv1.CancelTaskRequest{Name: taskID, Preconditions: &taskv1.WritePreconditions{Uid: &task.Task.UID}})
+	answer := newAnswerCodec(0, 0)
+	_, err = taskv1.NewTaskServiceClient(p.conn).CancelTask(p.authCtx(ctx), &taskv1.CancelTaskRequest{Name: taskID, Preconditions: &taskv1.WritePreconditions{Uid: &task.Task.UID}}, answer.option())
+	if refused := answer.refused(); refused != nil {
+		return agentError(ErrDeleteTask, refused)
+	}
 	if err != nil {
 		return agentError(ErrDeleteTask, err)
 	}
@@ -280,6 +227,25 @@ func (p *grpcProxyV1) StreamTaskLogsForUID(ctx context.Context, taskID, uid stri
 		}
 	}()
 	return ch, nil
+}
+
+// checkListed refuses a task of a listing whose ID is over MaxTaskIDBytes or that
+// has more conditions than MaxTaskConditions.
+func checkListed(t *taskv1.Task) error {
+	if err := checkTaskID(t.GetMetadata().GetName()); err != nil {
+		return err
+	}
+	return checkConditions(t)
+}
+
+// checkConditions refuses a task with more conditions than MaxTaskConditions, as
+// the JSON of an HTTP agent is refused while it is decoded. The scan of the answer
+// has bounded what the task cost; this keeps the transports to one rule.
+func checkConditions(t *taskv1.Task) error {
+	if len(t.GetStatus().GetConditions()) > MaxTaskConditions {
+		return tooManyConditions()
+	}
+	return nil
 }
 
 // taskDataToProxy converts a proto TaskData (nested metadata + spec + status)

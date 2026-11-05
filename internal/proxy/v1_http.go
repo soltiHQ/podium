@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,12 +49,12 @@ type taskResource struct {
 		Slot string `json:"slot"`
 	} `json:"spec"`
 	Status struct {
-		Phase              string                  `json:"phase"`
-		Attempt            int                     `json:"attempt"`
-		Error              string                  `json:"error"`
-		ExitCode           *int32                  `json:"exitCode"`
-		ObservedGeneration uint64                  `json:"observedGeneration"`
-		Conditions         []taskConditionResource `json:"conditions"`
+		Phase              string         `json:"phase"`
+		Attempt            int            `json:"attempt"`
+		Error              string         `json:"error"`
+		ExitCode           *int32         `json:"exitCode"`
+		ObservedGeneration uint64         `json:"observedGeneration"`
+		Conditions         taskConditions `json:"conditions"`
 	} `json:"status"`
 }
 
@@ -81,45 +80,6 @@ type listMeta struct {
 	ResourceVersion string  `json:"resourceVersion"`
 	Remaining       *uint64 `json:"remainingItemCount"`
 	TaskUID         string  `json:"taskUid"`
-}
-
-// taskItems is the items of a ListTasks page. It decodes them one at a time and
-// stops at the first one past limit, before it builds it: an empty item takes three
-// bytes in a body and a few hundred on the heap, so the 4 MiB cap on the body does
-// not bound what decoding it costs. A key that comes twice adds to the same list,
-// so the bound holds for the page, whatever its keys.
-type taskItems struct {
-	limit int
-	list  []taskResource
-}
-
-func (t *taskItems) UnmarshalJSON(data []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	token, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	if token == nil { // null, as for a slice
-		return nil
-	}
-	if delim, ok := token.(json.Delim); !ok || delim != '[' {
-		return errors.New("items is not an array")
-	}
-	for dec.More() {
-		if len(t.list) == t.limit {
-			return tooManyItems(t.limit)
-		}
-		var item taskResource
-		if err = dec.Decode(&item); err != nil {
-			return err
-		}
-		if err = checkTaskID(item.Metadata.Name); err != nil {
-			return err
-		}
-		t.list = append(t.list, item)
-	}
-	_, err = dec.Token() // the closing bracket
-	return err
 }
 
 func (p *httpProxyV1) taskURL(name, suffix string) string {
@@ -160,6 +120,9 @@ func (p *httpProxyV1) ListTasks(ctx context.Context, f TaskFilter) (*proxyv1.Lis
 	}{Items: taskItems{limit: pageBound(f.Limit)}}
 	if err := p.request(ctx, http.MethodGet, u.String(), nil, &out); err != nil {
 		return nil, agentError(ErrListTasks, err)
+	}
+	if err := checkCursor(out.Metadata.Next); err != nil {
+		return nil, agentError(ErrListTasks, fmt.Errorf("%w: %w", ErrDecode, err))
 	}
 	tasks := make([]proxyv1.Task, len(out.Items.list))
 	for i, t := range out.Items.list {

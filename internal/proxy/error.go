@@ -26,10 +26,19 @@ var (
 	// may succeed, a list page with a lower limit for one. An agent's own
 	// ResourceExhausted, a quota for one, does not carry it.
 	ErrResponseTooLarge = errors.New("proxy: response too large")
-	// ErrTooManyItems indicates a ListTasks page that holds more items than the
-	// request's limit. The proxy refuses it before it builds them, and the error
-	// is a decode failure too: no agent answers so.
+	// ErrTooManyItems indicates a ListTasks or ListTaskRuns page that holds more
+	// items than the request's limit, its page size for runs. The proxy refuses it
+	// before it builds them, and the error is a decode failure too: no agent
+	// answers so.
 	ErrTooManyItems = errors.New("proxy: too many items")
+	// ErrTooManyElements indicates an answer, or an item of one, that holds more
+	// repeated elements than the proxy builds: more than a gRPC answer may hold in
+	// all, or more conditions than a task may. It is an ErrTooManyItems, and a decode
+	// failure too.
+	ErrTooManyElements error = elementsError{}
+	// ErrCursorTooLong indicates a ListTasks page whose next cursor is longer than
+	// MaxCursorBytes. It is a decode failure too.
+	ErrCursorTooLong = errors.New("proxy: cursor too long")
 	// ErrListTasks indicates a ListTasks call failed (HTTP or gRPC).
 	ErrListTasks = errors.New("proxy: list tasks")
 	// ErrUnsupportedAPIVersion indicates the agent reported an unknown API version.
@@ -48,3 +57,11 @@ var (
 	// ErrNilPool indicates a required *Pool dependency is nil.
 	ErrNilPool = errors.New("proxy: nil pool")
 )
+
+// elementsError is the type of ErrTooManyElements: it reads as its own error and is
+// also ErrTooManyItems.
+type elementsError struct{}
+
+func (elementsError) Error() string { return "proxy: too many elements" }
+
+func (elementsError) Unwrap() error { return ErrTooManyItems }

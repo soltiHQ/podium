@@ -43,22 +43,8 @@ limit up to 1000. Offset pagination is unsupported. An answer that the proxy
 refuses for its size, a body over 4 MiB from an HTTP agent (an `ErrDecode` too)
 or a message over the gRPC receive limit, carries `ErrResponseTooLarge`, so that
 a caller can ask for a smaller page; an agent's own `ResourceExhausted`, a quota
-for one, does not.
-
-The 4 MiB cap bounds the bytes of an answer, not what building it costs: an empty
-item takes three bytes of JSON or two of protobuf and a few hundred bytes of heap.
-So `ListTasks` refuses a page of more items than the request's limit (1000, the
-most a page holds, when it names none) before it builds them. The error wraps
-`ErrTooManyItems` and `ErrDecode`, the Kind is the one of any decode error, and it
-carries no `ErrResponseTooLarge`: a smaller page would not help. Over HTTP the
-items are decoded one at a time from the buffered body, and the decoder stops at
-the first one past the limit. Over gRPC a codec made for the call counts the
-`tasks` entries on the wire, before the answer is decoded; it names no
-content-subtype, so the call sends the same `application/grpc` as any other.
-A task ID over `MaxTaskIDBytes` (1024; the SDK limits a name to 63 bytes a
-segment) refuses the page too, as an `ErrDecode`. Both the sync runner's listing
-and the REST listing of an agent's tasks go through it. What a single item holds,
-its conditions for one, is not bounded here beyond the 4 MiB of the answer.
+for one, does not. What a page and an item may hold has bounds of its own, see "What
+an answer may build".
 
 The live run-history inspector joins only pages with the same
 task UID and resource version. It rejects repeated cursors and histories
@@ -71,6 +57,61 @@ when reconnecting. The returned event channel closes at stream completion,
 cancellation or a transport error. `AgentProxy` does not expose a separate
 mid-stream error channel, so an early close alone cannot distinguish EOF from
 transport failure.
+
+## What an answer may build
+
+The 4 MiB cap bounds the bytes of an answer, not what building it costs: an empty
+element takes two bytes of protobuf or three of JSON on the wire, and about a
+hundred or a few hundred bytes on the heap. So the proxy bounds what an answer
+builds, before it builds it where it can. An answer over a bound fails the call with
+an error that wraps `ErrDecode`, the Kind of a decode error, and carries no
+`ErrResponseTooLarge`: a smaller page would not help. Every call goes through these,
+the sync runner's listing and the REST listing of an agent's tasks as well.
+
+| What | Bound | Where it is checked | Error |
+|---|---|---|---|
+| Items of a `ListTasks` page | the request's limit; 1000, the most a page holds, when it names none | gRPC: on the wire, before decoding. HTTP: while decoding, before the item past the limit is decoded | `ErrTooManyItems` |
+| Runs of a `ListTaskRuns` page | the page size of the request | as the items of a page | `ErrTooManyItems` |
+| Elements of every repeated field and map of a gRPC answer, at any depth | 262144 (`1 << 18`) in all | on the wire, before decoding | `ErrTooManyElements` |
+| Conditions of a task, in a listing, `GetTask` and the answer of `ApplyTask` | 64 (`MaxTaskConditions`) | HTTP: while decoding, before the 65th is decoded. gRPC: after decoding, which the budget above has capped | `ErrTooManyElements` |
+| Task ID in a listing | 1024 bytes (`MaxTaskIDBytes`; the SDK limits a name to 63 bytes a segment) | after the item (HTTP) or the page (gRPC) is decoded | `ErrDecode` |
+| Next cursor of a listing | 4096 bytes (`MaxCursorBytes`) | after the page is decoded | `ErrCursorTooLong` |
+
+`ErrTooManyElements` is an `ErrTooManyItems` too; the sync runner tells the two apart
+(a page with more tasks than asked, a page with too many elements).
+
+Over gRPC every unary call (`ListTasks`, `GetTask`, `ApplyTask`, `DeleteTask`,
+`CancelTask`, `ListTaskRuns`) is made with a codec of its own. Before
+`proto.Unmarshal` it scans the wire bytes of the answer against the descriptor of the
+response message, and counts every element of every repeated field and map in the
+tree of messages under it: each entry of a map, each value of a packed scalar field.
+A field the schema does not know, or whose wire type it does not fit, is skipped, as
+`proto.Unmarshal` keeps it as unknown bytes. Messages nested deeper than protobuf
+decodes (10000) are refused. The codec names no content-subtype, so the call sends
+the same `application/grpc` as a call without it. The log stream needs no scan: its
+messages hold no repeated field and no map.
+
+Over HTTP every list the proxy builds from JSON is one of the three in the table:
+they are decoded an element at a time by `jsonbounds.go`, and a key that comes twice
+adds to the same list. The decoded structs hold no other list, and a field they do
+not name is skipped without being built. HTTP has no budget in all, as the three
+bounds add up to less.
+
+What the tests measure (`TotalAlloc` of the process during one call, the fake agent
+included; a call that reads a page of 4 MiB allocates 8 to 20 MiB by itself):
+
+| Answer | Unbounded decode | Refused |
+|---|---|---|
+| `ListTasks`: a task with a million empty conditions, or env entries, or args; a thousand tasks with a thousand conditions each | 86 to 255 MiB (gRPC) | 2 to 4 MiB (gRPC) |
+| `ListTasks`: a task with a million empty conditions | 499 MiB (HTTP) | 21 MiB (HTTP) |
+| `GetTask`, `ApplyTask`: a task with a million empty conditions | 411 to 491 MiB (HTTP), 125 to 159 MiB (gRPC) | 13 MiB (HTTP), 4 MiB (gRPC) |
+| `ListTaskRuns`: a page of a million empty runs | 748 MiB (HTTP), 604 MiB (gRPC) | 14 MiB (HTTP), 8 MiB (gRPC) |
+| An answer of exactly 262144 elements | | decodes, 32 MiB |
+
+The bounds refuse nothing compliant: the tests decode a page of a thousand tasks
+with 64 conditions and 150 env entries each (215000 elements, 1.9 MB) over gRPC and a
+thousand tasks with 64 conditions over HTTP. Within the 4 MiB the proxy reads, the
+budget is reached only by an answer whose elements average under 16 bytes.
 
 ## Migration
 

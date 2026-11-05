@@ -19,6 +19,14 @@ const (
 	// refused, as one that could not be decoded.
 	MaxTaskIDBytes = 1024
 
+	// MaxTaskConditions is the most conditions a task may hold in an answer, on both
+	// transports. An answer with a task that has more is refused, not cut.
+	MaxTaskConditions = 64
+
+	// MaxCursorBytes is the longest next cursor a ListTasks page may name; a page
+	// that names a longer one is refused.
+	MaxCursorBytes = 4096
+
 	// maxTaskPage is the most tasks a page holds, and the largest limit a request
 	// may name.
 	maxTaskPage = 1000
@@ -114,6 +122,26 @@ func pageBound(limit int) int {
 // tooManyItems is the error for a page that holds more than limit items.
 func tooManyItems(limit int) error {
 	return fmt.Errorf("%w: more than %d items", ErrTooManyItems, limit)
+}
+
+// tooManyElements is the error for an answer, or an item of one, that holds more
+// repeated elements than the proxy builds; what says which.
+func tooManyElements(what string) error {
+	return fmt.Errorf("%w: %s", ErrTooManyElements, what)
+}
+
+// tooManyConditions is the error for a task that holds more than MaxTaskConditions.
+func tooManyConditions() error {
+	return tooManyElements(fmt.Sprintf("a task holds more than %d conditions", MaxTaskConditions))
+}
+
+// checkCursor refuses a next cursor over MaxCursorBytes. The cursor is not in the
+// error: it can be as long as the page.
+func checkCursor(cursor string) error {
+	if len(cursor) > MaxCursorBytes {
+		return fmt.Errorf("%w: next cursor of %d bytes, over %d", ErrCursorTooLong, len(cursor), MaxCursorBytes)
+	}
+	return nil
 }
 
 // checkTaskID refuses a task ID over MaxTaskIDBytes. The ID is not in the error:

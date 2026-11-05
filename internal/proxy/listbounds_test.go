@@ -13,11 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/encoding"
-	"google.golang.org/grpc/mem"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/protobuf/encoding/protowire"
 
 	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
 	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
@@ -52,13 +48,16 @@ func emptyItemsPage(size int) []byte {
 // that says the page held too many items. It is not one the proxy refused for its
 // size, which asks the caller for a smaller page, and errkind sorts it as the
 // error of an agent.
-func wantTooManyItems(t *testing.T, err error) {
+func wantTooManyItems(t *testing.T, err, op error) {
 	t.Helper()
-	if !errors.Is(err, ErrListTasks) || !errors.Is(err, ErrDecode) || !errors.Is(err, ErrTooManyItems) {
-		t.Fatalf("ListTasks = %v, want a list tasks decode error that is ErrTooManyItems", err)
+	if !errors.Is(err, op) || !errors.Is(err, ErrDecode) || !errors.Is(err, ErrTooManyItems) {
+		t.Fatalf("%v: want a %v decode error that is ErrTooManyItems", err, op)
+	}
+	if errors.Is(err, ErrTooManyElements) {
+		t.Fatalf("%v: a page of too many items is no flood of elements", err)
 	}
 	if errors.Is(err, ErrResponseTooLarge) {
-		t.Fatalf("ListTasks = %v: a page of too many items is no page too large, a smaller one is not what to ask for", err)
+		t.Fatalf("%v: a page of too many items is no page too large, a smaller one is not what to ask for", err)
 	}
 	if kind := errkind.Classify(err); kind != errkind.Internal {
 		t.Fatalf("kind = %v, want Internal", kind)
@@ -84,42 +83,7 @@ func TestHTTPListTasksRefusesExtraItemsBeforeDecode(t *testing.T) {
 	if grew > pageBudget {
 		t.Errorf("the call allocated %d MiB, want under %d MiB", grew>>20, pageBudget>>20)
 	}
-	wantTooManyItems(t, err)
-}
-
-// rawPageServer answers ListTasks with the bytes of a page it holds, as an agent
-// that built the page by hand would. The proto codec of a server cannot: the
-// millions of tasks it would have to marshal cost the test the heap it measures.
-type rawPageServer struct {
-	taskContractServer
-	marker *taskv1.ListTasksResponse // what ListTasks returns, for the codec to swap
-}
-
-func (s *rawPageServer) ListTasks(context.Context, *taskv1.ListTasksRequest) (*taskv1.ListTasksResponse, error) {
-	return s.marker, nil
-}
-
-// rawPageCodec marshals the marker response of a rawPageServer as page, and
-// every other message as the proto codec does.
-type rawPageCodec struct {
-	encoding.CodecV2
-	marker *taskv1.ListTasksResponse
-	page   []byte
-}
-
-func (c rawPageCodec) Marshal(v any) (mem.BufferSlice, error) {
-	if v == c.marker {
-		return mem.BufferSlice{mem.SliceBuffer(c.page)}, nil
-	}
-	return c.CodecV2.Marshal(v)
-}
-
-// rawPageProxy is a gRPC client of an agent that answers every ListTasks with page.
-func rawPageProxy(t *testing.T, page []byte) *grpcProxyV1 {
-	t.Helper()
-	marker := &taskv1.ListTasksResponse{}
-	codec := rawPageCodec{CodecV2: encoding.GetCodecV2("proto"), marker: marker, page: page}
-	return grpcContractProxyOver(t, &rawPageServer{marker: marker}, []grpc.ServerOption{grpc.ForceServerCodecV2(codec)})
+	wantTooManyItems(t, err, ErrListTasks)
 }
 
 // An empty task takes two bytes on the wire: tag 1, the tasks field, and a length
@@ -127,7 +91,7 @@ func rawPageProxy(t *testing.T, page []byte) *grpcProxyV1 {
 // the heap more than 500 MiB to build.
 func TestGRPCListTasksRefusesExtraItemsBeforeDecode(t *testing.T) {
 	page := bytes.Repeat([]byte{0x0a, 0x00}, maxAgentMessageBytes/2)
-	p := rawPageProxy(t, page)
+	p := newRawAnswers(answers{list: page}).proxy(t)
 
 	var err error
 	grew := allocated(func() { _, err = p.ListTasks(context.Background(), TaskFilter{Limit: 1000}) })
@@ -136,30 +100,31 @@ func TestGRPCListTasksRefusesExtraItemsBeforeDecode(t *testing.T) {
 	if grew > pageBudget {
 		t.Errorf("the call allocated %d MiB, want under %d MiB", grew>>20, pageBudget>>20)
 	}
-	wantTooManyItems(t, err)
+	wantTooManyItems(t, err, ErrListTasks)
 }
 
-// listing is an agent of one transport, with a page that names the given task IDs.
+// listing is an agent of one transport, with a page that names the given task IDs
+// and the given next cursor.
 type listing struct {
 	name  string
-	agent func(t *testing.T, ids []string) AgentProxy
+	agent func(t *testing.T, ids []string, cursor string) AgentProxy
 }
 
 var listings = []listing{
-	{"http", func(t *testing.T, ids []string) AgentProxy {
+	{"http", func(t *testing.T, ids []string, cursor string) AgentProxy {
 		t.Helper()
 		items := make([]string, len(ids))
 		for i, id := range ids {
 			items[i] = fmt.Sprintf(`{"metadata":{"name":%q,"uid":"u"}}`, id)
 		}
-		body := `{"metadata":{},"items":[` + strings.Join(items, ",") + `]}`
+		body := fmt.Sprintf(`{"metadata":{"continue":%q},"items":[%s]}`, cursor, strings.Join(items, ","))
 		agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, body) }))
 		t.Cleanup(agent.Close)
 		return &httpProxyV1{endpoint: agent.URL, client: agent.Client()}
 	}},
-	{"grpc", func(t *testing.T, ids []string) AgentProxy {
+	{"grpc", func(t *testing.T, ids []string, cursor string) AgentProxy {
 		t.Helper()
-		page := &taskv1.ListTasksResponse{}
+		page := &taskv1.ListTasksResponse{Continue: cursor}
 		for _, id := range ids {
 			page.Tasks = append(page.Tasks, &taskv1.Task{Metadata: &taskv1.ObjectMeta{Name: id, Uid: "u"}})
 		}
@@ -196,12 +161,12 @@ func TestListTasksPageBounds(t *testing.T) {
 	} {
 		for _, l := range listings {
 			t.Run(l.name+"/"+tc.name, func(t *testing.T) {
-				p := l.agent(t, names(tc.items))
+				p := l.agent(t, names(tc.items), "")
 
 				resp, err := p.ListTasks(context.Background(), TaskFilter{Limit: tc.limit})
 
 				if !tc.ok {
-					wantTooManyItems(t, err)
+					wantTooManyItems(t, err, ErrListTasks)
 					return
 				}
 				if err != nil || len(resp.Tasks) != tc.items || resp.Total != tc.items {
@@ -225,7 +190,7 @@ func TestListTasksRefusesLongTaskID(t *testing.T) {
 	} {
 		for _, l := range listings {
 			t.Run(l.name+"/"+tc.name, func(t *testing.T) {
-				p := l.agent(t, []string{"task-0000", tc.id})
+				p := l.agent(t, []string{"task-0000", tc.id}, "")
 
 				resp, err := p.ListTasks(context.Background(), TaskFilter{Limit: 10})
 
@@ -286,65 +251,6 @@ func TestGRPCListTasksKeepsTheWireOfTheCall(t *testing.T) {
 	}
 }
 
-// pageEntries is a protobuf message of n entries of the tasks field, each holding
-// payload.
-func pageEntries(n int, payload []byte) []byte {
-	var b []byte
-	for range n {
-		b = protowire.AppendTag(b, tasksField, protowire.BytesType)
-		b = protowire.AppendBytes(b, payload)
-	}
-	return b
-}
-
-func TestTasksFieldIsTheTasksFieldOfTheSchema(t *testing.T) {
-	field := (&taskv1.ListTasksResponse{}).ProtoReflect().Descriptor().Fields().ByName("tasks")
-	if field == nil || field.Number() != tasksField {
-		t.Fatalf("tasks field = %v, want number %d", field, tasksField)
-	}
-}
-
-// holdsMore counts the entries of one field at the top level of a message and
-// reads nothing below it.
-func TestHoldsMore(t *testing.T) {
-	var (
-		other      = protowire.AppendString(protowire.AppendTag(nil, 4, protowire.BytesType), "next")
-		varint     = protowire.AppendVarint(protowire.AppendTag(nil, tasksField, protowire.VarintType), 7)
-		nested     = pageEntries(1, pageEntries(5, []byte("deep"))) // entries of tasks inside a task are not tasks
-		interleave = slices.Concat(pageEntries(1, []byte("a")), other, varint, pageEntries(1, nil), other)
-		group      = protowire.AppendTag(nil, 9, protowire.StartGroupType)
-	)
-	for _, tc := range []struct {
-		name  string
-		wire  []byte
-		limit int
-		over  bool
-		bad   bool
-	}{
-		{"an empty message", nil, 0, false, false},
-		{"entries up to the limit", pageEntries(3, nil), 3, false, false},
-		{"one entry over the limit", pageEntries(3, nil), 2, true, false},
-		{"an entry over a limit of none", pageEntries(1, nil), 0, true, false},
-		{"entries of other fields", slices.Concat(other, other, other), 0, false, false},
-		{"a value of the field that is no entry", varint, 0, false, false},
-		{"entries below the field", nested, 1, false, false},
-		{"entries between other fields", interleave, 2, false, false},
-		{"entries between other fields, over", interleave, 1, true, false},
-		{"a length that overruns the message", append(pageEntries(1, nil), 0x0a, 0x05, 'x'), 5, false, true},
-		{"a group that never ends", slices.Concat(pageEntries(1, nil), group), 5, false, true},
-		{"a bad tag", []byte{0x80}, 5, false, true},
-		{"a message that is over before it is bad", slices.Concat(pageEntries(3, nil), []byte{0x80}), 2, true, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			over, err := holdsMore(tc.wire, tasksField, tc.limit)
-
-			if (err != nil) != tc.bad || over != tc.over {
-				t.Fatalf("holdsMore = %v, %v, want %v, error %v", over, err, tc.over, tc.bad)
-			}
-		})
-	}
-}
-
 // httpPage serves body as the answer to every call, and reads the page it makes.
 func httpPage(t *testing.T, body string, limit int) (*proxyv1.ListTasksResponse, error) {
 	t.Helper()
@@ -399,7 +305,7 @@ func TestHTTPListTasksDecodesThePage(t *testing.T) {
 					t.Fatalf("cursor %q, version %q, want c and 7", resp.NextCursor, resp.ResourceVersion)
 				}
 			case "many":
-				wantTooManyItems(t, err)
+				wantTooManyItems(t, err, ErrListTasks)
 			default:
 				if !errors.Is(err, ErrListTasks) || !errors.Is(err, ErrDecode) || errors.Is(err, ErrTooManyItems) {
 					t.Fatalf("ListTasks = %v, want a list tasks decode error that is no ErrTooManyItems", err)

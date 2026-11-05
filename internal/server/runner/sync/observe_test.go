@@ -54,6 +54,18 @@ func tooManyItems() error {
 	return agentErr{errkind.Internal, fmt.Errorf("%w: %w: %w: more than 1000 items", proxy.ErrListTasks, proxy.ErrDecode, proxy.ErrTooManyItems)}
 }
 
+// tooManyElementsErr is what the proxy returns for an answer that holds more
+// repeated elements than it builds: a decode error, and an ErrTooManyItems too.
+func tooManyElementsErr() error {
+	return agentErr{errkind.Internal, fmt.Errorf("%w: %w: %w: a task holds more than 64 conditions", proxy.ErrListTasks, proxy.ErrDecode, proxy.ErrTooManyElements)}
+}
+
+// cursorTooLongErr is what the proxy returns for a page whose next cursor is over
+// the limit.
+func cursorTooLongErr() error {
+	return agentErr{errkind.Internal, fmt.Errorf("%w: %w: %w: next cursor of 4097 bytes, over 4096", proxy.ErrListTasks, proxy.ErrDecode, proxy.ErrCursorTooLong)}
+}
+
 // holdN makes the agent hold n tasks, task-0000 on.
 func holdN(fp *fakeProxy, n int) {
 	for i := range n {

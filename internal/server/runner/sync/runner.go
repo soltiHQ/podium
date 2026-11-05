@@ -171,6 +171,7 @@ const (
 	causeSnapshot   = "pages name different snapshots"
 	causeAnswer     = "page answered with an error"
 	causeMoreTasks  = "agent returned more tasks than asked"
+	causeElements   = "agent returned a page with too many elements"
 	causeLongCursor = "agent returned a cursor that is too long"
 	causeListSize   = "listing too large"
 )
@@ -776,13 +777,14 @@ const taskListLimit = 1000
 
 // What an agent may make a listing cost, whatever it answers. A page with more
 // tasks than were asked for, or a cursor longer than maxCursorBytes, is an answer
-// no agent gives: the proxy refuses the first before it builds the tasks, and the
-// runner checks both itself. A listing that would hold more than maxListedTasks
-// task IDs or maxListedIDBytes bytes of them, or take more than maxListedPages
-// calls, refused pages included, is not followed further: the runner keeps neither
-// without bound, and the longest task ID the proxy lets through (proxy.MaxTaskIDBytes)
-// times the count is more bytes than maxListedIDBytes allows, so the count alone
-// does not bound them. Each leaves the listing incomplete, see listTasks.
+// no agent gives. The proxy bounds both, and what a page builds besides, see
+// internal/proxy/README.md; the runner checks the two itself as well. A listing
+// that would hold more than maxListedTasks task IDs or maxListedIDBytes bytes of
+// them, or take more than maxListedPages calls, refused pages included, is not
+// followed further: the runner keeps neither without bound, and the longest task ID
+// the proxy lets through (proxy.MaxTaskIDBytes) times the count is more bytes than
+// maxListedIDBytes allows, so the count alone does not bound them. Each leaves the
+// listing incomplete, see listTasks.
 const (
 	maxCursorBytes   = 4096
 	maxListedTasks   = 65536
@@ -800,7 +802,8 @@ const (
 // false, and no task may be judged missing by it: the budget is used, a task is
 // too large to list, a page fails, a page holds more tasks than it was asked for
 // (the proxy refuses it before it builds the tasks, as ErrTooManyItems, and the
-// runner counts them again), a cursor is longer than maxCursorBytes, the listing
+// runner counts them again), a page holds too many elements (ErrTooManyElements), a
+// cursor is longer than maxCursorBytes (the proxy refuses it first too), the listing
 // would hold more than maxListedTasks task IDs or maxListedIDBytes bytes of them,
 // or take more than maxListedPages calls (a refused page is a call), the agent
 // returns a cursor it returned before, the pages name different snapshots (a
@@ -847,8 +850,14 @@ func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agent
 		case errors.Is(err, proxy.ErrResponseTooLarge):
 			turn.listed = listing{cause: causeTooLarge, err: err}
 			return nil, false
+		case errors.Is(err, proxy.ErrTooManyElements):
+			turn.listed = listing{cause: causeElements, err: err}
+			return nil, false
 		case errors.Is(err, proxy.ErrTooManyItems):
 			turn.listed = listing{cause: causeMoreTasks, err: err}
+			return nil, false
+		case errors.Is(err, proxy.ErrCursorTooLong):
+			turn.listed = listing{cause: causeLongCursor, err: err}
 			return nil, false
 		case err != nil:
 			turn.listed = listing{cause: causeAnswer, err: err}
