@@ -26,6 +26,10 @@ var (
 	// may succeed, a list page with a lower limit for one. An agent's own
 	// ResourceExhausted, a quota for one, does not carry it.
 	ErrResponseTooLarge = errors.New("proxy: response too large")
+	// ErrTooManyItems indicates a ListTasks page that holds more items than the
+	// request's limit. The proxy refuses it before it builds them, and the error
+	// is a decode failure too: no agent answers so.
+	ErrTooManyItems = errors.New("proxy: too many items")
 	// ErrListTasks indicates a ListTasks call failed (HTTP or gRPC).
 	ErrListTasks = errors.New("proxy: list tasks")
 	// ErrUnsupportedAPIVersion indicates the agent reported an unknown API version.

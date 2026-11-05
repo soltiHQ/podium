@@ -63,8 +63,14 @@ func (s *taskContractServer) StreamTaskLogs(r *taskv1.StreamTaskLogsRequest, str
 
 func grpcContractProxy(t *testing.T, s *taskContractServer, opts ...grpc.DialOption) *grpcProxyV1 {
 	t.Helper()
+	return grpcContractProxyOver(t, s, nil, opts...)
+}
+
+// grpcContractProxyOver is grpcContractProxy over a server that has serverOpts.
+func grpcContractProxyOver(t *testing.T, s taskv1.TaskServiceServer, serverOpts []grpc.ServerOption, opts ...grpc.DialOption) *grpcProxyV1 {
+	t.Helper()
 	l := &memoryListener{conns: make(chan net.Conn), done: make(chan struct{})}
-	server := grpc.NewServer()
+	server := grpc.NewServer(serverOpts...)
 	taskv1.RegisterTaskServiceServer(server, s)
 	go func() { _ = server.Serve(l) }()
 	opts = append([]grpc.DialOption{grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return l.DialContext(ctx) }), grpc.WithTransportCredentials(insecure.NewCredentials())}, opts...)

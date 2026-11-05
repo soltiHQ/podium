@@ -4,12 +4,16 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
 	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/mem"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 )
 
 // grpcProxyV1 implements AgentProxy over gRPC (solti.task.v1.TaskService).
@@ -52,13 +56,24 @@ func (p *grpcProxyV1) ListTasks(ctx context.Context, f TaskFilter) (*proxyv1.Lis
 		}
 	}
 
-	resp, err := client.ListTasks(p.authCtx(ctx), req)
+	// The codec of the call refuses a page of more tasks than the limit before it
+	// builds them. grpc-go flattens what a codec returns into an Internal status,
+	// so the codec says it refused the page and the error is made here.
+	limit := pageBound(f.Limit)
+	codec := &pageCodec{limit: limit}
+	resp, err := client.ListTasks(p.authCtx(ctx), req, grpc.ForceCodecV2(codec))
+	if codec.refused.Load() {
+		return nil, agentError(ErrListTasks, fmt.Errorf("%w: %w", ErrDecode, tooManyItems(limit)))
+	}
 	if err != nil {
 		return nil, responseError(ErrListTasks, err)
 	}
 
 	tasks := make([]proxyv1.Task, len(resp.GetTasks()))
 	for i, t := range resp.GetTasks() {
+		if err = checkTaskID(t.GetMetadata().GetName()); err != nil {
+			return nil, agentError(ErrListTasks, fmt.Errorf("%w: %w", ErrDecode, err))
+		}
 		tasks[i] = taskDataToProxy(t)
 	}
 
@@ -66,6 +81,79 @@ func (p *grpcProxyV1) ListTasks(ctx context.Context, f TaskFilter) (*proxyv1.Lis
 		Tasks: tasks,
 		Total: len(tasks), NextCursor: resp.GetContinue(), ResourceVersion: resp.GetResourceVersion(), RemainingCount: resp.RemainingItemCount,
 	}, nil
+}
+
+// tasksField is the number of the repeated tasks field of ListTasksResponse.
+const tasksField protowire.Number = 1
+
+// pageCodec is the protobuf codec of one ListTasks call. It counts the tasks of
+// the answer on the wire, before the answer is decoded, and refuses one of more
+// than limit: an empty task takes two bytes there and about a hundred on the heap,
+// so the 4 MiB a client reads holds two million of them. Otherwise it encodes and
+// decodes as grpc-go's own protobuf codec does. A codec is made for each call: it
+// records its refusal.
+type pageCodec struct {
+	limit   int
+	refused atomic.Bool
+}
+
+// Name is empty so that the call keeps the content-type application/grpc that a
+// call without a forced codec sends; a name would add a content-subtype to it.
+func (*pageCodec) Name() string { return "" }
+
+func (*pageCodec) Marshal(v any) (mem.BufferSlice, error) {
+	m, ok := v.(proto.Message)
+	if !ok {
+		return nil, fmt.Errorf("proxy: marshal %T: not a protobuf message", v)
+	}
+	b, err := proto.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	return mem.BufferSlice{mem.SliceBuffer(b)}, nil
+}
+
+func (c *pageCodec) Unmarshal(data mem.BufferSlice, v any) error {
+	m, ok := v.(proto.Message)
+	if !ok {
+		return fmt.Errorf("proxy: unmarshal into %T: not a protobuf message", v)
+	}
+	buf := data.MaterializeToBuffer(mem.DefaultBufferPool())
+	defer buf.Free()
+	wire := buf.ReadOnlyData()
+	over, err := holdsMore(wire, tasksField, c.limit)
+	if err != nil {
+		return err
+	}
+	if over {
+		c.refused.Store(true)
+		return tooManyItems(c.limit)
+	}
+	return proto.Unmarshal(wire, m)
+}
+
+// holdsMore reports whether the protobuf message b has more than limit entries of
+// the length-delimited field num at its top level. It reads the tags and skips
+// the values, and stops at the entry past limit: nothing is decoded or built.
+func holdsMore(b []byte, num protowire.Number, limit int) (bool, error) {
+	n := 0
+	for len(b) > 0 {
+		field, kind, size := protowire.ConsumeTag(b)
+		if size < 0 {
+			return false, protowire.ParseError(size)
+		}
+		b = b[size:]
+		if size = protowire.ConsumeFieldValue(field, kind, b); size < 0 {
+			return false, protowire.ParseError(size)
+		}
+		b = b[size:]
+		if field == num && kind == protowire.BytesType {
+			if n++; n > limit {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func (p *grpcProxyV1) ApplyTask(ctx context.Context, sub TaskSubmission) (string, error) {

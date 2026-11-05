@@ -48,6 +48,12 @@ func tooLarge() error {
 	return agentErr{errkind.Internal, fmt.Errorf("%w: %w: %w: agent response exceeds 4 MiB", proxy.ErrListTasks, proxy.ErrDecode, proxy.ErrResponseTooLarge)}
 }
 
+// tooManyItems is what the proxy returns for a page that holds more items than the
+// limit: the decode error that says so, which is no page too large.
+func tooManyItems() error {
+	return agentErr{errkind.Internal, fmt.Errorf("%w: %w: %w: more than 1000 items", proxy.ErrListTasks, proxy.ErrDecode, proxy.ErrTooManyItems)}
+}
+
 // holdN makes the agent hold n tasks, task-0000 on.
 func holdN(fp *fakeProxy, n int) {
 	for i := range n {

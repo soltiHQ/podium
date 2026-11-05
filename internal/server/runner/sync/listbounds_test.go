@@ -171,6 +171,9 @@ func TestListingsThatBreakABoundJudgeNothing(t *testing.T) {
 		cause string
 	}{
 		{"a page holds more tasks than asked", overfull, 1, causeMoreTasks},
+		{"the proxy refuses a page of more tasks than asked", func(int, proxy.TaskFilter) ([]string, string, error) {
+			return nil, "", tooManyItems()
+		}, 1, causeMoreTasks},
 		{"a page holds more tasks than the smaller limit asked", func(call int, asked proxy.TaskFilter) ([]string, string, error) {
 			if asked.Limit > 500 {
 				return nil, "", tooLarge()

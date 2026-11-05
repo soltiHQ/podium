@@ -43,7 +43,24 @@ limit up to 1000. Offset pagination is unsupported. An answer that the proxy
 refuses for its size, a body over 4 MiB from an HTTP agent (an `ErrDecode` too)
 or a message over the gRPC receive limit, carries `ErrResponseTooLarge`, so that
 a caller can ask for a smaller page; an agent's own `ResourceExhausted`, a quota
-for one, does not. The live run-history inspector joins only pages with the same
+for one, does not.
+
+The 4 MiB cap bounds the bytes of an answer, not what building it costs: an empty
+item takes three bytes of JSON or two of protobuf and a few hundred bytes of heap.
+So `ListTasks` refuses a page of more items than the request's limit (1000, the
+most a page holds, when it names none) before it builds them. The error wraps
+`ErrTooManyItems` and `ErrDecode`, the Kind is the one of any decode error, and it
+carries no `ErrResponseTooLarge`: a smaller page would not help. Over HTTP the
+items are decoded one at a time from the buffered body, and the decoder stops at
+the first one past the limit. Over gRPC a codec made for the call counts the
+`tasks` entries on the wire, before the answer is decoded; it names no
+content-subtype, so the call sends the same `application/grpc` as any other.
+A task ID over `MaxTaskIDBytes` (1024; the SDK limits a name to 63 bytes a
+segment) refuses the page too, as an `ErrDecode`. Both the sync runner's listing
+and the REST listing of an agent's tasks go through it. What a single item holds,
+its conditions for one, is not bounded here beyond the 4 MiB of the answer.
+
+The live run-history inspector joins only pages with the same
 task UID and resource version. It rejects repeated cursors and histories
 exceeding 1024 rows, 16 pages or 8 MiB of logical payload, returning an
 actionable error instead of an incomplete history. Larger histories use the

@@ -173,18 +173,20 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   large (an answer over 4 MiB) is asked again from the same cursor with half
   the limit, down to one task, and the smaller limit holds for the rest of the
   turn; the next turn starts at 1000 again. The listing is bounded, whatever
-  the agent answers: a page with more tasks than it was asked for, or a cursor
-  over 4096 bytes, is refused, and a listing that would hold more than 65536
-  task IDs or 32 MiB of them, or take more than 1024 calls, refused pages
-  included, stops. A synced rollout whose task is missing from the listing is
-  queued for a reinstall, but only a complete listing shows a task missing. If
-  the budget runs out, a page fails or is refused (a task too large to list
-  even alone included), the listing passes a bound, the agent returns a cursor
-  it returned before, or its pages name different snapshots (resource
-  versions that differ; a page without one is let through), no rollout is
-  judged and none is touched, and the next tick lists again from the first
-  page, as a cursor holds only within a tick. So every synced rollout of an
-  agent is observed each tick when, after the turn's pushes, the agent's task
+  the agent answers. The proxy refuses a page with more tasks than it was asked
+  for, and a task ID over 1024 bytes, before it builds the tasks: a page of empty
+  tasks costs a few KiB, not hundreds of MiB. The runner counts the tasks of a
+  page again, and refuses a cursor over 4096 bytes. A listing that would hold
+  more than 65536 task IDs or 32 MiB of them, or take more than 1024 calls,
+  refused pages included, stops. A synced rollout whose task is missing from
+  the listing is queued for a reinstall, but only a complete listing shows a
+  task missing. If the budget runs out, a page fails or is refused (a task too
+  large to list even alone included), the listing passes a bound, the agent
+  returns a cursor it returned before, or its pages name different snapshots
+  (resource versions that differ; a page without one is let through), no
+  rollout is judged and none is touched, and the next tick lists again from the
+  first page, as a cursor holds only within a tick. So every synced rollout of
+  an agent is observed each tick when, after the turn's pushes, the agent's task
   list can be listed within those bounds, with the last page starting inside
   `push_timeout`; an agent whose list cannot is not observed. A synced rollout
   without a task makes no call.
