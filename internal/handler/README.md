@@ -306,8 +306,13 @@ the token check came first. `HTTPDiscovery` and `GRPCDiscovery` take the same bu
 `agent_auth.require=false` the rate still applies. Thirty concurrent syncs of one agent land 10
 (`TestSyncBurstIsLimitedPerAgent`).
 
-The refusal logs one WARN with the agent ID, the first time for an ID and then at most once a minute for it (the HTTP
-access log and the gRPC call log still record every refused call); the log never holds a token. The buckets are in
+The refusal logs one WARN with the agent ID, the first time for an ID and then at most once a minute for it; the log
+never holds a token. The access loggers record each refused call at DEBUG instead of the WARN of a 4xx or the ERROR of a
+failed gRPC call, so that an agent that keeps syncing cannot flood the log: the 429 carries `Retry-After`
+(`response.TooManyRequests`), the gRPC status carries `RetryInfo` (`status.Throttled`), and `Logger` and `UnaryLogger`
+take either for a throttle, whichever node wrote it, so a follower that forwards a sync logs the leader's refusal at
+DEBUG too (`TestThrottledSyncsAreLoggedAtDebug`, `TestAccessLogOfAThrottleIsDebug`, `TestUnaryLoggerLogsAThrottleAtDebug`).
+The other refusals keep their levels: a wrong token, and the 429 / `ResourceExhausted` of the failure limiter. The buckets are in
 memory, on the node that runs the handlers: in raft mode the leader, where a follower forwards a sync, so the new leader
 counts from its own after a failover, and a restart clears them. A bucket that was not used for 10 minutes is dropped.
 The handlers read the time from a `clock` field that the tests replace, so a refill is never waited for.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/rs/zerolog"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	grpcstatus "google.golang.org/grpc/status"
@@ -37,7 +39,7 @@ const syncLimited = "agent syncs too often: at most 10 at once, then one per 1s"
 type syncResult struct {
 	outcome    syncOutcome
 	message    string // the message of an answer that is not a success
-	retryAfter string // the Retry-After header of the answer, over HTTP
+	retryAfter string // the seconds of the Retry-After header over HTTP, or of the RetryInfo of the status over gRPC
 }
 
 // syncFunc sends req to a handler, with token as the bearer token when it is set.
@@ -142,7 +144,13 @@ func (e *limitEnv) grpcSyncer() syncFunc {
 			ctx = metadata.NewIncomingContext(ctx, metadata.Pairs("authorization", "Bearer "+token))
 		}
 		_, err := g.Sync(ctx, req)
-		out := syncResult{message: grpcstatus.Convert(err).Message()}
+		st := grpcstatus.Convert(err)
+		out := syncResult{message: st.Message()}
+		for _, detail := range st.Details() {
+			if retry, ok := detail.(*errdetails.RetryInfo); ok {
+				out.retryAfter = strconv.Itoa(int(retry.GetRetryDelay().AsDuration() / time.Second))
+			}
+		}
 		switch grpcstatus.Code(err) {
 		case codes.OK:
 			out.outcome = synced
@@ -164,11 +172,11 @@ func (e *limitEnv) grpcSyncer() syncFunc {
 var limitTransports = []struct {
 	name       string
 	syncer     func(*limitEnv) syncFunc
-	retryAfter string                   // the Retry-After header of a sync over the rate
+	retryAfter string                   // when a sync over the rate may come back, in seconds
 	invalid    func(rule string) string // the message of the answer to data that breaks rule
 }{
 	{"http", (*limitEnv).httpSyncer, "1", func(rule string) string { return "Invalid agent data: " + rule + "." }},
-	{"grpc", (*limitEnv).grpcSyncer, "", func(rule string) string { return "invalid agent data: " + rule }},
+	{"grpc", (*limitEnv).grpcSyncer, "1", func(rule string) string { return "invalid agent data: " + rule }},
 }
 
 // as makes a sync of heartbeat's agent come from the agent id.

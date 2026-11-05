@@ -9,12 +9,15 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 // logSink collects what a logger writes; the server's goroutines write while the
@@ -121,6 +124,57 @@ func TestUnaryLoggerLogsRoutingAnswersAtWarn(t *testing.T) {
 			}
 			if got := header.Get(LeaderKey); (tc.hint == "" && len(got) != 0) || (tc.hint != "" && (len(got) != 1 || got[0] != tc.hint)) {
 				t.Fatalf("x-leader %q, want %q", got, tc.hint)
+			}
+			if got := logs.levels(t, "grpc request"); len(got) != 1 || got[0] != tc.level {
+				t.Fatalf("logged the call at %v, want once at %s", got, tc.level)
+			}
+		})
+	}
+}
+
+// retryInfo is an error with code and the RetryInfo that a throttle carries, as
+// status.Throttled builds it.
+func retryInfo(t *testing.T, code codes.Code) error {
+	t.Helper()
+	st, err := status.New(code, "slow down").WithDetails(&errdetails.RetryInfo{RetryDelay: durationpb.New(time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Err()
+}
+
+// A ResourceExhausted that carries RetryInfo is a throttle: a client sent more
+// than its share and was told when to come back, which any client can cause at
+// will, so UnaryLogger logs it at DEBUG, where an ERROR per call would flood the
+// log. Any other ResourceExhausted stays an ERROR, and only ResourceExhausted
+// is a throttle. A follower passes on the leader's answer with its details, and
+// logs a forwarded throttle at DEBUG too.
+func TestUnaryLoggerLogsAThrottleAtDebug(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		node  func(t *testing.T, logged grpc.UnaryServerInterceptor) *node // the node called, logging with logged
+		code  codes.Code
+		level string
+	}{
+		{"a throttle of the handler", func(t *testing.T, logged grpc.UnaryServerInterceptor) *node {
+			return serve(t, retryInfo(t, codes.ResourceExhausted), logged, UnaryLeader(&leaderStub{leading: true}, LeaderOptions{Port: 50051}))
+		}, codes.ResourceExhausted, "debug"},
+		{"a throttle of the leader, forwarded", func(t *testing.T, logged grpc.UnaryServerInterceptor) *node {
+			leader := serve(t, retryInfo(t, codes.ResourceExhausted), UnaryLeader(&leaderStub{leading: true}, LeaderOptions{Port: 50051}))
+			return serve(t, nil, logged, UnaryLeader(&leaderStub{leader: "127.0.0.1:7000"}, LeaderOptions{Port: leader.port, Forwarder: syncForwarder(t)}))
+		}, codes.ResourceExhausted, "debug"},
+		{"a ResourceExhausted without RetryInfo", func(t *testing.T, logged grpc.UnaryServerInterceptor) *node {
+			return serve(t, status.Error(codes.ResourceExhausted, "rate limited"), logged, UnaryLeader(&leaderStub{leading: true}, LeaderOptions{Port: 50051}))
+		}, codes.ResourceExhausted, "error"},
+		{"RetryInfo on another code", func(t *testing.T, logged grpc.UnaryServerInterceptor) *node {
+			return serve(t, retryInfo(t, codes.Unavailable), logged, UnaryLeader(&leaderStub{leading: true}, LeaderOptions{Port: 50051}))
+		}, codes.Unavailable, "error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := &logSink{}
+			n := tc.node(t, UnaryLogger(zerolog.New(logs)))
+			if _, err := n.client(t).Sync(context.Background(), syncRequest()); status.Code(err) != tc.code {
+				t.Fatalf("Sync: %v, want %v", err, tc.code)
 			}
 			if got := logs.levels(t, "grpc request"); len(got) != 1 || got[0] != tc.level {
 				t.Fatalf("logged the call at %v, want once at %s", got, tc.level)

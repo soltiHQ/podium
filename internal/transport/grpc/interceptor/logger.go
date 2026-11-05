@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
@@ -13,11 +14,15 @@ import (
 )
 
 // UnaryLogger returns a unary server interceptor that logs every completed call: at INFO, and at ERROR when it
-// fails. The exception is the Unavailable "not the leader" answer with the x-leader hint, which is logged at WARN: a
+// fails. There are two exceptions. The Unavailable "not the leader" answer with the x-leader hint is logged at WARN: a
 // write that reached a follower is a routing condition and not a failure of this node, as the HTTP access log has
 // it for a 503 with X-Leader, and only the interceptors that route writes, inside this one, mark it
 // (hintNotLeader). Any other failure stays an ERROR: an Unavailable without the hint, and "leader unreachable",
-// which keeps its hint, as the HTTP access log keeps the 502 of an unreachable leader an ERROR.
+// which keeps its hint, as the HTTP access log keeps the 502 of an unreachable leader an ERROR. A ResourceExhausted
+// that carries RetryInfo is logged at DEBUG: it is a throttle, a client that sent more than its share and was told
+// when to come back, which any client can cause at will, as the HTTP access log has it for a 429 with Retry-After,
+// and only status.Throttled attaches that detail. Any other ResourceExhausted stays an ERROR. A follower that
+// forwards a call passes the leader's error on with its details, and logs the same line for it.
 func UnaryLogger(logger zerolog.Logger) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		start := time.Now()
@@ -33,6 +38,8 @@ func UnaryLogger(logger zerolog.Logger) grpc.UnaryServerInterceptor {
 		switch {
 		case code == codes.Unavailable && slot.notLeader.Load():
 			evt = logger.Warn().Err(err)
+		case throttle(st):
+			evt = logger.Debug().Err(err)
 		case err != nil:
 			evt = logger.Error().Err(err)
 		}
@@ -52,4 +59,17 @@ func UnaryLogger(logger zerolog.Logger) grpc.UnaryServerInterceptor {
 		evt.Msg("grpc request")
 		return resp, err
 	}
+}
+
+// throttle reports whether st is a throttle: a ResourceExhausted with RetryInfo.
+func throttle(st *grpcstatus.Status) bool {
+	if st.Code() != codes.ResourceExhausted {
+		return false
+	}
+	for _, detail := range st.Details() {
+		if _, ok := detail.(*errdetails.RetryInfo); ok {
+			return true
+		}
+	}
+	return false
 }

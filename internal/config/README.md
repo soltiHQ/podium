@@ -376,8 +376,14 @@ restart clears them, and after a failover the new leader counts from its own
 buckets, which hold nothing for the syncs the former leader served. A bucket
 that was not used for 10 minutes is dropped, so memory follows the agents that
 sync. The first refused sync of an agent ID logs a WARN with the agent ID, and
-then at most one more a minute for that ID; the HTTP access log and the gRPC
-call log still record every refused sync, as they record any failed request.
+then at most one more a minute for that ID. The access loggers record each
+refused sync at DEBUG, not as the WARN of an HTTP 4xx or the ERROR of a failed
+gRPC call, so that an agent that keeps syncing cannot flood the log: the HTTP
+429 carries `Retry-After` and the gRPC status carries `RetryInfo`, and the
+loggers take those for a throttle. A follower that proxies or forwards a
+leader's refusal logs it at DEBUG too. A sync that fails in another way keeps
+its level: a wrong token (WARN over HTTP, ERROR over gRPC) and the 429 /
+`ResourceExhausted` of the failure limiter.
 
 ## First administrator
 

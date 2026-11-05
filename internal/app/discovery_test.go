@@ -255,7 +255,12 @@ func newDiscoveryClients(t *testing.T) discoveryClients {
 // newDiscoveryClientsFor serves discovery wired from cfg the way [New] wires it.
 func newDiscoveryClientsFor(t *testing.T, cfg config.Config) discoveryClients {
 	t.Helper()
-	logger := zerolog.Nop()
+	return newDiscoveryClientsLogged(t, cfg, zerolog.Nop())
+}
+
+// newDiscoveryClientsLogged is newDiscoveryClientsFor with everything logging to logger.
+func newDiscoveryClientsLogged(t *testing.T, cfg config.Config, logger zerolog.Logger) discoveryClients {
+	t.Helper()
 	store := inmemory.New()
 	svc, err := initServices(store, kit.New(store, cfg.Auth), cfg.History.Archive, cfg.AgentAuth, logger)
 	if err != nil {
@@ -442,6 +447,117 @@ func TestDiscoveryTransportsShareTheSyncBudget(t *testing.T) {
 	}
 	if most := burst + int(time.Since(start)/time.Second); landed < burst || landed > most {
 		t.Fatalf("%d of %d syncs over both transports landed, want from %d to %d (one bucket for both)", landed, attempts, burst, most)
+	}
+}
+
+// accessLevels counts the lines of a JSON log that say message, by level.
+func accessLevels(logs *syncBuffer, message string) map[string]int {
+	counts := map[string]int{}
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var entry struct{ Level, Message string }
+		if json.Unmarshal([]byte(line), &entry) == nil && entry.Message == message {
+			counts[entry.Level]++
+		}
+	}
+	return counts
+}
+
+// A sync that the rate refuses is logged by the access loggers at DEBUG, not as
+// the WARN of an HTTP 4xx or the ERROR of a failed gRPC call: any agent can cause
+// any number of them, and each line would flood the log. A sync that fails
+// otherwise keeps its level: the 401 / Unauthenticated of a wrong token, and the
+// 429 / ResourceExhausted of the failure limiter, which is no throttle of the
+// rate. The handler's own WARN is not an access line.
+func TestThrottledSyncsAreLoggedAtDebug(t *testing.T) {
+	const burst, attempts = 10, 40
+	const ok, limited, unauthenticated = "ok", "limited", "unauthenticated"
+	for _, tr := range []struct {
+		name    string
+		message string // of the access line
+		failed  string // the level of a failed call
+		sync    func(c discoveryClients, id, token string) string
+	}{
+		{"http", "http request", "warn", func(c discoveryClients, id, token string) string {
+			switch code := c.syncHTTP(id, token); code {
+			case http.StatusOK:
+				return ok
+			case http.StatusTooManyRequests:
+				return limited
+			case http.StatusUnauthorized:
+				return unauthenticated
+			default:
+				return fmt.Sprintf("HTTP %d", code)
+			}
+		}},
+		{"grpc", "grpc request", "error", func(c discoveryClients, id, token string) string {
+			switch err := c.syncGRPC(id, token); status.Code(err) {
+			case codes.OK:
+				return ok
+			case codes.ResourceExhausted:
+				return limited
+			case codes.Unauthenticated:
+				return unauthenticated
+			default:
+				return err.Error()
+			}
+		}},
+	} {
+		t.Run(tr.name, func(t *testing.T) {
+			logs := &syncBuffer{}
+			c := newDiscoveryClientsLogged(t, config.Default(), zerolog.New(logs))
+			lines := func() map[string]int { return accessLevels(logs, tr.message) }
+
+			// A burst of one agent: the first ten land, the rest are throttled.
+			before := lines()
+			landed, throttled := 0, 0
+			for i := range attempts {
+				switch got := tr.sync(c, "agent-a", "token-a"); got {
+				case ok:
+					landed++
+				case limited:
+					throttled++
+				default:
+					t.Fatalf("sync %d of the burst: %s", i+1, got)
+				}
+			}
+			after := lines()
+			if after["warn"] != before["warn"] || after["error"] != before["error"] {
+				t.Fatalf("the burst logged %d WARN and %d ERROR access lines, want none", after["warn"]-before["warn"], after["error"]-before["error"])
+			}
+			if got := after["debug"] - before["debug"]; got != throttled || throttled == 0 {
+				t.Fatalf("%d throttled syncs logged %d DEBUG access lines, want one each", throttled, got)
+			}
+			if got := after["info"] - before["info"]; got != landed || landed < burst {
+				t.Fatalf("%d accepted syncs logged %d INFO access lines, want one each, at least %d", landed, got, burst)
+			}
+
+			// A wrong token for an agent whose bucket is whole still logs a failure.
+			if got := tr.sync(c, "agent-b", "token-b"); got != ok {
+				t.Fatalf("enroll agent-b: %s", got)
+			}
+			before = lines()
+			if got := tr.sync(c, "agent-b", "stale-token"); got != unauthenticated {
+				t.Fatalf("a wrong token: %s, want %s", got, unauthenticated)
+			}
+			if got := lines()[tr.failed] - before[tr.failed]; got != 1 {
+				t.Fatalf("a wrong token logged %d access lines at %s, want 1", got, tr.failed)
+			}
+
+			// The failure limiter's 429 / ResourceExhausted is no throttle of the rate.
+			if got := tr.sync(c, "agent-c", "token-c"); got != ok {
+				t.Fatalf("enroll agent-c: %s", got)
+			}
+			for range 5 {
+				tr.sync(c, "agent-c", "stale-token")
+			}
+			before = lines()
+			if got := tr.sync(c, "agent-c", "token-c"); got != limited {
+				t.Fatalf("agent-c after five failures: %s, want %s", got, limited)
+			}
+			if got := lines()[tr.failed] - before[tr.failed]; got != 1 {
+				t.Fatalf("a sync blocked by the failure limiter logged %d access lines at %s, want 1", got, tr.failed)
+			}
+		})
 	}
 }
 

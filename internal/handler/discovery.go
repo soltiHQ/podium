@@ -288,7 +288,7 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 	}
 
 	if !admitSync(g.logger, g.syncs, g.clock(), req.GetId()) {
-		return nil, status.Errorf(ctx, codes.ResourceExhausted, "%s", syncLimitedAnswer)
+		return nil, status.Throttled(ctx, syncRefill, "%s", syncLimitedAnswer)
 	}
 
 	existing, getErr := g.agentSVC.Get(ctx, req.GetId())

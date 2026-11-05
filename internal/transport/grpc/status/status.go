@@ -2,10 +2,13 @@ package status
 
 import (
 	"context"
+	"time"
 
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
+	"google.golang.org/protobuf/protoadapt"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
@@ -39,6 +42,25 @@ func Errorf(ctx context.Context, code codes.Code, format string, args ...any) er
 		if detailed, err := withRequestID(st, rid); err == nil {
 			st = detailed
 		}
+	}
+	return st.Err()
+}
+
+// Throttled creates the ResourceExhausted status error of a call that a rate limit
+// refused. Besides the request ID it carries RetryInfo with retryAfter, the delay
+// after which the client may try again: the gRPC form of Retry-After. That is also
+// how UnaryLogger tells a throttle, which it logs at DEBUG, from any other
+// ResourceExhausted. A forwarding follower passes the details on with the error.
+func Throttled(ctx context.Context, retryAfter time.Duration, format string, args ...any) error {
+	st := grpcstatus.Newf(codes.ResourceExhausted, format, args...)
+	transportctx.SetError(ctx, st.Message())
+
+	details := []protoadapt.MessageV1{&errdetails.RetryInfo{RetryDelay: durationpb.New(retryAfter)}}
+	if rid, ok := transportctx.RequestID(ctx); ok {
+		details = append(details, &errdetails.RequestInfo{RequestId: rid})
+	}
+	if detailed, err := st.WithDetails(details...); err == nil {
+		st = detailed
 	}
 	return st.Err()
 }
