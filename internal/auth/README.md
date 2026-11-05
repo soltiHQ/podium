@@ -14,7 +14,7 @@ auth/
 ├── kit/                  composition root (kit.New)
 ├── providers/            Provider interface + Request/Result contracts
 │   └── password/         password provider implementation
-├── ratelimit/            in-memory rate limiter for failed attempts
+├── ratelimit/            in-memory limiters: failed attempts (Limiter) and token buckets per key (Buckets)
 ├── rbac/                 RBAC permission resolver (user + role merge)
 ├── session/              core service: login, refresh, revoke
 └── token/                Issuer / Verifier / Clock abstractions
@@ -111,6 +111,7 @@ needs.
 | `token`        | `Verifier`  | interface: `Verify(ctx, raw) → identity`                      |
 | `token`        | `Clock`     | interface: `Now()` — testability                              |
 | `ratelimit`    | `Limiter`   | thread-safe in-memory attempt tracker                         |
+| `ratelimit`    | `Buckets`   | thread-safe in-memory token buckets per key; discovery's sync rate |
 | `devicecookie` | `Signer`    | issues and checks device cookies                              |
 | `rbac`         | `Resolver`  | user + role permission union                                  |
 | `kit`          | `Auth`      | composition root (Clock, Limiter, Devices, Session, Verifier) |

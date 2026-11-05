@@ -17,8 +17,8 @@ handler/
 | Handler           | Transport | Constructor           | Dependencies                                                         |
 |-------------------|-----------|-----------------------|----------------------------------------------------------------------|
 | `API`             | HTTP      | `NewAPI`              | user, access, session, credential, agent, spec services + proxy.Pool; the cluster service in raft mode (`WithCluster`) |
-| `HTTPDiscovery`   | HTTP      | `NewHTTPDiscovery`    | agent service, discovery limiter, client IP resolver                 |
-| `GRPCDiscovery`   | gRPC      | `NewGRPCDiscovery`    | agent service, discovery limiter, client IP resolver (raft mode)     |
+| `HTTPDiscovery`   | HTTP      | `NewHTTPDiscovery`    | agent service, discovery limiter, sync buckets, client IP resolver   |
+| `GRPCDiscovery`   | gRPC      | `NewGRPCDiscovery`    | agent service, discovery limiter, sync buckets, client IP resolver (raft mode) |
 | `UI`              | HTTP      | `NewUI`               | access + spec services, client IP resolver, cookie Secure policy     |
 | `Static`          | HTTP      | `NewStatic`           | embedded `ui.Static` filesystem                                      |
 
@@ -244,7 +244,14 @@ token.
 | HTTP      | POST               | `/api/v1/discovery/sync`       |
 | gRPC      | `DiscoverService/Sync` | proto-defined                |
 
-Both parse the agent heartbeat payload, call `model.NewAgentFrom`, then `agentSVC.Upsert`. The upsert reports what
+Both parse the agent heartbeat payload and call `model.NewAgentFrom`, which checks its field limits before anything
+is enrolled or charged. They then verify the token (`verifyAgentToken`), when agent auth is required, charge the sync to
+the bucket of its agent ID (`admitSync`, see "Sync rate" below), and call `agentSVC.Upsert`. The capability fields have
+limits of their own: `os`, `arch` and `platform` at most 64 bytes each; at most 32 runners, each name at most 128 bytes;
+per runner at most 64 labels (key at most 128 bytes, value at most 1024 bytes) and at most 64 workloads (`api_version`
+and `kind` at most 128 bytes each). Data that breaks one is answered 400 / `InvalidArgument` naming the field (such as
+`agent capabilities.runners[1].name exceeds 128 bytes`), with nothing enrolled or stored
+(`TestCapabilityCapsRefuseOversizedFields`); the limits are not applied to rows already stored. The upsert reports what
 the sync changed in the stored row (`agent.UpsertResult`), and discovery sends the `agent_update` refresh pulse only
 when the sync gave the UI pages something new: a **visible change**, that is, a new agent or a different status, name,
 endpoint, labels or capabilities, or a **reconnect**, that is, a new agent, an agent that was not active, or one that
@@ -280,6 +287,26 @@ or a deposed leader whose check of the leadership failed. That is a routing cond
 logged at WARN, and answered with the leader's address when one is known, over HTTP a 503 with `X-Leader`
 (`response.StoreFailed`), over gRPC an `Unavailable` with the `x-leader` hint and the mark that makes `UnaryLogger` log
 the call at WARN too, once (`interceptor.HintLeader`; `TestDiscoveryAnswersLeadershipErrorsWithTheLeader`).
+
+### Sync rate
+
+Each agent ID has a bucket of 10 syncs, refilled one per second (`NewSyncBuckets`; the numbers are constants, with no
+configuration keys). `admitSync` takes a token from it for each sync that passed the payload checks and the token
+check, before the agent is written, so a sync with a wrong token, no token or an invalid payload takes nothing from the
+bucket of the agent whose ID it carries (`TestWrongTokenDoesNotDrainTheBucket`), and the sync that enrolls an ID is
+charged one token like any other (`TestEnrollingSyncIsChargedOneToken`). A sync that finds the bucket empty is answered
+429 with `Retry-After: 1` over HTTP (`response.TooManyRequests`) or `ResourceExhausted` over gRPC, and writes nothing:
+the store opens no transaction for its write (`TestLimitedSyncWritesNothing`), though the body read, the validation and
+the token check came first. `HTTPDiscovery` and `GRPCDiscovery` take the same buckets
+(`TestDiscoveryTransportsShareTheSyncBudget`), so an agent has one budget whichever transport it uses, and with
+`agent_auth.require=false` the rate still applies. Thirty concurrent syncs of one agent land 10
+(`TestSyncBurstIsLimitedPerAgent`).
+
+The refusal logs one WARN with the agent ID, the first time for an ID and then at most once a minute for it (the HTTP
+access log and the gRPC call log still record every refused call); the log never holds a token. The buckets are in
+memory, on the node that runs the handlers: in raft mode the leader, where a follower forwards a sync, so the new leader
+counts from its own after a failover, and a restart clears them. A bucket that was not used for 10 minutes is dropped.
+The handlers read the time from a `clock` field that the tests replace, so a refill is never waited for.
 
 ## UI pages
 | Path                | Handler          | Auth | Permission  |

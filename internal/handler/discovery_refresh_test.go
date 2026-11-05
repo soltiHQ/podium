@@ -5,16 +5,24 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 
 	agentv1 "github.com/soltiHQ/control-plane/api/gen/solti/agent/v1"
 	discoverv1 "github.com/soltiHQ/control-plane/api/gen/solti/discover/v1"
 	"github.com/soltiHQ/control-plane/domain/enum"
+	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
+
+// heartbeatBuckets let an agent heartbeat far more often than podium lets it:
+// these tests count what many heartbeats cause, not how fast they may come.
+func heartbeatBuckets() *ratelimit.Buckets {
+	return ratelimit.NewBuckets(ratelimit.BucketConfig{Burst: 1000, Refill: time.Second})
+}
 
 // syncTransports are the two discovery transports. Each builds a handler over
 // svc and hub and returns the function that syncs one heartbeat through it.
@@ -23,7 +31,7 @@ var syncTransports = []struct {
 	sync func(svc *agent.Service, hub *event.Hub) func(*discoverv1.SyncRequest) error
 }{
 	{"http", func(svc *agent.Service, hub *event.Hub) func(*discoverv1.SyncRequest) error {
-		h := NewHTTPDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), nil, false)
+		h := NewHTTPDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), heartbeatBuckets(), nil, false)
 		return func(req *discoverv1.SyncRequest) error {
 			body, err := discoverySyncMarshal.Marshal(req)
 			if err != nil {
@@ -36,7 +44,7 @@ var syncTransports = []struct {
 		}
 	}},
 	{"grpc", func(svc *agent.Service, hub *event.Hub) func(*discoverv1.SyncRequest) error {
-		g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), nil, false)
+		g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), heartbeatBuckets(), nil, false)
 		return func(req *discoverv1.SyncRequest) error {
 			_, err := g.Sync(context.Background(), req)
 			return err

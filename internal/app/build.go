@@ -408,28 +408,31 @@ func warnForwarding(logger zerolog.Logger, cfg config.Config) {
 }
 
 // buildDiscoveryListeners wires the HTTP and gRPC discovery listeners around one
-// failure limiter: both count agent token failures per (client IP, agent ID), so
-// an agent has one budget whichever transport it uses. resolver gives both the
-// client IP; gRPC discovery reads it from x-forwarded-for only in raft mode, where
-// a follower forwards its syncs to the leader with forwarder, while standalone
-// keeps the peer address, as before.
+// failure limiter and one set of sync buckets: both count agent token failures
+// per (client IP, agent ID) and charge each sync to the bucket of its agent ID,
+// so an agent has one budget of each whichever transport it uses. resolver gives
+// both the client IP; gRPC discovery reads it from x-forwarded-for only in raft
+// mode, where a follower forwards its syncs to the leader with forwarder, while
+// standalone keeps the peer address, as before.
 func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, cfg config.Config, resolver *clientip.Resolver, serverTLS, forwardTLS *tls.Config, forwarder *interceptor.Forwarder) (http.Handler, *grpc.Server) {
 	limiter := kit.NewLimiter(cfg.Auth)
+	syncs := handler.NewSyncBuckets()
 	var grpcClients *clientip.Resolver
 	if _, raft := leadership.(cluster.Membership); raft {
 		grpcClients = resolver
 	}
-	return buildDiscoveryHandler(logger, agentSVC, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), limiter, resolver, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled(), forwardTLS),
-		buildGRPCServer(logger, agentSVC, eventHub, leadership, limiter, grpcClients, serverTLS, cfg.AgentAuth.Require, addrPort(cfg.GRPC.Addr), forwarder)
+	return buildDiscoveryHandler(logger, agentSVC, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), limiter, syncs, resolver, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled(), forwardTLS),
+		buildGRPCServer(logger, agentSVC, eventHub, leadership, limiter, syncs, grpcClients, serverTLS, cfg.AgentAuth.Require, addrPort(cfg.GRPC.Addr), forwarder)
 }
 
 // buildDiscoveryHandler wires the HTTP discovery listener. It has no per-IP
 // limit: the handler counts authentication failures per (client IP, agent ID)
-// in limiter, so agents behind one egress IP never block each other. A
-// follower forwards syncs to the leader with forwardTLS, see [leaderOptions].
-func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, resolver *clientip.Resolver, requireAuth bool, targetTLS bool, forwardTLS *tls.Config) http.Handler {
+// in limiter, so agents behind one egress IP never block each other, and charges
+// each sync to the bucket of its agent ID in syncs. A follower forwards syncs to
+// the leader with forwardTLS, see [leaderOptions].
+func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, requireAuth bool, targetTLS bool, forwardTLS *tls.Config) http.Handler {
 	var (
-		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC, eventHub, limiter, resolver, requireAuth)
+		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC, eventHub, limiter, syncs, resolver, requireAuth)
 		mux           = http.NewServeMux()
 	)
 	mux.HandleFunc("/api/v1/discovery/sync", httpDiscovery.Sync)
@@ -499,11 +502,12 @@ func addrPort(addr string) int {
 // buildGRPCServer wires the gRPC discovery listener, which serves on port. Like
 // HTTP discovery, it has no per-IP limit: the Sync handler counts authentication
 // failures per (client IP, agent ID) in limiter, with the client IP that
-// resolver gives (nil: the peer). On a follower, forwarder sends a Sync to the
-// leader's gRPC listener, at the host of the leader's raft address and port,
-// which every replica is assumed to serve it on; a write it does not forward
-// answers Unavailable with that address in the x-leader hint.
-func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, limiter *ratelimit.Limiter, resolver *clientip.Resolver, serverTLS *tls.Config, requireAuth bool, port int, forwarder *interceptor.Forwarder) *grpc.Server {
+// resolver gives (nil: the peer), and charges each sync to the bucket of its
+// agent ID in syncs. On a follower, forwarder sends a Sync to the leader's gRPC
+// listener, at the host of the leader's raft address and port, which every
+// replica is assumed to serve it on; a write it does not forward answers
+// Unavailable with that address in the x-leader hint.
+func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, serverTLS *tls.Config, requireAuth bool, port int, forwarder *interceptor.Forwarder) *grpc.Server {
 	// Write methods (must run on leader). Sync is the only agent-facing
 	// mutation; everything else is pure read.
 	writeMethods := map[string]struct{}{
@@ -538,7 +542,7 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *e
 
 	var (
 		srv           = grpc.NewServer(opts...)
-		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC, eventHub, limiter, resolver, requireAuth)
+		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC, eventHub, limiter, syncs, resolver, requireAuth)
 	)
 	discoverv1.RegisterDiscoverServiceServer(srv, grpcDiscovery)
 	return srv

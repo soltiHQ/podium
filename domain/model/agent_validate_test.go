@@ -114,6 +114,92 @@ func TestValidateAgentEndpointRejectsUnsafeForms(t *testing.T) {
 	}
 }
 
+// The capability fields of a sync are bounded one by one: the platform fields,
+// the runners, and per runner its name, labels and workloads. Each row is a
+// value at its limit, which passes, or one over it, which is refused with the
+// field named. The runner and the workload that break a limit come second, to
+// show the index in the name.
+func TestNewAgentFromEnforcesCapabilityLimits(t *testing.T) {
+	text := func(n int) string { return strings.Repeat("x", n) }
+	// labels builds entries with distinct zero-padded keys of exactly keyBytes.
+	labels := func(entries, keyBytes, valueBytes int) map[string]string {
+		m := make(map[string]string, entries)
+		for i := range entries {
+			m[fmt.Sprintf("%0*d", keyBytes, i)] = text(valueBytes)
+		}
+		return m
+	}
+	workloads := func(n int) []GroupVersionKind {
+		out := make([]GroupVersionKind, n)
+		for i := range out {
+			out[i] = GroupVersionKind{Group: "solti.io", Version: "v1", Kind: "Subprocess"}
+		}
+		return out
+	}
+	// second sets the runner that follows a plain one.
+	second := func(edit func(*RunnerCapability)) func(*AgentParams) {
+		return func(p *AgentParams) {
+			r := RunnerCapability{Name: "second", Labels: map[string]string{}, Workloads: workloads(2)}
+			edit(&r)
+			p.Capabilities = []RunnerCapability{{Name: "first", Labels: map[string]string{}}, r}
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*AgentParams)
+		rule string // what the refusal says; empty for a value that passes
+	}{
+		{"os at limit", func(p *AgentParams) { p.OS = text(64) }, ""},
+		{"os over limit", func(p *AgentParams) { p.OS = text(65) }, "agent os exceeds 64 bytes"},
+		{"arch at limit", func(p *AgentParams) { p.Arch = text(64) }, ""},
+		{"arch over limit", func(p *AgentParams) { p.Arch = text(65) }, "agent arch exceeds 64 bytes"},
+		{"platform at limit", func(p *AgentParams) { p.Platform = text(64) }, ""},
+		{"platform over limit", func(p *AgentParams) { p.Platform = text(65) }, "agent platform exceeds 64 bytes"},
+
+		{"runners at limit", func(p *AgentParams) { p.Capabilities = make([]RunnerCapability, 32) }, ""},
+		{"too many runners", func(p *AgentParams) { p.Capabilities = make([]RunnerCapability, 33) }, "agent capabilities exceed 32 runners"},
+		{"runner name at limit", second(func(r *RunnerCapability) { r.Name = text(128) }), ""},
+		{"runner name over limit", second(func(r *RunnerCapability) { r.Name = text(129) }), "agent capabilities.runners[1].name exceeds 128 bytes"},
+
+		{"labels at limits", second(func(r *RunnerCapability) { r.Labels = labels(64, 128, 1024) }), ""},
+		{"too many labels", second(func(r *RunnerCapability) { r.Labels = labels(65, 8, 1) }), "agent capabilities.runners[1].labels exceed 64 entries"},
+		{"label key over limit", second(func(r *RunnerCapability) { r.Labels = labels(1, 129, 1) }), "agent capabilities.runners[1].labels has a key over 128 bytes"},
+		{"label value over limit", second(func(r *RunnerCapability) { r.Labels = labels(1, 8, 1025) }), "agent capabilities.runners[1].labels has a value over 1024 bytes"},
+
+		{"workloads at limit", second(func(r *RunnerCapability) { r.Workloads = workloads(64) }), ""},
+		{"too many workloads", second(func(r *RunnerCapability) { r.Workloads = workloads(65) }), "agent capabilities.runners[1].workloads exceed 64 entries"},
+		// api_version is the group, a slash and the version: 100 + 1 + 27 bytes.
+		{"api version with a group at limit", second(func(r *RunnerCapability) {
+			r.Workloads[1] = GroupVersionKind{Group: text(100), Version: text(27), Kind: "Subprocess"}
+		}), ""},
+		{"api version with a group over limit", second(func(r *RunnerCapability) {
+			r.Workloads[1] = GroupVersionKind{Group: text(100), Version: text(28), Kind: "Subprocess"}
+		}), "agent capabilities.runners[1].workloads[1].api_version exceeds 128 bytes"},
+		{"api version without a group at limit", second(func(r *RunnerCapability) {
+			r.Workloads[1] = GroupVersionKind{Version: text(128), Kind: "Subprocess"}
+		}), ""},
+		{"api version without a group over limit", second(func(r *RunnerCapability) {
+			r.Workloads[1] = GroupVersionKind{Version: text(129), Kind: "Subprocess"}
+		}), "agent capabilities.runners[1].workloads[1].api_version exceeds 128 bytes"},
+		{"kind at limit", second(func(r *RunnerCapability) { r.Workloads[1].Kind = text(128) }), ""},
+		{"kind over limit", second(func(r *RunnerCapability) { r.Workloads[1].Kind = text(129) }), "agent capabilities.runners[1].workloads[1].kind exceeds 128 bytes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := AgentParams{ID: "agent-1", Name: "Agent", Endpoint: "http://10.0.0.5:8085", EndpointType: 2, APIVersion: 1}
+			tc.edit(&p)
+			_, err := NewAgentFrom(p)
+			switch {
+			case tc.rule == "" && err != nil:
+				t.Fatalf("NewAgentFrom rejected a value at its limit: %v", err)
+			case tc.rule != "" && !errors.Is(err, domain.ErrInvalidArgument):
+				t.Fatalf("NewAgentFrom = %v, want ErrInvalidArgument", err)
+			case tc.rule != "" && err.Error() != domain.ErrInvalidArgument.Error()+": "+tc.rule:
+				t.Fatalf("NewAgentFrom = %q, want it to say %q", err, tc.rule)
+			}
+		})
+	}
+}
+
 func TestNewAgentFromEnforcesFieldLimits(t *testing.T) {
 	// metadata builds entries with distinct zero-padded keys of exactly keyBytes.
 	metadata := func(entries, keyBytes, valueBytes int) map[string]string {

@@ -2,6 +2,8 @@ package response
 
 import (
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
@@ -379,6 +381,37 @@ func Internal(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
 					http.StatusInternalServerError,
 					"Server error",
 					"Something went wrong on our side. Please try again later.",
+				)
+			}
+			return nil
+		}(mode),
+	})
+}
+
+// TooManyRequests renders a 429 response with a custom message. With a positive
+// retryAfter it sets Retry-After to that many whole seconds, rounded up, so that
+// a client that waits that long does not come early.
+func TooManyRequests(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, retryAfter time.Duration, msg string) {
+	if retryAfter > 0 {
+		seconds := int64(retryAfter / time.Second)
+		if retryAfter%time.Second != 0 {
+			seconds++
+		}
+		w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	}
+	transportctx.SetError(r.Context(), msg)
+	httpctx.Responder(r.Context()).Respond(w, r, http.StatusTooManyRequests, &responder.View{
+		Data: errorBody{
+			Code:      http.StatusTooManyRequests,
+			Message:   msg,
+			RequestID: transportctx.TryRequestID(r.Context()),
+		},
+		Component: func(m httpctx.RenderMode) templ.Component {
+			if m == httpctx.RenderPage {
+				return renderErrorPage(
+					http.StatusTooManyRequests,
+					"Too many requests",
+					msg,
 				)
 			}
 			return nil

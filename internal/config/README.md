@@ -98,6 +98,17 @@ podium starts, but that agent's syncs are refused with 400, and no API resets a
 stored credential yet. gRPC discovery caps request headers at 16 KiB, like the
 HTTP listeners.
 
+The capability fields of a sync have limits, checked with the rest of the
+payload before any token is checked or enrolled: `os`, `arch` and `platform` at
+most 64 bytes each; at most 32 runners, each name at most 128 bytes; and per
+runner at most 64 labels (key at most 128 bytes, value at most 1024 bytes) and
+at most 64 workloads (`api_version` and `kind` at most 128 bytes each). A sync
+that breaks one is refused with HTTP 400 / gRPC `InvalidArgument`, naming the
+field, as in `agent capabilities.runners[1].labels has a value over 1024
+bytes`, and nothing is enrolled or stored. The limits apply to what agents send,
+not to rows already stored. Whatever the limits, a sync is still bounded by the
+256 KiB of its body.
+
 SDK agents send their token only over TLS unless the agent explicitly allows
 insecure token transport (`allow_insecure_token_transport()`). With `require:
 true`, a sync without a token is refused like a wrong one and logged at WARN
@@ -115,7 +126,8 @@ agent_auth:
 
 `require: false` turns off both directions: no token is checked and none is
 sent. Startup then logs one WARN line: `agent authentication disabled: any host
-that reaches the discovery listeners can register agents`.
+that reaches the discovery listeners can register agents`. The sync rate (see
+"Rate limiting") stays on.
 
 ### Enrollment secret
 
@@ -333,6 +345,33 @@ restart clears them. Behind a reverse proxy, list the proxy in
 
 The main UI and API listener has no limit on failed authentication: its tokens
 and session IDs cannot be guessed, and passwords go through the login limiter.
+
+### Sync rate
+
+Besides the failure limiter, each agent ID has a bucket of syncs on HTTP and
+gRPC discovery. It holds 10, every sync takes one, and one comes back every
+second. These are constants; there are no configuration keys. A sync that finds
+the bucket empty is answered HTTP 429 with `Retry-After: 1` / gRPC
+`ResourceExhausted`, and writes nothing. The SDK treats both as retryable.
+
+The bucket is charged after the payload is validated and the token is checked,
+and before the agent is written. A sync with a wrong token, no token, or a
+payload that breaks a limit takes nothing from the bucket of the agent whose ID
+it carries: the failure limiter counts the token failures. The sync that enrolls
+an agent ID is charged one token, like any other. A refused sync still costs
+its body read, its validation and its token check, which come first. HTTP and
+gRPC share the buckets, so an agent has one budget whichever transport it uses.
+With `agent_auth.require: false` there is no token check, and the rate still
+applies.
+
+The buckets live in memory on the node that runs the discovery handlers. In
+raft mode that is the leader, where followers forward the syncs they get. A
+restart clears them, and after a failover the new leader counts from its own
+buckets, which hold nothing for the syncs the former leader served. A bucket
+that was not used for 10 minutes is dropped, so memory follows the agents that
+sync. The first refused sync of an agent ID logs a WARN with the agent ID, and
+then at most one more a minute for that ID; the HTTP access log and the gRPC
+call log still record every refused sync, as they record any failed request.
 
 ## First administrator
 

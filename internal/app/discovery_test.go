@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc"
@@ -25,6 +26,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/cluster/standalone"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
+	"github.com/soltiHQ/control-plane/internal/handler"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
@@ -290,11 +292,12 @@ func TestGRPCDiscoveryRejectsOversizedMessage(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), nil, nil, false, 0, nil))
-	sync := func(id string, osBytes int) error {
+	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, nil, false, 0, nil))
+	// The padding is a metadata value: a field that takes 1 KiB, the most a value may hold.
+	sync := func(id string, padding int) error {
 		_, err := client.Sync(ctx, &discoverv1.SyncRequest{
 			Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1,
-			Os: strings.Repeat("x", osBytes),
+			Metadata: map[string]string{"padding": strings.Repeat("x", padding)},
 		})
 		return err
 	}
@@ -317,7 +320,7 @@ func TestGRPCDiscoveryCapsHeaders(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), nil, nil, false, 0, nil))
+	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, nil, false, 0, nil))
 	sync := func(id string, padding int) error {
 		md := metadata.AppendToOutgoingContext(ctx, "x-padding", strings.Repeat("p", padding))
 		_, err := client.Sync(md, &discoverv1.SyncRequest{
@@ -402,6 +405,44 @@ func TestDiscoveryTransportsShareTheFailureBudget(t *testing.T) {
 	}
 	if code := c.syncHTTP("agent-a", "token-agent-a"); code != http.StatusTooManyRequests {
 		t.Fatalf("HTTP after the shared budget ran out: HTTP %d, want 429", code)
+	}
+}
+
+// HTTP and gRPC discovery draw on one bucket of syncs per agent ID: an agent
+// that alternates between the transports does not get a burst on each. The
+// listeners keep the real clock, so a second that passes during the test may
+// refill a token: the syncs that land can exceed the burst by at most the whole
+// seconds the test took.
+func TestDiscoveryTransportsShareTheSyncBudget(t *testing.T) {
+	const burst, attempts = 10, 14 // seven syncs over each transport
+	c := newDiscoveryClients(t)
+	start := time.Now()
+	landed := 0
+	for i := range attempts {
+		var refused bool
+		if i%2 == 0 {
+			switch code := c.syncHTTP("agent-a", "token-agent-a"); code {
+			case http.StatusOK:
+			case http.StatusTooManyRequests:
+				refused = true
+			default:
+				t.Fatalf("sync %d over HTTP: HTTP %d", i+1, code)
+			}
+		} else {
+			switch err := c.syncGRPC("agent-a", "token-agent-a"); status.Code(err) {
+			case codes.OK:
+			case codes.ResourceExhausted:
+				refused = true
+			default:
+				t.Fatalf("sync %d over gRPC: %v", i+1, err)
+			}
+		}
+		if !refused {
+			landed++
+		}
+	}
+	if most := burst + int(time.Since(start)/time.Second); landed < burst || landed > most {
+		t.Fatalf("%d of %d syncs over both transports landed, want from %d to %d (one bucket for both)", landed, attempts, burst, most)
 	}
 }
 

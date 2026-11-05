@@ -78,7 +78,7 @@ func TestHTTPDiscoveryRejectsInvalidAgent(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
+	h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 	for _, tc := range []struct{ name, id, body, message string }{
 		{"unsafe id", `x'"`, `{"id":"x'\"","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`, "Invalid agent data: agent id may contain only [A-Za-z0-9._-]."},
 		{"unparsable endpoint", "agent-1", `{"id":"agent-1","endpoint":"http://[","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`, "Invalid agent data: agent endpoint is not a valid URL."},
@@ -116,7 +116,7 @@ func TestGRPCDiscoveryRejectsInvalidAgent(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
+	g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer agent-token"))
 	tooMuchMetadata := make(map[string]string, 65)
 	for i := range 65 {
@@ -152,7 +152,7 @@ func TestDiscoveryRequiresTokenByDefault(t *testing.T) {
 	hub := event.NewHub(logger)
 	defer hub.Close()
 	requireAuth := config.Default().AgentAuth.Require
-	h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), nil, requireAuth)
+	h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, requireAuth)
 	body := func(endpoint string) string {
 		return `{"id":"enrolled-agent","name":"Agent","endpoint":"` + endpoint + `","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
 	}
@@ -172,7 +172,7 @@ func TestDiscoveryRequiresTokenByDefault(t *testing.T) {
 	if enrolled.Endpoint() != "http://10.0.0.5:8085" {
 		t.Fatalf("re-sync with a different token replaced the endpoint: %s", enrolled.Endpoint())
 	}
-	g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), nil, requireAuth)
+	g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, requireAuth)
 	_, err = g.Sync(ctx, &discoverv1.SyncRequest{Id: "grpc-agent", Endpoint: "10.0.0.6:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})
 	if grpcstatus.Code(err) != codes.Unauthenticated {
 		t.Fatalf("tokenless gRPC sync with default config: %v, want Unauthenticated", err)
@@ -184,7 +184,7 @@ func TestDiscoveryAcceptsSDKProtoJSONCapabilitiesAndRejectsOversize(t *testing.T
 	logger := zerolog.Nop()
 	svc := agent.New(store, logger)
 	hub := event.NewHub(logger)
-	handler := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), nil, false)
+	handler := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, false)
 	body := `{"id":"sdk-agent","name":"SDK Agent","endpoint":"http://127.0.0.1:1234","uptimeSeconds":"5","ts":"100","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1,"heartbeatIntervalS":30,"capabilities":{"runners":[{"name":"default","labels":{"zone":"eu"},"workloads":[{"apiVersion":"solti.io/v1","kind":"Subprocess"}]}]}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/sync", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -217,7 +217,7 @@ func TestDiscoveryAuthFailuresBlockOnlyThatAgent(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
+	h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 	body := func(id string) string {
 		return `{"id":"` + id + `","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
 	}
@@ -281,7 +281,7 @@ func TestGRPCDiscoveryAuthFailuresBlockOnlyThatAgent(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
+	g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 	sync := func(peerIP, id, token string) error {
 		ctx := peer.NewContext(context.Background(), &peer.Peer{Addr: &net.TCPAddr{IP: net.ParseIP(peerIP), Port: 40000}})
 		ctx = metadata.NewIncomingContext(ctx, metadata.Pairs("authorization", "Bearer "+token))
@@ -346,7 +346,7 @@ func TestDiscoveryBoundsConcurrentTokenChecks(t *testing.T) {
 		handler func(svc *agent.Service, hub *event.Hub) func(token string) syncOutcome
 	}{
 		{"http", func(svc *agent.Service, hub *event.Hub) func(string) syncOutcome {
-			h := NewHTTPDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), nil, true)
+			h := NewHTTPDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 			body := `{"id":"agent-a","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
 			return func(token string) syncOutcome {
 				switch code := syncHTTPFrom(h, "203.0.113.9:40000", body, token).Code; code {
@@ -362,7 +362,7 @@ func TestDiscoveryBoundsConcurrentTokenChecks(t *testing.T) {
 			}
 		}},
 		{"grpc", func(svc *agent.Service, hub *event.Hub) func(string) syncOutcome {
-			g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), nil, true)
+			g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 			from := peer.NewContext(context.Background(), &peer.Peer{Addr: &net.TCPAddr{IP: net.ParseIP("203.0.113.9"), Port: 40000}})
 			return func(token string) syncOutcome {
 				ctx := metadata.NewIncomingContext(from, metadata.Pairs("authorization", "Bearer "+token))
@@ -449,7 +449,7 @@ func TestDiscoveryStorageErrorsDoNotCountAsFailures(t *testing.T) {
 	store := &unavailableTx{Storage: inmemory.New()}
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	h := NewHTTPDiscovery(logger, agent.New(store, logger), hub, discoveryLimiter(), nil, true)
+	h := NewHTTPDiscovery(logger, agent.New(store, logger), hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 	body := `{"id":"agent-a","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
 	if res := syncHTTP(h, body, "token-a"); res.Code != http.StatusOK {
 		t.Fatalf("enroll agent-a: HTTP %d", res.Code)
@@ -478,7 +478,7 @@ func TestDiscoveryRejectsOverlongToken(t *testing.T) {
 		svc := agent.New(inmemory.New(), logger)
 		hub := event.NewHub(logger)
 		defer hub.Close()
-		h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
+		h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 		body := func(id string) string {
 			return `{"id":"` + id + `","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
 		}
@@ -510,7 +510,7 @@ func TestDiscoveryRejectsOverlongToken(t *testing.T) {
 		svc := agent.New(inmemory.New(), logger)
 		hub := event.NewHub(logger)
 		defer hub.Close()
-		g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
+		g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 		sync := func(id, token string) error {
 			ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
 			_, err := g.Sync(ctx, &discoverv1.SyncRequest{Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})
@@ -561,7 +561,7 @@ func TestTokenlessSyncWarns(t *testing.T) {
 		sync func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func() bool // reports a refused sync
 	}{
 		{"http", func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func() bool {
-			h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
+			h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 			body := `{"id":"agent-a","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
 			return func() bool {
 				code := syncHTTP(h, body, "").Code
@@ -569,7 +569,7 @@ func TestTokenlessSyncWarns(t *testing.T) {
 			}
 		}},
 		{"grpc", func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func() bool {
-			g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
+			g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 			return func() bool {
 				_, err := g.Sync(context.Background(), &discoverv1.SyncRequest{Id: "agent-a", Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})
 				code := grpcstatus.Code(err)
@@ -634,7 +634,7 @@ func TestRefusedEnrollmentWarns(t *testing.T) {
 		sync func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func(id, token string) syncOutcome
 	}{
 		{"http", "192.0.2.1", func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func(string, string) syncOutcome {
-			h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
+			h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 			return func(id, token string) syncOutcome {
 				body := `{"id":"` + id + `","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
 				switch code := syncHTTP(h, body, token).Code; code {
@@ -650,7 +650,7 @@ func TestRefusedEnrollmentWarns(t *testing.T) {
 			}
 		}},
 		{"grpc", "203.0.113.9", func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func(string, string) syncOutcome {
-			g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), nil, true)
+			g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 			return func(id, token string) syncOutcome {
 				ctx := peer.NewContext(context.Background(), &peer.Peer{Addr: &net.TCPAddr{IP: net.ParseIP("203.0.113.9"), Port: 40000}})
 				if token != "" {
@@ -736,7 +736,7 @@ func TestEnrollRequiresDerivedTokenWhenSecretSet(t *testing.T) {
 		sync func(svc *agent.Service, hub *event.Hub) func(id, token string) syncOutcome
 	}{
 		{"http", func(svc *agent.Service, hub *event.Hub) func(string, string) syncOutcome {
-			h := NewHTTPDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), nil, true)
+			h := NewHTTPDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 			return func(id, token string) syncOutcome {
 				body := `{"id":"` + id + `","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
 				switch code := syncHTTP(h, body, token).Code; code {
@@ -752,7 +752,7 @@ func TestEnrollRequiresDerivedTokenWhenSecretSet(t *testing.T) {
 			}
 		}},
 		{"grpc", func(svc *agent.Service, hub *event.Hub) func(string, string) syncOutcome {
-			g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), nil, true)
+			g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 			return func(id, token string) syncOutcome {
 				ctx := context.Background()
 				if token != "" {
@@ -827,7 +827,7 @@ func TestDeletedAgentSyncsAgainWithItsStoredToken(t *testing.T) {
 		sync func(svc *agent.Service, hub *event.Hub) func(token string) syncOutcome
 	}{
 		{"http", func(svc *agent.Service, hub *event.Hub) func(string) syncOutcome {
-			h := NewHTTPDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), nil, true)
+			h := NewHTTPDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 			body := `{"id":"agent-1","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
 			return func(token string) syncOutcome {
 				switch code := syncHTTP(h, body, token).Code; code {
@@ -841,7 +841,7 @@ func TestDeletedAgentSyncsAgainWithItsStoredToken(t *testing.T) {
 			}
 		}},
 		{"grpc", func(svc *agent.Service, hub *event.Hub) func(string) syncOutcome {
-			g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), nil, true)
+			g := NewGRPCDiscovery(zerolog.Nop(), svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
 			return func(token string) syncOutcome {
 				ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("authorization", "Bearer "+token))
 				_, err := g.Sync(ctx, &discoverv1.SyncRequest{Id: "agent-1", Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})
@@ -984,7 +984,7 @@ func TestDiscoveryAnswersLeadershipErrorsWithTheLeader(t *testing.T) {
 				hub := event.NewHub(zerolog.Nop())
 				defer hub.Close()
 				svc := agent.New(writesFail{Storage: inmemory.New(), err: failure.err}, zerolog.Nop())
-				h := NewHTTPDiscovery(zerolog.New(logs), svc, hub, discoveryLimiter(), nil, site.requireAuth)
+				h := NewHTTPDiscovery(zerolog.New(logs), svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, site.requireAuth)
 				req := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/sync", strings.NewReader(body))
 				req.Header.Set("Content-Type", "application/json")
 				req.Header.Set("Authorization", "Bearer token-a")
@@ -1012,7 +1012,7 @@ func TestDiscoveryAnswersLeadershipErrorsWithTheLeader(t *testing.T) {
 					interceptor.UnaryLogger(logger),
 					interceptor.UnaryLeader(&movedLeadership{leader: raftLeader}, interceptor.LeaderOptions{Port: 50051}),
 				))
-				discoverv1.RegisterDiscoverServiceServer(srv, NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), nil, site.requireAuth))
+				discoverv1.RegisterDiscoverServiceServer(srv, NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, site.requireAuth))
 				lis, err := net.Listen("tcp", "127.0.0.1:0")
 				if err != nil {
 					t.Fatal(err)
