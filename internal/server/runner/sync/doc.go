@@ -10,21 +10,22 @@
 //     - Update     → ApplyTask(spec)                               → save new TaskId
 //     - Uninstall  → DeleteTask(actualTaskID) (or noop if empty)   → drop rollout
 //     - Noop       → ListTasks (every page, once per agent)        → reinstall what the agent lost
-//     A page starts at 1000 tasks. One that the proxy refuses as too large is asked again from the same cursor
-//     with half the limit, down to one task. The runner also bounds what an agent can make a listing cost: a
-//     page that holds more tasks than it was asked for, or names a cursor longer than 4096 bytes, is refused,
-//     and a listing that would hold more than 65536 task IDs or 32 MiB of them, or take more than 1024 calls,
-//     refused pages included, stops. Only a complete listing shows a task missing: if the turn's budget
-//     runs out, a task is too large to list even alone, a page fails or is refused, the listing passes a
-//     bound, the agent returns a cursor it returned before, or its pages name different snapshots (resource
-//     versions that differ; a page without one is let through), no rollout is judged and the next tick lists
-//     again from the first page, at 1000. So every synced rollout of an agent is observed each tick when,
-//     after the turn's pushes, its task list can be listed within those bounds, with the last page starting
-//     inside PushTimeout. The reinstalls queued after a complete listing are store writes, not agent calls:
-//     about 1 ms each on the durable store, and in raft mode each is a replicated commit. They are not
-//     bounded by PushTimeout. The runner logs when the listing stops being complete, with the cause, and when
-//     it is complete again, naming the latest cause, not on every tick: an agent that flips between the two
-//     logs a pair of lines for each flip.
+//     A page starts at 1000 tasks. One that the proxy refuses as too large, or as holding more elements than it
+//     builds, is asked again from the same cursor with half the limit, down to one task. The runner also bounds
+//     what an agent can make a listing cost: a page that holds more tasks than it was asked for, or names a
+//     cursor longer than 4096 bytes, is refused, and a listing that would hold more than 65536 task IDs or
+//     32 MiB of them, or take more than 1024 calls, refused pages included, stops. Only a complete listing
+//     shows a task missing: if the turn's budget runs out, a task is too large to list or holds too many
+//     elements even alone, a page fails or is refused, the listing passes a bound, the agent returns a cursor
+//     it returned before, or its pages name different snapshots (resource versions that differ; a page
+//     without one is let through), no rollout is judged and the next tick lists again from the first page,
+//     at 1000. So every synced rollout of an agent is observed each tick when, after the turn's pushes, its
+//     task list can be listed within those bounds, with the last page starting inside PushTimeout. The
+//     reinstalls queued after a complete listing are store writes, not agent calls: about 1 ms each on the
+//     durable store, and in raft mode each is a replicated commit. They are not bounded by PushTimeout. The
+//     runner logs when the listing stops being complete, with the cause, and when it is complete again, naming
+//     the latest cause, not on every tick: an agent that flips between the two logs a pair of lines for each
+//     flip.
 //  3. After processing rollouts, the finalizer pass actually removes any
 //     `Spec.DeletionRequested=true` spec whose last rollout has drained.
 package sync

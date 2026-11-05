@@ -155,7 +155,7 @@ func wantTooManyElements(t *testing.T, err, op error) {
 		t.Fatalf("%v: want a %v decode error that is ErrTooManyElements", err, op)
 	}
 	if errors.Is(err, ErrResponseTooLarge) {
-		t.Fatalf("%v: a flood of elements is no answer too large, a smaller page does not help", err)
+		t.Fatalf("%v: a flood of elements is no answer too large: the runner has a path of its own for each", err)
 	}
 	if kind := errkind.Classify(err); kind != errkind.Internal {
 		t.Fatalf("kind = %v, want Internal", kind)

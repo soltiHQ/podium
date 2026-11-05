@@ -158,6 +158,7 @@ func TestIncompleteListMarksNothingMissing(t *testing.T) {
 	}{
 		{name: "the budget is used", pages: 1, advance: defaultPushTimeout, cause: causeBudget},
 		{name: "a refused page uses the budget before it is asked again", pages: 1, advance: defaultPushTimeout, failAt: 1, err: tooLarge(), cause: causeBudget},
+		{name: "a page with too many elements uses the budget before it is asked again", pages: 1, advance: defaultPushTimeout, failAt: 1, err: tooManyElementsErr(), cause: causeBudget},
 		{name: "a page is answered with an error", pages: 2, failAt: 2, err: httpAnswer(proxy.ErrListTasks, 500, errkind.Internal), cause: causeAnswer},
 		{name: "a page is unanswered", pages: 2, failAt: 2, err: noAnswer(proxy.ErrListTasks)},
 		{name: "the cursor repeats", pages: 2, cursors: []string{"a", "a"}, cause: causeCursor},
@@ -263,7 +264,8 @@ func TestPagesOfOneSnapshotComplete(t *testing.T) {
 // gave no answer backs off, one that answered, whatever the status, does not.
 // A 404 on the listing is such an answer, not a lost task: only a task missing
 // from a complete listing is queued for a reinstall. A page refused as too large
-// is an answer too: it is asked again smaller before the listing is given up.
+// is an answer too: it is asked again smaller before the listing is given up, as is
+// one with too many elements.
 func TestListErrorsKeepTheObservationClasses(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -284,6 +286,7 @@ func TestListErrorsKeepTheObservationClasses(t *testing.T) {
 		{"answered grpc resource exhausted", agentErr{errkind.Unavailable, fmt.Errorf("%w: rpc error: code = ResourceExhausted desc = retained task limit reached", proxy.ErrListTasks)}, 1, false, false},
 		{"answer malformed", agentErr{errkind.Internal, fmt.Errorf("%w: %w: unexpected end of JSON input", proxy.ErrListTasks, proxy.ErrDecode)}, 1, false, false},
 		{"answer refused as too large", tooLarge(), 10, false, false},
+		{"answer refused for too many elements", tooManyElementsErr(), 10, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fp := &fakeProxy{listErr: tc.err}
@@ -314,103 +317,139 @@ func TestListErrorsKeepTheObservationClasses(t *testing.T) {
 	}
 }
 
-// A page the proxy refuses as too large is asked again from the same cursor with
-// half the limit, and the smaller limit holds for the rest of the turn: an agent
-// that can be listed at some size is listed whole, and its lost task found. The
-// next turn starts at 1000 again.
+// A page the proxy refuses as too large, or as holding more elements than it
+// builds, is asked again from the same cursor with half the limit, and the smaller
+// limit holds for the rest of the turn: an agent that can be listed at some size is
+// listed whole, and its lost task found. A page of 1000 tasks that is over the
+// budget of elements while half of it fits is such an agent. The next turn starts at
+// 1000 again.
 func TestRefusedPagesAreAskedAgainSmaller(t *testing.T) {
-	fp := &fakeProxy{}
-	r, s, _ := newFakeRunner(t, fp)
-	var logs bytes.Buffer
-	r.logger = zerolog.New(&logs)
-	holdN(fp, 2300)
-	fp.onList = func(_ context.Context, page *proxyv1.ListTasksResponse) error {
-		if len(page.Tasks) > 300 {
-			return tooLarge()
-		}
-		return nil
-	}
-	kept := []*model.Rollout{
-		seedRollout(t, s, "sp-first", "agent-a", enum.RolloutIntentNoop, "task-0000"),
-		seedRollout(t, s, "sp-last", "agent-a", enum.RolloutIntentNoop, "task-2299"),
-	}
-	lost := seedRollout(t, s, "sp-lost", "agent-a", enum.RolloutIntentNoop, "task-lost")
+	for _, tc := range []struct {
+		name    string
+		refusal func() error
+		fits    int // the most tasks a page may hold before the agent's answer is refused
+	}{
+		{"an answer too large, a page of 250 fits", tooLarge, 300},
+		{"an answer with too many elements, a page of 250 fits", tooManyElementsErr, 300},
+		{"an answer with too many elements, a page of 500 fits", tooManyElementsErr, 600},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := &fakeProxy{}
+			r, s, _ := newFakeRunner(t, fp)
+			var logs bytes.Buffer
+			r.logger = zerolog.New(&logs)
+			holdN(fp, 2300)
+			fp.onList = func(_ context.Context, page *proxyv1.ListTasksResponse) error {
+				if len(page.Tasks) > tc.fits {
+					return tc.refusal()
+				}
+				return nil
+			}
+			kept := []*model.Rollout{
+				seedRollout(t, s, "sp-first", "agent-a", enum.RolloutIntentNoop, "task-0000"),
+				seedRollout(t, s, "sp-last", "agent-a", enum.RolloutIntentNoop, "task-2299"),
+			}
+			lost := seedRollout(t, s, "sp-lost", "agent-a", enum.RolloutIntentNoop, "task-lost")
 
-	r.tick(context.Background())
+			r.tick(context.Background())
 
-	want := []proxy.TaskFilter{{Limit: 1000}, {Limit: 500}, {Limit: 250}}
-	for last := 249; last < 2300; last += 250 {
-		want = append(want, proxy.TaskFilter{Limit: 250, Cursor: fmt.Sprintf("task-%04d", last)})
-	}
-	if !slices.Equal(fp.lists, want) {
-		t.Fatalf("agent listed with %+v, want %+v", fp.lists, want)
-	}
-	for _, ro := range kept {
-		if !unchanged(t, s, ro) {
-			t.Fatalf("rollout %s changed though its agent holds its task", ro.ID())
-		}
-	}
-	if !requeued(t, s, lost) {
-		t.Fatal("the listing was complete: want the lost task queued for a reinstall")
-	}
-	if logs.Len() != 0 {
-		t.Fatalf("a listing that came whole logged: %s", logs.String())
-	}
+			// Every size from 1000 down is asked from the first page until one fits;
+			// the pages of that size follow, each from the cursor of the one before.
+			var want []proxy.TaskFilter
+			limit := 1000
+			for ; limit > tc.fits; limit /= 2 {
+				want = append(want, proxy.TaskFilter{Limit: limit})
+			}
+			want = append(want, proxy.TaskFilter{Limit: limit})
+			for last := limit - 1; last < 2300; last += limit {
+				want = append(want, proxy.TaskFilter{Limit: limit, Cursor: fmt.Sprintf("task-%04d", last)})
+			}
+			if !slices.Equal(fp.lists, want) {
+				t.Fatalf("agent listed with %+v, want %+v", fp.lists, want)
+			}
+			for _, ro := range kept {
+				if !unchanged(t, s, ro) {
+					t.Fatalf("rollout %s changed though its agent holds its task", ro.ID())
+				}
+			}
+			if !requeued(t, s, lost) {
+				t.Fatal("the listing was complete: want the lost task queued for a reinstall")
+			}
+			if logs.Len() != 0 {
+				t.Fatalf("a listing that came whole logged: %s", logs.String())
+			}
+			if b, ok := r.backoffs["agent-a"]; ok {
+				t.Fatalf("the agent answered, but is backed off: %+v", b)
+			}
 
-	// A new turn starts over at 1000.
-	fp.lists = nil
-	fp.applyResp = []string{"task-lost"} // the reinstall
-	r.tick(context.Background())
-	if len(fp.lists) < 1 || fp.lists[0] != (proxy.TaskFilter{Limit: 1000}) {
-		t.Fatalf("next turn started with %+v, want {Limit: 1000}", fp.lists)
+			// A new turn starts over at 1000.
+			fp.lists = nil
+			fp.applyResp = []string{"task-lost"} // the reinstall
+			r.tick(context.Background())
+			if len(fp.lists) < 1 || fp.lists[0] != (proxy.TaskFilter{Limit: 1000}) {
+				t.Fatalf("next turn started with %+v, want {Limit: 1000}", fp.lists)
+			}
+		})
 	}
 }
 
-// A task too large to list even alone leaves the listing incomplete, and no
-// rollout is judged missing: not the task on the pages that came, the task that
-// cannot be listed, nor the one the agent lost. The refusals are answers.
-func TestATaskTooLargeEvenAloneLeavesTheListingIncomplete(t *testing.T) {
-	fp := &fakeProxy{}
-	r, s, _ := newFakeRunner(t, fp)
-	var logs bytes.Buffer
-	r.logger = zerolog.New(&logs)
-	holdN(fp, 2300)
-	fp.onList = func(_ context.Context, page *proxyv1.ListTasksResponse) error {
-		for _, task := range page.Tasks {
-			if task.ID == "task-0500" {
-				return tooLarge()
+// A task that is refused even alone, for its size or for the elements it holds,
+// leaves the listing incomplete, and no rollout is judged missing: not the task on
+// the pages that came, the task that cannot be listed, nor the one the agent lost.
+// The refusals are answers.
+func TestATaskRefusedEvenAloneLeavesTheListingIncomplete(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		refusal func() error
+		cause   string
+	}{
+		{"a task too large", tooLarge, causeTooLarge},
+		{"a task with too many elements", tooManyElementsErr, causeElements},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := &fakeProxy{}
+			r, s, _ := newFakeRunner(t, fp)
+			var logs bytes.Buffer
+			r.logger = zerolog.New(&logs)
+			holdN(fp, 2300)
+			fp.onList = func(_ context.Context, page *proxyv1.ListTasksResponse) error {
+				for _, task := range page.Tasks {
+					if task.ID == "task-0500" {
+						return tc.refusal()
+					}
+				}
+				return nil
 			}
-		}
-		return nil
-	}
-	rollouts := []*model.Rollout{
-		seedRollout(t, s, "sp-before", "agent-a", enum.RolloutIntentNoop, "task-0000"),
-		seedRollout(t, s, "sp-large", "agent-a", enum.RolloutIntentNoop, "task-0500"),
-		seedRollout(t, s, "sp-after", "agent-a", enum.RolloutIntentNoop, "task-2299"),
-		seedRollout(t, s, "sp-lost", "agent-a", enum.RolloutIntentNoop, "task-lost"),
-	}
+			rollouts := []*model.Rollout{
+				seedRollout(t, s, "sp-before", "agent-a", enum.RolloutIntentNoop, "task-0000"),
+				seedRollout(t, s, "sp-large", "agent-a", enum.RolloutIntentNoop, "task-0500"),
+				seedRollout(t, s, "sp-after", "agent-a", enum.RolloutIntentNoop, "task-2299"),
+				seedRollout(t, s, "sp-lost", "agent-a", enum.RolloutIntentNoop, "task-lost"),
+			}
 
-	r.tick(context.Background())
+			r.tick(context.Background())
 
-	// 1000 is refused, 500 is the page before the large task, then every size
-	// from the cursor after it down to one task is refused.
-	want := []proxy.TaskFilter{{Limit: 1000}, {Limit: 500}}
-	for _, limit := range []int{500, 250, 125, 62, 31, 15, 7, 3, 1} {
-		want = append(want, proxy.TaskFilter{Limit: limit, Cursor: "task-0499"})
-	}
-	if !slices.Equal(fp.lists, want) {
-		t.Fatalf("agent listed with %+v, want %+v", fp.lists, want)
-	}
-	for _, ro := range rollouts {
-		if !unchanged(t, s, ro) {
-			t.Fatalf("rollout %s changed on an incomplete listing", ro.ID())
-		}
-	}
-	if b, ok := r.backoffs["agent-a"]; ok {
-		t.Fatalf("the agent answered, but is backed off: %+v", b)
-	}
-	if warns := strings.Count(logs.String(), `"level":"warn"`); warns != 1 || !strings.Contains(logs.String(), causeTooLarge) {
-		t.Fatalf("logged %d warnings, want one naming %q: %s", warns, causeTooLarge, logs.String())
+			// 1000 is refused, 500 is the page before the task, then every size from
+			// the cursor after it down to one task is refused.
+			want := []proxy.TaskFilter{{Limit: 1000}, {Limit: 500}}
+			for _, limit := range []int{500, 250, 125, 62, 31, 15, 7, 3, 1} {
+				want = append(want, proxy.TaskFilter{Limit: limit, Cursor: "task-0499"})
+			}
+			if !slices.Equal(fp.lists, want) {
+				t.Fatalf("agent listed with %+v, want %+v", fp.lists, want)
+			}
+			for _, ro := range rollouts {
+				if !unchanged(t, s, ro) {
+					t.Fatalf("rollout %s changed on an incomplete listing", ro.ID())
+				}
+			}
+			if b, ok := r.backoffs["agent-a"]; ok {
+				t.Fatalf("the agent answered, but is backed off: %+v", b)
+			}
+			if warns := strings.Count(logs.String(), `"level":"warn"`); warns != 1 || !strings.Contains(logs.String(), tc.cause) {
+				t.Fatalf("logged %d warnings, want one naming %q: %s", warns, tc.cause, logs.String())
+			}
+		})
 	}
 }
 

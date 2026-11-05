@@ -171,7 +171,7 @@ const (
 	causeSnapshot   = "pages name different snapshots"
 	causeAnswer     = "page answered with an error"
 	causeMoreTasks  = "agent returned more tasks than asked"
-	causeElements   = "agent returned a page with too many elements"
+	causeElements   = "page holds too many elements even at limit 1"
 	causeLongCursor = "agent returned a cursor that is too long"
 	causeListSize   = "listing too large"
 )
@@ -792,25 +792,36 @@ const (
 	maxListedPages   = 1024
 )
 
+// refusedAsTooBig reports whether the proxy refused a page for what it holds in all:
+// the answer is over the 4 MiB it reads (ErrResponseTooLarge), or holds more
+// elements than it builds (ErrTooManyElements). A page of fewer tasks may come under
+// either. It may not under the other bound that ErrTooManyElements stands for, a task
+// with more conditions than a task may hold: that task is refused at any size, and
+// the listing ends at the page of that task alone, as it does for a task that is too
+// large alone.
+func refusedAsTooBig(err error) bool {
+	return errors.Is(err, proxy.ErrResponseTooLarge) || errors.Is(err, proxy.ErrTooManyElements)
+}
+
 // listTasks lists every task of the turn's agent, a page at a time and with no
 // filter, so that a task is there whatever its phase, as it was to GetTask. Each
 // page is a call of its own, within PushTimeout, and starts only while the turn is
 // within its budget. A page starts at taskListLimit tasks. One that the proxy
-// refuses as too large is asked again from the same cursor with half the limit,
-// down to one task, and the smaller limit holds for the rest of the turn. Only a
-// listing that reaches the last page is complete. One that stops short reports
-// false, and no task may be judged missing by it: the budget is used, a task is
-// too large to list, a page fails, a page holds more tasks than it was asked for
+// refuses as too large, or as holding too many elements (see refusedAsTooBig), is
+// asked again from the same cursor with half the limit, down to one task, and the
+// smaller limit holds for the rest of the turn. Only a listing that reaches the last
+// page is complete. One that stops short reports false, and no task may be judged
+// missing by it: the budget is used, a task is too large to list or holds too many
+// elements even alone, a page fails, a page holds more tasks than it was asked for
 // (the proxy refuses it before it builds the tasks, as ErrTooManyItems, and the
-// runner counts them again), a page holds too many elements (ErrTooManyElements), a
-// cursor is longer than maxCursorBytes (the proxy refuses it first too), the listing
-// would hold more than maxListedTasks task IDs or maxListedIDBytes bytes of them,
-// or take more than maxListedPages calls (a refused page is a call), the agent
-// returns a cursor it returned before, the pages name different snapshots (a
-// resource version that differs from the first one named; a page without one is
-// let through) or the tick is cancelled. A page answers or goes unanswered as any
-// call does, a refusal and an error status included: the turn notes it, and
-// turn.listed says why a listing is incomplete.
+// runner counts them again), a cursor is longer than maxCursorBytes (the proxy
+// refuses it first too), the listing would hold more than maxListedTasks task IDs
+// or maxListedIDBytes bytes of them, or take more than maxListedPages calls (a
+// refused page is a call), the agent returns a cursor it returned before, the pages
+// name different snapshots (a resource version that differs from the first one
+// named; a page without one is let through) or the tick is cancelled. A page
+// answers or goes unanswered as any call does, a refusal and an error status
+// included: the turn notes it, and turn.listed says why a listing is incomplete.
 func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agentTurn, start time.Time) (map[string]struct{}, bool) {
 	var (
 		tasks   = make(map[string]struct{})
@@ -844,7 +855,7 @@ func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agent
 			return nil, false
 		}
 		switch {
-		case errors.Is(err, proxy.ErrResponseTooLarge) && limit > 1:
+		case refusedAsTooBig(err) && limit > 1:
 			limit /= 2
 			continue
 		case errors.Is(err, proxy.ErrResponseTooLarge):

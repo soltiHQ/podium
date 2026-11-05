@@ -172,10 +172,14 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   listing of the agent's tasks, with no filter, instead of a call per rollout.
   Each page is a call like any other and starts only while the turn is within
   its budget. A page starts at 1000 tasks. One that the proxy refuses as too
-  large (an answer over 4 MiB) is asked again from the same cursor with half
-  the limit, down to one task, and the smaller limit holds for the rest of the
-  turn; the next turn starts at 1000 again. The listing is bounded, whatever
-  the agent answers. The proxy bounds what a page builds (see "What an answer
+  large (an answer over 4 MiB) or as holding too many elements (more than 262144
+  repeated elements in all, or a task with more than 64 conditions) is asked
+  again from the same cursor with half the limit, down to one task, and the
+  smaller limit holds for the rest of the turn; the next turn starts at 1000
+  again. A smaller page helps against the size and the budget of elements, and
+  not against a task that is over its own bound, whichever page holds it: the
+  listing then ends at a page of that task alone. The listing is bounded,
+  whatever the agent answers. The proxy bounds what a page builds (see "What an answer
   may build" in `internal/proxy/README.md`). A page with more tasks than it was
   asked for, an answer with more than 262144 repeated elements in all (gRPC) and
   a task with more than 64 conditions (HTTP) are refused before they are built.
@@ -188,7 +192,8 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   calls, refused pages included, stops. A synced rollout whose task is missing
   from the listing is queued for a reinstall, but only a complete listing shows
   a task missing. If the budget runs out, a page fails or is refused (a task too
-  large to list even alone included), the listing passes a bound, the agent
+  large to list, or with too many elements, even alone included), the listing
+  passes a bound, the agent
   returns a cursor it returned before, or its pages name different snapshots
   (resource versions that differ; a page without one is let through), no
   rollout is judged and none is touched, and the next tick lists again from the
@@ -207,8 +212,8 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   agent's listing turns incomplete, the runner logs one warning that names the
   cause (a task too large to list, the budget used, a repeated cursor, pages of
   different snapshots, a page answered with an error, a page with more tasks
-  than asked, a page with too many elements, a cursor that is too long, a
-  listing over the bounds). When it
+  than asked, a task or a page with too many elements even alone, a cursor that
+  is too long, a listing over the bounds). When it
   turns complete again, one info line names the latest cause. Neither is
   repeated on every tick, and a cause that changes meanwhile is not logged. An
   agent that flips between the two logs a pair of lines for each flip.

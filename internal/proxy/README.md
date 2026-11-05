@@ -64,9 +64,16 @@ The 4 MiB cap bounds the bytes of an answer, not what building it costs: an empt
 element takes two bytes of protobuf or three of JSON on the wire, and about a
 hundred or a few hundred bytes on the heap. So the proxy bounds what an answer
 builds, before it builds it where it can. An answer over a bound fails the call with
-an error that wraps `ErrDecode`, the Kind of a decode error, and carries no
-`ErrResponseTooLarge`: a smaller page would not help. Every call goes through these,
-the sync runner's listing and the REST listing of an agent's tasks as well.
+an error that wraps `ErrDecode` and has the Kind of a decode error. It carries no
+`ErrResponseTooLarge`, which stays for an answer over the size the proxy reads.
+Whether a smaller page helps depends on the bound. It does against the budget of
+elements in all (`ErrTooManyElements`), and the sync runner then asks again with half
+the limit, as it does for `ErrResponseTooLarge`. It does not against more items than
+the limit, an ID or a cursor over its bound; and a task with more conditions than the
+cap is refused in any page that holds it, though the runner, which cannot tell it
+from the budget, asks again smaller for it too, down to a page of that task alone.
+Every call goes through these, the sync runner's listing and the REST listing of an
+agent's tasks as well.
 
 | What | Bound | Where it is checked | Error |
 |---|---|---|---|
@@ -77,8 +84,8 @@ the sync runner's listing and the REST listing of an agent's tasks as well.
 | Task ID in a listing | 1024 bytes (`MaxTaskIDBytes`; the SDK limits a name to 63 bytes a segment) | after the item (HTTP) or the page (gRPC) is decoded | `ErrDecode` |
 | Next cursor of a listing | 4096 bytes (`MaxCursorBytes`) | after the page is decoded | `ErrCursorTooLong` |
 
-`ErrTooManyElements` is an `ErrTooManyItems` too; the sync runner tells the two apart
-(a page with more tasks than asked, a page with too many elements).
+`ErrTooManyElements` is an `ErrTooManyItems` too; the sync runner tells the two apart:
+it asks again with half the limit on the first, and ends the listing on the second.
 
 Over gRPC every unary call (`ListTasks`, `GetTask`, `ApplyTask`, `DeleteTask`,
 `CancelTask`, `ListTaskRuns`) is made with a codec of its own. Before

@@ -34,7 +34,8 @@ var (
 	// ErrTooManyElements indicates an answer, or an item of one, that holds more
 	// repeated elements than the proxy builds: more than a gRPC answer may hold in
 	// all, or more conditions than a task may. It is an ErrTooManyItems, and a decode
-	// failure too.
+	// failure too. A page with a lower limit may come under the first bound, so the
+	// sync runner asks again for one; no page does under the second.
 	ErrTooManyElements error = elementsError{}
 	// ErrCursorTooLong indicates a ListTasks page whose next cursor is longer than
 	// MaxCursorBytes. It is a decode failure too.
