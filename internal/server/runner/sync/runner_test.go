@@ -155,7 +155,7 @@ type fakePool struct {
 	agents map[string]proxy.AgentProxy
 }
 
-func (p *fakePool) Get(endpoint string, _ enum.EndpointType, _ enum.APIVersion, _ string) (proxy.AgentProxy, error) {
+func (p *fakePool) Get(_, endpoint string, _ enum.EndpointType, _ enum.APIVersion, _ string) (proxy.AgentProxy, error) {
 	if ap, ok := p.agents[endpoint]; ok {
 		return ap, nil
 	}

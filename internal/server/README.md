@@ -117,7 +117,9 @@ by how long they have been silent. `hb` is the heartbeat the agent reported, or
   agent `active` again. No event is recorded when the status does not change;
   each change records `agent_inactive`, `agent_disconnected` or `agent_deleted`.
 - **Deletion drops the row only.** Deleting an agent drops its row, and with
-  it the labels operators set on it; its rollouts and its credential stay.
+  it the labels operators set on it; its rollouts and its credential stay. Once
+  the deletion is committed the runner has the proxy pool close the gRPC
+  connection it holds to the agent (`Pool.Forget`); a later call dials afresh.
   Until the agent syncs again, each of its pushes fails with `agent not found`
   until `max_retries`, and its synced rollouts are skipped: no call goes out,
   so its backoff does not change. When it syncs again, its stored token still
@@ -216,3 +218,8 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   that used up its timeout still records the status, the attempt and the
   `sync_failed` event. A tick cancelled by shutdown or lost leadership records
   nothing.
+- **An agent's error text is cut.** The text of a failed call is the agent's to
+  choose. The runner cuts the message it stores in the rollout and records as the
+  detail of the `sync_failed` event to 4 KiB on a UTF-8 boundary, with `…` where
+  it cut (`proxy.CapAgentText`), and the errors of the proxy that it logs are cut
+  the same.

@@ -22,6 +22,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/config"
+	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
@@ -471,7 +472,9 @@ func TestNewLeaderGivesAgentsAGrace(t *testing.T) {
 	cfg := lifecycle.Config{TickInterval: 20 * time.Millisecond, DeleteAfter: deleteAfter}
 	runners := map[*raftNode]*lifecycle.Runner{}
 	for _, n := range nodes {
-		r, err := lifecycle.New(cfg, zerolog.Nop(), n.store, n.hub, n.leadership)
+		pool := proxy.NewPool(nil, false)
+		t.Cleanup(func() { _ = pool.Close() })
+		r, err := lifecycle.New(cfg, zerolog.Nop(), n.store, pool, n.hub, n.leadership)
 		if err != nil {
 			t.Fatal(err)
 		}

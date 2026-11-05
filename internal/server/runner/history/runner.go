@@ -133,7 +133,7 @@ func (r *Runner) collectAgent(ctx context.Context, agentID string) {
 	} else if !errors.Is(err, storage.ErrNotFound) {
 		return
 	}
-	remote, err := r.pool.Get(agent.Endpoint(), agent.EndpointType(), agent.APIVersion(), token)
+	remote, err := r.pool.Get(agent.ID(), agent.Endpoint(), agent.EndpointType(), agent.APIVersion(), token)
 	if err != nil {
 		r.logger.Debug().Err(err).Str("agent_id", agentID).Msg("archive: agent proxy unavailable")
 		return

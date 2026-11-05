@@ -466,7 +466,7 @@ func buildLogHub(logger zerolog.Logger, agentSVC *agent.Service, proxyPool *prox
 		if err != nil {
 			return nil, err
 		}
-		p, err := proxyPool.Get(ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
+		p, err := proxyPool.Get(ag.ID(), ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
 		if err != nil {
 			return nil, err
 		}

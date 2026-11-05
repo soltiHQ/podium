@@ -47,7 +47,7 @@ func (f *archiveProxy) DeleteTask(ctx context.Context, id string) error {
 
 type archivePool struct{ source proxy.AgentProxy }
 
-func (p archivePool) Get(string, enum.EndpointType, enum.APIVersion, string) (proxy.AgentProxy, error) {
+func (p archivePool) Get(string, string, enum.EndpointType, enum.APIVersion, string) (proxy.AgentProxy, error) {
 	return p.source, nil
 }
 

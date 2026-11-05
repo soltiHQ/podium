@@ -177,7 +177,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 	response.ErrorPageRenderer = pageSystem.ErrorPage
 	responder.LoginPath = routepath.PageLogin
 
-	lifecycleRunner, err := lifecycle.New(cfg.Lifecycle, logger, store, eventHub, leadership)
+	lifecycleRunner, err := lifecycle.New(cfg.Lifecycle, logger, store, proxyPool, eventHub, leadership)
 	if err != nil {
 		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)

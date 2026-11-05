@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/event"
+	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
@@ -94,10 +96,29 @@ func TestLifecycleScansAll503StaleAgents(t *testing.T) {
 	}
 }
 
+// forgetting records the agents the runner asked the pool to forget.
+type forgetting struct {
+	mu  sync.Mutex
+	ids []string
+}
+
+func (f *forgetting) Forget(agentID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ids = append(f.ids, agentID)
+}
+
+func (f *forgetting) forgotten() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.ids)
+}
+
 // fixture runs the lifecycle runner over an in-memory store with a clock the test moves.
 type fixture struct {
 	store *inmemory.Store
 	hub   *event.Hub
+	pool  *forgetting
 	r     *Runner
 	now   time.Time
 }
@@ -105,12 +126,13 @@ type fixture struct {
 // newFixture builds a runner that has no start-up grace.
 func newFixture(t *testing.T, cfg Config) *fixture {
 	t.Helper()
-	f := &fixture{store: inmemory.New(), hub: event.NewHub(zerolog.New(io.Discard)), now: time.Now()}
+	f := &fixture{store: inmemory.New(), hub: event.NewHub(zerolog.New(io.Discard)), pool: &forgetting{}, now: time.Now()}
 	t.Cleanup(f.hub.Close)
 	f.r = &Runner{
 		store:  f.store,
 		cfg:    cfg.withDefaults(),
 		logger: zerolog.New(io.Discard),
+		pool:   f.pool,
 		hub:    f.hub,
 		clock:  func() time.Time { return f.now },
 	}
@@ -363,6 +385,55 @@ func TestReconcileDecidesAgainOnTheReReadAgent(t *testing.T) {
 	f.expectKinds(t, "after reconcile", nil)
 }
 
+// failingTx is a store whose transactions fail.
+type failingTx struct{ storage.Storage }
+
+func (failingTx) WithTx(context.Context, func(storage.Storage) error) error {
+	return errors.New("store unavailable")
+}
+
+// The runner that deletes an agent has the pool close its connection, once the
+// deletion is committed. The other transitions, a deletion that lost to a sync and
+// one that did not commit leave it alone.
+func TestDeletionForgetsTheAgentInThePool(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		silence time.Duration
+		store   func(*fixture) storage.Storage // the store the runner reconciles on; nil: the fixture's
+		want    []string
+	}{
+		{"deleted", 25 * time.Hour, nil, []string{"a"}},
+		{"silent for exactly delete_after, which is kept", 24 * time.Hour, nil, nil},
+		{"disconnected", 10 * time.Minute, nil, nil},
+		{"inactive", 61 * time.Second, nil, nil},
+		{"active", 31 * time.Second, nil, nil},
+		{"a deletion that lost to a heartbeat", 25 * time.Hour, func(f *fixture) storage.Storage {
+			fresh, err := f.store.GetAgent(context.Background(), "a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			fresh = fresh.Clone()
+			fresh.SetLastSeenAt(f.now)
+			return &heartbeatBeforeTx{Storage: f.store, fresh: fresh}
+		}, nil},
+		{"a deletion that did not commit", 25 * time.Hour, func(f *fixture) storage.Storage { return failingTx{f.store} }, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, Config{})
+			f.put(t, f.now.Add(-tc.silence), 30*time.Second, enum.AgentStatusActive)
+			if tc.store != nil {
+				f.r.store = tc.store(f)
+			}
+
+			f.r.tick(context.Background())
+
+			if got := f.pool.forgotten(); !slices.Equal(got, tc.want) {
+				t.Fatalf("the pool was asked to forget %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // terms is a Leadership that leads for one term per start time, each ending a
 // while after it began. clock is the time of the current term; seen gets
 // startedAt as the runner left it at the end of each term.
@@ -396,9 +467,11 @@ func (l *terms) WhenLeader(ctx context.Context, fn func(context.Context) error) 
 func TestEachTermRecordsStartedAt(t *testing.T) {
 	hub := event.NewHub(zerolog.New(io.Discard))
 	defer hub.Close()
+	pool := proxy.NewPool(nil, false)
+	defer func() { _ = pool.Close() }()
 	first := time.Now().Add(time.Hour)
 	leadership := &terms{starts: []time.Time{first, first.Add(48 * time.Hour)}}
-	r, err := New(Config{TickInterval: time.Millisecond}, zerolog.New(io.Discard), inmemory.New(), hub, leadership)
+	r, err := New(Config{TickInterval: time.Millisecond}, zerolog.New(io.Discard), inmemory.New(), pool, hub, leadership)
 	if err != nil {
 		t.Fatal(err)
 	}

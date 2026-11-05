@@ -26,7 +26,7 @@ import (
 
 // proxyGetter is the small subset of *proxy.Pool that the sync runner actually needs.
 type proxyGetter interface {
-	Get(endpoint string, epType enum.EndpointType, apiVersion enum.APIVersion, token string) (proxy.AgentProxy, error)
+	Get(agentID, endpoint string, epType enum.EndpointType, apiVersion enum.APIVersion, token string) (proxy.AgentProxy, error)
 }
 
 // Runner periodically reconciles Rollout records against live state on agents.
@@ -531,7 +531,7 @@ func (r *Runner) getProxy(ctx context.Context, ss *model.Rollout) (proxy.AgentPr
 		r.markFailed(ctx, ss, "agent credential lookup: "+err.Error())
 		return nil, false
 	}
-	ap, err := r.pool.Get(ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
+	ap, err := r.pool.Get(ag.ID(), ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
 	if err != nil {
 		r.markFailed(ctx, ss, "proxy error: "+err.Error())
 		return nil, false
@@ -683,6 +683,10 @@ func (r *Runner) markFailed(ctx context.Context, attempted *model.Rollout, errMs
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return
 	}
+	// The message is the words of the runner and, after them, the text of an agent's
+	// error. The proxy cuts that text, but the words come on top of it: the rollout
+	// and the event keep the whole message cut to the same limit.
+	errMsg = proxy.CapAgentText(errMsg)
 	ctx, cancel := writeContext(ctx)
 	defer cancel()
 	changed := false
@@ -751,7 +755,7 @@ func (r *Runner) observeAgent(ctx context.Context, turn *agentTurn, start time.T
 	if err != nil {
 		return
 	}
-	ap, err := r.pool.Get(ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
+	ap, err := r.pool.Get(ag.ID(), ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
 	if err != nil {
 		return
 	}

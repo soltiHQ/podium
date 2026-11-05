@@ -12,15 +12,21 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/event"
+	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/server/runner/base"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
 
+// forgetter is the subset of *proxy.Pool that the lifecycle runner needs: it closes
+// the pooled connection to an agent that is gone.
+type forgetter interface{ Forget(agentID string) }
+
 // Runner periodically checks agent liveness (active → inactive → disconnected → deleted) while this replica is leader.
 type Runner struct {
 	*base.Runner
 
+	pool   forgetter
 	hub    *event.Hub
 	logger zerolog.Logger
 	store  storage.Storage
@@ -35,9 +41,12 @@ type Runner struct {
 }
 
 // New creates a lifecycle runner.
-func New(cfg Config, logger zerolog.Logger, store storage.Storage, hub *event.Hub, leadership cluster.Leadership) (*Runner, error) {
+func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.Pool, hub *event.Hub, leadership cluster.Leadership) (*Runner, error) {
 	if store == nil {
 		return nil, fmt.Errorf("lifecycle: %w", storage.ErrNilStore)
+	}
+	if pool == nil {
+		return nil, fmt.Errorf("lifecycle: %w", proxy.ErrNilPool)
 	}
 	if hub == nil {
 		return nil, fmt.Errorf("lifecycle: %w", event.ErrNilHub)
@@ -51,6 +60,7 @@ func New(cfg Config, logger zerolog.Logger, store storage.Storage, hub *event.Hu
 		logger: logger.With().Str("runner", cfg.Name).Logger(),
 		cfg:    cfg,
 		store:  store,
+		pool:   pool,
 		hub:    hub,
 	}
 	r.Runner = base.New(cfg.Name, cfg.TickInterval, leadership, logger, r.tick)
@@ -180,6 +190,11 @@ func (r *Runner) reconcile(ctx context.Context, now time.Time, observed *model.A
 		return
 	}
 	if changed != nil {
+		// A deleted agent has no use for the pooled connection to it. The deletion is
+		// committed, so a failed or lost transaction never gets here.
+		if kind == event.AgentDeleted && r.pool != nil { // narrow test runners may omit the pool
+			r.pool.Forget(changed.ID())
+		}
 		r.hub.Record(kind, event.Payload{ID: changed.ID(), Name: changed.Name(), By: "lifecycle"})
 		r.hub.Notify(event.RefreshAgents)
 	}
