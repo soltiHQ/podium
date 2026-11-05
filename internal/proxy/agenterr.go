@@ -19,9 +19,10 @@ import (
 // plane classifies it through the single errkind contract — without sniffing
 // gRPC/HTTP details downstream.
 //
-// Its text is capped, see CapAgentText: an agent chose it, so wherever the control
-// plane stores, records or logs the error it keeps at most that much of it. The
-// chain behind the error is whole.
+// Its text is capped, see CapAgentText: the text of an agent's error is the agent's
+// to choose, so a place that formats the error to store, record or log it holds at
+// most that much. The chain behind the error is whole, and a place that reads the
+// status inside it reads all of it.
 type AgentError struct {
 	kind errkind.Kind
 	err  error
@@ -46,19 +47,23 @@ func agentError(op, agentErr error) error {
 	}
 }
 
-// MaxAgentTextBytes is the most of a text an agent produced that the control plane
-// keeps or logs, before the marker CapAgentText ends a cut text with.
+// MaxAgentTextBytes is the most of the text of an agent's error that the control
+// plane keeps as an error, records in an event or logs, before the marker
+// CapAgentText ends a cut text with.
 const MaxAgentTextBytes = 4 << 10
 
 // agentTextMarker ends a text that CapAgentText cut.
 const agentTextMarker = "…"
 
-// CapAgentText returns a text an agent produced, an error of one for example, cut
-// to MaxAgentTextBytes on a UTF-8 boundary and ended with a marker where it was
-// cut; a text within the limit is returned as it is. An agent may answer with as
-// much text as a message or a header list holds, and the control plane stores it in
-// a rollout, records it in an event and logs it, so every place that does cuts it
-// with this. The cut keeps whole runes of a valid text; it steps back at most
+// CapAgentText returns the text of an agent's error cut to MaxAgentTextBytes on a
+// UTF-8 boundary and ended with a marker where it was cut; a text within the limit
+// is returned as it is. An agent may answer with as much text as a message or a
+// header list holds. AgentError reads as the cut text, and the sync runner cuts the
+// message it stores in a rollout and records in an event, which holds words of its
+// own besides the agent's. It cuts nothing else an agent produces: the archive of
+// history keeps the error an agent reports for a run in a record under a bound of
+// its own, ExecutionErrorMaxBytes (32 KiB), and refuses a record over it instead of
+// cutting it. The cut keeps whole runes of a valid text; it steps back at most
 // three bytes to find a boundary, so bytes that are no UTF-8 are cut just below the
 // limit.
 func CapAgentText(s string) string {

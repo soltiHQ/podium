@@ -324,7 +324,7 @@ func (p *httpProxyV1) StreamTaskLogsForUID(ctx context.Context, name, uid string
 	req.Header.Set("Accept", "text/event-stream")
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrStreamTaskLogs, err)
+		return nil, agentError(ErrStreamTaskLogs, err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		err := formatUnexpectedStatus(resp)

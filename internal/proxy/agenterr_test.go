@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -143,4 +145,25 @@ func TestAgentErrorCapsItsText(t *testing.T) {
 			t.Fatalf("Error() is %d bytes", len(err.Error()))
 		}
 	})
+}
+
+// failingClient is an httpClient whose every call fails with err.
+type failingClient struct{ err error }
+
+func (c failingClient) Do(*http.Request) (*http.Response, error) { return nil, c.err }
+
+// The error of opening a log stream is an agent error like the others of the proxy:
+// the text of it may be what a hostile agent chose, so it is capped when it is read.
+func TestStreamLogsConnectionErrorIsAnAgentError(t *testing.T) {
+	p := &httpProxyV1{endpoint: "http://127.0.0.1:1", client: failingClient{errors.New(strings.Repeat("x", 1<<20))}}
+
+	_, err := p.StreamTaskLogsForUID(context.Background(), "task", "uid")
+
+	var agentErr *AgentError
+	if !errors.As(err, &agentErr) || !errors.Is(err, ErrStreamTaskLogs) {
+		t.Fatalf("StreamTaskLogsForUID = %T %.80v, want an *AgentError of the log stream", err, err)
+	}
+	if len(err.Error()) > MaxAgentTextBytes+len("…") {
+		t.Fatalf("the error is %d bytes, want at most %d", len(err.Error()), MaxAgentTextBytes+len("…"))
+	}
 }

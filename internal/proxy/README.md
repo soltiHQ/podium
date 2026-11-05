@@ -112,15 +112,20 @@ the token it is given. A call in flight on a connection that is closed fails.
 preserving operation and transport errors for `errors.Is`. Request deadlines come
 from the caller context.
 
-An agent chooses the text of its errors, so `AgentError.Error()` is capped by
-`CapAgentText` to 4 KiB (`MaxAgentTextBytes`), cut on a UTF-8 boundary and ended
-with `…`; the chain behind it is whole. Wherever the control plane stores, records
-or logs such a text it comes through this: the sync runner cuts the rollout error
-and the `sync_failed` event detail with it, so they hold at most 4 KiB and the
-marker. An HTTP error body is read up to 4 KiB. A gRPC client accepts a header
-list of 64 KiB at most (the status message travels in the trailers); a status
-over that fails the call with an error of the transport, instead of the 16 MiB
-that grpc-go allows by default.
+An agent chooses the text of its errors, so `AgentError.Error()`, the text of every
+error the proxy returns for an agent's answer or for opening its log stream, is cut by
+`CapAgentText` to 4 KiB (`MaxAgentTextBytes`) on a UTF-8 boundary and ended with `…`;
+the chain behind it is whole. The sync runner puts words of its own before such an
+error and stores it in the rollout and records it in the `sync_failed` event, so it
+cuts the message once more: both hold at most 4 KiB and the marker. A log line that
+carries such an error carries the cut text. An error the proxy makes itself (a bad
+endpoint, a task name that does not match) holds no text of an agent. The helper
+cuts nothing else: the archive of history keeps the error an agent reports for a
+run under a bound of its own, `ExecutionErrorMaxBytes` (32 KiB), and refuses a
+record over it instead of cutting it. An HTTP error body is read up to 4 KiB. A gRPC
+client accepts a header list of 64 KiB at most (the status message travels in the
+trailers); a status over that fails the call with an error of the transport, instead
+of the 16 MiB that grpc-go allows by default.
 
 ## Endpoints and credentials
 

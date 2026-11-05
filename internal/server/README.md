@@ -221,5 +221,7 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
 - **An agent's error text is cut.** The text of a failed call is the agent's to
   choose. The runner cuts the message it stores in the rollout and records as the
   detail of the `sync_failed` event to 4 KiB on a UTF-8 boundary, with `…` where
-  it cut (`proxy.CapAgentText`), and the errors of the proxy that it logs are cut
-  the same.
+  it cut (`proxy.CapAgentText`), and the errors of the proxy that it logs read as
+  the cut text. The archive of history, which keeps the error an agent reports
+  for a run, does not use the helper: it has a bound of its own, 32 KiB, and
+  refuses a record over it.
