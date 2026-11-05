@@ -293,11 +293,10 @@ func TestGRPCDiscoveryRejectsOversizedMessage(t *testing.T) {
 	hub := event.NewHub(logger)
 	defer hub.Close()
 	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, nil, false, 0, nil))
-	// The padding is a metadata value: a field that takes 1 KiB, the most a value may hold.
-	sync := func(id string, padding int) error {
+	sync := func(id string, osBytes int) error {
 		_, err := client.Sync(ctx, &discoverv1.SyncRequest{
 			Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1,
-			Metadata: map[string]string{"padding": strings.Repeat("x", padding)},
+			Os: strings.Repeat("x", osBytes),
 		})
 		return err
 	}

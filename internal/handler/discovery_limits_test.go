@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog"
 	"google.golang.org/grpc/codes"
@@ -424,7 +425,10 @@ func TestLimitedSyncWarnsOncePerMinutePerAgent(t *testing.T) {
 
 // Each capability field of a sync has a limit. Data that breaks one is refused
 // with HTTP 400 / InvalidArgument, naming the field, before the token is
-// enrolled or anything is written, and it takes nothing from the bucket.
+// enrolled or anything is written, and it takes nothing from the bucket. The
+// limits sit at what the SDK itself lets an agent send, because it treats a
+// refusal as permanent; os, arch and platform are cut instead, see
+// TestLongPlatformFieldsAreCut.
 func TestCapabilityCapsRefuseOversizedFields(t *testing.T) {
 	text := func(n int) string { return strings.Repeat("x", n) }
 	labels := func(entries int) map[string]string {
@@ -464,16 +468,13 @@ func TestCapabilityCapsRefuseOversizedFields(t *testing.T) {
 		edit  func(*discoverv1.SyncRequest)
 		rule  string
 	}{
-		{"os", func(r *discoverv1.SyncRequest) { r.Os = text(65) }, "agent os exceeds 64 bytes"},
-		{"arch", func(r *discoverv1.SyncRequest) { r.Arch = text(65) }, "agent arch exceeds 64 bytes"},
-		{"platform", func(r *discoverv1.SyncRequest) { r.Platform = text(65) }, "agent platform exceeds 64 bytes"},
-		{"runners", func(r *discoverv1.SyncRequest) { r.Capabilities.Runners = runners(33) }, "agent capabilities exceed 32 runners"},
+		{"runners", func(r *discoverv1.SyncRequest) { r.Capabilities.Runners = runners(65) }, "agent capabilities exceed 64 runners"},
 		{"runner name", secondRunner(func(r *agentv1.RunnerCapability) { r.Name = text(129) }), "agent capabilities.runners[1].name exceeds 128 bytes"},
-		{"labels", secondRunner(func(r *agentv1.RunnerCapability) { r.Labels = labels(65) }), "agent capabilities.runners[1].labels exceed 64 entries"},
-		{"label key", secondRunner(func(r *agentv1.RunnerCapability) { r.Labels = map[string]string{text(129): "v"} }), "agent capabilities.runners[1].labels has a key over 128 bytes"},
+		{"labels", secondRunner(func(r *agentv1.RunnerCapability) { r.Labels = labels(257) }), "agent capabilities.runners[1].labels exceed 256 entries"},
+		{"label key", secondRunner(func(r *agentv1.RunnerCapability) { r.Labels = map[string]string{text(318): "v"} }), "agent capabilities.runners[1].labels has a key over 317 bytes"},
 		{"label value", secondRunner(func(r *agentv1.RunnerCapability) { r.Labels = map[string]string{"zone": text(1025)} }), "agent capabilities.runners[1].labels has a value over 1024 bytes"},
-		{"workloads", secondRunner(func(r *agentv1.RunnerCapability) { r.Workloads = workloads(65) }), "agent capabilities.runners[1].workloads exceed 64 entries"},
-		{"workload api_version", secondRunner(func(r *agentv1.RunnerCapability) { r.Workloads[1].ApiVersion = text(129) }), "agent capabilities.runners[1].workloads[1].api_version exceeds 128 bytes"},
+		{"workloads", secondRunner(func(r *agentv1.RunnerCapability) { r.Workloads = workloads(257) }), "agent capabilities.runners[1].workloads exceed 256 entries"},
+		{"workload api_version", secondRunner(func(r *agentv1.RunnerCapability) { r.Workloads[1].ApiVersion = text(318) }), "agent capabilities.runners[1].workloads[1].api_version exceeds 317 bytes"},
 		{"workload kind", secondRunner(func(r *agentv1.RunnerCapability) { r.Workloads[1].Kind = text(129) }), "agent capabilities.runners[1].workloads[1].kind exceeds 128 bytes"},
 	} {
 		for _, tr := range limitTransports {
@@ -494,6 +495,87 @@ func TestCapabilityCapsRefuseOversizedFields(t *testing.T) {
 					}
 				}
 			})
+		}
+	}
+}
+
+// A valid SDK agent is never refused by a cap: the SDK treats a refusal as
+// permanent. This sync carries the most the SDK allows in each field (a label
+// key and an api_version of a 253-byte DNS prefix, a slash and 63 bytes) and the
+// most the caps allow in each count, as far as the 256 KiB body goes, and it is
+// stored whole.
+func TestCapabilityCapsAcceptWhatTheSDKSends(t *testing.T) {
+	text := func(n int) string { return strings.Repeat("x", n) }
+	qualified := func(i int) string { return fmt.Sprintf("%0*d", 317, i) } // 317 bytes, distinct
+	req := heartbeat(1, func(r *discoverv1.SyncRequest) {
+		runners := make([]*agentv1.RunnerCapability, 64)
+		for i := range runners {
+			runners[i] = &agentv1.RunnerCapability{Name: text(128)}
+		}
+		runners[0].Labels = make(map[string]string, 256)
+		for i := range 256 {
+			runners[0].Labels[qualified(i)] = "v"
+		}
+		runners[1].Workloads = make([]*agentv1.WorkloadType, 256)
+		for i := range runners[1].Workloads {
+			runners[1].Workloads[i] = &agentv1.WorkloadType{ApiVersion: text(253) + "/" + text(63), Kind: text(128)}
+		}
+		r.Capabilities.Runners = runners
+	})
+	for _, tr := range limitTransports {
+		t.Run(tr.name, func(t *testing.T) {
+			env := newLimitEnv(t, inmemory.New())
+			if res := tr.syncer(env)(req, "token-a"); res.outcome != synced {
+				t.Fatalf("sync at the limits of the SDK: %s %q, want synced", res.outcome, res.message)
+			}
+			stored, err := env.svc.Get(context.Background(), "agent-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			caps := stored.Capabilities()
+			if len(caps) != 64 || len(caps[0].Labels) != 256 || len(caps[1].Workloads) != 256 {
+				t.Fatalf("stored %d runners, %d labels, %d workloads, want 64, 256, 256", len(caps), len(caps[0].Labels), len(caps[1].Workloads))
+			}
+		})
+	}
+}
+
+// os, arch and platform are cut to 256 bytes, on a rune boundary, and the sync
+// lands: os is the PRETTY_NAME of the host, which the SDK does not bound, and a
+// refusal would be permanent there.
+func TestLongPlatformFieldsAreCut(t *testing.T) {
+	text := func(n int) string { return strings.Repeat("o", n) }
+	for _, tc := range []struct{ name, in, want string }{
+		{"300 bytes", text(300), text(256)},
+		{"a rune that straddles the limit", text(255) + "é" + text(43), text(255)},
+	} {
+		for _, field := range []string{"os", "arch", "platform"} {
+			for _, tr := range limitTransports {
+				t.Run(tr.name+"/"+field+", "+tc.name, func(t *testing.T) {
+					env := newLimitEnv(t, inmemory.New())
+					res := tr.syncer(env)(heartbeat(1, func(r *discoverv1.SyncRequest) {
+						switch field {
+						case "os":
+							r.Os = tc.in
+						case "arch":
+							r.Arch = tc.in
+						case "platform":
+							r.Platform = tc.in
+						}
+					}), "token-a")
+					if res.outcome != synced {
+						t.Fatalf("sync with a long %s: %s %q, want synced", field, res.outcome, res.message)
+					}
+					stored, err := env.svc.Get(context.Background(), "agent-a")
+					if err != nil {
+						t.Fatal(err)
+					}
+					got := map[string]string{"os": stored.OS(), "arch": stored.Arch(), "platform": stored.Platform()}[field]
+					if got != tc.want || !utf8.ValidString(got) {
+						t.Fatalf("%s stored as %d bytes, want the first %d bytes of it, on a rune boundary", field, len(got), len(tc.want))
+					}
+				})
+			}
 		}
 	}
 }

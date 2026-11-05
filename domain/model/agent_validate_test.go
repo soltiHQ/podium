@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/soltiHQ/control-plane/domain"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -114,11 +115,12 @@ func TestValidateAgentEndpointRejectsUnsafeForms(t *testing.T) {
 	}
 }
 
-// The capability fields of a sync are bounded one by one: the platform fields,
-// the runners, and per runner its name, labels and workloads. Each row is a
-// value at its limit, which passes, or one over it, which is refused with the
-// field named. The runner and the workload that break a limit come second, to
-// show the index in the name.
+// The capability fields of a sync are bounded one by one: the runners, and per
+// runner its name, labels and workloads. Each row is a value at its limit, which
+// passes, or one over it, which is refused with the field named. The runner and
+// the workload that break a limit come second, to show the index in the name.
+// The limits are never below what the SDK lets an agent send (a label key and an
+// api_version of 317 bytes), because it treats a refusal as permanent.
 func TestNewAgentFromEnforcesCapabilityLimits(t *testing.T) {
 	text := func(n int) string { return strings.Repeat("x", n) }
 	// labels builds entries with distinct zero-padded keys of exactly keyBytes.
@@ -149,38 +151,31 @@ func TestNewAgentFromEnforcesCapabilityLimits(t *testing.T) {
 		edit func(*AgentParams)
 		rule string // what the refusal says; empty for a value that passes
 	}{
-		{"os at limit", func(p *AgentParams) { p.OS = text(64) }, ""},
-		{"os over limit", func(p *AgentParams) { p.OS = text(65) }, "agent os exceeds 64 bytes"},
-		{"arch at limit", func(p *AgentParams) { p.Arch = text(64) }, ""},
-		{"arch over limit", func(p *AgentParams) { p.Arch = text(65) }, "agent arch exceeds 64 bytes"},
-		{"platform at limit", func(p *AgentParams) { p.Platform = text(64) }, ""},
-		{"platform over limit", func(p *AgentParams) { p.Platform = text(65) }, "agent platform exceeds 64 bytes"},
-
-		{"runners at limit", func(p *AgentParams) { p.Capabilities = make([]RunnerCapability, 32) }, ""},
-		{"too many runners", func(p *AgentParams) { p.Capabilities = make([]RunnerCapability, 33) }, "agent capabilities exceed 32 runners"},
+		{"runners at limit", func(p *AgentParams) { p.Capabilities = make([]RunnerCapability, 64) }, ""},
+		{"too many runners", func(p *AgentParams) { p.Capabilities = make([]RunnerCapability, 65) }, "agent capabilities exceed 64 runners"},
 		{"runner name at limit", second(func(r *RunnerCapability) { r.Name = text(128) }), ""},
 		{"runner name over limit", second(func(r *RunnerCapability) { r.Name = text(129) }), "agent capabilities.runners[1].name exceeds 128 bytes"},
 
-		{"labels at limits", second(func(r *RunnerCapability) { r.Labels = labels(64, 128, 1024) }), ""},
-		{"too many labels", second(func(r *RunnerCapability) { r.Labels = labels(65, 8, 1) }), "agent capabilities.runners[1].labels exceed 64 entries"},
-		{"label key over limit", second(func(r *RunnerCapability) { r.Labels = labels(1, 129, 1) }), "agent capabilities.runners[1].labels has a key over 128 bytes"},
+		{"labels at limits", second(func(r *RunnerCapability) { r.Labels = labels(256, 317, 1024) }), ""},
+		{"too many labels", second(func(r *RunnerCapability) { r.Labels = labels(257, 8, 1) }), "agent capabilities.runners[1].labels exceed 256 entries"},
+		{"label key over limit", second(func(r *RunnerCapability) { r.Labels = labels(1, 318, 1) }), "agent capabilities.runners[1].labels has a key over 317 bytes"},
 		{"label value over limit", second(func(r *RunnerCapability) { r.Labels = labels(1, 8, 1025) }), "agent capabilities.runners[1].labels has a value over 1024 bytes"},
 
-		{"workloads at limit", second(func(r *RunnerCapability) { r.Workloads = workloads(64) }), ""},
-		{"too many workloads", second(func(r *RunnerCapability) { r.Workloads = workloads(65) }), "agent capabilities.runners[1].workloads exceed 64 entries"},
-		// api_version is the group, a slash and the version: 100 + 1 + 27 bytes.
+		{"workloads at limit", second(func(r *RunnerCapability) { r.Workloads = workloads(256) }), ""},
+		{"too many workloads", second(func(r *RunnerCapability) { r.Workloads = workloads(257) }), "agent capabilities.runners[1].workloads exceed 256 entries"},
+		// api_version is the group, a slash and the version: 253 + 1 + 63 bytes.
 		{"api version with a group at limit", second(func(r *RunnerCapability) {
-			r.Workloads[1] = GroupVersionKind{Group: text(100), Version: text(27), Kind: "Subprocess"}
+			r.Workloads[1] = GroupVersionKind{Group: text(253), Version: text(63), Kind: "Subprocess"}
 		}), ""},
 		{"api version with a group over limit", second(func(r *RunnerCapability) {
-			r.Workloads[1] = GroupVersionKind{Group: text(100), Version: text(28), Kind: "Subprocess"}
-		}), "agent capabilities.runners[1].workloads[1].api_version exceeds 128 bytes"},
+			r.Workloads[1] = GroupVersionKind{Group: text(253), Version: text(64), Kind: "Subprocess"}
+		}), "agent capabilities.runners[1].workloads[1].api_version exceeds 317 bytes"},
 		{"api version without a group at limit", second(func(r *RunnerCapability) {
-			r.Workloads[1] = GroupVersionKind{Version: text(128), Kind: "Subprocess"}
+			r.Workloads[1] = GroupVersionKind{Version: text(317), Kind: "Subprocess"}
 		}), ""},
 		{"api version without a group over limit", second(func(r *RunnerCapability) {
-			r.Workloads[1] = GroupVersionKind{Version: text(129), Kind: "Subprocess"}
-		}), "agent capabilities.runners[1].workloads[1].api_version exceeds 128 bytes"},
+			r.Workloads[1] = GroupVersionKind{Version: text(318), Kind: "Subprocess"}
+		}), "agent capabilities.runners[1].workloads[1].api_version exceeds 317 bytes"},
 		{"kind at limit", second(func(r *RunnerCapability) { r.Workloads[1].Kind = text(128) }), ""},
 		{"kind over limit", second(func(r *RunnerCapability) { r.Workloads[1].Kind = text(129) }), "agent capabilities.runners[1].workloads[1].kind exceeds 128 bytes"},
 	} {
@@ -195,6 +190,76 @@ func TestNewAgentFromEnforcesCapabilityLimits(t *testing.T) {
 				t.Fatalf("NewAgentFrom = %v, want ErrInvalidArgument", err)
 			case tc.rule != "" && err.Error() != domain.ErrInvalidArgument.Error()+": "+tc.rule:
 				t.Fatalf("NewAgentFrom = %q, want it to say %q", err, tc.rule)
+			}
+		})
+	}
+}
+
+// os, arch and platform are cut to 256 bytes, never refused: os is the
+// PRETTY_NAME of the host, which the SDK does not bound, and the SDK treats a
+// refusal as permanent. The cut falls on a rune boundary and adds nothing.
+func TestNewAgentFromCutsPlatformFields(t *testing.T) {
+	text := func(n int) string { return strings.Repeat("o", n) }
+	for _, tc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"short", "Debian GNU/Linux 12 (bookworm)", "Debian GNU/Linux 12 (bookworm)"},
+		{"at limit", text(256), text(256)},
+		{"over limit", text(300), text(256)},
+		{"a rune that ends at the limit", text(254) + "é" + text(40), text(254) + "é"},
+		{"a 2-byte rune over the limit", text(255) + "é" + text(40), text(255)},
+		{"a 3-byte rune over the limit", text(254) + "€" + text(40), text(254)},
+		{"a 4-byte rune over the limit", text(253) + "😀" + text(40), text(253)},
+	} {
+		for field, set := range map[string]struct {
+			edit func(*AgentParams, string)
+			read func(*Agent) string
+		}{
+			"os":       {func(p *AgentParams, v string) { p.OS = v }, (*Agent).OS},
+			"arch":     {func(p *AgentParams, v string) { p.Arch = v }, (*Agent).Arch},
+			"platform": {func(p *AgentParams, v string) { p.Platform = v }, (*Agent).Platform},
+		} {
+			t.Run(field+", "+tc.name, func(t *testing.T) {
+				p := AgentParams{ID: "agent-1", Name: "Agent", Endpoint: "http://10.0.0.5:8085", EndpointType: 2, APIVersion: 1}
+				set.edit(&p, tc.in)
+				a, err := NewAgentFrom(p)
+				if err != nil {
+					t.Fatalf("NewAgentFrom refused a long %s: %v", field, err)
+				}
+				if got := set.read(a); got != tc.want || !utf8.ValidString(got) {
+					t.Fatalf("%s stored as %d bytes %q, want %d bytes %q", field, len(got), got, len(tc.want), tc.want)
+				}
+			})
+		}
+	}
+}
+
+func TestCutUTF8(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		in    string
+		limit int
+		want  string
+	}{
+		{"empty", "", 4, ""},
+		{"shorter", "abc", 4, "abc"},
+		{"exactly the limit", "abcd", 4, "abcd"},
+		{"ascii over", "abcdef", 4, "abcd"},
+		{"cut falls between runes", "abéz", 4, "abé"},
+		{"cut splits a 2-byte rune", "abcé", 4, "abc"},
+		{"cut splits a 3-byte rune at its second byte", "ab€", 3, "ab"},
+		{"cut splits a 3-byte rune at its third byte", "ab€", 4, "ab"},
+		{"cut splits a 4-byte rune at its second byte", "a😀", 2, "a"},
+		{"cut splits a 4-byte rune at its fourth byte", "a😀", 4, "a"},
+		{"limit zero", "abc", 0, ""},
+		// Not UTF-8: the step back is bounded, so it cannot cut to nothing.
+		{"continuation bytes only", "\x80\x80\x80\x80\x80\x80", 5, "\x80\x80"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cutUTF8(tc.in, tc.limit); got != tc.want {
+				t.Fatalf("cutUTF8(%q, %d) = %q, want %q", tc.in, tc.limit, got, tc.want)
 			}
 		})
 	}

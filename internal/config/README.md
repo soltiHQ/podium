@@ -99,15 +99,21 @@ stored credential yet. gRPC discovery caps request headers at 16 KiB, like the
 HTTP listeners.
 
 The capability fields of a sync have limits, checked with the rest of the
-payload before any token is checked or enrolled: `os`, `arch` and `platform` at
-most 64 bytes each; at most 32 runners, each name at most 128 bytes; and per
-runner at most 64 labels (key at most 128 bytes, value at most 1024 bytes) and
-at most 64 workloads (`api_version` and `kind` at most 128 bytes each). A sync
-that breaks one is refused with HTTP 400 / gRPC `InvalidArgument`, naming the
-field, as in `agent capabilities.runners[1].labels has a value over 1024
-bytes`, and nothing is enrolled or stored. The limits apply to what agents send,
-not to rows already stored. Whatever the limits, a sync is still bounded by the
-256 KiB of its body.
+payload before any token is checked or enrolled: at most 64 runners, each name
+at most 128 bytes; and per runner at most 256 labels (key at most 317 bytes,
+value at most 1024 bytes) and at most 256 workloads (`api_version` at most 317
+bytes, `kind` at most 128 bytes). A sync that breaks one is refused with HTTP
+400 / gRPC `InvalidArgument`, naming the field, as in `agent
+capabilities.runners[1].labels has a value over 1024 bytes`, and nothing is
+enrolled or stored. The SDK treats a 400 as permanent, so none of the limits is
+below what the SDK itself lets an agent send: its label keys and `api_version`
+are qualified names of at most 317 bytes (a DNS prefix of 253 bytes, a slash and
+63 bytes), and it sets no limit on how many there are. `os`, `arch` and
+`platform` are never refused for their length: each is cut to 256 bytes, on a
+rune boundary, and the sync lands (the SDK sends the `PRETTY_NAME` of the host's
+`/etc/os-release` as `os`, and does not bound it). The limits apply to what
+agents send, not to rows already stored. Whatever the limits, a sync is still
+bounded by the 256 KiB of its body.
 
 SDK agents send their token only over TLS unless the agent explicitly allows
 insecure token transport (`allow_insecure_token_transport()`). With `require:

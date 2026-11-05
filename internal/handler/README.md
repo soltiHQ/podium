@@ -247,11 +247,15 @@ token.
 Both parse the agent heartbeat payload and call `model.NewAgentFrom`, which checks its field limits before anything
 is enrolled or charged. They then verify the token (`verifyAgentToken`), when agent auth is required, charge the sync to
 the bucket of its agent ID (`admitSync`, see "Sync rate" below), and call `agentSVC.Upsert`. The capability fields have
-limits of their own: `os`, `arch` and `platform` at most 64 bytes each; at most 32 runners, each name at most 128 bytes;
-per runner at most 64 labels (key at most 128 bytes, value at most 1024 bytes) and at most 64 workloads (`api_version`
-and `kind` at most 128 bytes each). Data that breaks one is answered 400 / `InvalidArgument` naming the field (such as
+limits of their own: at most 64 runners, each name at most 128 bytes; per runner at most 256 labels (key at most 317
+bytes, value at most 1024 bytes) and at most 256 workloads (`api_version` at most 317 bytes, `kind` at most 128 bytes).
+Data that breaks one is answered 400 / `InvalidArgument` naming the field (such as
 `agent capabilities.runners[1].name exceeds 128 bytes`), with nothing enrolled or stored
-(`TestCapabilityCapsRefuseOversizedFields`); the limits are not applied to rows already stored. The upsert reports what
+(`TestCapabilityCapsRefuseOversizedFields`). None is below what the SDK allows, since it treats a 400 as permanent: a
+label key and an `api_version` are qualified names there, 317 bytes at most. A sync with the longest of both, and the
+most runners, labels and workloads these limits allow, is stored whole (`TestCapabilityCapsAcceptWhatTheSDKSends`).
+`os`, `arch` and `platform` are not refused for their length: each is cut to 256 bytes on a rune boundary
+(`TestLongPlatformFieldsAreCut`). The limits are not applied to rows already stored. The upsert reports what
 the sync changed in the stored row (`agent.UpsertResult`), and discovery sends the `agent_update` refresh pulse only
 when the sync gave the UI pages something new: a **visible change**, that is, a new agent or a different status, name,
 endpoint, labels or capabilities, or a **reconnect**, that is, a new agent, an agent that was not active, or one that

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/soltiHQ/control-plane/domain"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -25,15 +26,24 @@ const (
 
 // Limits for the platform and capability fields of a discovery payload: os,
 // arch and platform, and the runners with their names, labels and workloads.
+//
+// The SDK treats a refusal, HTTP 400 or gRPC InvalidArgument, as permanent, so
+// none of these is below what the SDK itself lets an agent send. A label key
+// and an api_version are qualified names there: a DNS prefix of 253 bytes, a
+// slash and 63 bytes, which is 317; its names, label values and kinds are
+// shorter than the limits here; and it sets no count limit. os, arch and
+// platform are cut, never refused: os is the PRETTY_NAME of the host's
+// /etc/os-release, which the SDK does not bound.
 const (
-	agentPlatformMaxBytes         = 64 // os, arch and platform, each
-	agentRunnersMax               = 32
-	agentRunnerNameMaxBytes       = 128
-	agentRunnerLabelsMax          = 64
-	agentRunnerLabelKeyMaxBytes   = 128
-	agentRunnerLabelValueMaxBytes = 1024
-	agentRunnerWorkloadsMax       = 64
-	agentWorkloadFieldMaxBytes    = 128 // api_version and kind, each
+	agentPlatformMaxBytes           = 256 // os, arch and platform are cut to this, each
+	agentRunnersMax                 = 64
+	agentRunnerNameMaxBytes         = 128
+	agentRunnerLabelsMax            = 256
+	agentRunnerLabelKeyMaxBytes     = 317
+	agentRunnerLabelValueMaxBytes   = 1024
+	agentRunnerWorkloadsMax         = 256
+	agentWorkloadAPIVersionMaxBytes = 317
+	agentWorkloadKindMaxBytes       = 128
 )
 
 // agentIDPattern is the SDK AgentId charset.
@@ -170,12 +180,21 @@ func validateAgentParams(p AgentParams, epType enum.EndpointType) error {
 			return fmt.Errorf("%w: agent metadata keys are limited to %d bytes and values to %d bytes", domain.ErrInvalidArgument, agentMetadataKeyMaxBytes, agentMetadataValueMaxBytes)
 		}
 	}
-	for _, f := range []struct{ name, value string }{{"os", p.OS}, {"arch", p.Arch}, {"platform", p.Platform}} {
-		if len(f.value) > agentPlatformMaxBytes {
-			return fmt.Errorf("%w: agent %s exceeds %d bytes", domain.ErrInvalidArgument, f.name, agentPlatformMaxBytes)
-		}
-	}
 	return validateCapabilities(p.Capabilities)
+}
+
+// cutUTF8 returns s cut to at most limit bytes, on a rune boundary: when the
+// cut would split a rune, it falls before that rune. Nothing is added to the
+// text. It steps back at most three bytes, so that text that is not UTF-8 cannot
+// make it cut to nothing.
+func cutUTF8(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	for back := 0; back < utf8.UTFMax-1 && limit > 0 && !utf8.RuneStart(s[limit]); back++ {
+		limit--
+	}
+	return s[:limit]
 }
 
 // validateCapabilities bounds the runner inventory of a discovery payload: the
@@ -213,10 +232,10 @@ func validateRunner(i int, r RunnerCapability) error {
 	}
 	for j, w := range r.Workloads {
 		switch {
-		case apiVersionBytes(w) > agentWorkloadFieldMaxBytes:
-			return invalidRunner(i, ".workloads[%d].api_version exceeds %d bytes", j, agentWorkloadFieldMaxBytes)
-		case len(w.Kind) > agentWorkloadFieldMaxBytes:
-			return invalidRunner(i, ".workloads[%d].kind exceeds %d bytes", j, agentWorkloadFieldMaxBytes)
+		case apiVersionBytes(w) > agentWorkloadAPIVersionMaxBytes:
+			return invalidRunner(i, ".workloads[%d].api_version exceeds %d bytes", j, agentWorkloadAPIVersionMaxBytes)
+		case len(w.Kind) > agentWorkloadKindMaxBytes:
+			return invalidRunner(i, ".workloads[%d].kind exceeds %d bytes", j, agentWorkloadKindMaxBytes)
 		}
 	}
 	return nil
