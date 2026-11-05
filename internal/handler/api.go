@@ -12,12 +12,14 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/loghub"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
+	clustersvc "github.com/soltiHQ/control-plane/internal/service/cluster"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
 	"github.com/soltiHQ/control-plane/internal/service/history"
 	"github.com/soltiHQ/control-plane/internal/service/session"
@@ -57,8 +59,21 @@ type API struct {
 	logHub        *loghub.Hub
 	streamLimit   *middleware.StreamLimiter
 	logAccess     func(*http.Request) error
+	// clusterSVC serves the cluster routes; nil, as in standalone, registers none.
+	clusterSVC *clustersvc.Service
 
 	logger zerolog.Logger
+}
+
+// APIOption configures an API beyond the services every node has.
+type APIOption func(*API)
+
+// WithCluster serves the cluster routes with svc: GET /api/v1/cluster, POST
+// /api/v1/cluster/members and DELETE /api/v1/cluster/members/{id}. Only a raft
+// node has a cluster service. Without one, as in standalone, the routes are not
+// registered, and their paths answer as any other unknown path.
+func WithCluster(svc *clustersvc.Service) APIOption {
+	return func(a *API) { a.clusterSVC = svc }
 }
 
 // NewAPI creates a new API handler. logAccess re-checks, for a task log stream
@@ -77,6 +92,7 @@ func NewAPI(
 	logHub *loghub.Hub,
 	streamLimit *middleware.StreamLimiter,
 	logAccess func(*http.Request) error,
+	opts ...APIOption,
 ) *API {
 	if accessSVC == nil {
 		panic(service.ErrNilService)
@@ -114,7 +130,7 @@ func NewAPI(
 	if logAccess == nil {
 		panic("handler.NewAPI: nil log stream access check")
 	}
-	return &API{
+	a := &API{
 		logger: logger.With().Str("handler", "api").Logger(),
 
 		credentialSVC: credentialSVC,
@@ -130,6 +146,10 @@ func NewAPI(
 		streamLimit:   streamLimit,
 		logAccess:     logAccess,
 	}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
 }
 
 // Routes registers API routes.
@@ -150,6 +170,11 @@ func (a *API) Routes(mux *http.ServeMux, auth route.BaseMW, _ route.PermMW, comm
 	route.HandleFunc(mux, routepath.ApiDashboardIssues, a.IssuesDelete, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiPermissions, a.Permissions, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiRoles, a.Roles, append(common, auth)...)
+	if a.clusterSVC != nil {
+		route.HandleFunc(mux, routepath.ApiCluster, a.Cluster, append(common, auth)...)
+		route.HandleFunc(mux, routepath.ApiClusterMembers, a.ClusterMembers, append(common, auth)...)
+		route.HandleFunc(mux, routepath.ApiClusterMember, a.ClusterMembersRouter, append(common, auth)...)
+	}
 }
 
 // Permissions handles GET /api/v1/permissions: the permissions the caller may
@@ -202,6 +227,18 @@ func (a *API) rolesList(w http.ResponseWriter, r *http.Request, mode httpctx.Ren
 	response.OK(w, r, mode, &responder.View{
 		Data: restv1.ListRolesResponse{Items: items},
 	})
+}
+
+// failure starts the log line of a write that the store failed, with err on it: an
+// ERROR, except for a write that reached a follower or lost leadership
+// (cluster.IsLeadershipError), which is a routing condition and not a failure of
+// this node, so it is a WARN. The handler answers such a write with
+// response.StoreFailed.
+func (a *API) failure(err error) *zerolog.Event {
+	if cluster.IsLeadershipError(err) {
+		return a.logger.Warn().Err(err)
+	}
+	return a.logger.Error().Err(err)
 }
 
 // identity returns the authenticated identity from the request context.

@@ -28,7 +28,6 @@ type Config struct {
 
 	TLSConfig *tls.Config `yaml:"-"`
 
-	BaseContext func(net.Listener) context.Context                    `yaml:"-"`
 	ConnContext func(ctx context.Context, c net.Conn) context.Context `yaml:"-"`
 }
 

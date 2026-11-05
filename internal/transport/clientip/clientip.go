@@ -11,26 +11,57 @@ import (
 // unknown stands for a peer address that does not parse.
 const unknown = "unknown"
 
+// ForwardedForKey is the gRPC metadata key of X-Forwarded-For: a node that forwards
+// a call to another sends the caller's address in it, as an HTTP reverse proxy does.
+const ForwardedForKey = "x-forwarded-for"
+
 // ErrInvalidTrustedProxy indicates a trusted proxy entry that is neither an IP address nor a CIDR prefix.
 var ErrInvalidTrustedProxy = errors.New("clientip: invalid trusted proxy")
 
 // Resolver resolves client IPs and the request scheme. A nil *Resolver trusts no proxy.
 type Resolver struct {
 	trusted []netip.Prefix
+	hosts   *Hosts // trusted as well, nil for none
+}
+
+// Option configures a Resolver.
+type Option func(*Resolver)
+
+// TrustHosts makes the resolver trust the addresses of hosts as well, as proxies:
+// the hosts of the raft configuration, which forward requests to the leader.
+func TrustHosts(hosts *Hosts) Option {
+	return func(r *Resolver) { r.hosts = hosts }
 }
 
 // New returns a Resolver that trusts the forwarding headers sent by trustedProxies.
 // Each entry is an IP address or a CIDR prefix; IPv4-mapped entries are unmapped.
-func New(trustedProxies []string) (*Resolver, error) {
-	r := &Resolver{trusted: make([]netip.Prefix, 0, len(trustedProxies))}
+func New(trustedProxies []string, opts ...Option) (*Resolver, error) {
+	trusted, err := ParseTrusted(trustedProxies)
+	if err != nil {
+		return nil, err
+	}
+	r := &Resolver{trusted: trusted}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r, nil
+}
+
+// ParseTrusted returns the prefixes that a Resolver of trustedProxies trusts, in
+// their order: each entry, trimmed, is an IP address, which is its own /32 or
+// /128, or a CIDR prefix, which is masked; IPv4-mapped entries are unmapped and
+// zones dropped. So entries that trust the same addresses, such as 10.0.0.1 and
+// 10.0.0.1/32, parse alike.
+func ParseTrusted(trustedProxies []string) ([]netip.Prefix, error) {
+	trusted := make([]netip.Prefix, 0, len(trustedProxies))
 	for _, entry := range trustedProxies {
 		p, err := parseTrusted(strings.TrimSpace(entry))
 		if err != nil {
 			return nil, fmt.Errorf("%w %q: want an IP address or a CIDR prefix", ErrInvalidTrustedProxy, entry)
 		}
-		r.trusted = append(r.trusted, p)
+		trusted = append(trusted, p)
 	}
-	return r, nil
+	return trusted, nil
 }
 
 // FromAddr returns the canonical IP of an "ip", "ip:port" or "[ip]:port" address,
@@ -50,14 +81,22 @@ func FromAddr(addr string) string {
 // of them are. The peer stays the answer when the header is missing or empty, or
 // when the walk reaches an entry that does not parse.
 func (r *Resolver) IP(req *http.Request) string {
-	peer, ok := parseAddr(req.RemoteAddr)
+	return r.Forwarded(req.RemoteAddr, req.Header.Values("X-Forwarded-For"))
+}
+
+// Forwarded returns the canonical client IP of a request from the peer at peerAddr
+// that carries forwardedFor: the values of its X-Forwarded-For header lines, or of
+// its gRPC x-forwarded-for metadata ([ForwardedForKey]). It walks them as IP does,
+// so they count only when the peer is trusted.
+func (r *Resolver) Forwarded(peerAddr string, forwardedFor []string) string {
+	peer, ok := parseAddr(peerAddr)
 	if !ok {
 		return unknown
 	}
 	if !r.trusts(peer) {
 		return peer.String()
 	}
-	return r.forwardedFor(req.Header, peer).String()
+	return r.forwardedFor(forwardedFor, peer).String()
 }
 
 // HTTPS reports whether the client reached the server over HTTPS: the connection
@@ -75,10 +114,10 @@ func (r *Resolver) HTTPS(req *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(proto), "https")
 }
 
-// forwardedFor walks the X-Forwarded-For entries of every header line from the right.
-// A missing or empty header is one empty entry, which does not parse.
-func (r *Resolver) forwardedFor(h http.Header, peer netip.Addr) netip.Addr {
-	entries := strings.Split(strings.Join(h.Values("X-Forwarded-For"), ","), ",")
+// forwardedFor walks the entries of every forwarding value, in order, from the right.
+// No value, or an empty one, is one empty entry, which does not parse.
+func (r *Resolver) forwardedFor(values []string, peer netip.Addr) netip.Addr {
+	entries := strings.Split(strings.Join(values, ","), ",")
 	var client netip.Addr
 	for i := len(entries) - 1; i >= 0; i-- {
 		a, ok := parseAddr(strings.TrimSpace(entries[i]))
@@ -102,7 +141,7 @@ func (r *Resolver) trusts(a netip.Addr) bool {
 			return true
 		}
 	}
-	return false
+	return r.hosts.Contains(a)
 }
 
 // parseTrusted parses one trusted proxy entry into a prefix of canonical addresses.

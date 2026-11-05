@@ -21,14 +21,15 @@ var _ event.Writer = (*EventWriter)(nil)
 // the event. In a typical flow writes already hit the leader (via leader
 // forwarding in transport middleware), so this path is rare.
 type EventWriter struct {
-	raft *hraft.Raft
-	hub  *event.Hub // local hub for follower fallback
+	raft    *hraft.Raft
+	hub     *event.Hub      // local hub for follower fallback
+	stopped <-chan struct{} // closed once raft shuts down, which ends the wait of a submission
 }
 
 // NewEventWriter wires the Raft node to the local hub. hub is the same
 // *event.Hub the FSM applies against.
 func NewEventWriter(r *hraft.Raft, hub *event.Hub) *EventWriter {
-	return &EventWriter{raft: r, hub: hub}
+	return &EventWriter{raft: r, hub: hub, stopped: stopSignal(r)}
 }
 
 func (w *EventWriter) Notify(ev string) {
@@ -63,13 +64,22 @@ func (w *EventWriter) DeleteIssues(kind, id string) int {
 }
 
 // submit encodes and applies a single-op command. Returns error if Raft
-// rejects the submission (non-leader, timeout, quorum loss).
+// rejects the submission (non-leader, timeout, quorum loss), or shuts down
+// before its outcome is known (awaitWrite), with the meaning writeError gives
+// it. A node that shut down already submits nothing (refuseStopped).
 func (w *EventWriter) submit(op *raftv1.Op) error {
 	data, err := overlay.EncodeCommand([]*raftv1.Op{op})
 	if err != nil {
 		return err
 	}
-	return w.raft.Apply(data, applyTimeout).Error()
+	if err := refuseStopped(w.stopped); err != nil {
+		return err
+	}
+	f := w.raft.Apply(data, applyTimeout)
+	if err := awaitWrite(f, w.stopped); err != nil {
+		return writeError(f, err)
+	}
+	return nil
 }
 
 // payloadToProto converts the in-memory event.Payload to its replicated form.

@@ -13,7 +13,6 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
-	"github.com/soltiHQ/control-plane/internal/cluster/standalone"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
@@ -364,17 +363,56 @@ func TestReconcileDecidesAgainOnTheReReadAgent(t *testing.T) {
 	f.expectKinds(t, "after reconcile", nil)
 }
 
-// The grace exists only if New starts it: the tests above set startedAt by hand.
-func TestNewRecordsStartedAt(t *testing.T) {
+// terms is a Leadership that leads for one term per start time, each ending a
+// while after it began. clock is the time of the current term; seen gets
+// startedAt as the runner left it at the end of each term.
+type terms struct {
+	starts []time.Time
+	clock  time.Time
+	r      *Runner
+	seen   []time.Time
+}
+
+func (*terms) AmLeader() bool        { return true }
+func (*terms) CurrentLeader() string { return "" }
+
+func (l *terms) WhenLeader(ctx context.Context, fn func(context.Context) error) error {
+	for _, start := range l.starts {
+		l.clock = start
+		term, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+		err := fn(term)
+		cancel()
+		if err != nil {
+			return err
+		}
+		l.seen = append(l.seen, l.r.startedAt)
+	}
+	return nil
+}
+
+// The grace starts with each leadership term, not with New: a replica that takes
+// leadership long after it started still gives every agent the full thresholds
+// from the start of its term. The tests above set startedAt by hand.
+func TestEachTermRecordsStartedAt(t *testing.T) {
 	hub := event.NewHub(zerolog.New(io.Discard))
 	defer hub.Close()
-	before := time.Now()
-	r, err := New(Config{}, zerolog.New(io.Discard), inmemory.New(), hub, standalone.NewLeadership())
+	first := time.Now().Add(time.Hour)
+	leadership := &terms{starts: []time.Time{first, first.Add(48 * time.Hour)}}
+	r, err := New(Config{TickInterval: time.Millisecond}, zerolog.New(io.Discard), inmemory.New(), hub, leadership)
 	if err != nil {
 		t.Fatal(err)
 	}
-	after := time.Now()
-	if r.startedAt.Before(before) || r.startedAt.After(after) {
-		t.Fatalf("startedAt = %v, want between %v and %v", r.startedAt, before, after)
+	if !r.startedAt.IsZero() {
+		t.Fatalf("New set startedAt to %v: the grace must start with a leadership term", r.startedAt)
+	}
+	leadership.r = r
+	// The term's own time, which the runner reads through its clock: the
+	// stand-in WhenLeader runs every term on the goroutine of Start.
+	r.clock = func() time.Time { return leadership.clock }
+	if err = r.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.EqualFunc(leadership.seen, leadership.starts, time.Time.Equal) {
+		t.Fatalf("startedAt at the end of each term = %v, want the start of each term %v", leadership.seen, leadership.starts)
 	}
 }

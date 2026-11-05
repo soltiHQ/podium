@@ -6,6 +6,7 @@ require (
 	github.com/a-h/templ v0.3.1100
 	github.com/felixge/httpsnoop v1.1.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/raft v1.8.0
 	github.com/hashicorp/raft-boltdb/v2 v2.4.2
 	github.com/kelseyhightower/envconfig v1.4.0
@@ -28,7 +29,6 @@ require (
 	github.com/cli/browser v1.3.0 // indirect
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
-	github.com/hashicorp/go-hclog v1.6.3 // indirect
 	github.com/hashicorp/go-immutable-radix v1.3.1 // indirect
 	github.com/hashicorp/go-metrics v0.7.0 // indirect
 	github.com/hashicorp/go-msgpack/v2 v2.1.5 // indirect

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -32,7 +33,82 @@ import (
 const (
 	agentAuthDisabledWarning = "agent authentication disabled: any host that reaches the discovery listeners can register agents"
 	openDiscoveryWarning     = "agent authentication covers enrolled agents only: the first sync of an unknown agent ID enrolls it and sets the endpoint podium calls, so set SOLTI_AGENT_AUTH_ENROLL_SECRET or tls.server.client_ca_file, or keep the discovery listeners reachable only from agent networks"
+	// The startup warnings of a raft node about its forwards to the leader.
+	plaintextForwardingWarning = "raft forwarding runs plaintext: without tls.server a follower forwards the writes it gets, logins, cookies and tokens included, and the agents' syncs to the leader over plain HTTP and gRPC; set tls.server on every node, and tls.client.ca_file to the CA of the nodes' server certificates"
+	uncertifiedForwardWarning  = "agent mTLS is on (tls.server.client_ca_file) and tls.client.cert_file is unset: a follower presents no client certificate when it forwards an agent's sync to the leader, whose discovery listeners require one, so every sync that reaches a follower fails; set tls.client.cert_file and key_file to a certificate the agents' CA signed"
 )
+
+// forwardingWarnings returns the messages of the startup warnings about a raft
+// node's forwards, found in a JSON log.
+func forwardingWarnings(t *testing.T, logs []byte) []string {
+	t.Helper()
+	var out []string
+	for _, line := range bytes.Split(bytes.TrimSpace(logs), []byte("\n")) {
+		var entry map[string]any
+		if json.Unmarshal(line, &entry) != nil || entry["level"] != "warn" {
+			continue
+		}
+		if msg, _ := entry["message"].(string); msg == plaintextForwardingWarning || msg == uncertifiedForwardWarning {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
+// A raft node says at start what its forwards to the leader lack, once per
+// case: without tls.server a follower forwards logins, cookies and tokens in
+// plaintext; with agent mTLS on and no tls.client certificate, it forwards an
+// agent's sync without the client certificate the leader's discovery listeners
+// require. TLS with a client certificate, or without agent mTLS, needs nothing.
+func TestRaftNodeWarnsWhatItsForwardsLack(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		serverTLS, clientCA, cert bool
+		want                      []string
+	}{
+		{name: "plaintext", want: []string{plaintextForwardingWarning}},
+		{name: "tls", serverTLS: true},
+		{name: "agent mTLS without a client certificate", serverTLS: true, clientCA: true, want: []string{uncertifiedForwardWarning}},
+		{name: "agent mTLS with a client certificate", serverTLS: true, clientCA: true, cert: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			if tc.serverTLS {
+				cfg.TLS.Server.CertFile, cfg.TLS.Server.KeyFile = "server.crt", "server.key"
+			}
+			if tc.clientCA {
+				cfg.TLS.Server.ClientCAFile = "agents-ca.pem"
+			}
+			if tc.cert {
+				cfg.TLS.Client.CertFile, cfg.TLS.Client.KeyFile = "client.crt", "client.key"
+			}
+			var logs bytes.Buffer
+			warnForwarding(zerolog.New(&logs), cfg)
+			if got := forwardingWarnings(t, logs.Bytes()); fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("warnings %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Standalone forwards nothing, and says nothing about forwards: a node without
+// TLS, which warns in raft mode, starts without the warning.
+func TestStandaloneWarnsOfNoForwarding(t *testing.T) {
+	var logs bytes.Buffer
+	cfg := config.Default()
+	cfg.Cluster.Standalone.Ephemeral = true
+	cfg.Auth.JWTSecret = strings.Repeat("standalone-forwarding-secret", 2)
+	a, err := New(context.Background(), cfg, zerolog.New(&logs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := forwardingWarnings(t, logs.Bytes()); len(got) != 0 {
+		t.Fatalf("standalone warned %q", got)
+	}
+}
 
 // discoveryWarnings returns the startup warnings about who can register
 // agents, found in a JSON log.
@@ -185,7 +261,7 @@ func newDiscoveryClientsFor(t *testing.T, cfg config.Config) discoveryClients {
 	}
 	hub := event.NewHub(logger)
 	t.Cleanup(hub.Close)
-	h, srv := buildDiscoveryListeners(logger, svc.agent, hub, standalone.NewLeadership(), cfg, nil, nil)
+	h, srv := buildDiscoveryListeners(logger, svc.agent, hub, standalone.NewLeadership(), cfg, nil, nil, nil, nil)
 	return discoveryClients{http: h, grpc: serveDiscovery(t, srv), agents: svc.agent}
 }
 
@@ -214,7 +290,7 @@ func TestGRPCDiscoveryRejectsOversizedMessage(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), nil, false))
+	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), nil, nil, false, 0, nil))
 	sync := func(id string, osBytes int) error {
 		_, err := client.Sync(ctx, &discoverv1.SyncRequest{
 			Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1,
@@ -241,7 +317,7 @@ func TestGRPCDiscoveryCapsHeaders(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), nil, false))
+	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), nil, nil, false, 0, nil))
 	sync := func(id string, padding int) error {
 		md := metadata.AppendToOutgoingContext(ctx, "x-padding", strings.Repeat("p", padding))
 		_, err := client.Sync(md, &discoverv1.SyncRequest{
@@ -369,6 +445,67 @@ func TestDiscoveryEnrollmentUsesTheConfiguredSecret(t *testing.T) {
 		if token, err := c.agents.AgentToken(ctx, id); err != nil || token != want {
 			t.Fatalf("stored token of %s: %q %v, want its derived token", id, token, err)
 		}
+	}
+}
+
+// Standalone gRPC discovery takes its client IP from the peer, as it did before
+// followers forwarded syncs: x-forwarded-for counts for nothing, even from a
+// host that trusted_proxies lists, while HTTP discovery believes that host's
+// X-Forwarded-For. Each attempt names an address of its own; over gRPC the
+// limiter still counts all of them at the peer.
+func TestStandaloneGRPCDiscoveryIgnoresForwardedFor(t *testing.T) {
+	cfg := config.Default()
+	cfg.TrustedProxies = []string{"127.0.0.1"} // the address of the test's own client
+	logger := zerolog.Nop()
+	leadership := standalone.NewLeadership()
+	resolver, closeHosts, err := clientResolver(cfg, leadership)
+	if err != nil || closeHosts != nil {
+		t.Fatalf("clientResolver in standalone: %v, with a closer: %v", err, closeHosts != nil)
+	}
+	svc := agent.New(inmemory.New(), logger)
+	hub := event.NewHub(logger)
+	t.Cleanup(hub.Close)
+	h, srv := buildDiscoveryListeners(logger, svc, hub, leadership, cfg, resolver, nil, nil, nil)
+	client := serveDiscovery(t, srv)
+	forged := func(attempt int) string { return fmt.Sprintf("198.51.100.%d", attempt+1) }
+	for _, tc := range []struct {
+		name string
+		sync func(attempt int, id, token string) error
+		want func(err error) bool // the end of the sixth attempt, after five failures
+	}{
+		{"grpc", func(attempt int, id, token string) error {
+			ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer "+token, "x-forwarded-for", forged(attempt))
+			_, err := client.Sync(ctx, &discoverv1.SyncRequest{Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})
+			return err
+		}, func(err error) bool { return status.Code(err) == codes.ResourceExhausted }},
+		{"http", func(attempt int, id, token string) error {
+			body := `{"id":"` + id + `","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
+			r := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/sync", strings.NewReader(body))
+			r.RemoteAddr = "127.0.0.1:40000"
+			r.Header.Set("Authorization", "Bearer "+token)
+			r.Header.Set("X-Forwarded-For", forged(attempt))
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != http.StatusOK {
+				return fmt.Errorf("HTTP %d", w.Code)
+			}
+			return nil
+		}, func(err error) bool { return err == nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := "agent-" + tc.name
+			if err := tc.sync(0, id, "token-"+id); err != nil {
+				t.Fatalf("enroll: %v", err)
+			}
+			for attempt := 1; attempt <= 5; attempt++ {
+				if err := tc.sync(attempt, id, "stale-token"); err == nil {
+					t.Fatalf("bad token %d accepted", attempt)
+				}
+			}
+			if err := tc.sync(6, id, "token-"+id); !tc.want(err) {
+				t.Fatalf("the sixth attempt, as %s: %v", forged(6), err)
+			}
+		})
 	}
 }
 

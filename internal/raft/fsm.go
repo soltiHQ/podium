@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	hraft "github.com/hashicorp/raft"
+	"github.com/rs/zerolog"
 
 	raftv1 "github.com/soltiHQ/control-plane/api/gen/solti/raft/v1"
 	"github.com/soltiHQ/control-plane/internal/event"
@@ -24,16 +26,22 @@ var _ hraft.FSM = (*FSM)(nil)
 // Event ops (Notify/Record/DeleteIssues) are applied to the hub outside
 // the transaction — they are append-only and have no rollback semantics.
 // The FSM runs on every replica on every committed log entry.
+//
+// A command that cannot be decoded or fails to apply changes nothing on the
+// replica and is dropped. Only the proposing leader sees the error, as the
+// response of Apply, so every replica logs it (see logFailure).
 type FSM struct {
-	store storage.Storage
-	hub   *event.Hub
+	store  storage.Storage
+	hub    *event.Hub
+	logger zerolog.Logger
 }
 
 // NewFSM builds an FSM wrapping store and hub. store must be the plain
 // inmemory one (NOT a Raft-backed wrapper) to avoid recursive Apply; hub
 // must be the local *event.Hub whose ApplyLocal* methods we call directly.
-func NewFSM(store storage.Storage, hub *event.Hub) *FSM {
-	return &FSM{store: store, hub: hub}
+// logger gets a line for each command that fails.
+func NewFSM(store storage.Storage, hub *event.Hub, logger zerolog.Logger) *FSM {
+	return &FSM{store: store, hub: hub, logger: logger}
 }
 
 // Apply decodes the proto Command, runs store ops under one WithTx, and
@@ -41,6 +49,7 @@ func NewFSM(store storage.Storage, hub *event.Hub) *FSM {
 func (f *FSM) Apply(l *hraft.Log) any {
 	cmd, err := overlay.DecodeCommand(l.Data)
 	if err != nil {
+		f.logFailure(l.Index, nil)
 		return err
 	}
 	ctx := context.Background()
@@ -64,6 +73,7 @@ func (f *FSM) Apply(l *hraft.Log) any {
 			return overlay.ApplyOps(ctx, tx, storeOps)
 		})
 		if err != nil {
+			f.logFailure(l.Index, cmd)
 			return err
 		}
 	}
@@ -72,6 +82,57 @@ func (f *FSM) Apply(l *hraft.Log) any {
 		applyEventOp(f.hub, op)
 	}
 	return nil
+}
+
+// undecodable is the kind logged for a command that cannot be decoded.
+const undecodable = "undecodable"
+
+// logFailure logs a command that failed on this replica, at ERROR: the index of
+// its log entry, its kind and the number of its operations, and nothing more.
+// Neither the error nor the command is logged, as either can hold the values of
+// the state (IDs, names, hashes). The kind of a decoded command is the kinds of
+// its operations, named as in the protocol (agent_upsert), in order, each once;
+// a command that does not decode (cmd is nil) has the kind "undecodable" and no
+// count.
+//
+// Store checks every write against the state before it proposes it, so a command
+// that fails here is a corrupted log entry or a version skew. Every replica
+// applies a log entry the same way, so each one logs the same entry, unless a
+// version skew lets some of them apply what others cannot. The line is then the
+// only sign of the divergence.
+func (f *FSM) logFailure(index uint64, cmd *raftv1.Command) {
+	if cmd == nil {
+		f.logger.Error().Uint64("index", index).Str("kind", undecodable).
+			Msg("raft: committed command is not decodable and was dropped on this replica (corrupted entry or version skew)")
+		return
+	}
+	f.logger.Error().Uint64("index", index).Str("kind", commandKind(cmd)).Int("ops", len(cmd.GetOps())).
+		Msg("raft: committed command failed to apply and was dropped on this replica, which stays as it was (corrupted entry or version skew)")
+}
+
+// commandKind names the kinds of the operations of cmd, in order, each once,
+// joined by commas: agent_upsert,agent_delete.
+func commandKind(cmd *raftv1.Command) string {
+	var (
+		kinds []string
+		seen  = make(map[string]bool)
+	)
+	for _, op := range cmd.GetOps() {
+		if kind := opKind(op); !seen[kind] {
+			seen[kind] = true
+			kinds = append(kinds, kind)
+		}
+	}
+	return strings.Join(kinds, ",")
+}
+
+// opKind is the name in the protocol of the variant op carries.
+func opKind(op *raftv1.Op) string {
+	m := op.ProtoReflect()
+	if field := m.WhichOneof(m.Descriptor().Oneofs().ByName("op")); field != nil {
+		return string(field.Name())
+	}
+	return "unknown"
 }
 
 // isEventOp reports whether op carries an event-hub mutation rather than

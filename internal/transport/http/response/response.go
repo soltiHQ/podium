@@ -3,6 +3,7 @@ package response
 import (
 	"net/http"
 
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
@@ -11,7 +12,23 @@ import (
 	"github.com/a-h/templ"
 )
 
+// LeaderHeader is the response header that carries the HTTP address of the cluster leader: host:port, no scheme.
+// See "Leader hint" in internal/transport/README.md.
+const LeaderHeader = "X-Leader"
+
+// SetLeader adds the leader's HTTP address to an answer as LeaderHeader. Every answer that carries it
+// sets it here. An empty address adds nothing: a node that leads, that knows no leader, or that has no
+// HTTP port to give has none.
+func SetLeader(w http.ResponseWriter, addr string) {
+	if addr != "" {
+		w.Header().Set(LeaderHeader, addr)
+	}
+}
+
 // FromError maps a domain error to the matching HTTP response using the shared errkind classifier.
+// A write that reached a follower (cluster.ErrNotLeader) or lost leadership while it was committing
+// (cluster.ErrLeadershipLost) answers 503 like any unavailable store, with LeaderHeader when the Leader
+// middleware knows who leads.
 func FromError(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, err error) {
 	switch errkind.Classify(err) {
 	case errkind.InvalidArgument:
@@ -29,10 +46,25 @@ func FromError(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, 
 	case errkind.FailedPrecondition:
 		Conflict(w, r, mode, "precondition failed")
 	case errkind.Unavailable, errkind.Canceled, errkind.DeadlineExceeded:
+		if cluster.IsLeadershipError(err) {
+			SetLeader(w, httpctx.Leader(r.Context()))
+		}
 		Unavailable(w, r, mode)
 	default:
 		Internal(w, r, mode)
 	}
+}
+
+// StoreFailed answers a write that the store failed and the handler has no answer for: 503, as
+// Unavailable does. A write that reached a follower or lost leadership (cluster.IsLeadershipError) goes
+// through FromError instead, so that its 503 carries the leader's address; every other error is
+// answered as before.
+func StoreFailed(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, err error) {
+	if cluster.IsLeadershipError(err) {
+		FromError(w, r, mode, err)
+		return
+	}
+	Unavailable(w, r, mode)
 }
 
 type errorBody struct {
@@ -269,6 +301,62 @@ func Unavailable(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode
 					http.StatusServiceUnavailable,
 					"Service unavailable",
 					"The server is temporarily unable to handle the request.",
+				)
+			}
+			return nil
+		}(mode),
+	})
+}
+
+// UnavailableMsg renders a 503 response with a custom message.
+func UnavailableMsg(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, msg string) {
+	transportctx.SetError(r.Context(), msg)
+	httpctx.Responder(r.Context()).Respond(w, r, http.StatusServiceUnavailable, &responder.View{
+		Data: errorBody{
+			Code:      http.StatusServiceUnavailable,
+			Message:   msg,
+			RequestID: transportctx.TryRequestID(r.Context()),
+		},
+		Component: func(m httpctx.RenderMode) templ.Component {
+			if m == httpctx.RenderPage {
+				return renderErrorPage(
+					http.StatusServiceUnavailable,
+					"Service unavailable",
+					msg,
+				)
+			}
+			return nil
+		}(mode),
+	})
+}
+
+// NotLeader answers, with msg, a write that this node no longer leads the
+// cluster to serve: 503, with leader, the leader's HTTP address, in
+// LeaderHeader, as FromError answers cluster.ErrNotLeader. The caller reads
+// leader once from the Leader middleware (httpctx.Leader), so that the answer
+// carries the address its message was chosen for: the leader can move between
+// two reads. An empty leader sends no header.
+func NotLeader(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, leader, msg string) {
+	SetLeader(w, leader)
+	UnavailableMsg(w, r, mode, msg)
+}
+
+// UnprocessableEntity renders a 422 response with a custom message: a request
+// that is well formed, but that the server cannot carry out as it stands.
+func UnprocessableEntity(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, msg string) {
+	transportctx.SetError(r.Context(), msg)
+	httpctx.Responder(r.Context()).Respond(w, r, http.StatusUnprocessableEntity, &responder.View{
+		Data: errorBody{
+			Code:      http.StatusUnprocessableEntity,
+			Message:   msg,
+			RequestID: transportctx.TryRequestID(r.Context()),
+		},
+		Component: func(m httpctx.RenderMode) templ.Component {
+			if m == httpctx.RenderPage {
+				return renderErrorPage(
+					http.StatusUnprocessableEntity,
+					"Request not carried out",
+					msg,
 				)
 			}
 			return nil

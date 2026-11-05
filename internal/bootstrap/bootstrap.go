@@ -52,6 +52,22 @@ type Options struct {
 	cost int
 }
 
+// Check reports what would fail any seed with o, whatever the user table holds:
+// neither a data directory nor ephemeral state ([ErrNoDataDir]), or an
+// AdminPassword that breaks the password policy, whose error names
+// [AdminPasswordEnv] and never the value. [Run] checks both only once it knows
+// that a seed is due. A node that seeds at a leadership term, which can come
+// at any time, cannot know that at start, and checks o there instead.
+func (o Options) Check() error {
+	if o.DataDir == "" && !o.Ephemeral {
+		return ErrNoDataDir
+	}
+	if o.AdminPassword != "" {
+		return checkAdminPassword(o.AdminPassword)
+	}
+	return nil
+}
+
 // Run reconciles the built-in roles with their code definitions and seeds the
 // administrator. User-admin and its password are seeded when the user table is
 // empty, its password alone when user-admin is the only user and has none (a
@@ -242,9 +258,8 @@ func adminSeedNeeded(ctx context.Context, userSVC *user.Service, credSVC *creden
 // policy; its error names the variable and never the value.
 func initialPassword(opts Options) (password string, generated bool, err error) {
 	if opts.AdminPassword != "" {
-		if err = credentials.CheckPasswordPolicy(opts.AdminPassword); err != nil {
-			return "", false, fmt.Errorf("bootstrap: %s must have at least %d characters and at most %d bytes: %w",
-				AdminPasswordEnv, credentials.MinPasswordLength, credentials.MaxPasswordBytes, err)
+		if err = checkAdminPassword(opts.AdminPassword); err != nil {
+			return "", false, err
 		}
 		return opts.AdminPassword, false, nil
 	}
@@ -252,6 +267,16 @@ func initialPassword(opts Options) (password string, generated bool, err error) 
 		return "", false, fmt.Errorf("bootstrap: generate admin password: %w", err)
 	}
 	return password, true, nil
+}
+
+// checkAdminPassword applies the password policy to a password from
+// [AdminPasswordEnv]. Its error names the variable and never the value.
+func checkAdminPassword(password string) error {
+	if err := credentials.CheckPasswordPolicy(password); err != nil {
+		return fmt.Errorf("bootstrap: %s must have at least %d characters and at most %d bytes: %w",
+			AdminPasswordEnv, credentials.MinPasswordLength, credentials.MaxPasswordBytes, err)
+	}
+	return nil
 }
 
 // storeAdmin creates user-admin when seed asks for it, then sets its password

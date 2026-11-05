@@ -942,3 +942,42 @@ func TestBootstrapRefusesToSeedWithoutDataDirOrEphemeral(t *testing.T) {
 		t.Fatalf("a restart without anything to seed failed: %v", err)
 	}
 }
+
+// Check refuses the options that would fail any seed, whatever the user table
+// holds: neither a data directory nor ephemeral state, or a password from the
+// environment that breaks the policy, which its error names by variable and
+// never by value.
+func TestCheckRefusesWhatEverySeedNeeds(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts Options
+		want error
+	}{
+		{"data directory", Options{DataDir: "/data"}, nil},
+		{"ephemeral", Options{Ephemeral: true}, nil},
+		{"password that passes the policy", Options{DataDir: "/data", AdminPassword: "operator-chosen-password"}, nil},
+		{"neither data directory nor ephemeral", Options{}, ErrNoDataDir},
+		{"neither, with a password", Options{AdminPassword: "operator-chosen-password"}, ErrNoDataDir},
+		{"password too short", Options{DataDir: "/data", AdminPassword: "Sh0rt-pw-11"}, auth.ErrWeakPassword},
+		{"password too long", Options{Ephemeral: true, AdminPassword: strings.Repeat("long-password-", 6)}, auth.ErrWeakPassword},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.opts.Check()
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("Check() = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Check() = %v, want %v", err, tc.want)
+			}
+			if tc.opts.AdminPassword != "" && strings.Contains(err.Error(), tc.opts.AdminPassword) {
+				t.Fatal("the error has the password")
+			}
+			if errors.Is(err, auth.ErrWeakPassword) && !strings.Contains(err.Error(), AdminPasswordEnv) {
+				t.Fatalf("error %q does not name %s", err, AdminPasswordEnv)
+			}
+		})
+	}
+}

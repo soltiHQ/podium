@@ -6,6 +6,7 @@ HTTP and gRPC request handlers for the control plane.
 handler/
 ├── handler.go      package documentation
 ├── api.go          API — REST + HTMX endpoints (users, agents, specs, sessions, roles)
+├── api_cluster.go  API — the cluster status and membership routes of a raft node
 ├── discovery.go    HTTPDiscovery + GRPCDiscovery — agent heartbeat / sync
 ├── ui.go           UI — full-page HTML renders (login, dashboard, detail pages)
 └── static.go       Static — embedded file serving (CSS, JS, images)
@@ -15,9 +16,9 @@ handler/
 
 | Handler           | Transport | Constructor           | Dependencies                                                         |
 |-------------------|-----------|-----------------------|----------------------------------------------------------------------|
-| `API`             | HTTP      | `NewAPI`              | user, access, session, credential, agent, spec services + proxy.Pool |
+| `API`             | HTTP      | `NewAPI`              | user, access, session, credential, agent, spec services + proxy.Pool; the cluster service in raft mode (`WithCluster`) |
 | `HTTPDiscovery`   | HTTP      | `NewHTTPDiscovery`    | agent service, discovery limiter, client IP resolver                 |
-| `GRPCDiscovery`   | gRPC      | `NewGRPCDiscovery`    | agent service, discovery limiter                                     |
+| `GRPCDiscovery`   | gRPC      | `NewGRPCDiscovery`    | agent service, discovery limiter, client IP resolver (raft mode)     |
 | `UI`              | HTTP      | `NewUI`               | access + spec services, client IP resolver, cookie Secure policy     |
 | `Static`          | HTTP      | `NewStatic`           | embedded `ui.Static` filesystem                                      |
 
@@ -54,8 +55,8 @@ UI checks permissions **at registration** (per-route granularity).
 `TestRoutePermissionMatrix` (`route_permissions_test.go`) holds this table as code and checks it against the
 registered routes: every new `/api/v1` route needs a row there.
 
-Endpoints that read a JSON body (user create, update and password, agent labels, spec create and update) require
-`Content-Type: application/json`, parameters allowed; any other type gets 415 `Content-Type must be
+Endpoints that read a JSON body (user create, update and password, agent labels, spec create and update, cluster member
+add) require `Content-Type: application/json`, parameters allowed; any other type gets 415 `Content-Type must be
 application/json.`. A cross-site HTML form cannot send that type. In front of every route, `app` refuses
 cross-origin browser mutations with 403 (see `internal/config`, "Browser sessions").
 
@@ -160,6 +161,76 @@ Every event kind maps to a subject (`event.SubjectOf`):
 | user    | `user_*`, `session_created`, `rate_limited`                                | `UsersGet`  | `UsersEdit`  |
 | unknown | `issue_closed` (it can name any subject) and unknown kinds                 | all three   | all three    |
 
+### Cluster `/api/v1/cluster`
+| Method | Path                           | Permission      |
+|--------|--------------------------------|-----------------|
+| GET    | `/api/v1/cluster`              | `ClusterGet`    |
+| POST   | `/api/v1/cluster/members`      | `ClusterManage` |
+| DELETE | `/api/v1/cluster/members/{id}` | `ClusterManage` |
+
+Only a raft node registers these routes: `app` gives the API its cluster service (`internal/service/cluster`, which holds
+the rules) with `WithCluster`. Standalone registers none, so its cluster paths answer as any path that the UI's catch-all
+page route takes: 404 to an authenticated GET, 405 to an authenticated POST or DELETE, and 401 without credentials, as
+before raft mode had them (`TestClusterRoutesAbsentInStandalone`). `cluster:get` and `cluster:manage` exist in both modes,
+and appear in both among the permissions a user may be given, but they guard only these raft-mode routes. Of the built-in
+roles only Admin holds them, as it holds `enum.All` (`TestClusterRoutesNeedPermission`). Bootstrap resets a stored Admin
+role that differs to its definition (`TestBuiltinRolesReconciled` in `internal/bootstrap`), which it runs at a standalone
+start and at each raft leadership term (see `internal/bootstrap/README.md`).
+
+`GET /api/v1/cluster` is a read, so the node that gets it answers it itself, a follower included: its cluster as it sees
+it. `node_id`, `role` (`leader`, `follower`, `candidate` or `shutdown`), `leader_id` and `leader_address`, the raft
+address of the leader it knows, both left out while it knows none, `members`, each with its `id`, its raft `address` as
+the configuration writes it, and its `suffrage` (`voter`, `nonvoter` or `staging`), `last_index`, the index of the last
+entry of its log, and `config_fingerprint`, the fingerprint of the settings that every replica must share, as this node
+holds them: the hex SHA-256 over the digests of their five groups, `cluster.Fingerprint` (`TestClusterStatusAnswer`).
+Nodes whose fingerprints differ do not share those settings, so comparing the answers of every node shows drift that the
+nodes' `config-check` runners also log (see "Configuration drift" in `internal/raft/README.md`). The fingerprint is no
+secret, but whoever reads it and knows the other settings can confirm a guess of a weak `auth.jwt_secret` or
+`agent_auth.enroll_secret` offline, by computing the fingerprint of the guess: it is served behind `cluster:get` only,
+and the secrets must be strong.
+
+`POST /api/v1/cluster/members` takes `{"id": "n4", "address": "10.0.0.4:7000"}`, a node's `node_id` and raft advertise
+address, and adds it as a voter. `DELETE /api/v1/cluster/members/{id}`, with `?force=true` where the guard asks for it,
+removes a member. Both are writes, which a follower forwards to the leader, and both answer 204 once the change committed.
+The leader checks a change against its latest configuration, read with its index, and applies it against that index, so
+a change of the configuration in between refuses it instead of slipping past the checks. Every refusal changes nothing
+(`TestClusterRouteAnswers`):
+
+| Status | When                                                                                                         |
+|--------|--------------------------------------------------------------------------------------------------------------|
+| 400    | a body without `id` or `address`; an `id` with `/`, `=`, a comma or spaces around it, which the member's route or `discovery.peers` could not name; an `address` that is not `host:port` with a port from 1 to 65535 or names no host; a `force` that is no boolean |
+| 404    | no member has the `id` to remove                                                                             |
+| 409    | a member has the `id` already; a member answers at the `address` already, as written or under another name of the ip:port it answers at, which the message names with the member, `Member n2 of the cluster answers at 10.0.0.2:7000 already.`: the leader resolves the host of the `address` and of every member, skips a member whose host does not resolve, and refuses a shared ip:port, as one node must not be two voters; a removal that leaves fewer than 3 voters, without `force=true`, which the message names; the last voter, `The last voter cannot be removed.`, force or not; a configuration that changed after the leader read it, `configuration changed, retry` |
+| 415    | a body that is not declared as JSON                                                                          |
+| 422    | no raft node of the cluster answers at the `address`, which the message names: before it adds a voter, the leader dials the address as the raft transport would and checks the certificate there as raft does, so that a typo never adds a voter nobody reaches, which raises the quorum |
+| 500    | the leader cannot read its configuration: a read of its stores that fails, or gives index 0 or no server, logged at ERROR as `cannot read the raft configuration` (see "Membership" in `internal/raft/README.md`) |
+| 503    | the write met a follower or lost leadership: with `X-Leader`, as every write (see "Leader hint" in `internal/transport/README.md`); a 404 or 409 of the rules above that the node could not confirm its leadership for, also with `X-Leader`, below; the leader's own removal, below |
+
+The 404 and the 409s of the rules, an unknown member, an `id` or `address` in use, the force guard and the last
+voter, come from the leader's own configuration, which a deposed leader reads stale. So before it answers one, the
+cluster service asks a quorum whether the node still leads the term it read the configuration in
+(`cluster.Admin.VerifyLeader`), and answers 503 with `X-Leader`, as for a follower, when it does not, having changed
+nothing (`TestRefusalsFromTheConfigurationConfirmTheLeadership` in `internal/service/cluster`). A change the rules let
+through needs no check: a deposed leader cannot commit it.
+
+The leader asked to remove itself first hands its leadership over to another voter, with hashicorp/raft's leadership
+transfer, so that writes resume without an election timeout, and removes nothing yet. Once it knows the new leader, it
+answers 503 with `X-Leader` and the message `This node handed its leadership over and is still a member: repeat the
+request, at the leader that X-Leader names, to remove it.`, the leader the node read once, so the header and the message
+agree. The request repeated there, or at the same node, which now forwards it, removes a follower. So the removal of the
+leader takes two calls, both of which a follower forwards (`TestMembershipChangesThroughAFollower` in `internal/app`).
+When no new leader is known after 5 s, or none can be named, the 503 has no `X-Leader` and says `Leadership moved; no
+leader is known yet, retry.`. A transfer that
+fails, as one to a dead voter that hashicorp/raft picked, removes nothing and answers 503 without `X-Leader`: remove dead
+members first. See "Membership" in `internal/raft/README.md`, which also says how to replace a dead member, and what
+becomes of a removed node, whose process must be stopped.
+
+Every change that commits logs one INFO line, `cluster membership changed`, with `actor_user_id`, `operation` (`add` or
+`remove`), `member_id`, `member_address` and `force`; a hand-over logs one too, with the `transfer` operation. A change
+that lost leadership while it committed, or whose node shut down before its outcome was known, which may still take
+effect, logs one WARN line with the same fields instead, `cluster membership change outcome unknown`. No line names a
+token.
+
 ### Other
 | Method | Path                    | Permission                                                           |
 |--------|-------------------------|----------------------------------------------------------------------|
@@ -199,7 +270,16 @@ at WARN with the agent ID and the ways out; with an enrollment secret they name 
 per `auth.rate_window` for a pair. Both transports share one limiter, so failures over HTTP count toward gRPC
 and back. `auth.rate_attempts` failures block that pair for `auth.rate_window`: HTTP answers 429, gRPC `ResourceExhausted`.
 There is no per-IP limit, so agents behind one egress IP (NAT, Kubernetes) never block each other.
-HTTP takes the client IP from `trusted_proxies`; gRPC uses the peer address.
+HTTP takes the client IP from `trusted_proxies`, and in raft mode from the hosts of the raft configuration too. gRPC takes it
+from the `x-forwarded-for` metadata of those hosts in raft mode, where a follower forwards a sync to the leader with the
+agent's address in it (`grpcClientIP`), and uses the peer address in standalone.
+
+A sync whose token check or upsert fails on the store is answered 503 / with the error's gRPC code, and logged at ERROR,
+but for a leadership error (`cluster.IsLeadershipError`): a leader that lost its leadership while it served the sync,
+or a deposed leader whose check of the leadership failed. That is a routing condition, as for the API's writes: it is
+logged at WARN, and answered with the leader's address when one is known, over HTTP a 503 with `X-Leader`
+(`response.StoreFailed`), over gRPC an `Unavailable` with the `x-leader` hint and the mark that makes `UnaryLogger` log
+the call at WARN too, once (`interceptor.HintLeader`; `TestDiscoveryAnswersLeadershipErrorsWithTheLeader`).
 
 ## UI pages
 | Path                | Handler          | Auth | Permission  |

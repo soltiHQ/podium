@@ -1,47 +1,25 @@
-package raft_test
+package raft
 
 import (
 	"context"
 	"testing"
 	"time"
 
-	"github.com/rs/zerolog"
-
 	"github.com/soltiHQ/control-plane/domain/model"
-	"github.com/soltiHQ/control-plane/internal/cluster/discovery"
 	"github.com/soltiHQ/control-plane/internal/event"
-	raftpkg "github.com/soltiHQ/control-plane/internal/raft"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
 
-// newSingleNode spins a 1-node raft cluster on loopback, returns profile
-// and cleanup.
-func newSingleNode(t *testing.T) *raftpkg.Profile {
+// newSingleNode starts a one-node raft cluster on loopback, with mutual TLS,
+// whose one peer is itself, and returns its profile once it leads. The node
+// stops when the test ends.
+func newSingleNode(t *testing.T) *Profile {
 	t.Helper()
-	dir := t.TempDir()
-	p, err := raftpkg.New(raftpkg.Config{
-		NodeID:           "n1",
-		BindAddr:         "127.0.0.1:0", // pick an ephemeral port
-		DataDir:          dir,
-		ElectionTimeout:  50 * time.Millisecond,
-		HeartbeatTimeout: 50 * time.Millisecond,
-	}, inmemory.New(), event.NewHub(zerolog.Nop()), discovery.NewStatic(nil), zerolog.Nop())
-	if err != nil {
-		t.Fatalf("raft.New: %v", err)
-	}
-	t.Cleanup(func() { _ = p.Shutdown() })
-
-	// Wait to become leader.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if p.Leadership().AmLeader() {
-			return p
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("raft: did not become leader within 2s")
-	return nil
+	n := newLoopbackNode(t, newTestCA(t), "n1", reserveLoopbackAddrs(t, 1)[0])
+	t.Cleanup(n.stop)
+	n.start(t, n.self(), oneNodeTimeouts)
+	waitFor(t, 2*time.Second, "n1 leads", n.profile.leadership.AmLeader)
+	return n.profile
 }
 
 func TestRaft_AgentUpsertFlowsThroughFSM(t *testing.T) {

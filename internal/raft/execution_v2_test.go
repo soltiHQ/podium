@@ -15,7 +15,7 @@ import (
 
 func TestRaftVersion2CommandLogCanBeReadAndExtended(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
+	dir := privateTestDir(t)
 	p, _, hub := openRestartProfile(t, dir)
 	a, err := model.NewAgent("v2-agent", "Before archive", "http://agent")
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/soltiHQ/control-plane/internal/auth"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
@@ -64,6 +65,11 @@ func Classify(err error) Kind {
 	case errors.Is(err, auth.ErrUserDisabled):
 		return FailedPrecondition
 
+	case errors.Is(err, cluster.ErrConfigurationChanged):
+		return Conflict
+	case errors.Is(err, cluster.ErrPeerUnreachable):
+		return FailedPrecondition
+
 	case errors.Is(err, storage.ErrNotFound):
 		return NotFound
 	case errors.Is(err, storage.ErrAlreadyExists):
@@ -72,7 +78,9 @@ func Classify(err error) Kind {
 		return Conflict
 	case errors.Is(err, storage.ErrInvalidArgument):
 		return InvalidArgument
-	case errors.Is(err, storage.ErrUnavailable):
+	case errors.Is(err, storage.ErrUnavailable),
+		errors.Is(err, cluster.ErrNotLeader),
+		errors.Is(err, cluster.ErrLeadershipLost):
 		return Unavailable
 
 	default:

@@ -8,6 +8,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/soltiHQ/control-plane/internal/auth"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
@@ -22,7 +23,8 @@ import (
 // Auth returns middleware that verifies the access token and stores the identity in context.
 // A browser whose access token is missing or expired is refreshed from its cookies. Missing
 // or rejected credentials answer 401, credentials that could not be checked 503, after an
-// ERROR log line with the method, the path and the error, never a credential. secure
+// ERROR log line with the method, the path and the error, never a credential. A refresh that
+// needs the leader on a follower is no such failure: see checkFailed. secure
 // decides whether the auth cookies Auth sets or clears carry the Secure attribute.
 func Auth(verifier token.Verifier, sessionSvc *session.Service, secure func(*http.Request) bool, logger zerolog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -31,8 +33,7 @@ func Auth(verifier token.Verifier, sessionSvc *session.Service, secure func(*htt
 			id, err := authenticate(w, r, verifier, sessionSvc, secure)
 			switch {
 			case err != nil:
-				logCheckFailure(logger, r, err)
-				response.Unavailable(w, r, mode)
+				checkFailed(w, r, mode, logger, err)
 			case id == nil:
 				response.Unauthorized(w, r, mode)
 			default:
@@ -51,8 +52,7 @@ func OptionalAuth(verifier token.Verifier, sessionSvc *session.Service, secure f
 			id, err := authenticate(w, r, verifier, sessionSvc, secure)
 			switch {
 			case err != nil:
-				logCheckFailure(logger, r, err)
-				response.Unavailable(w, r, httpctx.ModeFromRequest(r))
+				checkFailed(w, r, httpctx.ModeFromRequest(r), logger, err)
 			case id == nil:
 				next.ServeHTTP(w, r)
 			default:
@@ -60,6 +60,37 @@ func OptionalAuth(verifier token.Verifier, sessionSvc *session.Service, secure f
 			}
 		})
 	}
+}
+
+// checkFailed answers 503 to a request whose credentials could not be checked.
+// It logs why at ERROR: the method, the path and the error, never a cookie or a
+// token. The exception is a refresh that met the leadership
+// (cluster.IsLeadershipError), which only a refresh with auth.rotate_refresh
+// on can, as the rotation of the refresh token is a write. That is the
+// deployment's routing, not a failure of this node, so it is logged at WARN,
+// worded for what happened, and the 503 carries the leader's address in
+// X-Leader (response.FromError), which makes the access log (Logger) a WARN as
+// well:
+//
+//   - cluster.ErrNotLeader: the node does not lead, as every follower, and
+//     could not rotate the token, so nothing changed;
+//   - cluster.ErrLeadershipLost: the node lost its leadership, or shut down,
+//     while the rotation was committing, which may have taken effect. The hint
+//     stays: a retry at the leader refreshes the browser when the rotation did
+//     not commit, and when it did, the browser's refresh token no longer
+//     matches, and it logs in again.
+func checkFailed(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, logger zerolog.Logger, err error) {
+	if cluster.IsLeadershipError(err) {
+		message := "auth refresh needs the leader: a follower cannot rotate a refresh token, so with auth.rotate_refresh route browsers to the leader (X-Leader), or turn rotation off"
+		if errors.Is(err, cluster.ErrLeadershipLost) {
+			message = "auth refresh outcome unknown: with auth.rotate_refresh, this node lost its leadership, or shut down, while the rotation of the refresh token committed, which may have taken effect: a retry at the leader (X-Leader) refreshes the browser unless it did, and then the browser logs in again"
+		}
+		logger.Warn().Err(err).Str("method", r.Method).Str("path", r.URL.Path).Msg(message)
+		response.FromError(w, r, mode, err)
+		return
+	}
+	logCheckFailure(logger, r, err)
+	response.Unavailable(w, r, mode)
 }
 
 // logCheckFailure logs why credentials could not be checked: the method, the

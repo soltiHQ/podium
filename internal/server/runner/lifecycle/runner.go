@@ -26,8 +26,9 @@ type Runner struct {
 	store  storage.Storage
 	cfg    Config
 
-	// startedAt is when this runner began watching. Silence is never counted from before it, so downtime is not held
-	// against the agents. Zero means no grace.
+	// startedAt is when this replica's current leadership term began: when this runner began watching. Silence is
+	// never counted from before it, so time in which it did not watch the agents, a downtime or another replica's
+	// term, is not held against them. Zero means no grace.
 	startedAt time.Time
 	// clock replaces time.Now in tests; nil means time.Now.
 	clock func() time.Time
@@ -52,10 +53,15 @@ func New(cfg Config, logger zerolog.Logger, store storage.Storage, hub *event.Hu
 		store:  store,
 		hub:    hub,
 	}
-	r.startedAt = r.now()
 	r.Runner = base.New(cfg.Name, cfg.TickInterval, leadership, logger, r.tick)
+	// The grace starts anew with each term this replica leads, however long ago its process started.
+	r.OnLeader(r.startGrace)
 	return r, nil
 }
+
+// startGrace starts the grace of a leadership term: silence counts from now on. It runs before the term's first tick,
+// on the goroutine of the ticks.
+func (r *Runner) startGrace() { r.startedAt = r.now() }
 
 func (r *Runner) now() time.Time {
 	if r.clock != nil {
@@ -75,14 +81,14 @@ const (
 )
 
 // due returns the transition the agent is owed at now. It decides from the agent, now and this runner's config and
-// start alone, so tick can ask it of a snapshot and reconcile of the re-read agent.
+// term start alone, so tick can ask it of a snapshot and reconcile of the re-read agent.
 func (r *Runner) due(a *model.Agent, now time.Time) action {
 	hb := a.HeartbeatInterval()
 	if hb <= 0 {
 		hb = r.cfg.DefaultHeartbeat
 	}
-	// Count the silence from the later of the last sync and this runner's start: a control plane that was down
-	// must not delete agents that had no chance to sync yet.
+	// Count the silence from the later of the last sync and the start of this leadership term: a control plane
+	// that was down, or a replica that did not lead, must not delete agents that had no chance to sync yet.
 	since := a.LastSeenAt()
 	if r.startedAt.After(since) {
 		since = r.startedAt

@@ -3,6 +3,8 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/config"
@@ -106,5 +109,65 @@ func TestNewWritesAdminPasswordFileOnFirstStart(t *testing.T) {
 	}
 	if !bytes.Equal(written, again) {
 		t.Fatal("a restart rewrote the password file")
+	}
+}
+
+// raftSeedConfig is a raft configuration that passes validation, for node n1 of
+// three, whose TLS files and data directory do not exist: the node fails if it
+// ever starts.
+func raftSeedConfig(t *testing.T) (cfg config.Config, dir string) {
+	t.Helper()
+	cfg = config.Default()
+	cfg.Cluster, dir = unopenedRaftConfig(t)
+	cfg.Auth.JWTSecret = strings.Repeat("raft-seed-check-secret", 2)
+	return cfg, dir
+}
+
+// A raft node seeds at a leadership term, which can come at any time, so New
+// checks what any seed needs before anything starts. A password from
+// SOLTI_BOOTSTRAP_ADMIN_PASSWORD that breaks the password policy fails New,
+// whatever the user table holds, and the node never starts: its data
+// directory is not created. Neither the error nor the log has the value.
+func TestNewRaftRefusesAnAdminPasswordBreakingThePolicy(t *testing.T) {
+	for _, tc := range []struct{ name, password string }{
+		{"too short", "Sh0rt-pw-11"},
+		{"too long", strings.Repeat("long-password-", 6)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, dir := raftSeedConfig(t)
+			cfg.BootstrapAdminPassword = tc.password
+			var logs bytes.Buffer
+			a, err := New(context.Background(), cfg, zerolog.New(&logs))
+			if err == nil {
+				_ = a.Shutdown(context.Background())
+				t.Fatal("New accepted the password")
+			}
+			if !errors.Is(err, auth.ErrWeakPassword) || !strings.Contains(err.Error(), bootstrap.AdminPasswordEnv) {
+				t.Fatalf("New() = %v, want ErrWeakPassword naming %s", err, bootstrap.AdminPasswordEnv)
+			}
+			if strings.Contains(err.Error(), tc.password) || strings.Contains(logs.String(), tc.password) {
+				t.Fatal("the refused password was echoed")
+			}
+			if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("the data directory exists after the refusal: %v", err)
+			}
+		})
+	}
+}
+
+// A raft node without a data directory, which a configuration that config.Load
+// validated always has, could not write a generated password down: New fails
+// with ErrNoDataDir before anything starts, ahead of the cluster's own check of
+// the same setting.
+func TestNewRaftRefusesToStartWithoutADataDirectory(t *testing.T) {
+	cfg, _ := raftSeedConfig(t)
+	cfg.Cluster.Raft.DataDir = ""
+	a, err := New(context.Background(), cfg, zerolog.Nop())
+	if err == nil {
+		_ = a.Shutdown(context.Background())
+		t.Fatal("New started a raft node without a data directory")
+	}
+	if !errors.Is(err, bootstrap.ErrNoDataDir) {
+		t.Fatalf("New() = %v, want ErrNoDataDir", err)
 	}
 }

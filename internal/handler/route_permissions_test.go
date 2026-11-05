@@ -29,6 +29,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
+	clustersvc "github.com/soltiHQ/control-plane/internal/service/cluster"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
 	"github.com/soltiHQ/control-plane/internal/service/history"
 	"github.com/soltiHQ/control-plane/internal/service/session"
@@ -46,12 +47,14 @@ import (
 )
 
 // apiFixture is the production API wiring over an in-memory store that holds
-// the built-in roles. Requests carry the identity the auth middleware would
-// attach after AuthorizeAccess.
+// the built-in roles, as a raft node has it: with the cluster routes, over the
+// cluster administration that cluster plays. Requests carry the identity the
+// auth middleware would attach after AuthorizeAccess.
 type apiFixture struct {
-	store *inmemory.Store
-	hub   *event.Hub
-	mux   *http.ServeMux
+	store   *inmemory.Store
+	hub     *event.Hub
+	mux     *http.ServeMux
+	cluster *clusterAdmin
 }
 
 func newAPIFixture(t *testing.T) *apiFixture {
@@ -63,8 +66,14 @@ func newAPIFixture(t *testing.T) *apiFixture {
 // wrap is set; the fixture seeds and reads the inner store.
 func newAPIFixtureOver(t *testing.T, wrap func(storage.Storage) storage.Storage) *apiFixture {
 	t.Helper()
+	return newAPIFixtureLogging(t, wrap, zerolog.Nop())
+}
+
+// newAPIFixtureLogging is newAPIFixtureOver with the API and its services logging
+// into logger.
+func newAPIFixtureLogging(t *testing.T, wrap func(storage.Storage) storage.Storage, logger zerolog.Logger) *apiFixture {
+	t.Helper()
 	ctx := context.Background()
-	logger := zerolog.Nop()
 	store := inmemory.New()
 	for _, br := range enum.BuiltinRoles {
 		role, err := model.NewRole(br.ID, br.Name)
@@ -97,6 +106,7 @@ func newAPIFixtureOver(t *testing.T, wrap func(storage.Storage) storage.Storage)
 	}, loghub.Options{})
 	t.Cleanup(logs.Close)
 	streams := middleware.NewStreamLimiter(0, nil)
+	raft := newClusterAdmin()
 	api := NewAPI(logger,
 		user.New(st, logger),
 		access.New(kit.New(st, auth.Config{JWTSecret: strings.Repeat("k", auth.MinJWTSecretLen)}), st, logger),
@@ -105,12 +115,13 @@ func newAPIFixtureOver(t *testing.T, wrap func(storage.Storage) storage.Storage)
 		agent.New(st, logger),
 		spec.New(st, logger),
 		archive, pool, hub, logs, streams, allowAccess,
+		WithCluster(clustersvc.New(raft, logger, clustersvc.WithFingerprint(fixtureFingerprint))),
 	)
 	mux := http.NewServeMux()
 	api.Routes(mux, requireIdentity, nil)
 	// app.buildMainHandler registers the event stream next to the API routes.
 	route.HandleFunc(mux, routepath.ApiEventStream, hub.SSEHandler(allowAccess), requireIdentity, middleware.StreamLimit(streams))
-	return &apiFixture{store: store, hub: hub, mux: mux}
+	return &apiFixture{store: store, hub: hub, mux: mux, cluster: raft}
 }
 
 // requireIdentity stands in for middleware.Auth: a request without an
@@ -272,6 +283,10 @@ var routePermissionMatrix = []routePermission{
 	{method: http.MethodGet, pattern: "/api/v1/permissions", perms: []enum.Permission{enum.UsersEdit}},
 	{method: http.MethodGet, pattern: "/api/v1/roles", perms: []enum.Permission{enum.UsersEdit}},
 	{method: http.MethodGet, pattern: "/api/v1/events/stream", stream: true},
+	// Registered on a raft node only, which the fixture plays.
+	{method: http.MethodGet, pattern: "/api/v1/cluster", perms: []enum.Permission{enum.ClusterGet}},
+	{method: http.MethodPost, pattern: "/api/v1/cluster/members", body: `{"id":"n4","address":"10.0.0.4:7000"}`, perms: []enum.Permission{enum.ClusterManage}},
+	{method: http.MethodDelete, pattern: "/api/v1/cluster/members/{id}", id: "n3", query: "?force=true", perms: []enum.Permission{enum.ClusterManage}},
 }
 
 // unlistedRoutes are /api/v1 routes outside the user permission model.

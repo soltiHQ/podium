@@ -231,7 +231,7 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 
 	if action == modeCreate {
 		if err := a.specSVC.Create(r.Context(), ts); err != nil {
-			a.logger.Error().Err(err).Msg("spec create failed")
+			a.failure(err).Msg("spec create failed")
 			response.FromError(w, r, mode, err)
 			return
 		}
@@ -257,8 +257,8 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 			response.BadRequest(w, r, mode)
 			return
 		}
-		a.logger.Error().Err(err).Str("spec", id).Msg("spec update failed")
-		response.Unavailable(w, r, mode)
+		a.failure(err).Str("spec", id).Msg("spec update failed")
+		response.StoreFailed(w, r, mode, err)
 		return
 	}
 	a.logger.Info().Str("spec", id).Msg("spec updated")
@@ -276,8 +276,8 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 func (a *API) specDelete(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	err := a.specSVC.Delete(r.Context(), id)
 	if err != nil && !errors.Is(err, storage.ErrNotFound) {
-		a.logger.Error().Err(err).Str("spec", id).Msg("spec delete failed")
-		response.Unavailable(w, r, mode)
+		a.failure(err).Str("spec", id).Msg("spec delete failed")
+		response.StoreFailed(w, r, mode, err)
 		return
 	}
 	a.logger.Info().Str("spec", id).Msg("spec deleted")
@@ -293,8 +293,8 @@ func (a *API) specDelete(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 // normal Delete got stuck on retry-exhausted Uninstall rollouts.
 func (a *API) specForceDelete(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	if err := a.specSVC.ForceDelete(r.Context(), id); err != nil && !errors.Is(err, storage.ErrNotFound) {
-		a.logger.Error().Err(err).Str("spec", id).Msg("spec force-delete failed")
-		response.Unavailable(w, r, mode)
+		a.failure(err).Str("spec", id).Msg("spec force-delete failed")
+		response.StoreFailed(w, r, mode, err)
 		return
 	}
 	a.logger.Warn().Str("spec", id).Msg("spec force-deleted; agent tasks may be orphaned")
@@ -329,7 +329,7 @@ func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 			return
 		}
 		if !errors.Is(err, storage.ErrNotFound) {
-			a.logger.Error().Err(err).Str("spec", id).Msg("spec deploy failed")
+			a.failure(err).Str("spec", id).Msg("spec deploy failed")
 		}
 		response.FromError(w, r, mode, err)
 		return

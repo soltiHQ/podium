@@ -16,6 +16,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/cluster/discovery"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/raft"
@@ -49,19 +50,21 @@ func openDurable(t *testing.T) storage.Storage {
 	return s
 }
 
-// openRaft starts a single-node Raft cluster on loopback and returns its store once
-// the node leads.
+// openRaft starts a single-node Raft cluster on loopback, whose one peer is the
+// node itself, and returns its store once the node leads. The node dials no
+// peer, so its transport runs plain TCP: TLS has no part in the contract.
 func openRaft(t *testing.T) storage.Storage {
 	t.Helper()
 	hub := event.NewHub(zerolog.Nop())
 	t.Cleanup(hub.Close)
 	p, err := raft.New(raft.Config{
-		NodeID:           "contract",
-		BindAddr:         "127.0.0.1:0",
-		DataDir:          t.TempDir(),
-		ElectionTimeout:  50 * time.Millisecond,
-		HeartbeatTimeout: 50 * time.Millisecond,
-	}, inmemory.New(), hub, discovery.NewStatic(nil), zerolog.Nop())
+		NodeID:                 "contract",
+		BindAddr:               "127.0.0.1:0",
+		DataDir:                filepath.Join(t.TempDir(), "raft"),
+		ElectionTimeout:        50 * time.Millisecond,
+		HeartbeatTimeout:       50 * time.Millisecond,
+		AllowInsecureTransport: true,
+	}, inmemory.New(), hub, discovery.NewStatic([]cluster.Peer{{ID: "contract", Address: "127.0.0.1:0"}}), zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}

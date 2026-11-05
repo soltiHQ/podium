@@ -23,11 +23,13 @@ import (
 	"github.com/soltiHQ/control-plane/domain/wire"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/transport/clientip"
+	"github.com/soltiHQ/control-plane/internal/transport/grpc/interceptor"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
@@ -135,8 +137,8 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 			case errors.Is(err, agent.ErrUnauthenticated):
 				response.Unauthorized(w, r, mode)
 			default:
-				h.logger.Error().Err(err).Str("agent_id", in.GetId()).Msg("token verify failed")
-				response.Unavailable(w, r, mode)
+				syncFailure(h.logger, err).Str("agent_id", in.GetId()).Msg("token verify failed")
+				response.StoreFailed(w, r, mode, err)
 			}
 			return
 		}
@@ -145,8 +147,8 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 	existing, getErr := h.agentSVC.Get(r.Context(), in.GetId())
 	res, err := h.agentSVC.Upsert(r.Context(), a)
 	if err != nil {
-		h.logger.Error().Err(err).Str("agent_id", in.GetId()).Msg("upsert failed")
-		response.Unavailable(w, r, mode)
+		syncFailure(h.logger, err).Str("agent_id", in.GetId()).Msg("upsert failed")
+		response.StoreFailed(w, r, mode, err)
 		return
 	}
 	recordSyncEvents(h.eventHub, in.GetId(), in.GetName(), existing, getErr, res)
@@ -168,15 +170,18 @@ type GRPCDiscovery struct {
 	agentSVC    *agent.Service
 	hub         *event.Hub
 	limiter     *ratelimit.Limiter
+	resolver    *clientip.Resolver
 	requireAuth bool
 }
 
 // NewGRPCDiscovery creates a new gRPC discovery handler.
 //
 // requireAuth turns on per-agent bearer-token authentication on every sync,
-// as for NewHTTPDiscovery. limiter bounds the token checks of each (peer IP,
-// agent ID) pair, see verifyAgentToken.
-func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event.Hub, limiter *ratelimit.Limiter, requireAuth bool) *GRPCDiscovery {
+// as for NewHTTPDiscovery. limiter bounds the token checks of each (client IP,
+// agent ID) pair, see verifyAgentToken. resolver gives the client IP from the
+// peer and its x-forwarded-for metadata, see grpcClientIP; nil trusts no peer,
+// so the peer is the client.
+func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event.Hub, limiter *ratelimit.Limiter, resolver *clientip.Resolver, requireAuth bool) *GRPCDiscovery {
 	if agentSVC == nil {
 		panic(service.ErrNilService)
 	}
@@ -191,6 +196,7 @@ func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event
 		agentSVC:    agentSVC,
 		hub:         hub,
 		limiter:     limiter,
+		resolver:    resolver,
 		requireAuth: requireAuth,
 	}
 }
@@ -203,7 +209,7 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 	}
 
 	if g.requireAuth {
-		if err := verifyAgentToken(ctx, g.logger, g.agentSVC, g.limiter, grpcPeerIP(ctx), req.GetId(), grpcBearerToken(ctx)); err != nil {
+		if err := verifyAgentToken(ctx, g.logger, g.agentSVC, g.limiter, grpcClientIP(ctx, g.resolver), req.GetId(), grpcBearerToken(ctx)); err != nil {
 			switch {
 			case errors.Is(err, agent.ErrTokenTooLong):
 				return nil, status.Errorf(ctx, codes.InvalidArgument, "agent token is too long")
@@ -212,8 +218,8 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 			case errors.Is(err, agent.ErrUnauthenticated):
 				return nil, status.Errorf(ctx, codes.Unauthenticated, "agent authentication failed")
 			default:
-				g.logger.Error().Err(err).Str("agent_id", req.GetId()).Msg("token verify failed")
-				return nil, status.FromError(ctx, err).Err()
+				syncFailure(g.logger, err).Str("agent_id", req.GetId()).Msg("token verify failed")
+				return nil, grpcSyncFailed(ctx, err)
 			}
 		}
 	}
@@ -221,11 +227,35 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 	existing, getErr := g.agentSVC.Get(ctx, req.GetId())
 	res, err := g.agentSVC.Upsert(ctx, a)
 	if err != nil {
-		g.logger.Error().Err(err).Str("agent_id", req.GetId()).Msg("upsert failed")
-		return nil, status.FromError(ctx, err).Err()
+		syncFailure(g.logger, err).Str("agent_id", req.GetId()).Msg("upsert failed")
+		return nil, grpcSyncFailed(ctx, err)
 	}
 	recordSyncEvents(g.hub, req.GetId(), req.GetName(), existing, getErr, res)
 	return &discoverv1.SyncResponse{Success: true}, nil
+}
+
+// syncFailure starts the log line of a sync that the store failed, with err on
+// it: an ERROR, except for a leadership error (cluster.IsLeadershipError), a
+// leader that lost its leadership while it served the sync or a deposed leader
+// whose check of the leadership failed, which is a routing condition, as for
+// the API's writes, and so a WARN.
+func syncFailure(logger zerolog.Logger, err error) *zerolog.Event {
+	if cluster.IsLeadershipError(err) {
+		return logger.Warn().Err(err)
+	}
+	return logger.Error().Err(err)
+}
+
+// grpcSyncFailed is the gRPC answer to a sync that the store failed with err: its
+// status (status.FromError), and for a leadership error, an Unavailable, the
+// x-leader hint and the mark of a routing answer (interceptor.HintLeader), so
+// that UnaryLogger logs it at WARN, once, as the HTTP access log logs the 503
+// with X-Leader of HTTP discovery.
+func grpcSyncFailed(ctx context.Context, err error) error {
+	if cluster.IsLeadershipError(err) {
+		interceptor.HintLeader(ctx)
+	}
+	return status.FromError(ctx, err).Err()
 }
 
 // verifyAgentToken checks the bearer token of agentID synced from clientIP, for
@@ -340,14 +370,18 @@ func bearerToken(header string) string {
 	return ""
 }
 
-// grpcPeerIP returns the canonical IP of the gRPC peer. gRPC requests carry no
-// forwarding headers, so the peer address is the client.
-func grpcPeerIP(ctx context.Context) string {
+// grpcClientIP returns the canonical client IP of a gRPC call: its peer, or, from
+// a peer resolver trusts, such as a follower that forwarded the call, the
+// right-most entry of its x-forwarded-for metadata that resolver does not trust
+// (clientip.Resolver.Forwarded). A nil resolver trusts no peer: the peer is the
+// client, whatever metadata it sends.
+func grpcClientIP(ctx context.Context, resolver *clientip.Resolver) string {
 	var addr string
 	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
 		addr = p.Addr.String()
 	}
-	return clientip.FromAddr(addr)
+	md, _ := metadata.FromIncomingContext(ctx)
+	return resolver.Forwarded(addr, md.Get(clientip.ForwardedForKey))
 }
 
 // grpcBearerToken extracts the bearer token from incoming gRPC "authorization"

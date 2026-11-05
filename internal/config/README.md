@@ -46,6 +46,32 @@ tls:
 
 Env equivalents: `SOLTI_TLS_SERVER_CERT_FILE`, `SOLTI_TLS_CLIENT_CA_FILE`, etc.
 
+In raft mode a follower forwards the writes it gets on the HTTP and
+HTTP-discovery listeners, and the syncs it gets on the gRPC listener, to the
+leader, at the host of the leader's raft advertise address, as written, and
+this node's port of that listener (see "Cluster"). With
+`tls.server` set it forwards over TLS with `tls.client`: `ca_file` must also
+hold the CA of the replicas' server certificates, which must name each
+replica's raft advertise host as written, an IP SAN for `10.0.0.1:7000` and a
+DNS SAN for `podium-0.podium:7000`, and `cert_file`/`key_file` are presented
+when the leader asks for a client certificate, as the discovery listener does
+with `client_ca_file`. Without a `tls.client.ca_file`, the leader is verified
+against the system roots. A leader whose certificate does not verify gets no
+write: the follower answers 502. The raft transport has TLS settings of its
+own, with a CA of its own, see "Raft transport security".
+
+The forwards carry logins, cookies, bearer tokens and agents' tokens, so a raft
+cluster needs `tls.server` on every node: without it a follower forwards them
+in plaintext, and each raft node logs one WARN at start, `raft forwarding runs
+plaintext`. With agent mTLS (`client_ca_file`), the leader's discovery
+listeners want a client certificate of the agents' CA from a follower that
+forwards a sync too, so each node's `tls.client.cert_file` and `key_file` must
+chain to the agents' CA: without `tls.client.cert_file` every sync that reaches
+a follower fails, 502 over HTTP and `leader unreachable` over gRPC, and each
+raft node logs one WARN at start that says so. A follower dials the leader
+directly, never through the proxy that `HTTP_PROXY` or `HTTPS_PROXY` names.
+Standalone forwards nothing, and logs neither WARN.
+
 ## Agent authentication
 
 `agent_auth.require` defaults to `true`. It authenticates enrolled agents: a
@@ -172,11 +198,27 @@ TCP peer is in the list:
 RFC 7239 `Forwarded` is not supported: behind a proxy that sends only
 `Forwarded`, the proxy is the client. List only proxies that append the peer
 to `X-Forwarded-For` (or replace the header); a listed host that passes a
-client's header through unchanged lets that client pick its own IP. In raft
-mode, list the replicas too: a follower forwards writes to the leader, which
-otherwise sees the follower as the client.
+client's header through unchanged lets that client pick its own IP.
 
-gRPC discovery ignores this setting and always uses the peer address.
+In raft mode a follower forwards writes to the leader, which then sees the
+follower as the peer, so every node also trusts, besides this list, the hosts
+of its current raft configuration: there is no need to list the replicas. A
+host written as an IP counts as soon as the configuration holds it, and stops
+counting as soon as it leaves; a host written as a name counts at the addresses
+it resolves to, looked up every 10 s, so its trust is only as good as the DNS
+answers the node gets; where DNS cannot be trusted that far, write the
+advertise addresses as IPs. Each node must connect to the others from the
+address its raft address names, or resolves to. Any process on a node's host
+can then pick the client IP of its requests, as behind any listed proxy, so a
+raft host must not relay outside clients at L4 (a port forward, SNAT, or
+kube-proxy for a hostNetwork pod), just as a listed proxy must not pass a
+client's header through: such a client would reach the leader from the host's
+address and pick its own IP. See "Forwarding and trusted hosts" in
+`internal/raft/README.md`.
+
+gRPC discovery reads the client IP from the `x-forwarded-for` metadata of a
+trusted host only in raft mode, where a follower sets it when it forwards a
+sync. In standalone it ignores this setting and always uses the peer address.
 
 ## Browser sessions
 
@@ -186,11 +228,42 @@ clears them (login, logout, refresh, a revoked session), and so does the device
 cookie that login sets (see "Rate limiting"):
 
 - `auto` (default): when the client used HTTPS, either a TLS connection or
-  `X-Forwarded-Proto: https` from a proxy in `trusted_proxies`.
+  `X-Forwarded-Proto: https` from a proxy in `trusted_proxies`, or, in raft
+  mode, from a host of the raft configuration, which a follower that forwards a
+  request is (see "Client IPs and trusted proxies").
 - `always`: on every response. Use it when the proxy that terminates TLS cannot
   be listed in `trusted_proxies`.
 
 Any other value, an empty one included, fails configuration loading.
+
+`auth.rotate_refresh` (env `SOLTI_AUTH_ROTATE_REFRESH`, default `false`) makes
+every refresh of a browser's session replace its refresh token. The replacement
+is a write, so in raft mode only the leader can make it. A browser whose access
+token has expired (`auth.access_ttl`, 15m by default) and whose request, a GET
+included, reaches a follower gets 503 instead of a new token, with `X-Leader`
+when the follower knows its leader (see "Leader hint" in
+`internal/transport/README.md`), and sets no cookie; the follower logs a WARN,
+`auth refresh needs the leader`, with the method and the path, and the access
+log of an API route records a 503 with `X-Leader` as a WARN too, so the refresh
+leaves no ERROR line while the follower knows its leader. A refresh on a leader
+that loses its leadership, or shuts down, as the rotation commits gets the same
+503, and its WARN, `auth refresh outcome unknown`, says that the rotation may
+have taken effect: a retry at `X-Leader` refreshes the browser when it did not,
+and when it did, the browser logs in again. So with rotation on, a raft
+deployment needs leader-sticky routing, and no node offers a leader probe
+without credentials (`GET /api/v1/cluster` needs `cluster:get`), so an
+ordinary balancer cannot route to the leader by itself: keep rotation off in
+raft mode unless such routing is in place. See "Browsers and
+`auth.rotate_refresh`" in the runbook of `internal/raft/README.md`. Without
+rotation a refresh only reads, and works on every node, as does a request whose
+access token is still valid. Standalone is unaffected.
+
+In raft mode every node checks an access token, and refreshes a session
+without rotation, against its own store, which follows the leader's with a
+lag: a session revoked, or a user disabled, on the leader still works on a
+follower until the follower applies the change, and on a node cut off from
+the leader until it reaches it again. See "Reads on a follower" in
+`internal/raft/README.md`.
 
 The main listener refuses state-changing requests that a browser sends from
 another origin (Go's `http.CrossOriginProtection`) with 403
@@ -275,14 +348,19 @@ When the user table is empty, the first start creates the administrator
 - Without it podium generates a password and writes it, on one line with mode
   0600, to `bootstrap-admin-password` in the data directory of the selected
   backend: `cluster.standalone.data_dir` (default `data/podium`), or
-  `cluster.raft.data_dir` in raft mode, where the file sits on the node that led
-  at first boot. The log names only that path, made absolute.
+  `cluster.raft.data_dir` in raft mode, where the file sits on the node whose
+  leadership term seeded, the node whose log line gives its `node_id`. The log
+  names only that path, made absolute.
 - In ephemeral mode (`cluster.standalone.ephemeral: true`) there is no data
   directory, so the generated password is logged once, at WARN, with the prefix
   `ephemeral mode:`. No other mode logs a password.
 
 Once users exist the variable is ignored, with one WARN per start: remove it from
-the environment after the first start. See `internal/bootstrap/README.md`.
+the environment after the first start. A raft node seeds at the start of each of
+its leadership terms, whenever a quorum gives it one, and never waits for a
+leader at start. It refuses a value that breaks the policy at start, even with
+users present, and logs the WARN about an ignored value at every term. See
+`internal/bootstrap/README.md`.
 
 ## Standalone storage
 
@@ -303,6 +381,369 @@ without that flag fails configuration loading.
 log entries after which the store writes its state as a snapshot and truncates
 the log; 16 MiB of entries does the same. Zero keeps the default; a negative
 value fails configuration loading. See `internal/storage/durable/README.md`.
+
+## Cluster
+
+`cluster.backend: raft` runs podium as one node of a raft cluster. Only that
+backend reads `cluster.raft` and `cluster.discovery`: standalone ignores them,
+valid or not. To set up and run a cluster, follow "Runbook: a three-node
+cluster" in `internal/raft/README.md`: certificates, network, the first start,
+restarts and failover, adding and removing members, the routing of browsers,
+and rolling upgrades. Every node serves reads from its own store, which can
+lag the leader's: "Reads on a follower" there says what a lagging, cut-off or
+joining node serves, revocations included.
+
+```yaml
+cluster:
+  backend: raft
+  raft:
+    node_id: n1                     # unique, the same on every start
+    bind_addr: 0.0.0.0:7000         # where the raft transport listens
+    advertise_addr: 10.0.0.1:7000   # where peers dial it; default bind_addr
+    data_dir: /var/lib/solti/raft
+    join: false                     # true: a new node waits for the leader to add it
+    election_timeout_ms: 1000       # 0 keeps hashicorp/raft's 1 s
+    heartbeat_timeout_ms: 500       # 0 keeps hashicorp/raft's 1 s
+    snapshot_interval: 120s         # how often to check whether to snapshot; 0s keeps 120s
+    snapshot_threshold: 8192        # log entries since the last snapshot that start one; 0 keeps 8192
+    trailing_logs: 10240            # log entries a snapshot leaves in the log; 0 keeps 10240
+    tls:                            # mutual TLS between the nodes
+      cert_file: /etc/solti/raft/n1.crt
+      key_file: /etc/solti/raft/n1.key
+      ca_file: /etc/solti/raft/ca.crt
+  discovery:
+    driver: static                  # the default; or dns
+    peers:
+      - n1=10.0.0.1:7000
+      - n2=10.0.0.2:7000
+      - n3=10.0.0.3:7000
+```
+
+Env equivalents: `SOLTI_CLUSTER_BACKEND`, `SOLTI_CLUSTER_RAFT_NODE_ID`,
+`SOLTI_CLUSTER_RAFT_BIND_ADDR`, `SOLTI_CLUSTER_RAFT_ADVERTISE_ADDR`,
+`SOLTI_CLUSTER_RAFT_DATA_DIR`, `SOLTI_CLUSTER_RAFT_JOIN`,
+`SOLTI_CLUSTER_RAFT_ELECTION_TIMEOUT_MS`,
+`SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS`, `SOLTI_CLUSTER_RAFT_SNAPSHOT_INTERVAL`,
+`SOLTI_CLUSTER_RAFT_SNAPSHOT_THRESHOLD`, `SOLTI_CLUSTER_RAFT_TRAILING_LOGS`,
+`SOLTI_CLUSTER_RAFT_TLS_CERT_FILE`, `SOLTI_CLUSTER_RAFT_TLS_KEY_FILE`,
+`SOLTI_CLUSTER_RAFT_TLS_CA_FILE`, `SOLTI_CLUSTER_RAFT_ALLOW_INSECURE_TRANSPORT`,
+`SOLTI_CLUSTER_DISCOVERY_DRIVER`, and `SOLTI_CLUSTER_DISCOVERY_PEERS`, split
+on commas:
+
+```sh
+SOLTI_CLUSTER_DISCOVERY_PEERS="n1=10.0.0.1:7000, n2=10.0.0.2:7000, n3=10.0.0.3:7000"
+```
+
+`election_timeout_ms` and `heartbeat_timeout_ms` are raft's election and
+heartbeat timeouts, in milliseconds; 0 keeps hashicorp/raft's default of 1 s.
+Configuration loading refuses what hashicorp/raft would refuse at the start: a
+timeout under 5 ms, and an election timeout below the heartbeat timeout, the
+default of 1 s counted, so a `heartbeat_timeout_ms` over 1000 needs an
+`election_timeout_ms` at least as long.
+
+`snapshot_interval`, `snapshot_threshold` and `trailing_logs` set how a node
+compacts its raft log. Every `snapshot_interval` (a duration string such as
+`120s`, in YAML and in the environment) the node checks whether
+`snapshot_threshold` entries have piled up since its last snapshot, and takes
+one if so; the snapshot truncates the log down to its last `trailing_logs`
+entries. A follower that is further behind than that catches up from a snapshot
+of the whole state, not from log entries. The defaults are hashicorp/raft's:
+`120s`, 8192 and 10240. Zero keeps the default; a negative value fails
+configuration loading, and so does an interval under 5 ms, the least that
+hashicorp/raft accepts, which has no other limit on the three settings. They are
+not `cluster.standalone.snapshot_threshold`, which is the
+standalone store's. hashicorp/raft's own logs, of its elections, snapshots and
+transport, go through podium's logger like any other line, at their own INFO,
+WARN and ERROR levels, with `profile=raft` and `component` (`raft`, `snapshot`
+or `raft-net`); its DEBUG lines are dropped and it writes nothing to stderr. See
+`internal/raft/README.md`.
+
+Each `discovery.peers` entry is `id=host:port`: a node's `node_id` and the
+address its peers dial. A bare `host:port` names the node by its address.
+Spaces around an entry, its ID and its address are trimmed. List every node,
+this one included: a one-node cluster lists itself.
+
+Every node must serve `http.addr`, `http_discovery.addr` and `grpc.addr` on the
+same ports as the others (the same-port assumption): a follower knows the
+leader by its raft address only, so it forwards a write, or a gRPC discovery
+sync, to the host of the leader's raft advertise address with its own port of
+the listener the request came in on, and names that address in the HTTP
+`X-Leader` and the gRPC `x-leader` hints. Nothing checks the assumption: on a
+node whose port differs, forwards go to a port the leader does not serve, and
+fail (HTTP 502, gRPC `Unavailable`), or reach another node that shares the
+leader's host. A write, or a gRPC call, is forwarded once at most, so it never
+goes round nodes: a follower that gets one another node forwarded answers
+HTTP 503 or gRPC `Unavailable`, with the hint.
+
+Configuration loading fails, and nothing in `data_dir` is opened, when:
+
+- `raft.node_id`, `raft.bind_addr` or `raft.data_dir` is empty;
+- the node has neither all three `raft.tls` files nor
+  `raft.allow_insecure_transport: true`, or has the files and the flag (see
+  "Raft transport security" below);
+- `bind_addr` or `advertise_addr` is not `host:port` with a port from 1 to
+  65535;
+- `bind_addr` listens on every interface (`0.0.0.0`, `::` or no host) and
+  `advertise_addr` is unset, or `advertise_addr` is such an address itself;
+- a peer entry is malformed, an ID or an address appears twice, or no entry is
+  this node: `node_id` at its advertise address (`advertise_addr`, or
+  `bind_addr` without it), compared as written;
+- an entry is bare and `node_id` is not this node's advertise address. To
+  choose IDs, write every entry as `id=host:port`.
+
+A node with `raft.join: true` asks discovery for nothing (see "Joining a
+cluster" below), so of the last two rules only the syntax of each entry is
+checked: its `peers` may leave it out, or be empty. With `discovery.driver:
+dns` only `discovery.hostname` and `discovery.port` are checked for it.
+
+With `discovery.driver: dns`, each address that `discovery.hostname` resolves
+to is a peer at `ip:<discovery.port>`, named by that address. So
+`discovery.hostname` and a `discovery.port` from 1 to 65535 are required, the
+advertise address must be this node's IP and `discovery.port`, written as DNS
+returns it (`10.0.0.1:7000`, `[fd00::1]:7000`), and `node_id` must be that same
+address. Env: `SOLTI_CLUSTER_DISCOVERY_HOSTNAME`,
+`SOLTI_CLUSTER_DISCOVERY_PORT`.
+
+A node bootstraps the cluster on its first start, while `data_dir` holds no
+raft state: it asks discovery for the peers and starts with exactly that list,
+sorted by ID, so every node derives the same configuration whatever order
+discovery reports the peers in. Every node must see the same peers at its
+first start, and nothing compares the lists of different nodes: DNS answers
+that differ between nodes go unnoticed and leave them with different
+configurations, while an address DNS answers twice fails the start as a
+duplicate. A discovery error fails that start, and so does a list that breaks
+the rules above, which DNS answers can: a node that advertises a host name is
+not among them. A start that fails on its peers keeps no raft state, so the
+next one bootstraps again. Later starts load the configuration from the node's
+own log and do not ask discovery, so a discovery outage does not keep a
+restarting node down; validation still checks a static list on every start.
+See `internal/raft/README.md`.
+
+So `discovery.driver: dns` is safe for a first start only when every node
+resolves the complete set of nodes before its first start; prefer static peers
+for the first start. A node that resolves only itself bootstraps a cluster of
+one voter, which leads, seeds and takes writes on its own and refuses the
+votes of the others, which never elect a leader: a fork that no error reports.
+On Kubernetes, give the StatefulSet `podManagementPolicy: Parallel`, as its
+default `OrderedReady` starts pod-0 alone, and its headless service
+`publishNotReadyAddresses: true`, so that every pod resolves every pod, and its
+own advertise host, which a node resolves at start, before it is ready. After
+a first start, check `GET /api/v1/cluster` on every node: each must name the
+same leader and list every node.
+
+### Settings every replica must share
+
+These settings must be the same on every node of a raft cluster, as a request
+may reach any of them:
+
+- `auth.jwt_secret` (env `SOLTI_AUTH_JWT_SECRET`), `auth.cookie_secure`,
+  `auth.issuer` and `auth.audience`: a token one node signed fails on another,
+  and cookies are marked otherwise;
+- `agent_auth.require` and `agent_auth.enroll_secret` (env
+  `SOLTI_AGENT_AUTH_ENROLL_SECRET` only): the nodes authenticate and enroll
+  agents otherwise, and send agents tokens or not;
+- `trusted_proxies`: a proxy one node trusts is a client on another, and the
+  limiters key its clients otherwise;
+- `cors.*`: a browser origin one node allows, another refuses;
+- `tls.server.client_ca_file`, which turns agent mTLS on for the discovery
+  listeners: a node without it accepts agents that present no certificate, and
+  a node with another CA refuses agents the others accept. What must match is
+  whether it is set, and the certificates of the bundle, not its path, which
+  may differ from node to node.
+
+Every raft node digests them, group by group, and its `config-check` runner
+compares the digests with its leader's at each change of leader. A node whose
+settings differ logs one ERROR per leader, `configuration check: this node's
+configuration differs from the leader's in settings that every replica must
+share`, naming the groups that differ (`auth`, `agent auth`, `proxies`,
+`CORS`, `agent TLS`) and never a value; a drifted leader is reported by each of
+its followers. `GET /api/v1/cluster` shows each node's fingerprint of these
+settings as `config_fingerprint`: nodes whose fingerprints differ do not share
+them. Settings that apply alike count alike: `trusted_proxies` and
+`cors.allow_origins` in any order, a proxy as an IP or its /32, a CORS list
+left empty or set to the defaults it gets, an empty `auth.issuer` or
+`auth.audience` and its default, and the same CA bundle at another path.
+Overlapping proxy prefixes are not merged, though: write the lists alike on
+every node. A raft node reads `tls.server.client_ca_file` before it starts: a
+bundle it cannot read, or that holds no certificate, fails the start with the
+same error as it does in standalone.
+
+Whoever reads the fingerprint and knows the other settings can confirm a guess
+of a weak `jwt_secret` or `enroll_secret` offline, as the fingerprint of every
+guess can be computed. So both must be long random values, which is why the
+fingerprint is served only behind `cluster:get` and is never logged.
+
+Nothing compares the other settings. Those of the runners that only the leader
+runs, `lifecycle.*`, `sync.*` and `history.*`, change what the cluster does
+each time the leadership moves to a node configured otherwise. Of `tls.*`, each
+node's `tls.server.cert_file` and `key_file` are its own, and `tls.client.*`
+is not compared either: its drift shows as failed dials to agents or to the
+leader. Other settings, such as the token lifetimes, may differ unseen too:
+keep every node's configuration the same, and change it on all of them. See
+"Configuration drift" in `internal/raft/README.md`.
+
+### Joining a cluster
+
+`cluster.raft.join: true` (env `SOLTI_CLUSTER_RAFT_JOIN`) starts a node whose
+`data_dir` holds no raft state without a bootstrap: it asks discovery for
+nothing, writes no configuration, logs one INFO line that it waits, and waits
+for the leader of the running cluster to add it with `POST
+/api/v1/cluster/members` (see "Cluster" in `internal/handler/README.md`). A
+node that replaces a removed one starts with it, and so does a node whose
+`data_dir` was wiped, once it was removed from the cluster (see the runbook in
+`internal/raft/README.md`): without it, a first start bootstraps a
+configuration of its own from the static list. Once the node holds raft
+state, a restart loads the configuration from the node's own log, so leaving
+the flag set changes nothing. Clearing it does: without it, configuration
+loading needs `discovery.peers` to list the node as its `node_id` at its
+advertise address, and with `discovery.driver: dns` needs `node_id` and the
+advertise address to be the node's `ip:<discovery.port>`, as for any node. So
+keep the flag set until `discovery.peers` lists the node, or with dns until its
+`node_id` matches too; see "Replacing a dead member" in
+`internal/raft/README.md`.
+
+### Raft transport security
+
+The raft transport carries the whole control-plane state, agent tokens and
+password verifiers included, so it runs mutual TLS 1.3 between the nodes:
+
+- Each node has one certificate, `raft.tls.cert_file` with its
+  `raft.tls.key_file`, and presents it both to the peers that connect to it
+  and to the peers it dials. Every certificate of its chain, the root
+  included, must allow both server and client authentication in its extended
+  key usage, or carry no extended key usage.
+- `raft.tls.ca_file` holds the cluster CA. A node accepts a connection only
+  from a peer that presents a certificate this CA signed, and dials a peer only
+  when the peer's certificate is signed by it too.
+- A node dials a peer at its address as the peers list it, and the peer's
+  certificate must name that host as a subject alternative name, compared as
+  written, not as it resolves: an IP SAN for `10.0.0.2:7000`, a DNS SAN for
+  `podium-1.podium:7000`. With `discovery.driver: dns` the peers are dialed at
+  their IPs, so the certificates need IP SANs.
+- TLS 1.2 and older are refused both ways.
+- A node closes a connection it accepted whose TLS handshake does not finish
+  within 10 s, so a host that connects to `bind_addr` and stalls holds nothing
+  of the node for longer.
+
+TLS keeps other hosts out of the cluster, not off the port: every connection
+from a host that is no cluster node, refused or timed out in its handshake, is
+one ERROR line in the node's log, `failed to decode incoming command`, and
+nothing limits them. So `raft.bind_addr` must be reachable only from the
+cluster's nodes, by firewall or network policy.
+
+`raft.tls.ca_file` must be a CA that signs raft node certificates only, of one
+cluster. A node accepts every certificate it verifies as a full member of the
+cluster, whatever host the certificate names: it does not check a connecting
+peer's certificate against the configured peers. So it must never be the
+agents' CA, the CA of `tls.server` or `tls.client`, or a bundle merged with any
+of them, or every certificate those sign could write the cluster's state; and
+two clusters must never share a raft CA, or each takes the other's nodes for
+members.
+
+Removing a node revokes nothing: its certificate stays a full member's
+credential for the raft port, and for the configuration request on it, until
+it expires. Whoever holds its key can depose the leader with a higher term,
+and name its own host as the leader, so that the followers forward writes,
+logins, cookies and tokens included, to it. After removing a node whose keys
+may be exposed, issue a new raft CA and new certificates to every node: that
+alone stops the key, as no node accepts a certificate of the old CA any more.
+Re-issuing the removed node's `tls.server` certificate does not: podium checks
+no revocation, so the old certificate keeps passing the followers' check
+against `tls.client.ca_file` until it expires. That matters when a replacement
+reuses the node's host name or IP; then also replace the CA behind
+`tls.client.ca_file` and the CA that agents trust for the server. A compromised
+host holds more than its raft key: its other keys, `auth.jwt_secret`,
+`agent_auth.enroll_secret`, and in `data_dir` the agents' tokens, raw, and the
+password hashes. "A compromised node" in `internal/raft/README.md` lists
+everything podium keeps on a node, with each rotation and its cost; see also
+"Transport security" there.
+
+The files are read when the node starts, before anything in `data_dir` is
+opened: a file that is missing or holds no usable certificate or key fails the
+start, and a renewed certificate takes effect at the next start. The node then
+checks its own certificate as its peers will: signed by the CA of `ca_file`,
+valid now, for both server and client authentication, and naming the host of
+its advertise address as written. A certificate that fails any of these fails
+the start with an error that says which, so a node that its peers would refuse
+does not start cut off from them.
+
+`raft.allow_insecure_transport: true` runs the transport on plain TCP instead,
+for a cluster on a trusted network: any host that reaches `bind_addr` can then
+read the raft traffic and forge it, and every start logs one WARN that says
+so. The flag runs plain TCP only for a node without `raft.tls`; with both set,
+configuration loading fails.
+
+### Raft data directory
+
+`data_dir` holds the raft log, the stable store and the snapshots, so neither
+`data_dir` nor anything in it may carry group or other permission bits. A node
+makes a missing `data_dir` and its `snapshots` directory with mode 0700, and
+refuses to start, before it opens anything there, when either is open to its
+group or others or is a symlink, written with a trailing slash or not, as the
+standalone store refuses its directory. The BoltDB files are 0600. Each
+snapshot directory is made 0700 and its files 0600 as soon as hashicorp/raft
+creates them, before any state is written into them, and they stay so once the
+snapshot is in place, a snapshot a leader installs on the node included;
+snapshots already there, such as an earlier version's, are made private at
+start. Volume settings that add group permissions to
+`data_dir` make the node refuse to start.
+
+### Upgrading a raft node
+
+Earlier versions appended a node to its own peers: an empty `peers` list
+bootstrapped a one-node cluster, and a list of only the other nodes worked.
+This version refuses both. Before upgrading a raft node, add it to its own
+`peers` as `<node_id>=<advertise address>`; a node that keeps bare entries
+needs `node_id` equal to its advertise address. Do this on every node. A list
+that already names the node at its advertise address, as written, passes
+unchanged. A node whose list does not pass is refused at configuration
+loading, before anything in `data_dir` is opened, so its raft state stays as
+it was: fix the list and start it again. A node with raft state reads its
+configuration from its own log, not from `peers`, so listing itself changes
+nothing in the running cluster. A node with raft state keeps its `node_id` and
+its advertise address: started under another ID or address, it is not the
+member its peers know, and logs one ERROR at start, `raft: this node is not in
+its stored raft configuration as its node_id at its advertise_addr`; under
+another ID it is never elected. So do not rename the nodes of an earlier
+version, `n1` for `10.0.0.1:7000` say, during the upgrade: a renamed or
+re-addressed node must be removed from the cluster, its `data_dir` wiped, and
+added again with `join: true`. The two addresses are compared as written, not as
+they resolve: a member whose stored address spells its advertise address
+otherwise, a name against an IP say, logs the ERROR at every restart although it
+works, as its peers dial the stored address and raft elects it by ID; removing
+it and adding it again under the spelling of its advertise address, as above,
+clears the ERROR.
+
+Earlier versions also ran the transport on plain TCP and made `data_dir` and
+`snapshots` 0755 and the snapshot files 0644. This version needs, on every
+node:
+
+- `raft.tls`, with a certificate as above for each node, of a CA kept for raft
+  alone, or `raft.allow_insecure_transport: true`, which keeps plain TCP as
+  before. A node on TLS and a node on plain TCP cannot reach each other, so a
+  cluster works only while a majority of its nodes runs the same transport,
+  and a rolling upgrade keeps plain TCP: upgrade every node, one at a time,
+  with `allow_insecure_transport: true`, then switch all nodes to `raft.tls`
+  at once, in one full stop and start, during which the cluster takes no write
+  (see "Rolling upgrade" in the runbook of `internal/raft/README.md`).
+- `chmod -R go-rwx` on `data_dir`. A node refuses a `data_dir` or `snapshots`
+  directory that is still open to the group or others; it makes the snapshots
+  in it private by itself at its next start.
+
+This version also adds the permissions `cluster:get` and `cluster:manage`, in
+standalone too, which the Admin role gets when bootstrap reconciles it, and a
+user who holds every permission directly, not through the Admin role, needs the
+two new permissions to keep counting as an administrator.
+
+This version's nodes check their settings against the leader's (see "Settings
+every replica must share" above), which a node of an earlier version cannot
+answer. During a rolling upgrade, each upgraded follower of a leader that still
+runs the earlier version logs one WARN, `configuration check: cannot fetch the
+leader's configuration digests`, and fetches again 1, 2, 4, 8, 16 and 32 s
+after each failure, then every 60 s, from 1 s again at each change of leader.
+The old leader logs one ERROR, `failed to decode incoming command` with
+`unknown rpc type 240`, for each of those attempts of each such follower. Both
+stop once a node of this version leads.
 
 ## Observed run history
 
@@ -365,12 +806,12 @@ lifecycle:
 
 `delete_after` is a floor: an agent is deleted once its silence exceeds the
 larger of `delete_after` and `delete_multiplier` × its heartbeat, and never
-sooner. Silence counts from the later of the agent's last sync and the control
-plane's start, so after a restart every agent that has not synced yet gets the
-full thresholds to sync again before its status changes. Zero or negative
-values inherit the defaults shown; `delete_after` is also read from
-`SOLTI_LIFECYCLE_DELETEAFTER`. See `internal/server/README.md` for the states
-and the restart grace.
+sooner. Silence counts from the later of the agent's last sync and the start of
+the replica's leadership term, so after a restart, or a change of leader in raft
+mode, every agent that has not synced yet gets the full thresholds to sync again
+before its status changes. Zero or negative values inherit the defaults shown;
+`delete_after` is also read from `SOLTI_LIFECYCLE_DELETEAFTER`. See
+`internal/server/README.md` for the states and the grace of each term.
 
 Deleting an agent drops its row and the labels operators set on it. Its
 rollouts and its credential stay: until the agent syncs again, its pushes fail

@@ -6,8 +6,8 @@ package app
 
 import (
 	"context"
+	"crypto/x509"
 	"sync"
-	"time"
 
 	"github.com/soltiHQ/control-plane/internal/loghub"
 
@@ -25,8 +25,8 @@ import (
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
 	syncrunner "github.com/soltiHQ/control-plane/internal/server/runner/sync"
+	clustersvc "github.com/soltiHQ/control-plane/internal/service/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/uikit/htmx"
@@ -35,16 +35,13 @@ import (
 	pageSystem "github.com/soltiHQ/control-plane/ui/templates/page/system"
 )
 
-// leaderWaitTimeout caps how long [New] blocks waiting for any leader to be
-// elected before falling back to follower-mode bootstrap behaviour.
-const leaderWaitTimeout = 30 * time.Second
-
 // App is the fully wired control-plane runtime.
 type App struct {
 	logger zerolog.Logger
 
 	store        storage.Storage
 	leadership   cluster.Leadership
+	cluster      *clustersvc.Service // a test hook: only tests read it; the raft node's cluster service, nil in standalone
 	eventHub     *event.Hub
 	raftShutdown func()
 	proxyPool    *proxy.Pool
@@ -56,11 +53,44 @@ type App struct {
 	shutdownDone chan struct{}
 }
 
-// New assembles all dependencies and seeds initial data when this replica is
-// the leader. Returned [App] is ready to [Run]. Caller must call [Shutdown]
-// to release deferred resources (Raft node, proxy pool, event hub).
+// New assembles all dependencies. Standalone seeds the initial data here. A
+// raft node waits for no leader: it checks what a seed needs, and once it runs,
+// seeds at the start of each of its leadership terms (see [seedingRunner]).
+// Returned [App] is ready to [Run]. Caller must call [Shutdown] to release
+// deferred resources (Raft node, proxy pool, event hub).
 func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, error) {
-	store, leadership, eventHub, raftShutdown, err := buildCluster(cfg.Cluster, logger, hubOptions(cfg)...)
+	raftMode := cfg.Cluster.Backend == cluster.BackendRaft
+	clusterOpts := []clusterOption{withHubOptions(hubOptions(cfg)...)}
+	// A raft node digests the settings that every replica must share, answers
+	// its peers' configuration requests with the digests, and checks them
+	// against its leader's (raftpkg.Admin.ConfigCheck). Standalone does neither.
+	var (
+		digests cluster.Digests
+		// clientCAs is the agents' CA bundle that a raft node reads once, for its
+		// digests and for the pool of its discovery listeners (agentListenerTLS).
+		clientCAs []*x509.Certificate
+	)
+	if raftMode {
+		// A raft node cannot know at start whether a term of its own will seed:
+		// it checks before anything starts what any seed needs, which would
+		// otherwise fail at every term it leads.
+		if err := bootstrapOptions(cfg).Check(); err != nil {
+			return nil, err
+		}
+		cas, err := agentCAs(cfg)
+		if err != nil {
+			return nil, err
+		}
+		clientCAs = cas
+		shared, err := sharedSettings(cfg, clientCAs)
+		if err != nil {
+			return nil, err
+		}
+		digests = shared.Digests()
+		clusterOpts = append(clusterOpts, withConfigDigests(digests))
+	}
+
+	store, leadership, eventHub, raftShutdown, admin, err := buildCluster(cfg.Cluster, logger, clusterOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -71,32 +101,32 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
-
-	// Default users/roles/credentials seeding must run through the store.
-	// In raft mode that means only the leader actually persists — followers
-	// would get "not the leader" on Upsert. Solution: wait for any leader,
-	// then only the leader seeds. If this replica is a follower, skip —
-	// leader's writes will replicate here automatically.
-	seed, readyErr := readyForBootstrap(ctx, leadership, leaderWaitTimeout)
-	if readyErr != nil {
-		closeOnError(raftShutdown, eventHub)
-		return nil, readyErr
+	// A raft node serves the membership API through its cluster administration,
+	// and its status names the fingerprint of the settings every replica must
+	// share; standalone has none, and registers no cluster route.
+	if admin != nil {
+		svc.cluster = clustersvc.New(admin, logger, clustersvc.WithFingerprint(digests.Fingerprint()))
 	}
-	if seed {
+
+	// Default users/roles/credentials seeding must run through the store, on the
+	// leader. Standalone always leads: it seeds here, and a seed that fails fails
+	// the start. A raft node leads in some terms only; its seeding runner seeds
+	// at the start of each, and the seed replicates to the other nodes.
+	if !raftMode {
 		if err = bootstrap.Run(ctx, logger, bootstrapOptions(cfg), svc.role, svc.user, svc.credential); err != nil {
 			closeOnError(raftShutdown, eventHub)
 			return nil, err
 		}
-	} else {
-		logger.Info().Msg("bootstrap skipped: this replica is a follower; leader seeds shared state")
 	}
 
 	// TLS: agent-facing listeners (HTTP-discovery, gRPC) get the full server config,
 	// including mTLS when a client CA is set. The human-facing UI gets the SAME cert
 	// but WITHOUT a client-certificate requirement, so enabling mTLS for agents does
 	// not lock browsers (which have no client cert) out of the dashboard. One client
-	// config for outbound calls to agents. All opt-in (nil = plaintext).
-	serverTLS, err := cfg.TLS.Server.Build()
+	// config for outbound calls: to agents, and from a follower to the leader when it
+	// forwards a write. All opt-in (nil = plaintext). A raft node builds the
+	// agent-facing listeners' pool from the bundle it read for its digests.
+	serverTLS, err := agentListenerTLS(cfg, raftMode, clientCAs)
 	if err != nil {
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
@@ -121,12 +151,19 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		Bool("client_mtls", cfg.TLS.Client.CertFile != "").
 		Msg("tls configuration")
 	warnOpenDiscovery(logger, cfg)
+	if raftMode {
+		warnForwarding(logger, cfg)
+	}
 
-	resolver, err := clientip.New(cfg.TrustedProxies)
+	// In raft mode the resolver trusts the hosts of the raft configuration too, so
+	// the leader believes the client a follower forwards a write for. Those hosts
+	// live as long as the raft node, and close with it.
+	resolver, closeHosts, err := clientResolver(cfg, leadership)
 	if err != nil {
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
+	raftShutdown = before(closeHosts, raftShutdown)
 
 	proxyPool := proxy.NewPool(clientTLS, cfg.AgentAuth.Require)
 
@@ -161,7 +198,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	mainHandler, logHub := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership, resolver)
+	mainHandler, logHub := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership, resolver, clientTLS)
 	httpCfg := cfg.HTTP
 	httpCfg.TLSConfig = uiServerTLS
 	httpRunner, err := httpserver.New(httpCfg, logger, mainHandler)
@@ -172,7 +209,13 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	discoveryHandler, grpcSrv := buildDiscoveryListeners(logger, svc.agent, eventHub, leadership, cfg, resolver, serverTLS)
+	// A follower forwards its gRPC discovery syncs to the leader over one client
+	// connection, which closes with the raft node, after the listeners stopped.
+	forwarder := syncForwarder(cfg, leadership, clientTLS)
+	if forwarder != nil {
+		raftShutdown = before(func() { _ = forwarder.Close() }, raftShutdown)
+	}
+	discoveryHandler, grpcSrv := buildDiscoveryListeners(logger, svc.agent, eventHub, leadership, cfg, resolver, serverTLS, clientTLS, forwarder)
 	discoveryCfg := cfg.HTTPDiscovery
 	discoveryCfg.TLSConfig = serverTLS
 	httpDiscoveryRunner, err := httpserver.New(discoveryCfg, logger, discoveryHandler)
@@ -191,7 +234,16 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	srv, err := server.New(cfg.Server, logger, httpRunner, httpDiscoveryRunner, grpcRunner, lifecycleRunner, syncRunner, historyRunner)
+	runners := []server.Runner{httpRunner, httpDiscoveryRunner, grpcRunner, lifecycleRunner, syncRunner, historyRunner}
+	if raftMode {
+		runners = append(runners, seedingRunner(cfg, logger, leadership, svc))
+		// While another node leads, the check compares this node's digests with
+		// the leader's, at each change of leader.
+		if check := admin.ConfigCheck(logger); check != nil {
+			runners = append(runners, check)
+		}
+	}
+	srv, err := server.New(cfg.Server, logger, runners...)
 	if err != nil {
 		logHub.Close()
 		_ = proxyPool.Close()
@@ -203,6 +255,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		logger:       logger,
 		store:        store,
 		leadership:   leadership,
+		cluster:      svc.cluster,
 		eventHub:     eventHub,
 		raftShutdown: raftShutdown,
 		proxyPool:    proxyPool,

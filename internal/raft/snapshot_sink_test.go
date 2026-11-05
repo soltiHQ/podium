@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/rs/zerolog"
+
 	raftpkg "github.com/soltiHQ/control-plane/internal/raft"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
@@ -26,7 +28,7 @@ func (s *failingSink) Cancel() error { s.cancelled = true; return nil }
 
 func TestSnapshotCancelsShortWriteAndCloseFailure(t *testing.T) {
 	for _, sink := range []*failingSink{{short: true}, {closeErr: errors.New("close failed")}} {
-		snap, err := raftpkg.NewFSM(inmemory.New(), nil).Snapshot()
+		snap, err := raftpkg.NewFSM(inmemory.New(), nil, zerolog.Nop()).Snapshot()
 		if err != nil {
 			t.Fatal(err)
 		}

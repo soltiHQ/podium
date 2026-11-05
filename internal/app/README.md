@@ -17,39 +17,57 @@ app/
 ```go
 type App struct { /* opaque */ }
 
-func New(ctx, cfg, logger) (*App, error)   // build + bootstrap (blocks on leader wait)
+func New(ctx, cfg, logger) (*App, error)   // build; standalone seeds here, raft never waits for a leader
 func (a *App) Run(ctx) error               // start runners; block until ctx done or runner exits
-func (a *App) Shutdown()                   // release resources; idempotent
+func (a *App) Shutdown(ctx) error          // release resources; idempotent
 ```
 
-- `New` returns a ready-to-run [`App`] and seeds initial data when this
-  replica is the leader. On error it releases anything already acquired
-  (Raft node, event hub) before returning.
+- `New` returns a ready-to-run [`App`]. Standalone seeds the initial data in
+  `New`, and a seed that fails fails it. A raft node waits for no leader: `New`
+  checks before anything starts what any seed needs, and the `bootstrap` runner
+  seeds at the start of each leadership term of the node, see
+  `internal/bootstrap/README.md`. On error `New` releases anything already
+  acquired (Raft node, event hub) before returning.
 - `Run` delegates to [`server.Server.Run`] which orchestrates lifecycle of
-  all runners (HTTP, gRPC, sync, lifecycle).
-- `Shutdown` closes resources in reverse acquisition order: proxy pool →
-  event hub → Raft node. Safe to call multiple times.
+  all runners (HTTP, gRPC, sync, lifecycle, history, and in raft mode
+  bootstrap and config-check, which compares the settings every replica must
+  share with the leader's, see "Configuration drift" in
+  `internal/raft/README.md`).
+- `Shutdown` closes resources in reverse acquisition order: log hub → proxy
+  pool → event hub → in raft mode the gRPC sync forwarder, then the lookups of
+  the raft hosts' names that the client IP resolver trusts, then the Raft node.
+  Safe to call multiple times.
 
 ## Startup flow
 ```text
   app.New(ctx, cfg, logger)
         │
         ▼
-  buildCluster()                  ← store + leadership + event-hub (+ Raft node if cfg.Cluster.Backend=raft)
+  Options.Check()                 ← raft only: what any seed needs, before anything starts
+        │
+        ▼
+  agentCAs()                      ← raft only: the agents' CA bundle, read once, for the digests and the discovery listeners' pool
+        │
+        ▼
+  sharedSettings().Digests()      ← raft only: the digests of the settings every replica must share
+        │
+        ▼
+  buildCluster()                  ← store + leadership + event-hub (+ Raft node, answering its peers with the digests, and its raftpkg.Admin if cfg.Cluster.Backend=raft)
         │
         ▼
   kit.New(store, cfg.Auth)        ← auth composition root (JWT, sessions, RBAC, rate-limit)
         │
         ▼
-  initServices()                  ← user, role, credential, session, agent, spec, access
+  initServices()                  ← user, role, credential, session, agent, spec, access; then cluster over the Admin, with the fingerprint, if raft
+        │
+   ┌────┴───────────────┬────────────────────────────────────────┐
+   │ standalone         │ raft                                   │
+   │ bootstrap.Run()    │ no wait: the bootstrap runner seeds at │
+   │                    │ the start of each leadership term      │
+   └────┬───────────────┴────────────────────────────────────────┘
         │
         ▼
-  waitForLeader(ctx, 30s)
-        │
-   ┌────┴───────────────┐
-   │ leader             │ follower
-   │ bootstrap.Run()    │ skip — leader seeds shared state
-   └────┬───────────────┘
+  TLS, warnings                   ← agent-facing TLS (raft: from the bundle agentCAs read); who can register agents; raft only: what the forwards lack
         │
         ▼
   proxy.NewPool()                 ← outbound client pool (HTTP + gRPC) to agents
@@ -58,7 +76,7 @@ func (a *App) Shutdown()                   // release resources; idempotent
   htmx.Configure() + hooks        ← global UI ↔ transport wiring (errorPage, loginPath)
         │
         ▼
-  build runners                   ← lifecycle, sync, http, http-discovery, grpc
+  build runners                   ← lifecycle, sync, history, http, http-discovery, grpc (+ bootstrap and config-check if raft)
         │
         ▼
   server.New(runners…)            ← lifecycle orchestrator
@@ -91,7 +109,7 @@ func (a *App) Shutdown()                   // release resources; idempotent
   main returns
    │
    │ deferred:
-   │ • a.Shutdown()  →  proxy.Close → eventHub.Close → raftShutdown
+   │ • a.Shutdown()  →  logHub.Close → proxy.Close → eventHub.Close → raftShutdown (forwarder, hosts, raft)
    │ • signal stop()
    ▼
   process exit
@@ -99,6 +117,8 @@ func (a *App) Shutdown()                   // release resources; idempotent
 
 ## Error path during build
 If any builder fails inside `New` (e.g. `httpserver.New` cannot bind, Raft
-node fails to start, `bootstrap.Run` errors), the function releases every
-resource already acquired before returning the error. The caller never
-sees a partially-built `App` — either a fully wired one or `nil, err`.
+node fails to start, a raft node's seed check or a standalone `bootstrap.Run`
+errors), the function releases every resource already acquired before returning
+the error. The caller never sees a partially-built `App` — either a fully wired
+one or `nil, err`. A raft node's seed at a leadership term fails nothing: its
+runner retries it while the node leads.

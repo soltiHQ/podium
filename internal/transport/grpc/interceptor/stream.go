@@ -83,6 +83,7 @@ func StreamLogger(logger zerolog.Logger) grpc.StreamServerInterceptor {
 }
 
 // StreamLeader rejects writes on followers: for streaming this means RPCs the IsWrite predicate marks as mutating.
+// It forwards nothing: a write stream on a follower is codes.Unavailable with the x-leader hint of [UnaryLeader].
 func StreamLeader(leadership cluster.Leadership, opts LeaderOptions) grpc.StreamServerInterceptor {
 	isWrite := opts.IsWrite
 	if isWrite == nil {
@@ -92,8 +93,8 @@ func StreamLeader(leadership cluster.Leadership, opts LeaderOptions) grpc.Stream
 		if !isWrite(info.FullMethod) || leadership.AmLeader() {
 			return handler(srv, ss)
 		}
-		if addr := leadership.CurrentLeader(); addr != "" {
-			_ = ss.SetHeader(metadata.Pairs("x-leader", addr))
+		if addr := cluster.LeaderAddr(leadership.CurrentLeader(), opts.Port); addr != "" {
+			_ = ss.SetHeader(metadata.Pairs(LeaderKey, addr))
 		}
 		return status.Error(codes.Unavailable, "not the leader")
 	}

@@ -117,7 +117,7 @@ func (a *API) agentPatchLabels(w http.ResponseWriter, r *http.Request, mode http
 	})
 	if err != nil {
 		if !errors.Is(err, storage.ErrNotFound) {
-			a.logger.Error().Err(err).Str("agent_id", id).Msg("agent patch labels failed")
+			a.failure(err).Str("agent_id", id).Msg("agent patch labels failed")
 		}
 		response.FromError(w, r, mode, err)
 		return

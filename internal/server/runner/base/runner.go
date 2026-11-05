@@ -17,10 +17,11 @@ import (
 // it is canceled the moment this replica loses leadership or the server shuts down.
 type TickFunc func(ctx context.Context)
 
-// Runner is a leader-gated periodic server.Runner.
+// Runner is a leader-gated server.Runner.
 //
-// While leader, it invokes tick every interval;
-// on followers it parks inside the leadership gate without ticking.
+// While leader, a runner from New invokes tick every interval, and a term task
+// from NewTermTask runs its task once per leadership term;
+// on followers it parks inside the leadership gate.
 type Runner struct {
 	name       string
 	interval   time.Duration
@@ -28,6 +29,12 @@ type Runner struct {
 	tick       TickFunc
 	logger     zerolog.Logger
 	onLeader   func()
+
+	// term is the task of a term task (term.go), nil for a periodic runner.
+	// retryPause and maxRetryPause bound its pauses: termRetryPause and
+	// termMaxRetryPause.
+	term                      TermFunc
+	retryPause, maxRetryPause time.Duration
 
 	stop     chan struct{} // closed by Stop to request exit
 	done     chan struct{} // closed when Start's loop has fully returned
@@ -60,18 +67,24 @@ func New(name string, interval time.Duration, leadership cluster.Leadership, log
 func (r *Runner) Name() string { return r.name }
 
 // OnLeader sets fn to run each time this replica takes leadership, before the
-// first tick of that term. A runner whose bookkeeping may have gone stale while
-// another replica led renews it there. It must be called before Start.
+// first tick of that term, or the term task. A runner whose bookkeeping may have
+// gone stale while another replica led renews it there. It must be called before
+// Start.
 func (r *Runner) OnLeader(fn func()) { r.onLeader = fn }
 
-// Start runs the leader-gated tick loop until Stop is called or ctx is canceled.
+// Start runs the leader-gated tick loop, or the term task, until Stop is called
+// or ctx is canceled.
 func (r *Runner) Start(ctx context.Context) error {
 	if !r.started.CompareAndSwap(false, true) {
 		return ErrAlreadyStarted
 	}
 	defer close(r.done)
 
-	r.logger.Info().Dur("tick", r.interval).Msg("runner started")
+	event := r.logger.Info()
+	if r.term == nil {
+		event = event.Dur("tick", r.interval)
+	}
+	event.Msg("runner started")
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -84,6 +97,10 @@ func (r *Runner) Start(ctx context.Context) error {
 	}()
 
 	return r.leadership.WhenLeader(runCtx, func(leaderCtx context.Context) error {
+		if r.term != nil {
+			r.runTerm(leaderCtx)
+			return nil
+		}
 		ticker := time.NewTicker(r.interval)
 		defer ticker.Stop()
 		r.logger.Info().Msg("runner acquired leadership")

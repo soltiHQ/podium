@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/soltiHQ/control-plane/internal/auth"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
@@ -43,6 +44,15 @@ func TestClassify(t *testing.T) {
 		{"already exists", storage.ErrAlreadyExists, AlreadyExists},
 		{"conflict", storage.ErrConflict, Conflict},
 		{"storage invalid argument", storage.ErrInvalidArgument, InvalidArgument},
+		{"storage unavailable", storage.ErrUnavailable, Unavailable},
+		{"not the leader → unavailable", cluster.ErrNotLeader, Unavailable},
+		{"wrapped not the leader", fmt.Errorf("raft: WithTx: %w", cluster.ErrNotLeader), Unavailable},
+		{"leadership lost → unavailable", cluster.ErrLeadershipLost, Unavailable},
+		{"wrapped leadership lost", fmt.Errorf("raft: apply: %w", cluster.ErrLeadershipLost), Unavailable},
+		{"leadership lost with its cause", errors.Join(cluster.ErrLeadershipLost, errors.New("leadership lost while committing log")), Unavailable},
+		{"unavailable with its cause", errors.Join(storage.ErrUnavailable, errors.New("timed out enqueuing operation")), Unavailable},
+		{"configuration changed → conflict", fmt.Errorf("raft: remove n3: %w", cluster.ErrConfigurationChanged), Conflict},
+		{"peer unreachable → failed precondition", fmt.Errorf("raft: probe 10.0.0.4:7000: %w", cluster.ErrPeerUnreachable), FailedPrecondition},
 		{"wrapped sentinel is unwrapped", fmt.Errorf("load: %w", storage.ErrNotFound), NotFound},
 	}
 	for _, tt := range tests {
