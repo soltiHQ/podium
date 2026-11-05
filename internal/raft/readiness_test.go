@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
+	"github.com/soltiHQ/control-plane/internal/service/session"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
 )
@@ -150,10 +152,14 @@ func TestOneBarrierPerTerm(t *testing.T) {
 }
 
 // After a leadership change, the first transaction of the new leader takes a
-// barrier before its function reads, and reads every write that the previous
-// leader committed; the later transactions of its term take none. The new
-// leader led an earlier term, whose barrier it passed: the readiness of that
-// term does not carry into the new one. Three nodes on loopback with mutual TLS.
+// barrier before its function reads; the later transactions of its term take
+// none. The new leader led an earlier term, whose barrier it passed: the
+// readiness of that term does not carry into the new one. The writes of the
+// previous leader are on every node at the end; that the barrier makes a first
+// transaction read them while the FSM still replays the log is
+// TestRaftFirstTransactionAfterElectionReadsRestoredState's, as moveLeadership
+// waits for a barrier of its own on the new leader. Three nodes on loopback
+// with mutual TLS.
 func TestNewLeaderBarriersBeforeItsFirstTransaction(t *testing.T) {
 	c := newLoopbackCluster(t, "n1", "n2", "n3")
 	ctx := context.Background()
@@ -176,20 +182,11 @@ func TestNewLeaderBarriersBeforeItsFirstTransaction(t *testing.T) {
 
 	store := first.profile.Store()
 	before := first.profile.raft.LastIndex()
-	var (
-		atRead  logged   // what the log gained when the function read
-		missing []string // the writes the function did not read
-	)
+	var atRead logged // what the log gained when the function read
 	err := store.WithTx(ctx, func(tx storage.Storage) error {
 		atRead = loggedAfter(t, first, before)
-		for _, id := range written {
-			_, err := tx.GetAgent(ctx, id)
-			switch {
-			case errors.Is(err, storage.ErrNotFound):
-				missing = append(missing, id)
-			case err != nil:
-				return err
-			}
+		if _, err := tx.GetAgent(ctx, written[len(written)-1]); err != nil {
+			return err
 		}
 		return tx.UpsertAgent(ctx, testAgent(t, "third-term"))
 	})
@@ -198,9 +195,6 @@ func TestNewLeaderBarriersBeforeItsFirstTransaction(t *testing.T) {
 	}
 	if want := (logged{entries: 1, barriers: 1}); atRead != want {
 		t.Fatalf("%s's first transaction of its new term read once its log gained %+v, want %+v: a barrier", first.id, atRead, want)
-	}
-	if len(missing) > 0 {
-		t.Fatalf("%s's first transaction of its new term missed %v, written by %s", first.id, missing, second.id)
 	}
 	if got, want := loggedAfter(t, first, before), (logged{entries: 2, barriers: 1, commands: 1}); got != want {
 		t.Fatalf("%s's first transaction of its new term logged %+v, want %+v", first.id, got, want)
@@ -319,4 +313,110 @@ func TestTermChangeBeforeApplyRefusesTheWrite(t *testing.T) {
 		t.Fatalf("the refused write, sent again: %v", err)
 	}
 	holdsAll(t, c, "read", "refused")
+}
+
+// A transaction that skipped the barrier of its term and proposes nothing,
+// because its function failed or wrote nothing, answers once a quorum confirmed
+// that the node still leads (VerifyLeader). A deposed leader reads its own,
+// stale state, where the session that a newer leader created is missing: the
+// "not found" that a session revoke takes for done would answer success. So a
+// check that fails answers in place of the function's verdict, with the meaning
+// of a barrier's error: cluster.ErrNotLeader for a leadership lost or refused,
+// storage.ErrUnavailable for a node that shut down. A check that passes leaves
+// the verdict as it is, and logs nothing. The first transaction of a term,
+// whose barrier committed through a quorum, and a transaction that proposes a
+// write, which a deposed leader cannot commit, check nothing. The seam is the
+// store's VerifyLeader. Three nodes on loopback with mutual TLS.
+func TestWriteFreeTransactionConfirmsTheLeadership(t *testing.T) {
+	c := newLoopbackCluster(t, "n1", "n2", "n3")
+	leader := c.leader(t, 10*time.Second)
+	store := leader.profile.store
+	ctx := context.Background()
+	var (
+		checks   atomic.Int32 // the checks of the leadership the store made
+		checkErr error        // what the next check answers, the real check's answer when nil
+	)
+	verify := store.verifyLeader
+	store.verifyLeader = func() error {
+		checks.Add(1)
+		if checkErr != nil {
+			return checkErr
+		}
+		return verify()
+	}
+	notFound := func(tx storage.Storage) error { // a failed function, as a revoke of a missing session
+		_, err := tx.GetSession(ctx, "absent")
+		return err
+	}
+	readOnly := func(tx storage.Storage) error { // a function that writes nothing
+		_, err := tx.GetAgent(ctx, "ready")
+		return err
+	}
+
+	if err := store.WithTx(ctx, notFound); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("the first transaction of the term = %v, want %v", err, storage.ErrNotFound)
+	}
+	if err := store.UpsertAgent(ctx, testAgent(t, "ready")); err != nil {
+		t.Fatal(err)
+	}
+	if n := checks.Load(); n != 0 {
+		t.Fatalf("the first transaction of the term and a write checked the leadership %d times, want none", n)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		answer error // what the check answers
+		want   error // the meaning of the transaction's error
+		not    error // a meaning it must not have
+	}{
+		{"leadership lost", hraft.ErrLeadershipLost, cluster.ErrNotLeader, cluster.ErrLeadershipLost},
+		{"not the leader", hraft.ErrNotLeader, cluster.ErrNotLeader, cluster.ErrLeadershipLost},
+		{"shut down", hraft.ErrRaftShutdown, storage.ErrUnavailable, cluster.ErrNotLeader},
+	} {
+		checkErr = tc.answer
+		for _, fn := range []struct {
+			name string
+			run  func(storage.Storage) error
+		}{{"a failed function", notFound}, {"a function that writes nothing", readOnly}} {
+			before, checked := leader.profile.raft.LastIndex(), checks.Load()
+			err := store.WithTx(ctx, fn.run)
+			if !errors.Is(err, tc.want) || !errors.Is(err, tc.answer) || errors.Is(err, tc.not) || errors.Is(err, storage.ErrNotFound) {
+				t.Fatalf("%s, check answering %q: WithTx = %v, want %v and %v, not %v nor the function's verdict", fn.name, tc.name, err, tc.want, tc.answer, tc.not)
+			}
+			if kind := errkind.Classify(err); kind != errkind.Unavailable {
+				t.Fatalf("errkind.Classify(%v) = %v, want Unavailable", err, kind)
+			}
+			if n := checks.Load() - checked; n != 1 {
+				t.Fatalf("%s checked the leadership %d times, want once", fn.name, n)
+			}
+			if got := loggedAfter(t, leader, before); got != (logged{}) {
+				t.Fatalf("%s logged %+v, want nothing", fn.name, got)
+			}
+		}
+	}
+
+	checkErr = nil
+	before := leader.profile.raft.LastIndex()
+	if err := store.WithTx(ctx, notFound); !errors.Is(err, storage.ErrNotFound) || errors.Is(err, cluster.ErrNotLeader) {
+		t.Fatalf("a failed function, check passing: WithTx = %v, want the function's %v", err, storage.ErrNotFound)
+	}
+	if err := store.WithTx(ctx, readOnly); err != nil {
+		t.Fatalf("a function that writes nothing, check passing: WithTx = %v, want nil", err)
+	}
+	if got := loggedAfter(t, leader, before); got != (logged{}) {
+		t.Fatalf("two transactions that wrote nothing, their checks passing, logged %+v, want nothing", got)
+	}
+
+	// The session service answers the revoke of a missing session as done: on
+	// a node whose leadership the check refuses, it answers the refusal. The
+	// actor is checked only against a session found, so it is nil here.
+	sessions := session.New(store, zerolog.Nop())
+	checkErr = hraft.ErrLeadershipLost
+	if err := sessions.Revoke(ctx, nil, session.RevokeRequest{ID: "absent"}); !errors.Is(err, cluster.ErrNotLeader) {
+		t.Fatalf("a revoke of a missing session, the leadership refused = %v, want %v", err, cluster.ErrNotLeader)
+	}
+	checkErr = nil
+	if err := sessions.Revoke(ctx, nil, session.RevokeRequest{ID: "absent"}); err != nil {
+		t.Fatalf("a revoke of a missing session, the leadership confirmed = %v, want nil", err)
+	}
 }

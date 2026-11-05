@@ -125,7 +125,8 @@ func reportCommits(b *testing.B, leader *loopbackNode, first uint64) {
 // BenchmarkThreeNodeHeartbeat is BenchmarkHeartbeat of the durable store on the
 // store of a leader of three nodes with mutual TLS on loopback: the heartbeat
 // of an enrolled agent as discovery runs it. Verify the token, a transaction
-// that writes nothing while the token matches, and so commits nothing; read
+// that writes nothing while the token matches, and so commits nothing, but asks
+// a quorum whether the leader still leads, a round trip of heartbeats; read
 // the stored agent, which is local; then upsert the agent, one command. Only
 // the first transaction of the leader's term commits a barrier, and the seed of
 // benchCluster is that one, so a heartbeat commits one entry here, as the

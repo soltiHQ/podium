@@ -43,8 +43,10 @@ const applyTimeout = 5 * time.Second
 //     skew.
 //   - The first transaction of each leadership term of this node starts with
 //     a barrier, so that it reads every write committed before it; the later
-//     ones of the term start with none (awaitReady). A heartbeat, a token
-//     check that writes nothing and an upsert, so commits one entry.
+//     ones of the term start with none (awaitReady), and those that propose
+//     nothing ask a quorum whether this node still leads before they answer,
+//     which writes nothing (answer). A heartbeat, a token check that writes
+//     nothing and an upsert, so commits one entry.
 //
 // The inner store must be the plain inmemory one and MUST be the same store
 // the FSM applies against. Otherwise leader and followers diverge.
@@ -56,6 +58,10 @@ type Store struct {
 	// barrier commits a barrier and waits until the FSM has applied every entry
 	// before it: awaitApplied, which tests replace.
 	barrier func(ctx context.Context) error
+	// verifyLeader asks a quorum whether this node still leads, and writes
+	// nothing: the error of raft.VerifyLeader, which tests replace. answer
+	// waits for it as awaitLeadership does.
+	verifyLeader func() error
 	// stopped is closed once raft shuts down, which ends the wait for a write
 	// (awaitWrite).
 	stopped <-chan struct{}
@@ -75,11 +81,12 @@ func NewStore(inner storage.Storage, r *hraft.Raft) *Store {
 		panic("raft: nil raft")
 	}
 	return &Store{
-		inner:   inner,
-		raft:    r,
-		propose: r.Apply,
-		barrier: func(ctx context.Context) error { return awaitApplied(ctx, r) },
-		stopped: stopSignal(r),
+		inner:        inner,
+		raft:         r,
+		propose:      r.Apply,
+		barrier:      func(ctx context.Context) error { return awaitApplied(ctx, r) },
+		verifyLeader: func() error { return r.VerifyLeader().Error() },
+		stopped:      stopSignal(r),
 	}
 }
 
@@ -337,7 +344,9 @@ func (s *Store) BuildSpecFilter(c storage.SpecQueryCriteria) storage.SpecFilter 
 // the term reads what the earlier ones applied (awaitReady). While this node
 // leads, the inner store does not move under fn: every write of this Store
 // holds txMu. A write whose term ended before it was proposed fails with
-// ErrNotLeader, having proposed nothing.
+// ErrNotLeader, having proposed nothing. A later transaction of the term that
+// proposes nothing answers once a quorum confirmed that this node still leads
+// (answer), so that a deposed leader does not answer from its stale state.
 //
 // Contract: only leader can run WithTx. If Raft.State() != Leader the tx is
 // rejected with ErrNotLeader before fn executes.
@@ -355,19 +364,19 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx storage.Storage) error) e
 	s.txMu.Lock()
 	defer s.txMu.Unlock()
 
-	term, err := s.awaitReady(ctx)
+	term, skipped, err := s.awaitReady(ctx)
 	if err != nil {
 		return err
 	}
 	tx := overlay.New(s.inner)
 	if err := fn(tx); err != nil {
-		return err
+		return s.answer(ctx, skipped, err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if tx.Empty() {
-		return nil
+		return s.answer(ctx, skipped, nil)
 	}
 	// fn read the state of term. In a later term this node may have lost the
 	// leadership, and other leaders committed writes that fn did not read, and
@@ -385,4 +394,31 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx storage.Storage) error) e
 		return fmt.Errorf("raft: WithTx: the leadership term changed before the write was proposed: %w", ErrNotLeader)
 	}
 	return s.apply(tx.Ops())
+}
+
+// answer returns verdict, what fn made of a transaction that proposes nothing:
+// fn's error, or nil for a transaction that wrote nothing. A transaction that
+// took the barrier of its term knows that this node led when fn read: the
+// barrier committed through a quorum after the transaction began. One that
+// skipped the barrier asks a quorum first. A deposed leader still leads in its
+// own view, and fn read a state that may lack what a later term committed, so
+// verdict would be that of a stale state, such as the "not found" that a
+// session revoke or a user delete takes for done. VerifyLeader heartbeats the
+// followers and writes nothing to the log; a follower in a later term answers
+// that this node no longer leads, which steps it down, and a leader cut off
+// from its quorum waits until its lease steps it down, within the bound of
+// awaitLeadership. A check that fails is the answer in place of verdict:
+// ErrNotLeader for a leadership lost, storage.ErrUnavailable for a node that
+// shut down (barrierError). hashicorp/raft v1.8.0 counts for a check the
+// answer to a request that a follower had in flight when the check began
+// (notifyAll in its replication.go), so a deposed leader can still pass one
+// within that round trip.
+func (s *Store) answer(ctx context.Context, skipped bool, verdict error) error {
+	if !skipped {
+		return verdict
+	}
+	if err := awaitLeadership(ctx, s.verifyLeader); err != nil {
+		return err
+	}
+	return verdict
 }

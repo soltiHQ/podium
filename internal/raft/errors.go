@@ -76,12 +76,13 @@ func membershipError(f hraft.IndexFuture, err error) error {
 	return writeError(f, err)
 }
 
-// barrierError is clusterError for the error of a barrier, such as the one that
-// starts the first transaction of a leadership term (awaitReady). A barrier
-// writes nothing, so one that fails with ErrLeadershipLost proposed no write:
-// the transaction did not run, and the node is no longer the leader. That is
-// ErrNotLeader, which a client may retry, not the ErrLeadershipLost of a write
-// that may still commit.
+// barrierError is clusterError for the error of an operation that carries no
+// write: a barrier, such as the one that starts the first transaction of a
+// leadership term (awaitReady), or a check of the leadership
+// (awaitLeadership). One that fails with ErrLeadershipLost proposed no write:
+// the transaction proposed nothing, and the node is no longer the leader. That
+// is ErrNotLeader, which a client may retry, not the ErrLeadershipLost of a
+// write that may still commit.
 func barrierError(err error) error {
 	if errors.Is(err, hraft.ErrLeadershipLost) {
 		return meant{meaning: cluster.ErrNotLeader, cause: err}
