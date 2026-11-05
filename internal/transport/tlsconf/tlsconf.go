@@ -58,18 +58,25 @@ func (c ServerConfig) ClientCAs() ([]*x509.Certificate, error) {
 // BuildWithClientCAs is Build with cas, the certificates that ClientCAs gave,
 // in place of a read of ClientCAFile: a caller that read the bundle already,
 // to digest it, builds the listeners' pool from the very certificates it
-// digested, whatever the file holds by then. No certificates require no client
-// certificate, as ClientCAs gives none without a ClientCAFile. The key pair is
-// read and fails as for Build.
+// digested, whatever the file holds by then. nil cas require no client
+// certificate, as ClientCAs gives none without a ClientCAFile. With a
+// ClientCAFile set they are an error instead, as they would leave open a
+// listener that the configuration closes to clients without a certificate:
+// the call fails closed. While server TLS is off the result is (nil, nil), as
+// for Build. The key pair is read and fails as for Build.
 func (c ServerConfig) BuildWithClientCAs(cas []*x509.Certificate) (*tls.Config, error) {
 	cfg, err := c.build(false)
 	if err != nil || cfg == nil {
 		return cfg, err
 	}
-	if cas != nil {
-		cfg.ClientCAs = certPool(cas)
-		cfg.ClientAuth = tls.RequireAndVerifyClientCert
+	if cas == nil {
+		if c.ClientCAFile != "" {
+			return nil, errors.New("tls server: client CA: client_ca_file is set, but no certificates were given")
+		}
+		return cfg, nil
 	}
+	cfg.ClientCAs = certPool(cas)
+	cfg.ClientAuth = tls.RequireAndVerifyClientCert
 	return cfg, nil
 }
 

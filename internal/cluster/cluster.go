@@ -76,10 +76,10 @@ type Leadership interface {
 	// cancelled on leadership loss. When leadership is regained fn is
 	// called again. Returns when the outer ctx is cancelled, or with fn's
 	// error. How often fn runs differs between drivers: raft calls fn again
-	// whenever it returns while the node still leads, after another barrier,
-	// so fn must return only once its context ends, or it runs again and
-	// again; standalone, which always leads, calls fn once and returns what
-	// it returns.
+	// whenever it returns nil while the node still leads, after another
+	// barrier, so fn must return only once its context ends, or it runs again
+	// and again; standalone, which always leads, calls fn once and returns
+	// what it returns.
 	WhenLeader(ctx context.Context, fn func(context.Context) error) error
 }
 

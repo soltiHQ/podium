@@ -193,19 +193,24 @@ func servedAPI(t *testing.T, n *clusterNode, method, path string, status int) bo
 }
 
 // Three whole nodes run as main runs them, each on a loopback IP of its own
-// with one port per listener. Before the failover, each follower forwards an
-// agent's gRPC sync to the leader, so that the Forwarder of each holds a client
-// connection to the leader's gRPC address, and a user logs in through a
-// follower. The leader then stops, and the other two elect a new one. Writes
-// sent to the follower that remains then land on the new leader, and both
-// survivors hold them: a gRPC sync, which its Forwarder sends to the new
-// leader's address in place of the dead one's, an HTTP discovery sync and the
-// creation of a user on the main listener, which the Leader middleware sends to
-// the leader it knows at each request, with the cookies of the login made
-// before the failover. The new leader's access log holds the creation, the
-// follower's does not, and the follower follows the new leader once each write
-// is answered. Every node, which runs without tls.server, logged the WARN of
-// its plaintext forwarding once at start.
+// with one port per listener. Before the failover, each follower forwards one
+// write through each of its three listeners to the leader: a gRPC sync, so that
+// its Forwarder holds a client connection to the leader's gRPC address, an HTTP
+// discovery sync and the creation of a user on the main listener, with the
+// cookies of a login made through one of them. So whichever follower wins the
+// election, the other has forwarded to the leader on every listener before it
+// stops, and a forwarder that keeps its first leader, a connection or an
+// address, fails once the leader is gone; the test logs which follower won. The
+// leader then stops, and the other two elect a new one. Writes sent to the
+// follower that remains then land on the new leader, and both survivors hold
+// them: a gRPC sync, which its Forwarder sends to the new leader's address in
+// place of the dead one's, an HTTP discovery sync and the creation of a user on
+// the main listener, which the Leader middleware of each listener sends to the
+// leader it knows at each request, with the cookies of the login made before the
+// failover. The new leader's access log holds the creation, the follower's does
+// not, and the follower follows the new leader once each write is answered.
+// Every node, which runs without tls.server, logged the WARN of its plaintext
+// forwarding once at start.
 func TestFollowerWritesLandOnTheNewLeaderAfterFailover(t *testing.T) {
 	nodes := wholeNodesAt(t, loopbackIPs(t, 3), "n1", "n2", "n3")
 	for _, n := range nodes {
@@ -221,20 +226,47 @@ func TestFollowerWritesLandOnTheNewLeaderAfterFailover(t *testing.T) {
 			return err == nil
 		}
 	}
-
-	for _, via := range followers {
-		id := "agent-before-through-" + via.id
-		resp, err := discoveryClient(t, via.cfg.GRPC.Addr, nil, nil).Sync(withToken(ctx, "token-of-"+id), syncRequest(id))
-		if err != nil || !resp.GetSuccess() {
-			t.Fatalf("sync through %s before the failover: %v %v, want the leader's success", via.id, resp, err)
+	userHeld := func(subject string) func(storage.Storage) bool {
+		return func(s storage.Storage) bool {
+			_, err := s.GetUserBySubject(ctx, subject)
+			return err == nil
 		}
-		nodesHold(t, nodes, id, agentHeld(id))
 	}
+	// httpSyncOf is the body of the HTTP discovery sync of the agent id.
+	httpSyncOf := func(id string) string {
+		return `{"id":"` + id + `","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
+	}
+
+	client := httpClient()
 	cookies := loginThrough(t, leader, followers[0], nodes, "writer", enum.UsersGet, enum.UsersAdd)
+	for _, via := range followers {
+		grpcID := "agent-before-through-" + via.id
+		resp, err := discoveryClient(t, via.cfg.GRPC.Addr, nil, nil).Sync(withToken(ctx, "token-of-"+grpcID), syncRequest(grpcID))
+		if err != nil || !resp.GetSuccess() {
+			t.Fatalf("sync through %s over gRPC before the failover: %v %v, want the leader's success", via.id, resp, err)
+		}
+		nodesHold(t, nodes, grpcID, agentHeld(grpcID))
+
+		httpID := "agent-http-before-through-" + via.id
+		httpSync, body := send(t, client, http.MethodPost, "http://"+via.cfg.HTTPDiscovery.Addr+"/api/v1/discovery/sync", jsonType,
+			httpSyncOf(httpID), "token-of-"+httpID, nil)
+		if httpSync.StatusCode != http.StatusOK {
+			t.Fatalf("sync through %s over HTTP before the failover: %d %q, want the leader's 200", via.id, httpSync.StatusCode, body)
+		}
+		nodesHold(t, nodes, httpID, agentHeld(httpID))
+
+		subject := "user-before-through-" + via.id
+		created, body := send(t, client, http.MethodPost, "http://"+via.cfg.HTTP.Addr+"/api/v1/users", jsonType, `{"subject":"`+subject+`"}`, "", cookies)
+		if created.StatusCode != http.StatusNoContent {
+			t.Fatalf("user created through %s before the failover: %d %q, want the leader's 204", via.id, created.StatusCode, body)
+		}
+		nodesHold(t, nodes, subject, userHeld(subject))
+	}
 
 	leader.stop()
 	next, rest := readyNodes(t, followers)
 	via := rest[0]
+	t.Logf("%s stopped; %s, followers[%d], won the election; %s forwards to it", leader.id, next.id, slices.Index(followers, next), via.id)
 	survivors := []*clusterNode{next, via}
 	// follows fails the test unless via follows next once what was answered: a
 	// node that led meanwhile may have served it itself.
@@ -252,9 +284,8 @@ func TestFollowerWritesLandOnTheNewLeaderAfterFailover(t *testing.T) {
 	follows("the gRPC sync")
 	nodesHold(t, survivors, "the agent synced over gRPC after the failover", agentHeld("agent-after-grpc"))
 
-	client := httpClient()
 	httpSync, body := send(t, client, http.MethodPost, "http://"+via.cfg.HTTPDiscovery.Addr+"/api/v1/discovery/sync", jsonType,
-		`{"id":"agent-after-http","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`, "token-of-agent-after-http", nil)
+		httpSyncOf("agent-after-http"), "token-of-agent-after-http", nil)
 	if httpSync.StatusCode != http.StatusOK {
 		t.Fatalf("sync through %s over HTTP after the failover: %d %q, want %s's 200", via.id, httpSync.StatusCode, body, next.id)
 	}
@@ -266,10 +297,7 @@ func TestFollowerWritesLandOnTheNewLeaderAfterFailover(t *testing.T) {
 		t.Fatalf("user created through %s after the failover: %d %q, want %s's 204", via.id, created.StatusCode, body, next.id)
 	}
 	follows("the creation of a user")
-	nodesHold(t, survivors, "the user created after the failover", func(s storage.Storage) bool {
-		_, err := s.GetUserBySubject(ctx, "after-the-failover")
-		return err == nil
-	})
+	nodesHold(t, survivors, "the user created after the failover", userHeld("after-the-failover"))
 	waitFor(t, 5*time.Second, next.id+" logs the creation of the user", func() bool {
 		return servedAPI(t, next, http.MethodPost, "/api/v1/users", http.StatusNoContent)
 	})

@@ -229,8 +229,10 @@ func TestServerConfigClientCAs(t *testing.T) {
 // BuildWithClientCAs is Build with the certificates of a bundle that its caller
 // read already, ClientCAs': the same configuration from the same certificates,
 // without a read of ClientCAFile, which may have changed or gone since. No
-// certificates is no client certificate required. The key pair is read as
-// Build reads it, and fails as Build fails.
+// certificates is no client certificate required, unless ClientCAFile is set:
+// then the call fails, as a listener that the configuration closes to clients
+// without a certificate must not come out open. The key pair is read as Build
+// reads it, and fails as Build fails.
 func TestServerConfigBuildWithClientCAs(t *testing.T) {
 	cert, key := writeSelfSigned(t)
 	bundle := filepath.Join(t.TempDir(), "bundle.pem")
@@ -264,12 +266,32 @@ func TestServerConfigBuildWithClientCAs(t *testing.T) {
 		t.Fatalf("BuildWithClientCAs() = %+v, want what Build() gave for the bundle: %+v", cfg, read)
 	}
 
-	none, err := ServerConfig{CertFile: cert, KeyFile: key}.BuildWithClientCAs(nil)
-	if err != nil || none.ClientAuth != tls.NoClientCert || none.ClientCAs != nil {
-		t.Fatalf("BuildWithClientCAs(nil) = %+v, %v, want no client certificate required", none, err)
+	for _, tc := range []struct {
+		name string
+		cfg  ServerConfig
+		want string // "": no client certificate required; else the error's text
+	}{
+		{"no client_ca_file", ServerConfig{CertFile: cert, KeyFile: key}, ""},
+		{"client_ca_file set, bundle gone", server, "client_ca_file is set, but no certificates were given"},
+	} {
+		t.Run("nil certificates, "+tc.name, func(t *testing.T) {
+			got, err := tc.cfg.BuildWithClientCAs(nil)
+			if tc.want != "" {
+				if got != nil || err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("BuildWithClientCAs(nil) returned a config: %t, error: %v, want no config and an error saying %q", got != nil, err, tc.want)
+				}
+				return
+			}
+			if err != nil || got.ClientAuth != tls.NoClientCert || got.ClientCAs != nil {
+				t.Fatalf("BuildWithClientCAs(nil) = %+v, %v, want no client certificate required", got, err)
+			}
+		})
 	}
 	if off, err := (ServerConfig{}).BuildWithClientCAs(cas); off != nil || err != nil {
 		t.Fatalf("BuildWithClientCAs() without server TLS = %v, %v, want nil, nil", off, err)
+	}
+	if off, err := (ServerConfig{ClientCAFile: bundle}).BuildWithClientCAs(nil); off != nil || err != nil {
+		t.Fatalf("BuildWithClientCAs(nil) with client_ca_file set but server TLS off = %v, %v, want nil, nil, as for Build", off, err)
 	}
 	missing := ServerConfig{CertFile: cert + ".missing", KeyFile: key}
 	_, buildErr := missing.Build()

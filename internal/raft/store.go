@@ -420,11 +420,15 @@ func (s *Store) transact(ctx context.Context, fn func(tx storage.Storage) error)
 // transaction that wrote nothing, once a quorum confirmed that this node still
 // leads term, the term fn read in (confirmLeadership). A transaction that took
 // the barrier needs no check: the barrier committed through a quorum in its
-// term after the transaction began, which shows that no later term had
-// committed anything before fn read. One that skipped it may run on a deposed
-// leader, which still leads in its own view, and fn read a state that may lack
-// what a later term committed, so verdict would be that of a stale state, such
-// as the "not found" that a session revoke or a user delete takes for done.
+// term after the transaction began, and no later term had committed anything
+// when it did, so fn's read is linearizable at that point. The barrier can
+// return after a later term committed something: a leader that paused before
+// it handled the last acknowledgement of the barrier was replaced meanwhile.
+// fn then reads without that write, and its read still stands at the commit of
+// the barrier. One that skipped the barrier may run on a deposed leader, which
+// still leads in its own view, and fn read a state that may lack what a later
+// term committed, so verdict would be that of a stale state, such as the "not
+// found" that a session revoke or a user delete takes for done.
 //
 // answer runs after the transaction released txMu, so the check's round trip
 // holds up no other transaction. That leaves verdict as it was: fn read under
