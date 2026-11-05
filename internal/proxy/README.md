@@ -101,24 +101,40 @@ messages hold no repeated field and no map.
 Over HTTP every list the proxy builds from JSON is one of the three in the table:
 they are decoded an element at a time by `jsonbounds.go`, and a key that comes twice
 adds to the same list. The decoded structs hold no other list, and a field they do
-not name is skipped without being built. HTTP has no budget in all, as the three
-bounds add up to less.
+not name is skipped without being built. What is under a bound is built before the
+call fails: the first `limit` items of a page, and the first 64 conditions of a task,
+are decoded and dropped with the error; the element past the bound is not. HTTP has
+no budget in all, as the three bounds add up to less.
 
-What the tests measure (`TotalAlloc` of the process during one call, the fake agent
-included; a call that reads a page of 4 MiB allocates 8 to 20 MiB by itself):
+What the committed tests send, and what a call allocated while it refused it
+(`TotalAlloc` of the whole process during the call, the fake agent included, as
+`go test -v` logs it; each test asserts under 64 MiB, and a call that reads a page of
+4 MiB allocates 8 to 20 MiB by itself). The figures of the gRPC `ListTasks` floods
+vary by a MiB between runs:
 
-| Answer | Unbounded decode | Refused |
+| Test | What it sends | Allocated |
 |---|---|---|
-| `ListTasks`: a task with a million empty conditions, or env entries, or args; a thousand tasks with a thousand conditions each | 86 to 255 MiB (gRPC) | 2 to 4 MiB (gRPC) |
-| `ListTasks`: a task with a million empty conditions | 499 MiB (HTTP) | 21 MiB (HTTP) |
-| `GetTask`, `ApplyTask`: a task with a million empty conditions | 411 to 491 MiB (HTTP), 125 to 159 MiB (gRPC) | 13 MiB (HTTP), 4 MiB (gRPC) |
-| `ListTaskRuns`: a page of a million empty runs | 748 MiB (HTTP), 604 MiB (gRPC) | 14 MiB (HTTP), 8 MiB (gRPC) |
-| An answer of exactly 262144 elements | | decodes, 32 MiB |
+| `TestGRPCListTasksRefusesNestedElementFloodBeforeDecode` | to `ListTasks` (limit 1000), over gRPC: one task with 1048576 empty conditions, or empty env entries, or empty args, or labels; or 1000 tasks with 1000 empty conditions each | 2 to 4 MiB |
+| `TestHTTPListTasksRefusesConditionFlood` | to `ListTasks` (limit 1000), over HTTP: one task with 1048576 empty conditions | 21 MiB |
+| `TestGetTaskRefusesNestedElementFlood` | to `GetTask`: one task with 1048576 empty conditions, over HTTP; the same, and one with 1048576 empty env entries, over gRPC | 13 MiB (HTTP), 4 MiB each (gRPC) |
+| `TestApplyTaskRefusesNestedElementFlood` | to `ApplyTask`: one task with 1048576 empty conditions | 13 MiB (HTTP), 4 MiB (gRPC) |
+| `TestListTaskRunsRefusesExtraRunsBeforeDecode` | a `ListTaskRuns` page (limit 1000) of 1048576 empty runs over HTTP, of 2097152 (4 MiB) over gRPC | 14 MiB (HTTP), 8 MiB (gRPC) |
+| `TestCompliantAnswersNearTheBudgetStillDecode` | to `GetTask`, over gRPC: one task with exactly 262144 empty env entries; it decodes | 32 MiB |
 
-The bounds refuse nothing compliant: the tests decode a page of a thousand tasks
-with 64 conditions and 150 env entries each (215000 elements, 1.9 MB) over gRPC and a
-thousand tasks with 64 conditions over HTTP. Within the 4 MiB the proxy reads, the
-budget is reached only by an answer whose elements average under 16 bytes.
+Before these bounds the floods above allocated 86 to 748 MiB a call, all but the
+million labels, which the code before them accepted at 2 MiB (Go keeps one map entry
+for equal keys). That was measured when the bounds were written, by running these
+tests against that code; no committed test reproduces it, since they assert and log
+the refused side only.
+
+What the bounds let through is what stays within the numbers above, and nothing more
+is promised: the numbers are the control plane's choice, and no test shows that every
+agent's answers stay within them. The tests decode a page of 1000 tasks with 64
+conditions and 150 env entries each over gRPC (215000 elements, 1.87 MB), a page of
+1000 tasks with 64 conditions each over HTTP, and an answer of exactly 262144
+elements, and refuse one element more. Within the 4 MiB the proxy reads, the budget
+is reached only by an answer whose elements average under 16 bytes; a listing that
+hits it only through its page size is asked again smaller by the sync runner.
 
 ## Migration
 
