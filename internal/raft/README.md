@@ -17,10 +17,11 @@ these steps on real nodes over loopback with mutual TLS.
 
 ### Certificates
 
-1. Make a CA for raft alone: never the agents' CA, the CA of `tls.server` or
-   `tls.client`, or a bundle merged with one of them. A node takes every
-   certificate its CA signs for a full member, whatever host it names (see
-   "Transport security").
+1. Make a CA for raft alone, and one per cluster: never the agents' CA, the CA
+   of `tls.server` or `tls.client`, a bundle merged with one of them, or the
+   raft CA of another cluster. A node takes every certificate its CA signs for
+   a full member, whatever host it names, so two clusters that share a raft CA
+   are one cluster to each other's nodes (see "Transport security").
 2. Give each node one certificate of that CA, for both server and client
    authentication, whose subject alternative names hold the host of the node's
    advertise address as written: an IP SAN for `10.0.0.1:7000`, a DNS SAN for
@@ -34,6 +35,17 @@ these steps on real nodes over loopback with mutual TLS.
    certificate for the leader's raft host, so those certificates name each
    node's advertise host too, and `tls.client.ca_file` holds their CA (see "TLS"
    in `internal/config/README.md`).
+4. Set `tls.server` on every node. A follower forwards the writes it gets,
+   logins, cookies and bearer tokens included, and the agents' syncs, to the
+   leader: without `tls.server` it forwards them in plaintext, and each node
+   logs one WARN at start, `raft forwarding runs plaintext`. With agent mTLS
+   (`tls.server.client_ca_file`), the leader's discovery listeners want a client
+   certificate of the agents' CA from the follower too: give every node a
+   `tls.client.cert_file` and `key_file` that chain to that CA, or every sync
+   that reaches a follower fails, 502 over HTTP and `leader unreachable` over
+   gRPC; a node with agent mTLS and no `tls.client.cert_file` logs one WARN at
+   start that says so (`TestRaftNodeWarnsWhatItsForwardsLack`, in
+   `internal/app`).
 
 ### Network
 
@@ -58,6 +70,12 @@ these steps on real nodes over loopback with mutual TLS.
   or kube-proxy for a hostNetwork pod: every node believes the forwarding
   headers of the hosts of the raft configuration, so such a client could pick
   its own client IP (see "Forwarding and trusted hosts").
+- Let the nodes reach one another's HTTP and gRPC listeners directly. A
+  follower dials the leader itself, and takes no proxy from `HTTP_PROXY` or
+  `HTTPS_PROXY`, which would make the proxy the peer of every forward, a host
+  the leader trusts for no forwarding header
+  (`TestLeaderForwardsWithoutTheProxyOfTheEnvironment`,
+  `TestForwarderIgnoresTheProxyOfTheEnvironment`).
 
 ### Configuration
 
@@ -96,7 +114,25 @@ a second one starts, and the first node to lead seeds the administrator
 says which node's password file to read. A start that fails on its peers keeps
 no raft state, so it bootstraps again once they are fixed (see "Bootstrap").
 From then on a node reads its configuration from its own log, not from
-`peers` (`TestRestartDoesNotAskDiscovery`).
+`peers` (`TestRestartDoesNotAskDiscovery`). Timings that hashicorp/raft would
+refuse, an election timeout under the heartbeat timeout or under 5 ms, fail
+configuration loading, before anything is made (see "Validation").
+
+Prefer static peers for the first start. With the dns driver, each node
+bootstraps with the peers that DNS answers at its own first start, which is
+safe only when every node resolves the complete set of nodes before its first
+start. A node that resolves fewer nodes bootstraps a smaller configuration, and
+nothing tells: a node that resolves only itself is a cluster of one voter, which
+leads at once, seeds and takes writes, and refuses the votes of the others, as
+they are not in its configuration, while the others, which bootstrapped the
+larger list, never elect a leader. That is a silent fork, with no error at
+start (see "Bootstrap"). On Kubernetes, a StatefulSet in its default
+`OrderedReady` mode starts pod-0 alone, which then resolves only itself: give
+it `podManagementPolicy: Parallel`, and its headless service
+`publishNotReadyAddresses: true`, which also lets each pod resolve its own
+advertise host before it is ready, as `New` does at start. After every first
+start, check `GET /api/v1/cluster` on every node: each must name the same
+leader and list every node.
 
 ### Restarts and failover
 
@@ -109,14 +145,33 @@ From then on a node reads its configuration from its own log, not from
   role, the leader it knows and its `last_index` (see "Cluster" in
   `internal/handler/README.md`): restart the next node only once the last one
   follows the leader again.
+- A node keeps its `node_id` and its advertise address for as long as it holds
+  raft state: its peers know it by the ID and the address of the configuration
+  in their logs. Started again under another `node_id` it is never elected, as
+  hashicorp/raft lets only a voter of its configuration, by ID, stand; started
+  at another address, its peers still dial the stored one. Such a start fails
+  nothing, but logs one ERROR, `raft: this node is not in its stored raft
+  configuration as its node_id at its advertise_addr`, with `node_id`,
+  `advertise_addr` and the stored `servers`
+  (`TestRestartChecksTheNodeAgainstItsStoredConfiguration`). To rename or
+  re-address a node, remove it, wipe its `data_dir`, and add it again with
+  `join: true`.
 - When the leader goes down, the other two elect a leader and take writes, and
   every write that was acknowledged is on both
   (`TestFailoverKeepsAcknowledgedWrites`). A write in flight as the leader went
   down has an unknown outcome: its client got a 503 with
   `cluster.ErrLeadershipLost` (see "Follower writes"), or no answer when the
-  leader's process died, and the write may land or not, so a client should
+  leader's process died, or, from a follower that forwarded it, a 502, which the
+  follower answers for every forward that got no answer: a leader that committed
+  the write and then died gives one, as does one that did not answer within the
+  30 s that the forward waits. The write may land or not, so a client should
   repeat only writes that are safe to repeat. Followers forward to the new
-  leader, which the hints name.
+  leader, which the hints name: writes sent to a follower's HTTP and gRPC
+  listeners after the leader stopped land on the new leader
+  (`TestFollowerWritesLandOnTheNewLeaderAfterFailover`, in `internal/app`).
+- Every node serves reads from its own state, which a lagging or cut-off node
+  serves stale: see "Reads on a follower" for what that means for sessions and
+  revocations, and keep such a node out of the balancer.
 - A lone node never leads (`TestLateQuorumStillSeedsOnce`), and hashicorp/raft
   steps a leader down when it hears from no quorum within its lease
   (`checkLeaderLease` in v1.8.0), so with two nodes down the last one answers
@@ -146,10 +201,21 @@ From then on a node reads its configuration from its own log, not from
   leader's own removal takes two calls: it hands its leadership over and
   answers 503 with `X-Leader`, and the repeated call removes it
   (`TestRemoveLeaderTransfersFirst`). Remove dead members first (see "Removing
-  a member").
+  a member"). A follower forwards both calls, and an addition, to the leader
+  (`TestMembershipChangesThroughAFollower`, in `internal/app`).
 - Stop the process of every node you remove: its raft keeps running outside the
   cluster, with a state that no longer follows it, until the process stops
   (see "A removed node").
+- A removal revokes nothing. The removed node's raft certificate is still one
+  the cluster CA signed, a full member's credential: a host that holds its key
+  can still connect to every node's raft port as a member, fetch the
+  configuration digests, and send RPCs with a term that deposes the leader, and
+  it then names its own host as the leader, so that the followers forward
+  writes, with their logins, cookies and tokens, to its HTTP and gRPC
+  listeners, whose `tls.server` certificate passes their check. After removing
+  a node whose keys may be exposed, such as a compromised host, issue a new
+  raft CA and new certificates to every node, and replace the removed node's
+  `tls.server` certificate as well (see "Transport security").
 - A dead member is replaced by its removal, with `force`, and the addition of
   the replacement, started with `join: true`: "Replacing a dead member" lists
   the steps, which `TestReplaceDeadMember`, in `internal/app`, runs.
@@ -188,14 +254,19 @@ at `X-Leader` by itself, so behind a balancer that spreads requests evenly over
 the three nodes, each such read fails with probability 2/3. Routing must
 therefore be leader-sticky: the balancer sends browsers to the leader, or
 retries a request that gets `X-Leader` at the node it names, and follows the
-leadership when it moves. The status that names the leader,
-`GET /api/v1/cluster`, needs `cluster:get` (`TestClusterRoutesNeedPermission`),
-so a balancer that probes it needs a credential. A refresh on a leader that
-loses its leadership as the rotation commits answers 503 as well, and may have
-rotated the token all the same (see "Follower writes"): its browser then holds
-a refresh token that no longer matches, and logs in again. Without rotation
-none of this applies: turn rotation off where the balancer cannot follow the
-leader.
+leadership when it moves. No node offers a leader probe without
+authentication: the one status that names the leader, `GET /api/v1/cluster`,
+needs `cluster:get` (`TestClusterRoutesNeedPermission`), which an ordinary
+balancer cannot hold, so a balancer cannot find the leader by itself, and
+cannot route to it without a router that holds such a credential, or retries
+at `X-Leader`. So in raft mode keep `auth.rotate_refresh` off, as it is by
+default, unless leader-sticky routing is in place. A refresh on a leader that
+loses its leadership, or shuts down, as the rotation commits answers 503 with
+`X-Leader` as well, and `Auth` logs a WARN that its outcome is unknown (see
+"Follower writes"): the rotation may have taken effect. A retry at the leader
+the header names refreshes the browser when the rotation did not commit; when
+it did, the browser holds a refresh token that no longer matches, and logs in
+again, the hint followed or not. Without rotation none of this applies.
 
 ### Rolling upgrade
 
@@ -248,6 +319,22 @@ the node's `ip:<discovery.port>`. A static list must also pass the checks of
 for nothing, so only the syntax of its peers is checked, and the host name and
 port of dns (`TestJoiningNodeValidation`, see "Joining a running cluster").
 
+The election and heartbeat timeouts must be ones that hashicorp/raft's
+`ValidateConfig` accepts, which `BootstrapCluster` and `NewRaft` run only once
+the stores are open and the transport listens: each at 5 ms at least, 0 keeping
+the default of 1 s, and the election timeout no shorter than the heartbeat
+timeout, the defaults counted (`TestRaftTimeoutsConfig` and
+`TestRaftTimeoutLimitsAreHashicorps`, in `internal/cluster`). The lease, which
+`New` lowers to the heartbeat timeout when that is shorter, and the snapshot
+interval, 5 ms at least, are then within its limits too; nothing else of it
+depends on the configuration. `New` runs hashicorp/raft's check itself before
+it makes anything, for a caller that skipped `Validate`, and its error names
+the settings (`TestRaftTimeouts`). Such a caller that advertises every
+interface, or no host, gets `ErrNodeCertificate` over TLS when the node's
+certificate does not name that host, as the certificate is checked first, and
+otherwise, and on plain TCP, `errNotAdvertisable`, before the transport listens
+(`TestNewRefusesAnAddressPeersCannotDial`).
+
 ## Bootstrap
 
 `New` bootstraps only on a node's first start, while its data directory holds
@@ -264,15 +351,22 @@ no raft state:
    would give the node state and make the bootstrap fail with
    `ErrCantBootstrap` (`TestFirstStartBootstrapsBeforeRaftRuns`).
 
-The list is never rewritten for the node that derives it, so every node
-derives the same configuration whatever order discovery reports the peers in
+The list is never rewritten for the node that derives it, so every node derives
+the same configuration whatever order discovery reports the peers in
 (`TestAllNodesDeriveTheSameServerList`). hashicorp/raft expects that of
 `BootstrapCluster`, and once it has a configuration, a node rejects the vote of
-a candidate missing from it (`requestVote` in hashicorp/raft v1.8.0). Every
-node must therefore see the same peers at its first start: nothing compares the
-lists of different nodes, so DNS answers that differ between nodes go
-unnoticed, while an address DNS answers twice fails the start as a duplicate.
-Three nodes named `n1`, `n2` and `n3` elect a leader and replicate a write
+a candidate missing from it (`requestVote` in hashicorp/raft v1.8.0). Every node
+must therefore see the same peers at its first start: nothing compares the lists
+of different nodes, so DNS answers that differ between nodes go unnoticed, while
+an address DNS answers twice fails the start as a duplicate. With the dns driver
+that forks a cluster silently: a node whose DNS answered fewer peers bootstraps
+a smaller configuration, and a node that found only itself bootstraps a cluster
+of one voter, which leads it, seeds and takes writes at once, and refuses the
+votes of the others, which are not in its configuration, so they never elect a
+leader. No error says so at start; "First start" in the runbook says how to
+avoid it, and how to check every node after it. An expected count of peers
+before a bootstrap would catch it, and is not built. Three nodes named `n1`,
+`n2` and `n3` elect a leader and replicate a write
 (`TestThreeNodesWithNamedIDsElectLeader`).
 
 The list is derived before the transport listens, and a start that fails on
@@ -351,27 +445,36 @@ upsert, so commits one entry, and the token check none
    holds `txMu`, and its apply returns once the FSM applied its command, so a
    later transaction reads every write committed before it. The other
    proposers of a leader write nothing that a transaction reads, see below.
-3. A deposed leader, one that a later term replaced and that has not heard of
-   it yet, still leads in its own view, and reads its own, stale state. A write
-   it proposes cannot commit in its old term, so no write computed from that
-   state lands. A transaction that proposes nothing, because its function
-   failed or wrote nothing, would answer what that state holds: the session
-   revoke and the user delete of the API take a missing row for done, and would
-   answer 204 for a session or a user that a newer leader created. So such a
-   transaction, when it skipped the barrier, answers only once hashicorp/raft's
-   `VerifyLeader` confirmed that the node still leads (`Store.answer`): it
-   heartbeats the followers and writes nothing to the log. A follower in a
-   later term answers that the node no longer leads, which steps it down, and a
-   node cut off from its quorum waits until its lease steps it down, for no
-   longer than its request's context or 5 s allow. A check that fails is the
-   transaction's answer, in place of what its function made of the state:
+3. A deposed leader, one that a later term replaced and that has not heard of it
+   yet, still leads in its own view, and reads its own, stale state. A write it
+   proposes cannot commit in its old term, so no write computed from that state
+   lands. A transaction that proposes nothing, because its function failed or
+   wrote nothing, would answer what that state holds: the session revoke and the
+   user delete of the API take a missing row for done, and would answer 204 for
+   a session or a user that a newer leader created. So such a transaction, when
+   it skipped the barrier, answers only once hashicorp/raft's `VerifyLeader`
+   confirmed that the node still leads (`Store.answer`): it heartbeats the
+   followers and writes nothing to the log. A follower in a later term answers
+   that the node no longer leads, which steps it down, and a node cut off from
+   its quorum waits until its lease steps it down, for no longer than its
+   request's context or 5 s allow. A check that fails is the transaction's
+   answer, in place of what its function made of the state:
    `cluster.ErrNotLeader` for a leadership lost, `storage.ErrUnavailable` for a
    node that shut down (`TestWriteFreeTransactionConfirmsTheLeadership`, with a
    seam for the check). A transaction that took the barrier needs no check, as
    its barrier committed through a quorum after it began. hashicorp/raft v1.8.0
-   counts for a check the answer to a request that a follower had in flight
-   when the check began, so a deposed leader can still pass one within that
-   round trip.
+   counts for a check the answer to a request that a follower had in flight when
+   the check began, so a deposed leader can still pass one within that round
+   trip. The check runs once the transaction released `txMu`, so its round trip
+   holds up no other transaction; the function read under `txMu`, so a write
+   that runs between the release and the answer comes after that read. A check
+   that passes confirms the term the node is in when raft takes it, which can be
+   later than the term the function read in, when the leadership was lost and
+   regained meanwhile, and a leader of a term between may have committed what
+   the read lacks. So after the check the node must still lead, in the very term
+   the transaction read in, or the transaction answers `cluster.ErrNotLeader`
+   (`TestLeadershipCheckAnswersForTheTermOfTheRead`, whose function moves the
+   leadership away and back after its read).
 4. A node that loses the leadership of a term never leads that term again: it
    leads only a term it raised itself to, to win its election. So a later term
    is never ready before its own barrier: after a leadership change, the new
@@ -418,12 +521,13 @@ keeps its own barrier at the start of each term of each runner (see
 per term, and `WaitReady`, which runs outside `txMu` and covers every operation
 before it, would then need `txMu` to cover a transaction's write in flight.
 
-The five tests run on three nodes on loopback with mutual TLS, and count the
+The six tests run on three nodes on loopback with mutual TLS, and count the
 barriers and the commands that the leader's log gains, as the benchmarks do.
-The two race tests move the leadership to another node and back at the point of
-the race: inside the store's barrier, a seam that tests replace, and inside the
-transaction's own function. The check of the leadership is a seam too, which
-answers what a check on a deposed leader answers.
+The three race tests move the leadership to another node and back at the point
+of the race: inside the store's barrier, a seam that tests replace, and inside
+the transaction's own function, before its write and before its answer. The
+check of the leadership is a seam too, which answers what a check on a deposed
+leader answers, and sees that the transaction released `txMu`.
 
 ## Membership
 
@@ -431,8 +535,9 @@ answers what a check on a deposed leader answers.
 narrow `cluster.Admin` of the cluster service (`internal/service/cluster`)
 behind the membership API, which never hands out the hashicorp/raft node. It
 reads the node's ID, role, leader, last index and members, adds a voter, removes
-a server, transfers the leadership, and probes an address. The API is in
-"Cluster" of `internal/handler/README.md`.
+a server, transfers the leadership, probes an address, and confirms the
+leadership of a term with a quorum. The API is in "Cluster" of
+`internal/handler/README.md`.
 
 ### The configuration and its index
 
@@ -481,19 +586,37 @@ which the API answers 409 `configuration changed, retry`. The mapping is tied
 to v1.8.0: `TestStaleConfigurationIndexConflicts` pins the text, and fails when
 an upgrade words it otherwise.
 
+The read also gives the term the node was in when it read
+(`cluster.Configuration.Term`). A change that the rules let through needs
+nothing more: a deposed leader, one that a later term replaced without its
+knowing, cannot commit it. A refusal that the rules read from the configuration
+does: an unknown ID, an ID or an address in use, the force guard and the last
+voter. A deposed leader reads a configuration that may lack the later term's
+changes, so before the service answers such a refusal, `Admin.VerifyLeader` asks
+a quorum whether the node still leads, as a transaction of the store that writes
+nothing does (see "One barrier per term"), and in the term of the read. A check
+that fails answers `cluster.ErrNotLeader` in place of the refusal, which the API
+answers 503 with `X-Leader`, having changed nothing
+(`TestAdminVerifiesTheLeadershipOfTheTermItRead`, and
+`TestRefusalsFromTheConfigurationConfirmTheLeadership` in
+`internal/service/cluster`).
+
 ### Adding a voter
 
 The leader refuses an ID that a member has, and an address at which a member
-answers already: the member's address as written, or another name of an
-ip:port where the member answers. It resolves the host of the new address and
-the host of every member, as the transport dials them, an IP to itself, and
-refuses a shared ip:port with 409, naming the member. A member's host that does
-not resolve, such as the name of a dead member, counts for nothing, and a new
-address whose host does not resolve is left to the probe, which then fails.
+answers already: the member's address as written, or another name of an ip:port
+where the member answers. It resolves the host of the new address and the host
+of every member, as the transport dials them, an IP to itself, and refuses a
+shared ip:port with 409, naming the member. A member's host that does not
+resolve, such as the name of a dead member, counts for nothing, and a new
+address whose host does not resolve is left to the probe, which then fails. The
+lookups of one addition share a bound of 5 s, and a lookup that it cuts short
+counts as a host that does not resolve: behind a DNS slower than that, the check
+fails open, and only the probe stands between the address and the configuration.
 Without this check, a member listed by its IP whose certificate also names its
 DNS host could be added a second time under that host: two voters on one node,
-four voters on three nodes, so the quorum rises to three and the node's
-failure takes two votes, which stops writes (`TestRefusedChangesChangeNothing`,
+four voters on three nodes, so the quorum rises to three and the node's failure
+takes two votes, which stops writes (`TestRefusedChangesChangeNothing`,
 `TestAddMemberRules`).
 
 It then probes the address (`Admin.Probe`): it dials it as the transport dials
@@ -512,10 +635,11 @@ three voters need two, four need three. hashicorp/raft v1.8.0 makes the new
 server a voter at once, with no staging step, and it catches up from the
 leader's log or a snapshot.
 
-A change that lost leadership while it committed (`cluster.ErrLeadershipLost`)
-can still take effect: the service logs one WARN, `cluster membership change
-outcome unknown`, with the actor, the operation, the member and `force`, the
-fields of the INFO line of a change that committed
+A change that lost leadership while it committed, or whose node shut down
+before its outcome was known (`cluster.ErrLeadershipLost`), can still take
+effect: the service logs one WARN, `cluster membership change outcome
+unknown`, which names both causes, with the actor, the operation, the member
+and `force`, the fields of the INFO line of a change that committed
 (`TestAChangeOfUnknownOutcomeIsLogged`); read the status to know.
 
 ### Removing a member
@@ -544,7 +668,10 @@ after the failure all the same. `TestRemoveLeaderTransfersFirst` shows the
 order on three nodes: after the first call another node leads while every node
 still lists the old leader, and after the repeated one the old leader is out
 of every member's configuration, its raft never logged `removed ourself`, and
-writes commit.
+writes commit. `TestMembershipChangesThroughAFollower`, in `internal/app`,
+sends both calls through followers' HTTP API: the first answers 503 with the
+new leader's HTTP address in `X-Leader`, and the repeat, through a follower of
+the new leader, removes the old one.
 
 ### Replacing a dead member
 
@@ -591,7 +718,22 @@ certificate must also name the host the node dials, its address in the raft
 configuration, compared as written (`TestRaftRefusesPeerCertForAnotherHost`).
 Inbound, any certificate the CA verifies is a member, whatever it names: no
 check of a connecting peer against the configured peers exists, so the CA must
-sign raft node certificates only.
+sign raft node certificates only, of one cluster: two clusters that share a
+raft CA take each other's nodes for members.
+
+So the raft certificate is a member's credential for as long as it is valid,
+whatever the configuration says, and removing a node revokes nothing. In
+hashicorp/raft v1.8.0 a node takes an AppendEntries from any connected peer
+whose term is at least its own, and records that peer as its leader before it
+checks the log (`appendEntries`): a host that holds a removed node's key can
+still depose the leader with a higher term, name its own host as the leader,
+so that the followers forward the writes they get, logins, cookies and bearer
+tokens included, to its HTTP and gRPC listeners, whose `tls.server`
+certificate passes the followers' check of that host, and fetch every node's
+configuration digests. After removing a node whose keys may be exposed, issue
+a new raft CA and new raft certificates to every node, and re-issue that
+node's `tls.server` certificate too. A check of a connecting peer's host
+against the configured members would narrow this, and is not built.
 
 An accepted connection's handshake runs on its first read or write, in the
 goroutine hashicorp/raft gives that connection, never in its one accept loop.
@@ -677,19 +819,24 @@ that apply alike encode alike (`TestFingerprintChangesWithEachSetting`):
   without headers that parses (`TestServerConfigClientCAs`). The path counts
   for nothing, as it may differ from node to node; another CA counts.
 
-A raft node reads that bundle before it starts, and fails as `Build` fails on
-it, with the same error: a bundle that cannot be read, or holds no
+A raft node reads that bundle once, before it starts, and fails as `Build` fails
+on it, with the same error: a bundle that cannot be read, or holds no
 certificate, fails `New` before the raft node opens anything
 (`TestUnreadableAgentCABundleFailsTheStart`), where standalone fails later, in
-`Build`, as before. Every setting of `cors` counts even while `allow_origins` is
-empty, when the others have no effect. `cluster.Fingerprint` is the hex SHA-256
-over the five digests in order. The status, `GET /api/v1/cluster`, shows it as
-`config_fingerprint`, behind `cluster:get` (see "Cluster" in
-`internal/handler/README.md`); the group digests travel only from node to node,
-and no log line holds a digest, the fingerprint or a value. Whoever reads the
-fingerprint and knows the other settings can still confirm a guess of a weak
-secret offline, by computing the fingerprint of the guess, as the encoding is
-public: so the secrets must be strong, random values, not words.
+`Build`, as before. It then builds its discovery listeners' pool from the
+certificates it read, not from a second read of the file, so the digest it
+answers with names the very certificates its listeners check agents against,
+however the file changes meanwhile (`TestRaftNodeReadsTheAgentCABundleOnce`,
+`tlsconf.ServerConfig.BuildWithClientCAs`). Every setting of `cors` counts even
+while `allow_origins` is empty, when the others have no effect.
+`cluster.Fingerprint` is the hex SHA-256 over the five digests in order. The
+status, `GET /api/v1/cluster`, shows it as `config_fingerprint`, behind
+`cluster:get` (see "Cluster" in `internal/handler/README.md`); the group digests
+travel only from node to node, and no log line holds a digest, the fingerprint
+or a value. Whoever reads the fingerprint and knows the other settings can still
+confirm a guess of a weak secret offline, by computing the fingerprint of the
+guess, as the encoding is public: so the secrets must be strong, random values,
+not words.
 
 ### The configuration request
 
@@ -843,11 +990,18 @@ ends the wait once raft shuts down, however it does (`stopSignal`,
 future answers `ErrRaftShutdown` after the leader dispatched it, which its
 future's index tells, is `cluster.ErrLeadershipLost`, an unknown outcome; a
 store write releases its transaction lock as it returns. `ErrRaftShutdown` of a
-write never dispatched, `ErrEnqueueTimeout` and every error of a barrier stay
-`storage.ErrUnavailable` (`TestWriteOutcomeOfARaftShutdown`,
-`TestAWriteNeverAnsweredEndsWithItsNode`). A membership change of unknown
-outcome is logged as one (see "Adding a voter"), and HTTP answers it as any
-`cluster.ErrLeadershipLost`, 503, with `X-Leader` when a leader is known.
+write never dispatched, `ErrEnqueueTimeout` and every shutdown error of a
+barrier stay `storage.ErrUnavailable` (`TestWriteOutcomeOfARaftShutdown`,
+`TestAWriteNeverAnsweredEndsWithItsNode`). A write of a node whose raft shut
+down already is not proposed at all: raft would refuse it unwritten, and the
+wait, which finds the shutdown, would take that refusal for an unknown outcome.
+So it is `storage.ErrUnavailable`, and still `ErrRaftShutdown`, every time,
+for the store, the event hub's writer and a membership change alike
+(`refuseStopped`; `TestWritesOfAStoppedNodeAreRefusedUnwritten`). One that
+raft takes as its node shuts down can still end as an unknown outcome, the
+safe side. A membership change of unknown outcome is logged as one (see
+"Adding a voter"), and HTTP answers it as any `cluster.ErrLeadershipLost`, 503,
+with `X-Leader` when a leader is known.
 
 For HTTP the 503 of `ErrNotLeader` and `ErrLeadershipLost`
 (`response.FromError`) carries `X-Leader`, as the `Leader` middleware hands
@@ -862,10 +1016,18 @@ on the leader, or when a read writes. The write handlers of the API answer a
 failed store with `response.StoreFailed`, or with `response.FromError`, and log
 a leadership error as a WARN: 503 with `X-Leader`, where every other error is
 answered and logged as before
-(`TestWriteHandlersAnswerLeadershipErrorsWithTheLeader`). The logout and the
-HTTP discovery sync still answer `response.Unavailable` for every error, 503
-without the header. A gRPC discovery sync on a follower is forwarded to the
-leader too, see "Forwarding and trusted hosts" below.
+(`TestWriteHandlersAnswerLeadershipErrorsWithTheLeader`). The discovery syncs
+do the same: a sync whose token check or upsert meets a leadership error, on a
+leader that lost its leadership while it served the sync or on a deposed
+leader whose check of the leadership failed, logs a WARN and answers with the
+leader's address when one is known, over HTTP a 503 with `X-Leader`, and over
+gRPC an `Unavailable` with the `x-leader` hint and the mark of a routing
+answer, so that `UnaryLogger` logs it at WARN once, not a second ERROR
+(`TestDiscoveryAnswersLeadershipErrorsWithTheLeader`). A failover no longer
+floods ERROR lines on the agents' path. The logout still answers
+`response.Unavailable` for every error, 503 without the header. A gRPC
+discovery sync on a follower is forwarded to the leader too, see "Forwarding
+and trusted hosts" below.
 
 A read that writes is the refresh of a browser session with
 `auth.rotate_refresh` on: the `Auth` and `OptionalAuth` middleware refresh a
@@ -873,7 +1035,11 @@ request whose access token is missing or expired, whatever its method, and the
 rotation of the refresh token is a transaction. On a follower it fails with
 `ErrNotLeader` before it consumes the token: the request answers 503 with
 `X-Leader` when the follower knows its leader, no cookie is set, and the
-follower logs a WARN from `Auth`, not an ERROR. On an API route the access log
+follower logs a WARN from `Auth`, `auth refresh needs the leader`, not an
+ERROR. On a leader that loses its leadership, or shuts down, as the rotation
+commits, the rotation fails with `ErrLeadershipLost` and may have taken effect:
+the request answers the same 503, and `Auth`'s WARN says so, `auth refresh
+outcome unknown`, rather than naming a follower. On an API route the access log
 wraps `Auth` and logs every 5xx at ERROR, except a 503 that carries `X-Leader`,
 which it logs at WARN: that header is set only for a routing condition, so the
 refresh on a follower that knows its leader leaves no ERROR line
@@ -887,6 +1053,48 @@ logs at ERROR. The same cookies then refresh at the leader
 "Browsers and `auth.rotate_refresh`" in the runbook above. With
 `auth.rotate_refresh` off, as it is by default, a refresh only reads
 (`TestServiceRefreshNoRotationRemainsReusable`) and works on every node.
+
+## Reads on a follower
+
+Every node serves reads from its own store, a follower, a node that lags and a
+deposed leader alike: a read is local and eventually consistent (`Store` in
+`store.go`). No read goes through the leader, and none asks for a read index or
+a lease. So:
+
+- A read on a follower, or on a node that lags, sees the writes the node
+  applied, which can be behind what the leader committed: in a healthy cluster
+  by the time the leader takes to tell the follower that a write committed, on
+  a slow node for as long as it lags.
+- A revocation reaches a follower only when the follower applies it. A session
+  revoked, or a user disabled or deleted, on the leader keeps its access token
+  working on a follower that has not applied the change: the follower checks
+  the token's session and user against its own store, serves reads with it,
+  and, with `auth.rotate_refresh` off, refreshes the session, for as long as it
+  lags.
+- A node cut off from the leader, by a partition that leaves it reachable by
+  clients, keeps serving: hashicorp/raft does not stop a follower from serving
+  reads, and podium does not either. Its state stops at the last write it
+  applied, and every revocation after it passes it by, until it reaches the
+  leader again or is taken out of the balancer. `GET /api/v1/cluster` on it
+  shows its role, a candidate once it no longer hears from a leader, no
+  leader, and a `last_index` that falls behind the other nodes'.
+- A node that joins serves an empty state until it has caught up from the
+  leader's log or snapshot: with no user and no session, its logins and its
+  access checks fail until then.
+- A redirect after a forwarded write can miss the write. The follower that
+  forwarded it relays the leader's answer once the leader committed it, which
+  can be before the follower applied it, so the next request, at the same
+  follower, can find the follower without it. A login through a follower is
+  one: when the request after it reaches that follower before the follower
+  applied the new session, the follower finds no session for the access token,
+  and clears the browser's auth cookies, as for a revoked session, and the
+  browser has to log in again.
+
+So keep a node that lags, or that is cut off from the leader, out of the
+balancer, and watch `GET /api/v1/cluster` on every node for its role, its
+leader and its `last_index`. A bound on a follower's staleness, such as
+refusing authenticated requests once its last contact with the leader
+(hashicorp/raft's `LastContact`) is older than a limit, is not built.
 
 ## Forwarding and trusted hosts
 
@@ -907,7 +1115,20 @@ with the `UnaryLeader` interceptor's `Forwarder`, through the generated client:
   `x-podium-forwarded`, and nothing else of the call's metadata;
 - over one client connection, kept while the leader keeps its address, replaced
   when the leader moves, which closes the former leader's, and closed by its
-  `Close` (`TestForwarderKeepsOneConnectionPerLeader`).
+  `Close` (`TestForwarderKeepsOneConnectionPerLeader`; after a failover, a
+  follower's sync lands on the new leader,
+  `TestFollowerWritesLandOnTheNewLeaderAfterFailover` in `internal/app`);
+- straight to the leader, as the HTTP forward goes too: neither takes a proxy
+  from `HTTP_PROXY` or `HTTPS_PROXY`, which would make the proxy the peer of
+  every forward, a host the leader trusts for no forwarding header, and every
+  forwarded client one client of its limiters
+  (`TestForwarderIgnoresTheProxyOfTheEnvironment`,
+  `TestLeaderForwardsWithoutTheProxyOfTheEnvironment`). Without `tls.server`
+  the forwards run in plaintext, logins, cookies and tokens included, which
+  each node says at start with one WARN, `raft forwarding runs plaintext`; with
+  agent mTLS and no `tls.client.cert_file` a follower's sync forward lacks the
+  client certificate the leader's discovery listeners want, which each node
+  says with one WARN too (`TestRaftNodeWarnsWhatItsForwardsLack`).
 
 The leader's answer, an error included, is the follower's
 (`TestFollowerForwardsGRPCSync`, `TestUnaryLeaderForwardsAWriteWithItsMetadata`,
@@ -921,13 +1142,19 @@ that serve gRPC on different ports would send it round
 the call passes that answer on with its hint, the refusing node's view of the
 leader. An HTTP forward carries `X-Podium-Forwarded`, which the `Leader`
 middleware of a follower answers the same way, 503 with `X-Leader`
-(`TestLeaderForwardsAWriteOnce`). Either mark that a client sets itself only
-keeps its own request from being forwarded, and the leader serves a marked
-request as any other. Either mark counts when it is present, whatever its value.
-`UnaryLogger` logs a `not the leader` answer with the hint at WARN, as the
-access log does a 503 with `X-Leader`, and `leader unreachable`, which keeps its
-hint, at ERROR, as the access log does the 502 of an unreachable leader
-(`TestUnaryLoggerLogsRoutingAnswersAtWarn`).
+(`TestLeaderForwardsAWriteOnce`). The forward's transport sets the mark on
+what it sends, after the reverse proxy dropped the hop-by-hop headers, so a
+client whose `Connection` header names `X-Podium-Forwarded` cannot have the
+proxy drop the mark, and make one hop two. Either mark that a client sets
+itself only keeps its own request from being forwarded, and the leader serves
+a marked request as any other. Either mark counts when it is present, whatever
+its value. `UnaryLogger` logs a `not the leader` answer with the hint at WARN,
+as the access log does a 503 with `X-Leader`, and `leader unreachable`, which
+keeps its hint, at ERROR, as the access log does the 502 of an unreachable
+leader (`TestUnaryLoggerLogsRoutingAnswersAtWarn`). A call that `UnaryLeader`
+passed on and that met a leadership error in its handler, such as a discovery
+sync on a leader that lost its leadership, gets the hint and the mark from the
+handler (`interceptor.HintLeader`), and is a WARN too.
 
 The HTTP forward also drops the CORS headers of the leader's answer, which the
 reverse proxy would add to the follower's own: the answer names the client's
@@ -1097,11 +1324,16 @@ acknowledged write on both survivors, which hold the same state;
 stopped follower holds, which then installs the leader's snapshot, private on
 disk, matches the others, and restores that snapshot at its next start;
 `TestRejoinAfterRestart` restarts the leader from its data directory, which
-follows, catches up and votes again. `readiness_test.go` runs the five tests of
+follows, catches up and votes again. `readiness_test.go` runs the six tests of
 "One barrier per term" on three such nodes. `TestFollowerHTTPAndGRPCWritesLand`,
-in `internal/app`, runs three whole nodes, each on a loopback IP of its own: it
-skips on a host that is not Linux, and on Linux, where 127.0.0.0/8 is loopback,
-fails if 127.0.0.2 or 127.0.0.3 cannot be bound.
+`TestFollowerWritesLandOnTheNewLeaderAfterFailover` and
+`TestMembershipChangesThroughAFollower`, in `internal/app`, run whole nodes,
+three or four, each on a loopback IP of its own: they skip on a host that is
+not Linux, and on Linux, where 127.0.0.0/8 is loopback, fail if 127.0.0.2,
+127.0.0.3 or 127.0.0.4 cannot be bound. The second stops the leader, and
+writes through the remaining follower's HTTP API, HTTP discovery and gRPC
+listeners; the third adds and removes a member, and removes the leader in two
+calls, all through followers' HTTP API.
 
 ## Performance
 
@@ -1137,7 +1369,11 @@ the heartbeat medians were 2.7, 3.0 and 4.7 ms at 100, 1000 and 5000 agents.
 The three-node benchmarks run again at `6382259`, before both changes, between
 07:03 and 07:07 UTC on 2026-11-05, had heartbeat medians of 7.5, 7.4 and 8.3 ms
 and barrier medians of 2.4, 2.3 and 2.4 ms, close to the before cells. The
-commands:
+after cells were measured while the check of the leadership ran under `txMu`;
+it now runs once the transaction released `txMu` (see "One barrier per
+term"), which takes its round trip out of the time a leader holds `txMu` per
+token check. The benchmarks were not run again: the cells, and the rates below,
+are of the check under `txMu`, and so on the conservative side. The commands:
 
 ```sh
 task golang:exec CMD='go test -run "^$" -bench "^(BenchmarkThreeNodeHeartbeat|BenchmarkThreeNodeBarrier)$" -benchtime=1000x -count=3 ./internal/raft/'
@@ -1212,7 +1448,8 @@ A leader runs one transaction at a time: `Store.WithTx` holds `txMu` until the
 apply of its command. So a leader takes at most as many heartbeats a second as
 fit one after the other: about 135 before, at 7.3 ms each. The mean of a run
 (`ns/op`) counts its slow heartbeats too, and is what bounds a leader that runs
-one at a time. After, per run, by its p50 and by its mean:
+one at a time. After, with the token check's round trip under `txMu` as it was
+then, per run, by its p50 and by its mean:
 
 | agents | heartbeats a second by p50 | heartbeats a second by mean |
 | -- | -- | -- |
@@ -1224,10 +1461,11 @@ At 5000 agents the three runs at `f6433fe`, without the check, gave 175 to 224
 by p50 and 147 to 200 by mean, and the three with `GOGC=off` 170 to 177 and 169
 to 172. 5000 agents at the fixture's 30 s interval send 167 a second, which one
 leader could not take before. After, it is about what one leader takes, not a
-margin to plan on: the runs spread from 147 to 224 a second, on this machine,
-with the three nodes in one process, and without the HTTP or gRPC transport,
-the clients' TLS, the parsing and the rate limiter of a real heartbeat, or the
-runners and UI requests that take `txMu` too.
+margin to plan on: the code of the after cells gave 203 to 210 a second by p50
+and 164 to 208 by mean at 5000 agents, on this machine, with the three nodes in
+one process, and without the HTTP or gRPC transport, the clients' TLS, the
+parsing and the rate limiter of a real heartbeat, or the runners and UI
+requests that take `txMu` too.
 
 ### Barrier
 

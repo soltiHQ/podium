@@ -44,8 +44,9 @@ Main listener (`app.buildMainHandler`), outermost first:
                     before Leader, so a follower refuses such a request itself: it never
                     reaches the leader.
       Leader     ── raft only: forwards writes to the leader, over TLS with tls.client when tls.server is set,
-                    marked X-Podium-Forwarded, and never forwards a marked write again; drops the leader's CORS
-                    headers from its answer, as CORS above has set the follower's;
+                    straight to it, never through HTTP(S)_PROXY, marked X-Podium-Forwarded by its transport,
+                    after the reverse proxy dropped the hop-by-hop headers, and never forwards a marked write
+                    again; drops the leader's CORS headers from its answer, as CORS above has set the follower's;
                     stores where the leader serves this listener in ctx (httpctx.Leader), for X-Leader
        mux
         │  per route:
@@ -78,8 +79,9 @@ keeps the rest: an answer that names the origin twice is one a browser refuses (
         ▼
   UnaryRecovery → UnaryRequestID → UnaryLogger → UnaryLeader
         │   (UnaryAuth / UnaryRequirePermission exist but are not chained yet)
-        │   UnaryLeader, raft only: a follower forwards a Sync to the leader (Forwarder) and
-        │   answers with the leader's answer; any other write is Unavailable + x-leader
+        │   UnaryLeader, raft only: a follower forwards a Sync to the leader (Forwarder, never through
+        │   HTTPS_PROXY) and answers with the leader's answer; any other write is Unavailable + x-leader;
+        │   a call it passes on carries the means to hint the leader, for a handler's leadership error (HintLeader)
         │   UnaryLogger logs a failed call at ERROR, but a "not the leader" answer with x-leader at WARN
         ▼
   handler/discovery.go (GRPCDiscovery)
@@ -143,7 +145,8 @@ Downstream code never sniffs gRPC/HTTP details - it just calls `errkind.Classify
 
 It goes out on:
 - the 503 of a write that reached a follower (`cluster.ErrNotLeader`) or lost leadership while it was committing (`cluster.ErrLeadershipLost`), answered by `response.FromError`; the refresh of a session on a follower with `auth.rotate_refresh` is one;
-- the 503 of the removal of the leader through the membership API, which hands the leadership over first and answers with `response.NotLeader`, so that the removal is repeated at the new leader (see "Cluster" in `internal/handler/README.md`);
+- the 503 of the removal of the leader through the membership API, which hands the leadership over first and answers with `response.NotLeader`, given the leader's address the handler read once, so that the removal is repeated at the new leader (see "Cluster" in `internal/handler/README.md`);
+- the 503 of a discovery sync that met a leadership error on the node that served it (`response.StoreFailed`);
 - the 502 the `Leader` middleware answers when it cannot reach the leader it forwards a write to;
 - the 503 the `Leader` middleware of a follower answers for a write another node forwarded already: a forward carries
   `X-Podium-Forwarded`, and a follower never forwards a write that carries it again, so a write crosses one node at most,
@@ -155,13 +158,13 @@ A 503 that carries it is a routing condition, not a failure of the node, so the 
 
 It is never sent when that address cannot be derived: this node is the leader, no leader is known, or the port of the listener is not known (`LeaderOptions.ForwardPort` is 0, which answers a write on a follower with a 503 without it). The leader's raft address is not sent in its place.
 
-Every answer sets it through `response.SetLeader`, from the one derivation of the address (`cluster.LeaderAddr`, which the `Leader` middleware also forwards a write to). The middleware hands it to the handlers as a function in the request context (`httpctx.Leader`), asked when the answer is written, since the leader can change while a request runs.
+Every answer sets it through `response.SetLeader`, from the one derivation of the address (`cluster.LeaderAddr`, which the `Leader` middleware also forwards a write to). The middleware hands it to the handlers as a function in the request context (`httpctx.Leader`), asked when the answer is written, since the leader can change while a request runs. A handler that chooses its answer by the address asks once, and answers with what it read: two asks can give two leaders, or one and none.
 
 ### gRPC: `x-leader`
 
 The gRPC `x-leader` header metadata has the same meaning for the gRPC listener: the **gRPC address of the leader, `host:port`**, the host of the leader's raft advertise address, as written, with this node's gRPC port (`grpc.addr`), from the same derivation, so the same-port assumption holds for gRPC too. It goes out with the `Unavailable` of a write the follower does not forward: a write stream, a unary write the `Forwarder` has no call for, a call another node forwarded already (`x-podium-forwarded`, so a call crosses one node at most; as with `X-Podium-Forwarded`, a client that sends it itself only keeps its own call from being forwarded), and a forward the leader never answered (`leader unreachable`). A `Sync` that a follower forwards gets the leader's own answer instead, and its hint when that answer is the `Unavailable` of a node that does not lead, which refused the call as a forwarded one. As for HTTP, it is not sent when no leader is known or the gRPC port is unknown, and the raft address is never sent in its place.
 
-A `not the leader` answer with the hint is a routing condition, so `UnaryLogger` logs it at WARN, where any other failure is an ERROR: an `Unavailable` without the hint, and `leader unreachable`, which keeps its hint but is a failure, as HTTP logs the 502 of an unreachable leader at ERROR (`TestUnaryLoggerLogsRoutingAnswersAtWarn`). `StreamLogger` logs every stream at INFO, a failed one included, as before.
+A `not the leader` answer with the hint is a routing condition, so `UnaryLogger` logs it at WARN, where any other failure is an ERROR: an `Unavailable` without the hint, and `leader unreachable`, which keeps its hint but is a failure, as HTTP logs the 502 of an unreachable leader at ERROR (`TestUnaryLoggerLogsRoutingAnswersAtWarn`). A call that `UnaryLeader` passed on carries in its context how to ask where the leader is: a handler whose call meets a leadership error all the same, as gRPC discovery does on a leader that lost its leadership, answers it with `interceptor.HintLeader`, which sets the hint of the leader the node knows then, and the mark of a routing answer, so `UnaryLogger` logs it at WARN as well; with no leader known it sets neither. `StreamLogger` logs every stream at INFO, a failed one included, as before.
 
 ## TLS
 
@@ -173,5 +176,7 @@ Both halves are opt-in (empty = plaintext):
 Applied uniformly: one server `*tls.Config` for all listeners, one client config for the proxy pool, for the `Leader` middleware,
 whose follower forwards writes to the leader over TLS when `tls.server` is set (`LeaderOptions.TLSClientConfig`), and for the
 gRPC `Forwarder`, which forwards a follower's syncs under the same rule: TLS with `tls.client` when `tls.server` is set, checked
-for the leader's raft host, with `tls.client`'s certificate presented when the leader asks for one.
+for the leader's raft host, with `tls.client`'s certificate presented when the leader asks for one. Both forwards dial the
+leader directly: the `Leader` middleware's transport has no proxy, and the `Forwarder` dials with `grpc.WithNoProxy`, so neither
+takes `HTTP_PROXY` or `HTTPS_PROXY` from the environment.
 The raft transport between nodes has TLS of its own, `cluster.raft.tls` (see `internal/raft`).

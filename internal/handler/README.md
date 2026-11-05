@@ -204,22 +204,32 @@ a change of the configuration in between refuses it instead of slipping past the
 | 415    | a body that is not declared as JSON                                                                          |
 | 422    | no raft node of the cluster answers at the `address`, which the message names: before it adds a voter, the leader dials the address as the raft transport would and checks the certificate there as raft does, so that a typo never adds a voter nobody reaches, which raises the quorum |
 | 500    | the leader cannot read its configuration: a read of its stores that fails, or gives index 0 or no server, logged at ERROR as `cannot read the raft configuration` (see "Membership" in `internal/raft/README.md`) |
-| 503    | the write met a follower or lost leadership: with `X-Leader`, as every write (see "Leader hint" in `internal/transport/README.md`); the leader's own removal, below |
+| 503    | the write met a follower or lost leadership: with `X-Leader`, as every write (see "Leader hint" in `internal/transport/README.md`); a 404 or 409 of the rules above that the node could not confirm its leadership for, also with `X-Leader`, below; the leader's own removal, below |
+
+The 404 and the 409s of the rules, an unknown member, an `id` or `address` in use, the force guard and the last
+voter, come from the leader's own configuration, which a deposed leader reads stale. So before it answers one, the
+cluster service asks a quorum whether the node still leads the term it read the configuration in
+(`cluster.Admin.VerifyLeader`), and answers 503 with `X-Leader`, as for a follower, when it does not, having changed
+nothing (`TestRefusalsFromTheConfigurationConfirmTheLeadership` in `internal/service/cluster`). A change the rules let
+through needs no check: a deposed leader cannot commit it.
 
 The leader asked to remove itself first hands its leadership over to another voter, with hashicorp/raft's leadership
 transfer, so that writes resume without an election timeout, and removes nothing yet. Once it knows the new leader, it
 answers 503 with `X-Leader` and the message `This node handed its leadership over and is still a member: repeat the
-request, at the leader that X-Leader names, to remove it.`. The request repeated there, or at the same node, which now
-forwards it, removes a follower. So the removal of the leader takes two calls. When no new leader is known after 5 s, or
-none can be named, the 503 has no `X-Leader` and says `Leadership moved; no leader is known yet, retry.`. A transfer that
+request, at the leader that X-Leader names, to remove it.`, the leader the node read once, so the header and the message
+agree. The request repeated there, or at the same node, which now forwards it, removes a follower. So the removal of the
+leader takes two calls, both of which a follower forwards (`TestMembershipChangesThroughAFollower` in `internal/app`).
+When no new leader is known after 5 s, or none can be named, the 503 has no `X-Leader` and says `Leadership moved; no
+leader is known yet, retry.`. A transfer that
 fails, as one to a dead voter that hashicorp/raft picked, removes nothing and answers 503 without `X-Leader`: remove dead
 members first. See "Membership" in `internal/raft/README.md`, which also says how to replace a dead member, and what
 becomes of a removed node, whose process must be stopped.
 
 Every change that commits logs one INFO line, `cluster membership changed`, with `actor_user_id`, `operation` (`add` or
 `remove`), `member_id`, `member_address` and `force`; a hand-over logs one too, with the `transfer` operation. A change
-that lost leadership while it committed, which may still take effect, logs one WARN line with the same fields instead,
-`cluster membership change outcome unknown`. No line names a token.
+that lost leadership while it committed, or whose node shut down before its outcome was known, which may still take
+effect, logs one WARN line with the same fields instead, `cluster membership change outcome unknown`. No line names a
+token.
 
 ### Other
 | Method | Path                    | Permission                                                           |
@@ -263,6 +273,13 @@ There is no per-IP limit, so agents behind one egress IP (NAT, Kubernetes) never
 HTTP takes the client IP from `trusted_proxies`, and in raft mode from the hosts of the raft configuration too. gRPC takes it
 from the `x-forwarded-for` metadata of those hosts in raft mode, where a follower forwards a sync to the leader with the
 agent's address in it (`grpcClientIP`), and uses the peer address in standalone.
+
+A sync whose token check or upsert fails on the store is answered 503 / with the error's gRPC code, and logged at ERROR,
+but for a leadership error (`cluster.IsLeadershipError`): a leader that lost its leadership while it served the sync,
+or a deposed leader whose check of the leadership failed. That is a routing condition, as for the API's writes: it is
+logged at WARN, and answered with the leader's address when one is known, over HTTP a 503 with `X-Leader`
+(`response.StoreFailed`), over gRPC an `Unavailable` with the `x-leader` hint and the mark that makes `UnaryLogger` log
+the call at WARN too, once (`interceptor.HintLeader`; `TestDiscoveryAnswersLeadershipErrorsWithTheLeader`).
 
 ## UI pages
 | Path                | Handler          | Auth | Permission  |

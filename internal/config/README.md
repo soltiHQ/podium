@@ -60,6 +60,18 @@ against the system roots. A leader whose certificate does not verify gets no
 write: the follower answers 502. The raft transport has TLS settings of its
 own, with a CA of its own, see "Raft transport security".
 
+The forwards carry logins, cookies, bearer tokens and agents' tokens, so a raft
+cluster needs `tls.server` on every node: without it a follower forwards them
+in plaintext, and each raft node logs one WARN at start, `raft forwarding runs
+plaintext`. With agent mTLS (`client_ca_file`), the leader's discovery
+listeners want a client certificate of the agents' CA from a follower that
+forwards a sync too, so each node's `tls.client.cert_file` and `key_file` must
+chain to the agents' CA: without `tls.client.cert_file` every sync that reaches
+a follower fails, 502 over HTTP and `leader unreachable` over gRPC, and each
+raft node logs one WARN at start that says so. A follower dials the leader
+directly, never through the proxy that `HTTP_PROXY` or `HTTPS_PROXY` names.
+Standalone forwards nothing, and logs neither WARN.
+
 ## Agent authentication
 
 `agent_auth.require` defaults to `true`. It authenticates enrolled agents: a
@@ -216,7 +228,9 @@ clears them (login, logout, refresh, a revoked session), and so does the device
 cookie that login sets (see "Rate limiting"):
 
 - `auto` (default): when the client used HTTPS, either a TLS connection or
-  `X-Forwarded-Proto: https` from a proxy in `trusted_proxies`.
+  `X-Forwarded-Proto: https` from a proxy in `trusted_proxies`, or, in raft
+  mode, from a host of the raft configuration, which a follower that forwards a
+  request is (see "Client IPs and trusted proxies").
 - `always`: on every response. Use it when the proxy that terminates TLS cannot
   be listed in `trusted_proxies`.
 
@@ -231,11 +245,25 @@ when the follower knows its leader (see "Leader hint" in
 `internal/transport/README.md`), and sets no cookie; the follower logs a WARN,
 `auth refresh needs the leader`, with the method and the path, and the access
 log of an API route records a 503 with `X-Leader` as a WARN too, so the refresh
-leaves no ERROR line while the follower knows its leader. So with rotation on,
-a raft deployment needs leader-sticky routing: see "Browsers and
+leaves no ERROR line while the follower knows its leader. A refresh on a leader
+that loses its leadership, or shuts down, as the rotation commits gets the same
+503, and its WARN, `auth refresh outcome unknown`, says that the rotation may
+have taken effect: a retry at `X-Leader` refreshes the browser when it did not,
+and when it did, the browser logs in again. So with rotation on, a raft
+deployment needs leader-sticky routing, and no node offers a leader probe
+without credentials (`GET /api/v1/cluster` needs `cluster:get`), so an
+ordinary balancer cannot route to the leader by itself: keep rotation off in
+raft mode unless such routing is in place. See "Browsers and
 `auth.rotate_refresh`" in the runbook of `internal/raft/README.md`. Without
 rotation a refresh only reads, and works on every node, as does a request whose
 access token is still valid. Standalone is unaffected.
+
+In raft mode every node checks an access token, and refreshes a session
+without rotation, against its own store, which follows the leader's with a
+lag: a session revoked, or a user disabled, on the leader still works on a
+follower until the follower applies the change, and on a node cut off from
+the leader until it reaches it again. See "Reads on a follower" in
+`internal/raft/README.md`.
 
 The main listener refuses state-changing requests that a browser sends from
 another origin (Go's `http.CrossOriginProtection`) with 403
@@ -361,7 +389,9 @@ backend reads `cluster.raft` and `cluster.discovery`: standalone ignores them,
 valid or not. To set up and run a cluster, follow "Runbook: a three-node
 cluster" in `internal/raft/README.md`: certificates, network, the first start,
 restarts and failover, adding and removing members, the routing of browsers,
-and rolling upgrades.
+and rolling upgrades. Every node serves reads from its own store, which can
+lag the leader's: "Reads on a follower" there says what a lagging, cut-off or
+joining node serves, revocations included.
 
 ```yaml
 cluster:
@@ -406,8 +436,10 @@ SOLTI_CLUSTER_DISCOVERY_PEERS="n1=10.0.0.1:7000, n2=10.0.0.2:7000, n3=10.0.0.3:7
 
 `election_timeout_ms` and `heartbeat_timeout_ms` are raft's election and
 heartbeat timeouts, in milliseconds; 0 keeps hashicorp/raft's default of 1 s.
-An election timeout below the heartbeat timeout passes configuration loading
-but fails the start.
+Configuration loading refuses what hashicorp/raft would refuse at the start: a
+timeout under 5 ms, and an election timeout below the heartbeat timeout, the
+default of 1 s counted, so a `heartbeat_timeout_ms` over 1000 needs an
+`election_timeout_ms` at least as long.
 
 `snapshot_interval`, `snapshot_threshold` and `trailing_logs` set how a node
 compacts its raft log. Every `snapshot_interval` (a duration string such as
@@ -487,6 +519,18 @@ own log and do not ask discovery, so a discovery outage does not keep a
 restarting node down; validation still checks a static list on every start.
 See `internal/raft/README.md`.
 
+So `discovery.driver: dns` is safe for a first start only when every node
+resolves the complete set of nodes before its first start; prefer static peers
+for the first start. A node that resolves only itself bootstraps a cluster of
+one voter, which leads, seeds and takes writes on its own and refuses the
+votes of the others, which never elect a leader: a fork that no error reports.
+On Kubernetes, give the StatefulSet `podManagementPolicy: Parallel`, as its
+default `OrderedReady` starts pod-0 alone, and its headless service
+`publishNotReadyAddresses: true`, so that every pod resolves every pod, and its
+own advertise host, which a node resolves at start, before it is ready. After
+a first start, check `GET /api/v1/cluster` on every node: each must name the
+same leader and list every node.
+
 ### Settings every replica must share
 
 These settings must be the same on every node of a raft cluster, as a request
@@ -553,9 +597,10 @@ state, a restart loads the configuration from the node's own log, so leaving
 the flag set changes nothing. Clearing it does: without it, configuration
 loading needs `discovery.peers` to list the node as its `node_id` at its
 advertise address, and with `discovery.driver: dns` needs `node_id` and the
-advertise address to be the node's `ip:<discovery.port>`, as for any node. So keep the flag set until
-`discovery.peers` lists the node, or with dns until its `node_id` matches too;
-see "Replacing a dead member" in `internal/raft/README.md`.
+advertise address to be the node's `ip:<discovery.port>`, as for any node. So
+keep the flag set until `discovery.peers` lists the node, or with dns until its
+`node_id` matches too; see "Replacing a dead member" in
+`internal/raft/README.md`.
 
 ### Raft transport security
 
@@ -586,12 +631,23 @@ one ERROR line in the node's log, `failed to decode incoming command`, and
 nothing limits them. So `raft.bind_addr` must be reachable only from the
 cluster's nodes, by firewall or network policy.
 
-`raft.tls.ca_file` must be a CA that signs raft node certificates only. A node
-accepts every certificate it verifies as a full member of the cluster, whatever
-host the certificate names: it does not check a connecting peer's certificate
-against the configured peers. So it must never be the agents' CA, the CA of
-`tls.server` or `tls.client`, or a bundle merged with any of them, or every
-certificate those sign could write the cluster's state.
+`raft.tls.ca_file` must be a CA that signs raft node certificates only, of one
+cluster. A node accepts every certificate it verifies as a full member of the
+cluster, whatever host the certificate names: it does not check a connecting
+peer's certificate against the configured peers. So it must never be the
+agents' CA, the CA of `tls.server` or `tls.client`, or a bundle merged with any
+of them, or every certificate those sign could write the cluster's state; and
+two clusters must never share a raft CA, or each takes the other's nodes for
+members.
+
+Removing a node revokes nothing: its certificate stays a full member's
+credential for the raft port, and for the configuration request on it, until
+it expires. Whoever holds its key can depose the leader with a higher term,
+and name its own host as the leader, so that the followers forward writes,
+logins, cookies and tokens included, to it. After removing a node whose keys
+may be exposed, issue a new raft CA and new certificates to every node, and
+re-issue that node's `tls.server` certificate too. See "Transport security" in
+`internal/raft/README.md`.
 
 The files are read when the node starts, before anything in `data_dir` is
 opened: a file that is missing or holds no usable certificate or key fails the
@@ -635,7 +691,14 @@ unchanged. A node whose list does not pass is refused at configuration
 loading, before anything in `data_dir` is opened, so its raft state stays as
 it was: fix the list and start it again. A node with raft state reads its
 configuration from its own log, not from `peers`, so listing itself changes
-nothing in the running cluster.
+nothing in the running cluster. A node with raft state keeps its `node_id` and
+its advertise address: started under another ID or address, it is not the
+member its peers know, and logs one ERROR at start, `raft: this node is not in
+its stored raft configuration as its node_id at its advertise_addr`; under
+another ID it is never elected. So do not rename the nodes of an earlier
+version, `n1` for `10.0.0.1:7000` say, during the upgrade: a renamed or
+re-addressed node must be removed from the cluster, its `data_dir` wiped, and
+added again with `join: true`.
 
 Earlier versions also ran the transport on plain TCP and made `data_dir` and
 `snapshots` 0755 and the snapshot files 0644. This version needs, on every

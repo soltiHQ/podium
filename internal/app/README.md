@@ -33,8 +33,10 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   bootstrap and config-check, which compares the settings every replica must
   share with the leader's, see "Configuration drift" in
   `internal/raft/README.md`).
-- `Shutdown` closes resources in reverse acquisition order: proxy pool →
-  event hub → Raft node. Safe to call multiple times.
+- `Shutdown` closes resources in reverse acquisition order: log hub → proxy
+  pool → event hub → in raft mode the gRPC sync forwarder, then the lookups of
+  the raft hosts' names that the client IP resolver trusts, then the Raft node.
+  Safe to call multiple times.
 
 ## Startup flow
 ```text
@@ -42,6 +44,9 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
         │
         ▼
   Options.Check()                 ← raft only: what any seed needs, before anything starts
+        │
+        ▼
+  agentCAs()                      ← raft only: the agents' CA bundle, read once, for the digests and the discovery listeners' pool
         │
         ▼
   sharedSettings().Digests()      ← raft only: the digests of the settings every replica must share
@@ -60,6 +65,9 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
    │ bootstrap.Run()    │ no wait: the bootstrap runner seeds at │
    │                    │ the start of each leadership term      │
    └────┬───────────────┴────────────────────────────────────────┘
+        │
+        ▼
+  TLS, warnings                   ← agent-facing TLS (raft: from the bundle agentCAs read); who can register agents; raft only: what the forwards lack
         │
         ▼
   proxy.NewPool()                 ← outbound client pool (HTTP + gRPC) to agents
@@ -101,7 +109,7 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   main returns
    │
    │ deferred:
-   │ • a.Shutdown()  →  proxy.Close → eventHub.Close → raftShutdown
+   │ • a.Shutdown()  →  logHub.Close → proxy.Close → eventHub.Close → raftShutdown (forwarder, hosts, raft)
    │ • signal stop()
    ▼
   process exit
