@@ -9,6 +9,8 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+
+	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
 )
 
 // maxAnswerElements is the most elements that the repeated fields and maps of one
@@ -19,6 +21,13 @@ import (
 // tests, a refused flood 2 to 8.
 const maxAnswerElements = 1 << 18
 
+// conditionsField is the full name of the field of the conditions of a task status.
+// The scan caps the field for each status message at MaxTaskConditions, and keys the
+// cap by the name the schema gives it, not by its number: field 6 of ObjectMeta, the
+// labels, has the number of it, and a task may carry as many labels as the budget
+// allows.
+var conditionsField = (&taskv1.TaskStatus{}).ProtoReflect().Descriptor().Fields().ByName("conditions").FullName()
+
 // The numbers of the fields that hold the page of an answer.
 const (
 	tasksField protowire.Number = 1 // ListTasksResponse.tasks
@@ -27,12 +36,12 @@ const (
 
 // answerCodec is the protobuf codec of one unary call to an agent. Before it hands
 // the answer to proto.Unmarshal it scans the wire bytes of it against the message
-// descriptor, and refuses an answer that holds more than maxAnswerElements elements
-// of repeated fields and maps in all, or more than limit entries of the page field
-// (ListTasks and ListTaskRuns name one; the others pass 0). Otherwise it encodes and
-// decodes as grpc-go's own protobuf codec does. A codec is made for each call: it
-// records its refusal, which grpc-go would flatten into the text of an Internal
-// status.
+// descriptor, and refuses an answer that holds more than MaxTaskConditions conditions
+// in one task status, more than maxAnswerElements elements of repeated fields and
+// maps in all, or more than limit entries of the page field (ListTasks and
+// ListTaskRuns name one; the others pass 0). Otherwise it encodes and decodes as
+// grpc-go's own protobuf codec does. A codec is made for each call: it records its
+// refusal, which grpc-go would flatten into the text of an Internal status.
 type answerCodec struct {
 	page  protowire.Number
 	limit int
@@ -51,8 +60,9 @@ func newAnswerCodec(page protowire.Number, limit int) *answerCodec {
 func (c *answerCodec) option() grpc.CallOption { return grpc.ForceCodecV2(c) }
 
 // refused returns the decode error for an answer the codec refused, or nil if it
-// refused none. The error wraps ErrTooManyItems or ErrTooManyElements for an answer
-// with too many of them.
+// refused none. The error is an ErrTooManyItems for a page over its limit, an
+// ErrTooManyElements for an answer over the budget and an ErrTooManyConditions for a
+// status over its cap.
 func (c *answerCodec) refused() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -95,13 +105,18 @@ func (c *answerCodec) Unmarshal(data mem.BufferSlice, v any) error {
 
 // scanElements walks the wire bytes b of a message of the type md and counts the
 // elements of every repeated field and map in the tree of messages under it, a value
-// of a packed scalar field for each. It returns an error that wraps
-// ErrTooManyElements at the element past maxAnswerElements, and one that wraps
-// ErrTooManyItems at the entry past limit of the field page of b itself (page 0:
-// none). Another error means the bytes are not a message, or nest messages deeper
-// than protobuf decodes. Nothing is decoded or allocated: a field the schema does
-// not know, or that the schema's wire type does not fit, is skipped, as
-// proto.Unmarshal keeps it as unknown bytes.
+// of a packed scalar field for each, and the conditions of every task status. It
+// returns an error that wraps ErrTooManyConditions at the condition past
+// MaxTaskConditions in one status message, which comes before the budget even when
+// that condition is also the element past it; one that wraps ErrTooManyElements at
+// the element past maxAnswerElements; and one that wraps ErrTooManyItems at the
+// entry past limit of the field page of b itself (page 0: none). Another error means
+// the bytes are not a message, or nest messages deeper than protobuf decodes.
+// Nothing is decoded or allocated: a field the schema does not know, or that the
+// schema's wire type does not fit, is skipped, as proto.Unmarshal keeps it as
+// unknown bytes. A status that the sender splits in several occurrences of its field
+// is counted by occurrence, though the decoder merges them: the check after decoding
+// sees the whole.
 func scanElements(b []byte, md protoreflect.MessageDescriptor, page protowire.Number, limit int) error {
 	s := scanner{maxDepth: protowire.DefaultRecursionLimit, page: page, limit: limit}
 	return s.message(b, md, 0)
@@ -124,6 +139,7 @@ func (s *scanner) message(b []byte, md protoreflect.MessageDescriptor, depth int
 		return fmt.Errorf("messages nested deeper than %d", s.maxDepth)
 	}
 	fields := md.Fields()
+	conditions := 0 // entries of the conditions field in this message
 	for len(b) > 0 {
 		num, typ, n := protowire.ConsumeTag(b)
 		if n < 0 {
@@ -141,6 +157,13 @@ func (s *scanner) message(b []byte, md protoreflect.MessageDescriptor, depth int
 			}
 		}
 		if fd := fields.ByNumber(num); fd != nil {
+			// A task is refused in any page that holds it, so its 65th condition is
+			// refused before the budget counts it.
+			if typ == protowire.BytesType && fd.FullName() == conditionsField {
+				if conditions++; conditions > MaxTaskConditions {
+					return tooManyConditions()
+				}
+			}
 			if err := s.field(fd, typ, value, depth); err != nil {
 				return err
 			}

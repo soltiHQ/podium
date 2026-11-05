@@ -53,8 +53,9 @@ func (p *grpcProxyV1) ListTasks(ctx context.Context, f TaskFilter) (*proxyv1.Lis
 	}
 
 	// The codec of the call scans the answer before it is decoded: see answerCodec.
-	// A cursor, a task ID or a task that is over its bound is refused after, when
-	// the page is decoded, which the scan has bounded.
+	// A cursor or a task ID over its bound is refused after, when the page is
+	// decoded, which the scan has bounded. So is a task whose status the agent split
+	// in several occurrences of its conditions field, for the decoder merges them.
 	answer := newAnswerCodec(tasksField, pageBound(f.Limit))
 	resp, err := client.ListTasks(p.authCtx(ctx), req, answer.option())
 	if refused := answer.refused(); refused != nil {
@@ -240,8 +241,9 @@ func checkListed(t *taskv1.Task) error {
 
 // checkConditions refuses a task with more conditions than MaxTaskConditions, with
 // ErrTooManyConditions, as the JSON of an HTTP agent is refused while it is decoded.
-// The scan of the answer has bounded what the task cost; this keeps the transports
-// to one rule.
+// The scan of the answer has refused a status that holds more of them on the wire;
+// this is for one that the decoder merged from several occurrences of the field,
+// which the scan counted each on its own, and keeps the transports to one rule.
 func checkConditions(t *taskv1.Task) error {
 	if len(t.GetStatus().GetConditions()) > MaxTaskConditions {
 		return tooManyConditions()

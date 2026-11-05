@@ -177,19 +177,22 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   limit, down to one task, and the smaller limit holds for the rest of the turn;
   the next turn starts at 1000 again. A task with more than 64 conditions is a
   bound of the task, not of the page: no smaller page avoids it, so the page is
-  not asked again and the listing ends at the call that meets it. The listing is
-  bounded, whatever the agent answers. The proxy bounds what a page builds (see
-  "What an answer may build" in `internal/proxy/README.md`). What is past a
+  not asked again and the listing ends at the call that meets it. The proxy
+  refuses it at the 65th condition over either transport, so a flood of
+  conditions is one call with one cause whichever the agent speaks. The listing
+  is bounded, whatever the agent answers. The proxy bounds what a page builds
+  (see "What an answer may build" in `internal/proxy/README.md`). What is past a
   bound is not built: the task past the limit, the element past 262144 in all
-  (gRPC) and the condition past the 64th of a task (HTTP). What is under it is
+  (gRPC) and the condition past the 64th of a task (both). What is under it is
   built first: the first tasks of a page up to the limit, and the first 64
-  conditions of an HTTP task, are decoded and dropped with the error. A gRPC
-  task with more than 64 conditions, a task ID over 1024 bytes and a cursor over
-  4096 bytes are refused once decoded, at the cost of a page the other bounds
-  have capped. The tests measure a refused `ListTasks` flood at 2 to 21 MiB
-  allocated in all (what each sends is in the proxy README). The runner counts
-  the tasks of a page again, and refuses a cursor over 4096 bytes itself. A
-  listing that would hold more than 65536 task IDs or 32 MiB of them, or take
+  conditions of an HTTP task, are decoded and dropped with the error. A task ID
+  over 1024 bytes and a cursor over 4096 bytes are refused once decoded, and so
+  is a gRPC task whose status the agent split in several occurrences of the
+  conditions field, which the decoder merges, at the cost of a page the other
+  bounds have capped. The tests measure a refused `ListTasks` flood at 1 to 21
+  MiB allocated in all (what each sends is in the proxy README). The runner
+  counts the tasks of a page again, and refuses a cursor over 4096 bytes itself.
+  A listing that would hold more than 65536 task IDs or 32 MiB of them, or take
   more than 1024 calls, refused pages included, stops. A synced rollout whose
   task is missing from the listing is queued for a reinstall, but only a
   complete listing shows a task missing. If the budget runs out, a page fails or
@@ -209,15 +212,15 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   replicated commit. These writes make no agent call, so the turn's budget does
   not stop them: an agent that lost all its tasks has one write per rollout in
   one turn.
-- **A listing that cannot finish is logged when that changes.** When an
-  agent's listing turns incomplete, the runner logs one warning that names the
-  cause (a task too large to list, the budget used, a repeated cursor, pages of
-  different snapshots, a page answered with an error, a page with more tasks
-  than asked, a task or a page with too many elements even alone, a cursor that
-  is too long, a listing over the bounds). When it turns complete again, one
-  info line names the latest cause. Neither is repeated on every tick, and a
-  cause that changes meanwhile is not logged. An agent that flips between the
-  two logs a pair of lines for each flip.
+- **A listing that cannot finish is logged when that changes.** When an agent's
+  listing turns incomplete, the runner logs one warning that names the cause (a
+  task too large to list, the budget used, a repeated cursor, pages of different
+  snapshots, a page answered with an error, a page with more tasks than asked, a
+  task with too many conditions, a task or a page with too many elements even
+  alone, a cursor that is too long, a listing over the bounds). When it turns
+  complete again, one info line names the latest cause. Neither is repeated on
+  every tick, and a cause that changes meanwhile is not logged. An agent that
+  flips between the two logs a pair of lines for each flip.
 - **An unanswered call ends the agent's turn.** A failed push records its
   failure on the rollout; an unanswered listing records nothing and only backs
   the agent off. The agent's other rollouts wait, untouched. An answer,

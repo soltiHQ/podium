@@ -80,7 +80,7 @@ listing of an agent's tasks as well.
 | Items of a `ListTasks` page | the request's limit; 1000, the most a page holds, when it names none | gRPC: on the wire, before decoding. HTTP: while decoding, before the item past the limit is decoded | `ErrTooManyItems` |
 | Runs of a `ListTaskRuns` page | the page size of the request | as the items of a page | `ErrTooManyItems` |
 | Elements of every repeated field and map of a gRPC answer, at any depth | 262144 (`1 << 18`) in all | on the wire, before decoding | `ErrTooManyElements` |
-| Conditions of a task, in a listing, `GetTask` and the answer of `ApplyTask` | 64 (`MaxTaskConditions`) | HTTP: while decoding, before the 65th is decoded. gRPC: after decoding, which the budget above has capped | `ErrTooManyConditions` |
+| Conditions of a task, in a listing, `GetTask` and the answer of `ApplyTask` | 64 (`MaxTaskConditions`) | HTTP: while decoding, before the 65th is decoded. gRPC: on the wire, at the 65th of a status message, before decoding; a status split in several occurrences of its field is refused after decoding | `ErrTooManyConditions` |
 | Task ID in a listing | 1024 bytes (`MaxTaskIDBytes`; the SDK limits a name to 63 bytes a segment) | after the item (HTTP) or the page (gRPC) is decoded | `ErrDecode` |
 | Next cursor of a listing | 4096 bytes (`MaxCursorBytes`) | after the page is decoded | `ErrCursorTooLong` |
 
@@ -93,14 +93,24 @@ page over its limit), it ends the listing.
 
 Over gRPC every unary call (`ListTasks`, `GetTask`, `ApplyTask`, `DeleteTask`,
 `CancelTask`, `ListTaskRuns`) is made with a codec of its own. Before
-`proto.Unmarshal` it scans the wire bytes of the answer against the descriptor of the
-response message, and counts every element of every repeated field and map in the
-tree of messages under it: each entry of a map, each value of a packed scalar field.
-A field the schema does not know, or whose wire type it does not fit, is skipped, as
-`proto.Unmarshal` keeps it as unknown bytes. Messages nested deeper than protobuf
-decodes (10000) are refused. The codec names no content-subtype, so the call sends
-the same `application/grpc` as a call without it. The log stream needs no scan: its
-messages hold no repeated field and no map.
+`proto.Unmarshal` it scans the wire bytes of the answer against the descriptor of
+the response message, and counts every element of every repeated field and map in
+the tree of messages under it: each entry of a map, each value of a packed scalar
+field. It counts the conditions of each task status as well, and refuses the answer
+at the 65th in a status message, as `ErrTooManyConditions`, before the budget of
+elements can trip: a task with a million conditions is one refusal over gRPC as it
+is over HTTP, and the sync runner ends its listing at once. The cap is keyed by the
+full name of the field, `solti.task.v1.TaskStatus.conditions`, and not by its
+number: field 6 of the object metadata, the labels, has the same number and is not
+capped. The scan counts a status by occurrence on the wire. A sender that splits one
+status in several occurrences of the field gets by it, since `proto.Unmarshal`
+merges them; the check after decoding refuses the merged task, at the cost of
+decoding what the budget lets through (40 MiB in the test below, for 262144 empty
+conditions). A field the schema does not know, or whose wire type it does not fit,
+is skipped, as `proto.Unmarshal` keeps it as unknown bytes. Messages nested deeper
+than protobuf decodes (10000) are refused. The codec names no content-subtype, so
+the call sends the same `application/grpc` as a call without it. The log stream
+needs no scan: its messages hold no repeated field and no map.
 
 Over HTTP every list the proxy builds from JSON is one of the three in the table:
 they are decoded an element at a time by `jsonbounds.go`, and a key that comes twice
@@ -118,18 +128,20 @@ vary by a MiB between runs:
 
 | Test | What it sends | Allocated |
 |---|---|---|
-| `TestGRPCListTasksRefusesNestedElementFloodBeforeDecode` | to `ListTasks` (limit 1000), over gRPC: one task with 1048576 empty conditions, or empty env entries, or empty args, or labels; or 1000 tasks with 1000 empty conditions each | 2 to 4 MiB |
+| `TestGRPCListTasksRefusesNestedElementFloodBeforeDecode` | to `ListTasks` (limit 1000), over gRPC: one task with 1048576 empty conditions, or empty env entries, or empty args, or labels; 1000 tasks with 1000 empty conditions each; or 1000 tasks with 300 empty env entries each | 1 to 4 MiB |
 | `TestHTTPListTasksRefusesConditionFlood` | to `ListTasks` (limit 1000), over HTTP: one task with 1048576 empty conditions | 21 MiB |
 | `TestGetTaskRefusesNestedElementFlood` | to `GetTask`: one task with 1048576 empty conditions, over HTTP; the same, and one with 1048576 empty env entries, over gRPC | 13 MiB (HTTP), 4 MiB each (gRPC) |
 | `TestApplyTaskRefusesNestedElementFlood` | to `ApplyTask`: one task with 1048576 empty conditions | 13 MiB (HTTP), 4 MiB (gRPC) |
+| `TestAStatusSplitUpToTheBudgetIsRefusedAfterDecoding` | to `GetTask`, over gRPC: one task whose status is split in 4096 occurrences of 64 empty conditions, 262144 in all, which the scan lets through; it is refused after it is decoded | 40 MiB |
 | `TestListTaskRunsRefusesExtraRunsBeforeDecode` | a `ListTaskRuns` page (limit 1000) of 1048576 empty runs over HTTP, of 2097152 (4 MiB) over gRPC | 14 MiB (HTTP), 8 MiB (gRPC) |
 | `TestCompliantAnswersNearTheBudgetStillDecode` | to `GetTask`, over gRPC: one task with exactly 262144 empty env entries; it decodes | 32 MiB |
 
 Before these bounds the floods above allocated 86 to 748 MiB a call, all but the
 million labels, which the code before them accepted at 2 MiB (Go keeps one map entry
-for equal keys). That was measured when the bounds were written, by running these
-tests against that code; no committed test reproduces it, since they assert and log
-the refused side only.
+for equal keys). That was measured when the bounds were written, by running the tests
+that existed then against that code. The two rows added since (a thousand tasks with
+300 empty env entries each, and the split status) were not run against it. No
+committed test reproduces it, since they assert and log the refused side only.
 
 What the bounds let through is what stays within the numbers above, and nothing more
 is promised: the numbers are the control plane's choice, and no test shows that every

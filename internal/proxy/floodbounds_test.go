@@ -243,21 +243,27 @@ func checkAllocated(t *testing.T, grew uint64) {
 // labels of its metadata. An empty element takes two bytes on the wire and about a
 // hundred on the heap, so one task can hold a million of them, and a page of a
 // thousand tasks a thousand each. The proxy scans the wire bytes of every answer
-// before it decodes them, and counts every element of every repeated field and map
-// in the tree.
+// before it decodes them. It refuses a status at its 65th condition, a bound of the
+// task (ErrTooManyConditions), and the answer whose elements of every repeated
+// field and map in the tree add up past the budget (ErrTooManyElements).
 func TestGRPCListTasksRefusesNestedElementFloodBeforeDecode(t *testing.T) {
 	oneTaskOfConditions := func(n int) []byte {
 		return flood(&taskv1.ListTasksResponse{}, n, "tasks", "status", "conditions")
 	}
+	oneTaskOfEnv := func(n int) []byte {
+		return flood(&taskv1.ListTasksResponse{}, n, "tasks", "spec", "workload", "subprocess", "env")
+	}
 	for _, tc := range []struct {
 		name string
 		page []byte
+		want func(t *testing.T, err, op error) // the refusal
 	}{
-		{"a task with a million empty conditions", oneTaskOfConditions(million)},
-		{"a task with a million empty env entries in its spec", flood(&taskv1.ListTasksResponse{}, million, "tasks", "spec", "workload", "subprocess", "env")},
-		{"a task with a million empty args in its spec", flood(&taskv1.ListTasksResponse{}, million, "tasks", "spec", "workload", "wasm", "args")},
-		{"a task with a million labels", flood(&taskv1.ListTasksResponse{}, million, "tasks", "metadata", "labels")},
-		{"a thousand tasks with a thousand empty conditions each", bytes.Repeat(oneTaskOfConditions(1000), 1000)},
+		{"a task with a million empty conditions", oneTaskOfConditions(million), wantTooManyConditions},
+		{"a task with a million empty env entries in its spec", oneTaskOfEnv(million), wantTooManyElements},
+		{"a task with a million empty args in its spec", flood(&taskv1.ListTasksResponse{}, million, "tasks", "spec", "workload", "wasm", "args"), wantTooManyElements},
+		{"a task with a million labels", flood(&taskv1.ListTasksResponse{}, million, "tasks", "metadata", "labels"), wantTooManyElements},
+		{"a thousand tasks with a thousand empty conditions each", bytes.Repeat(oneTaskOfConditions(1000), 1000), wantTooManyConditions},
+		{"a thousand tasks with three hundred empty env entries each", bytes.Repeat(oneTaskOfEnv(300), 1000), wantTooManyElements},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := newRawAnswers(answers{list: tc.page}).proxy(t)
@@ -266,7 +272,7 @@ func TestGRPCListTasksRefusesNestedElementFloodBeforeDecode(t *testing.T) {
 			grew := allocated(func() { _, err = p.ListTasks(context.Background(), TaskFilter{Limit: 1000}) })
 
 			checkAllocated(t, grew)
-			wantTooManyElements(t, err, ErrListTasks)
+			tc.want(t, err, ErrListTasks)
 		})
 	}
 }
@@ -367,8 +373,8 @@ var taskAgents = []struct {
 
 // Both transports refuse the same tasks, with the same error: one with more
 // conditions than MaxTaskConditions, in a listing, in GetTask and in the answer of
-// ApplyTask. Over gRPC it passes the scan, which counts 640 conditions well under the
-// budget, and is refused after it is decoded.
+// ApplyTask. Over HTTP the condition past the cap is refused before it is decoded,
+// over gRPC the scan refuses it, before the answer is.
 func TestTaskConditionsBound(t *testing.T) {
 	for _, agent := range taskAgents {
 		for _, n := range []int{0, 1, MaxTaskConditions, MaxTaskConditions + 1, 10 * MaxTaskConditions} {
@@ -397,20 +403,96 @@ func TestTaskConditionsBound(t *testing.T) {
 	}
 }
 
+// The scan counts the conditions of a status message as it finds it on the wire. A
+// sender that splits one status in two occurrences of its field gets by the scan, and
+// protobuf merges the occurrences when it decodes: the task below holds 66 conditions
+// then, and the check after decoding refuses it, in a listing, in GetTask and in the
+// answer of ApplyTask. What got by is capped at the budget, which counts every
+// element on the wire.
+func TestAStatusSplitInTwoIsRefusedAfterDecoding(t *testing.T) {
+	status := path(&taskv1.Task{}, "status")[0]
+	half := field(status, flood(&taskv1.TaskStatus{}, MaxTaskConditions/2+1, "conditions"))
+	meta := field(path(&taskv1.Task{}, "metadata")[0], marshal(t, &taskv1.ObjectMeta{Name: "task", Uid: "u"}))
+	task := append(append(bytes.Clone(meta), half...), half...)
+	get := within(path(&taskv1.GetTaskResponse{}, "task"), task)
+
+	// The premise: the scan lets the answer through, and the decoder merges the status.
+	if err := scanElements(get, (&taskv1.GetTaskResponse{}).ProtoReflect().Descriptor(), 0, 0); err != nil {
+		t.Fatalf("scanElements = %v, want the answer let through: it holds %d conditions in each status", err, MaxTaskConditions/2+1)
+	}
+	var merged taskv1.GetTaskResponse
+	if err := proto.Unmarshal(get, &merged); err != nil || len(merged.GetTask().GetStatus().GetConditions()) != 2*(MaxTaskConditions/2+1) {
+		t.Fatalf("decoded %d conditions, %v, want the %d of both occurrences", len(merged.GetTask().GetStatus().GetConditions()), err, 2*(MaxTaskConditions/2+1))
+	}
+
+	p := newRawAnswers(answers{
+		list:  within(path(&taskv1.ListTasksResponse{}, "tasks"), task),
+		get:   get,
+		apply: within(path(&taskv1.ApplyTaskResponse{}, "task"), task),
+	}).proxy(t)
+	ctx := context.Background()
+
+	_, listErr := p.ListTasks(ctx, TaskFilter{Limit: 10})
+	_, getErr := p.GetTask(ctx, "task")
+	_, applyErr := p.ApplyTask(ctx, TaskSubmission{Spec: httpTestManifest(t, "task")})
+
+	wantTooManyConditions(t, listErr, ErrListTasks)
+	wantTooManyConditions(t, getErr, ErrGetTask)
+	wantTooManyConditions(t, applyErr, ErrApplyTask)
+}
+
+// The worst of what the check after decoding is left with: a status split in as many
+// occurrences as it takes to reach the budget with none of them over the cap, 4096
+// of 64 conditions. The scan lets the answer through, since it counts each
+// occurrence on its own and the elements add up to the budget and no more; the
+// decoder merges them into a status of 262144 conditions, and the check refuses the
+// task after. That is what the budget costs, which a status of that many conditions
+// in one occurrence cost before the scan capped it.
+func TestAStatusSplitUpToTheBudgetIsRefusedAfterDecoding(t *testing.T) {
+	status := path(&taskv1.Task{}, "status")[0]
+	occurrence := field(status, flood(&taskv1.TaskStatus{}, MaxTaskConditions, "conditions"))
+	meta := field(path(&taskv1.Task{}, "metadata")[0], marshal(t, &taskv1.ObjectMeta{Name: "task", Uid: "u"}))
+	task := append(bytes.Clone(meta), bytes.Repeat(occurrence, maxAnswerElements/MaxTaskConditions)...)
+	get := within(path(&taskv1.GetTaskResponse{}, "task"), task)
+	if err := scanElements(get, (&taskv1.GetTaskResponse{}).ProtoReflect().Descriptor(), 0, 0); err != nil {
+		t.Fatalf("scanElements = %v, want the answer of exactly the budget let through", err)
+	}
+	p := newRawAnswers(answers{get: get}).proxy(t)
+
+	var err error
+	grew := allocated(func() { _, err = p.GetTask(context.Background(), "task") })
+
+	checkAllocated(t, grew)
+	wantTooManyConditions(t, err, ErrGetTask)
+}
+
+// The scan caps the conditions of a status by the full name of the field in the
+// schema, not by its number, which the labels of a task share.
+func TestTheCappedFieldIsTheConditionsOfATaskStatus(t *testing.T) {
+	fd := (&taskv1.TaskStatus{}).ProtoReflect().Descriptor().Fields().ByName("conditions")
+	if conditionsField != "solti.task.v1.TaskStatus.conditions" || fd.FullName() != conditionsField {
+		t.Fatalf("the capped field is %q, the conditions of a status are %q, want solti.task.v1.TaskStatus.conditions", conditionsField, fd.FullName())
+	}
+	if !fd.IsList() || fd.Message() == nil || fd.Message().FullName() != "solti.task.v1.TaskCondition" {
+		t.Fatalf("%s is not a list of solti.task.v1.TaskCondition", fd.FullName())
+	}
+}
+
 // The answer of GetTask is scanned as a page is: a task of a million empty
-// conditions, or of a million empty entries elsewhere in its spec, is refused.
+// conditions is refused as one with too many conditions, and one of a million empty
+// entries elsewhere in its spec as an answer with too many elements.
 func TestGetTaskRefusesNestedElementFlood(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		agent func(t *testing.T) AgentProxy
-		want  func(t *testing.T, err, op error) // the refusal: HTTP has the bound on conditions only
+		want  func(t *testing.T, err, op error) // the refusal
 	}{
 		{"http/a million empty conditions", func(t *testing.T) AgentProxy {
 			return serveJSON(t, `{"metadata":{"name":"task","uid":"u"},"status":{"conditions":[`+jsonEmpties(million)+`]}}`)
 		}, wantTooManyConditions},
 		{"grpc/a million empty conditions", func(t *testing.T) AgentProxy {
 			return newRawAnswers(answers{get: flood(&taskv1.GetTaskResponse{}, million, "task", "status", "conditions")}).proxy(t)
-		}, wantTooManyElements},
+		}, wantTooManyConditions},
 		{"grpc/a million empty env entries", func(t *testing.T) AgentProxy {
 			return newRawAnswers(answers{get: flood(&taskv1.GetTaskResponse{}, million, "task", "spec", "workload", "container", "env")}).proxy(t)
 		}, wantTooManyElements},
@@ -428,7 +510,8 @@ func TestGetTaskRefusesNestedElementFlood(t *testing.T) {
 }
 
 // The answer of ApplyTask is scanned too, over gRPC, and its conditions are bounded
-// over HTTP: neither builds a flood for the identity the proxy reads from it.
+// over HTTP: neither builds a flood for the identity the proxy reads from it. Over
+// both transports a million conditions are a task with too many of them.
 func TestApplyTaskRefusesNestedElementFlood(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -440,7 +523,7 @@ func TestApplyTaskRefusesNestedElementFlood(t *testing.T) {
 		}, wantTooManyConditions},
 		{"grpc", func(t *testing.T) AgentProxy {
 			return newRawAnswers(answers{apply: flood(&taskv1.ApplyTaskResponse{}, million, "task", "status", "conditions")}).proxy(t)
-		}, wantTooManyElements},
+		}, wantTooManyConditions},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := tc.agent(t)
@@ -772,17 +855,44 @@ func marshal(t *testing.T, m proto.Message) []byte {
 }
 
 // scanElements walks the wire bytes of an answer against its message descriptor and
-// counts every element of every repeated field in the tree.
+// counts every element of every repeated field in the tree, and the conditions of
+// every task status.
 func TestScanElements(t *testing.T) {
+	// The labels of the metadata of a task have the number of the conditions of its
+	// status. The cap of the conditions is of the second by name, and the rows for
+	// the labels are only worth anything while the numbers are the same.
+	if labels, conditions := path(&taskv1.ObjectMeta{}, "labels")[0], path(&taskv1.TaskStatus{}, "conditions")[0]; labels != conditions {
+		t.Fatalf("the labels of a task are field %d and its conditions field %d: the rows that tell them apart by name tell nothing", labels, conditions)
+	}
 	var (
 		getResponse  = (&taskv1.GetTaskResponse{}).ProtoReflect().Descriptor()
 		listResponse = (&taskv1.ListTasksResponse{}).ProtoReflect().Descriptor()
 		listRequest  = (&taskv1.ListTasksRequest{}).ProtoReflect().Descriptor()
-		// A task of n conditions, as the answer of GetTask.
-		taskOf = func(n int) []byte { return flood(&taskv1.GetTaskResponse{}, n, "task", "status", "conditions") }
-		// A page of n tasks of withConditions conditions each.
-		tasks = func(n, withConditions int) []byte {
-			return bytes.Repeat(flood(&taskv1.ListTasksResponse{}, withConditions, "tasks", "status", "conditions"), n)
+		// A task of n empty env entries in its spec, as the answer of GetTask.
+		taskOf = func(n int) []byte {
+			return flood(&taskv1.GetTaskResponse{}, n, "task", "spec", "workload", "subprocess", "env")
+		}
+		// A page of n tasks of perTask empty env entries each.
+		tasks = func(n, perTask int) []byte {
+			return bytes.Repeat(flood(&taskv1.ListTasksResponse{}, perTask, "tasks", "spec", "workload", "subprocess", "env"), n)
+		}
+		// A task of n conditions in one status, as the answer of GetTask.
+		conditionsOf = func(n int) []byte { return flood(&taskv1.GetTaskResponse{}, n, "task", "status", "conditions") }
+		// A page of n tasks of perTask conditions each.
+		pagesOfConditions = func(n, perTask int) []byte {
+			return bytes.Repeat(flood(&taskv1.ListTasksResponse{}, perTask, "tasks", "status", "conditions"), n)
+		}
+		// A task whose status the sender splits in two occurrences of the field, of n
+		// conditions each: the decoder merges them into one of 2n.
+		splitStatus = func(n int) []byte {
+			status := path(&taskv1.Task{}, "status")[0]
+			half := field(status, flood(&taskv1.TaskStatus{}, n, "conditions"))
+			return within(path(&taskv1.GetTaskResponse{}, "task"), append(bytes.Clone(half), half...))
+		}
+		// A status with n entries of its conditions field in a varint, not a message.
+		varintConditions = func(n int) []byte {
+			conditions := path(&taskv1.TaskStatus{}, "conditions")[0]
+			return within(path(&taskv1.GetTaskResponse{}, "task", "status"), bytes.Repeat(protowire.AppendVarint(protowire.AppendTag(nil, conditions, protowire.VarintType), 1), n))
 		}
 		// A task with two selector expressions of values values each.
 		expressions = func(values int) []byte {
@@ -794,10 +904,11 @@ func TestScanElements(t *testing.T) {
 	)
 	// What kind of refusal a row expects.
 	const (
-		none     = ""
-		items    = "items"    // ErrTooManyItems, and not ErrTooManyElements
-		elements = "elements" // ErrTooManyElements
-		broken   = "broken"   // another error
+		none       = ""
+		items      = "items"      // ErrTooManyItems, and neither ErrTooManyElements nor ErrTooManyConditions
+		elements   = "elements"   // ErrTooManyElements, and no ErrTooManyConditions
+		conditions = "conditions" // ErrTooManyConditions, and no ErrTooManyElements
+		broken     = "broken"     // another error
 	)
 	for _, tc := range []struct {
 		name  string
@@ -812,8 +923,18 @@ func TestScanElements(t *testing.T) {
 		{"a page of one task over the limit", listResponse, tasks(3, 0), tasksField, 2, items},
 		{"entries of other fields do not count against the page limit", listResponse, tasks(2, 100), tasksField, 2, none},
 		{"a message with no page takes any number of entries up to the budget", getResponse, taskOf(1000), 0, 0, none},
-		{"conditions up to the budget", getResponse, taskOf(maxAnswerElements), 0, 0, none},
-		{"one condition over the budget", getResponse, taskOf(maxAnswerElements + 1), 0, 0, elements},
+		{"entries up to the budget", getResponse, taskOf(maxAnswerElements), 0, 0, none},
+		{"one entry over the budget", getResponse, taskOf(maxAnswerElements + 1), 0, 0, elements},
+		{"conditions up to the cap", getResponse, conditionsOf(MaxTaskConditions), 0, 0, none},
+		{"one condition over the cap", getResponse, conditionsOf(MaxTaskConditions + 1), 0, 0, conditions},
+		{"a million conditions are refused at the cap, long before the budget", getResponse, conditionsOf(million), 0, 0, conditions},
+		{"the cap is of one status, not of the answer", listResponse, pagesOfConditions(1000, MaxTaskConditions), tasksField, 1000, none},
+		{"the second task of a page is capped as the first", listResponse, append(pagesOfConditions(1, MaxTaskConditions), pagesOfConditions(1, MaxTaskConditions+1)...), tasksField, 2, conditions},
+		{"tasks within the cap still add up to the budget", listResponse, pagesOfConditions(5000, MaxTaskConditions), tasksField, 5000, elements},
+		{"the cap is met before the budget by the element that meets both", getResponse, append(taskOf(maxAnswerElements-MaxTaskConditions), conditionsOf(MaxTaskConditions+1)...), 0, 0, conditions},
+		{"the labels of a task are not its conditions, though they share a number", getResponse, flood(&taskv1.GetTaskResponse{}, 10*MaxTaskConditions, "task", "metadata", "labels"), 0, 0, none},
+		{"a status split in two is counted by occurrence", getResponse, splitStatus(MaxTaskConditions/2 + 1), 0, 0, none},
+		{"conditions of another wire type than the schema's are not counted", getResponse, varintConditions(10 * MaxTaskConditions), 0, 0, none},
 		{"elements add up across the tree, up to the budget", listResponse, tasks(2, maxAnswerElements/2-1), tasksField, 2, none},
 		{"elements add up across the tree, one over", listResponse, tasks(2, maxAnswerElements/2), tasksField, 2, elements},
 		{"the page limit is met before the budget", listResponse, emptyEntries(tasksField, maxAnswerElements+1), tasksField, 1000, items},
@@ -839,12 +960,16 @@ func TestScanElements(t *testing.T) {
 					t.Fatalf("scanElements = %v, want none", err)
 				}
 			case items:
-				if !errors.Is(err, ErrTooManyItems) || errors.Is(err, ErrTooManyElements) {
-					t.Fatalf("scanElements = %v, want ErrTooManyItems and no ErrTooManyElements", err)
+				if !errors.Is(err, ErrTooManyItems) || errors.Is(err, ErrTooManyElements) || errors.Is(err, ErrTooManyConditions) {
+					t.Fatalf("scanElements = %v, want ErrTooManyItems and neither ErrTooManyElements nor ErrTooManyConditions", err)
 				}
 			case elements:
-				if !errors.Is(err, ErrTooManyElements) || !errors.Is(err, ErrTooManyItems) {
-					t.Fatalf("scanElements = %v, want ErrTooManyElements", err)
+				if !errors.Is(err, ErrTooManyElements) || !errors.Is(err, ErrTooManyItems) || errors.Is(err, ErrTooManyConditions) {
+					t.Fatalf("scanElements = %v, want ErrTooManyElements and no ErrTooManyConditions", err)
+				}
+			case conditions:
+				if !errors.Is(err, ErrTooManyConditions) || !errors.Is(err, ErrTooManyItems) || errors.Is(err, ErrTooManyElements) {
+					t.Fatalf("scanElements = %v, want ErrTooManyConditions and no ErrTooManyElements", err)
 				}
 			case broken:
 				if err == nil || errors.Is(err, ErrTooManyItems) {
