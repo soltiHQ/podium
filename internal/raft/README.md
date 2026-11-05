@@ -21,7 +21,10 @@ these steps on real nodes over loopback with mutual TLS.
    of `tls.server` or `tls.client`, a bundle merged with one of them, or the
    raft CA of another cluster. A node takes every certificate its CA signs for
    a full member, whatever host it names, so two clusters that share a raft CA
-   are one cluster to each other's nodes (see "Transport security").
+   are one cluster to each other's nodes (see "Transport security"). A CA of its
+   own also keeps a removal cheap: a removed node's key stops working only when
+   the raft CA is replaced, which then touches no other certificate (see "A
+   compromised node").
 2. Give each node one certificate of that CA, for both server and client
    authentication, whose subject alternative names hold the host of the node's
    advertise address as written: an IP SAN for `10.0.0.1:7000`, a DNS SAN for
@@ -155,7 +158,12 @@ leader and list every node.
   `advertise_addr` and the stored `servers`
   (`TestRestartChecksTheNodeAgainstItsStoredConfiguration`). To rename or
   re-address a node, remove it, wipe its `data_dir`, and add it again with
-  `join: true`.
+  `join: true`. The two addresses are compared as written, not as they resolve:
+  a member whose stored address spells its `advertise_addr` otherwise, a name
+  against an IP say, logs the ERROR at every restart although it works, as its
+  peers dial the stored address and raft elects it by ID; removing it and adding
+  it again under the spelling of its `advertise_addr`, as above, clears the
+  ERROR.
 - When the leader goes down, the other two elect a leader and take writes, and
   every write that was acknowledged is on both
   (`TestFailoverKeepsAcknowledgedWrites`). A write in flight as the leader went
@@ -214,11 +222,92 @@ leader and list every node.
   writes, with their logins, cookies and tokens, to its HTTP and gRPC
   listeners, whose `tls.server` certificate passes their check. After removing
   a node whose keys may be exposed, such as a compromised host, issue a new
-  raft CA and new certificates to every node, and replace the removed node's
-  `tls.server` certificate as well (see "Transport security").
+  raft CA and new raft certificates to every node: that alone stops the key, as
+  no node accepts a certificate of the old CA any more (see "Transport
+  security"). Re-issuing the removed node's `tls.server` certificate stops
+  nothing, as podium checks no revocation, and a compromised host holds more
+  than its raft key: "A compromised node" lists what, with each rotation.
 - A dead member is replaced by its removal, with `force`, and the addition of
   the replacement, started with `join: true`: "Replacing a dead member" lists
   the steps, which `TestReplaceDeadMember`, in `internal/app`, runs.
+
+### A compromised node
+
+A removal revokes nothing, and a host that is compromised, or whose disk is
+lost, holds more than its raft key. This list is everything podium keeps on a
+node: the key files and secrets of its configuration, and its `data_dir`. The
+host's other credentials are not podium's. Each entry says what its holder can
+do, the rotation, and what the rotation costs. Podium checks no certificate
+revocation, so a certificate passes every check until it expires or the CA that
+signed it is replaced. Podium reads its files and settings only at start, so
+every rotation restarts the nodes it touches.
+
+- The raft key, `cluster.raft.tls.key_file`. Its holder connects to the raft
+  port of every node as a member, fetches their configuration digests, deposes
+  the leader with a higher term and, naming its own host as the leader, answers
+  the configuration requests of the followers (see "Transport security").
+  Rotation: a new raft CA, a certificate of it for every remaining node, and
+  the new CA as `cluster.raft.tls.ca_file` on every node. That alone stops the
+  key, as no node accepts a certificate of another CA
+  (`TestRaftRefusesPeerWithoutClusterCert`). Cost: every node restarts, and
+  nodes on different CAs cannot reach each other, so the cluster takes no write
+  while no majority runs on one CA.
+- The `tls.server` key. Its holder answers as the node's host, with a
+  certificate that any client trusting the CA accepts: a follower that forwards
+  to that host, which checks it against `tls.client.ca_file`, an agent, a
+  browser. Re-issuing the removed node's certificate revokes nothing: the old
+  one passes until it expires. That matters when a replacement reuses the host
+  name or IP, which the old key can still answer for. Rotation: a new CA for
+  the `tls.server` certificates, a certificate of it for every node, and the new
+  CA in `tls.client.ca_file` on every node and in the agents' trust for podium's
+  server. Cost: every node restarts, and every agent must trust the new CA.
+- The `tls.client` key, the certificate podium presents to the agents when they
+  ask for one, and to the leader when it asks. With agent mTLS
+  (`tls.server.client_ca_file`) it chains to the agents' CA, so it is a valid
+  agent client certificate on the discovery listeners of every node until it
+  expires. Rotation: replace the CA that verifies it, a new CA in
+  `tls.server.client_ca_file` on every node and in what the agents trust of
+  podium's client certificate, with a certificate of it for every node's
+  `tls.client` and for every agent. Cost: every agent gets a new certificate,
+  and every node restarts onto the same bundle, which the `agent TLS` group of
+  "Configuration drift" compares.
+- `auth.jwt_secret`, in the configuration file or the environment, the same on
+  every node. It signs the access tokens and the device cookies. With the ID of
+  a live session and the ID of its user, which `data_dir` holds, its holder
+  mints an access token that every node accepts for that user, with the user's
+  current permissions, until the session ends. Rotation: a new secret of 32
+  characters or more on every node, restarted together, as a token one node
+  signs fails on another, and each node whose `auth` group differs from its
+  leader's logs an ERROR. Cost: tokens signed with the old secret stop
+  verifying. A client that sends its token as a bearer gets 401 until it logs
+  in again. A browser is refreshed from its refresh and session cookies and
+  stays logged in (with `auth.rotate_refresh`, only the leader refreshes it).
+  Device cookies signed before the change count as unknown devices.
+- `agent_auth.enroll_secret`, in the environment only, the same on every node.
+  Its holder derives the token of any agent ID (HMAC-SHA256 of the ID), so it
+  enrolls any ID that is not enrolled yet, and knows the token of every agent
+  that was given a derived one. Rotation: a new secret of 32 bytes or more on
+  every node. Cost: it revokes nobody. An enrolled agent keeps the token it
+  enrolled with, which the old secret still derives, and no API resets a stored
+  credential: an agent whose token leaked runs under a new agent ID, with a
+  token derived from the new secret.
+- The state in `data_dir`, in the raft log and the snapshots. Every node holds
+  all of it, and podium does not encrypt it. Users hold no secret. Passwords
+  are stored as bcrypt hashes, which can be guessed at offline, and refresh
+  tokens as SHA3-256 hashes of 32 random bytes; session IDs and user IDs are
+  stored as they are. Agent tokens are stored raw, as podium presents them to
+  the agents: their holder syncs as the agent, which also sets the endpoint
+  podium calls for it, and calls the agent as podium does. Rotation: reset the
+  passwords (`POST /api/v1/users/{id}/password`), which ends that user's
+  sessions; an agent token has no rotation but the new agent ID above. Cost:
+  every user signs in again with a new password, and an agent whose token
+  leaked is a new agent, as the old ID's credential stays valid.
+- The first administrator's password. A generated one is in
+  `bootstrap-admin-password` in the `data_dir` of the node that seeded it (mode
+  0600), and one set with `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` stays in that
+  variable. Neither changes when the administrator does, so both matter only
+  while the password is still the first one. Rotation: change the
+  administrator's password, delete the file and unset the variable. Cost: none.
 
 ### Browsers and `auth.rotate_refresh`
 
@@ -261,12 +350,21 @@ balancer cannot hold, so a balancer cannot find the leader by itself, and
 cannot route to it without a router that holds such a credential, or retries
 at `X-Leader`. So in raft mode keep `auth.rotate_refresh` off, as it is by
 default, unless leader-sticky routing is in place. A refresh on a leader that
-loses its leadership, or shuts down, as the rotation commits answers 503 with
-`X-Leader` as well, and `Auth` logs a WARN that its outcome is unknown (see
-"Follower writes"): the rotation may have taken effect. A retry at the leader
-the header names refreshes the browser when the rotation did not commit; when
-it did, the browser holds a refresh token that no longer matches, and logs in
-again, the hint followed or not. Without rotation none of this applies.
+loses its leadership as the rotation commits answers 503, with `X-Leader` when
+the node knows the new leader by then, and `Auth` logs a WARN that its outcome
+is unknown (see "Follower writes"): the rotation may have taken effect. A retry
+at the leader the header names refreshes the browser when the rotation did not
+commit; when it did, the browser holds a refresh token that no longer matches,
+and logs in again, the hint followed or not. A refresh on a node that shuts
+down as the rotation commits has the same unknown outcome and the same WARN,
+but its 503 carries no `X-Leader`: `Shutdown` of hashicorp/raft v1.8.0 clears
+the known leader. A refresh that reaches a node after it shut down is refused
+before anything is proposed, as the node leads no more: its 503 has no
+`X-Leader` either, and `Auth` logs the WARN of a refresh that needs the leader,
+`auth refresh needs the leader`, not the unknown outcome. One that began while
+the node still led, and proposes after the shutdown, is refused unwritten at the
+proposal, which `Auth` logs at ERROR, `auth check failed`. Without rotation none
+of this applies.
 
 ### Rolling upgrade
 
@@ -731,9 +829,14 @@ so that the followers forward the writes they get, logins, cookies and bearer
 tokens included, to its HTTP and gRPC listeners, whose `tls.server`
 certificate passes the followers' check of that host, and fetch every node's
 configuration digests. After removing a node whose keys may be exposed, issue
-a new raft CA and new raft certificates to every node, and re-issue that
-node's `tls.server` certificate too. A check of a connecting peer's host
-against the configured members would narrow this, and is not built.
+a new raft CA and new raft certificates to every node: no node accepts a
+certificate of the old CA any more, which alone stops that key
+(`TestRaftRefusesPeerWithoutClusterCert`). Re-issuing the removed node's
+`tls.server` certificate does not: podium checks no revocation, so the old
+certificate keeps passing the followers' check against `tls.client.ca_file`
+until it expires (see "A compromised node", which also lists what else such a
+host holds). A check of a connecting peer's host against the configured members
+would narrow this, and is not built.
 
 An accepted connection's handshake runs on its first read or write, in the
 goroutine hashicorp/raft gives that connection, never in its one accept loop.

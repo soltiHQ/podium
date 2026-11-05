@@ -645,9 +645,18 @@ credential for the raft port, and for the configuration request on it, until
 it expires. Whoever holds its key can depose the leader with a higher term,
 and name its own host as the leader, so that the followers forward writes,
 logins, cookies and tokens included, to it. After removing a node whose keys
-may be exposed, issue a new raft CA and new certificates to every node, and
-re-issue that node's `tls.server` certificate too. See "Transport security" in
-`internal/raft/README.md`.
+may be exposed, issue a new raft CA and new certificates to every node: that
+alone stops the key, as no node accepts a certificate of the old CA any more.
+Re-issuing the removed node's `tls.server` certificate does not: podium checks
+no revocation, so the old certificate keeps passing the followers' check
+against `tls.client.ca_file` until it expires. That matters when a replacement
+reuses the node's host name or IP; then also replace the CA behind
+`tls.client.ca_file` and the CA that agents trust for the server. A compromised
+host holds more than its raft key: its other keys, `auth.jwt_secret`,
+`agent_auth.enroll_secret`, and in `data_dir` the agents' tokens, raw, and the
+password hashes. "A compromised node" in `internal/raft/README.md` lists
+everything podium keeps on a node, with each rotation and its cost; see also
+"Transport security" there.
 
 The files are read when the node starts, before anything in `data_dir` is
 opened: a file that is missing or holds no usable certificate or key fails the
@@ -698,7 +707,12 @@ its stored raft configuration as its node_id at its advertise_addr`; under
 another ID it is never elected. So do not rename the nodes of an earlier
 version, `n1` for `10.0.0.1:7000` say, during the upgrade: a renamed or
 re-addressed node must be removed from the cluster, its `data_dir` wiped, and
-added again with `join: true`.
+added again with `join: true`. The two addresses are compared as written, not as
+they resolve: a member whose stored address spells its advertise address
+otherwise, a name against an IP say, logs the ERROR at every restart although it
+works, as its peers dial the stored address and raft elects it by ID; removing
+it and adding it again under the spelling of its advertise address, as above,
+clears the ERROR.
 
 Earlier versions also ran the transport on plain TCP and made `data_dir` and
 `snapshots` 0755 and the snapshot files 0644. This version needs, on every
