@@ -275,11 +275,12 @@ func TestEnrollingSyncIsChargedOneToken(t *testing.T) {
 	}
 }
 
-// A sync over the rate is refused before the agent is written. Each transaction
-// of the store is counted: a sync opens one to check the token, when agent
-// authentication is required, and one to write the agent, and a refused sync
-// opens only the first. The row of the agent stays what the last accepted sync
-// made of it.
+// A sync over the rate is refused before the store is touched: before the token
+// check, and so before the agent is written. Each transaction of the store is
+// counted. An accepted sync opens one to check the token, when agent
+// authentication is required, and one to write the agent; a refused sync opens
+// none, with authentication required or not. The row of the agent stays what the
+// last accepted sync made of it.
 func TestLimitedSyncWritesNothing(t *testing.T) {
 	const burst, refusals = 10, 5
 	for _, tr := range limitTransports {
@@ -320,8 +321,8 @@ func TestLimitedSyncWritesNothing(t *testing.T) {
 						t.Fatalf("sync %d over the rate: %s, want refused", i+1, res.outcome)
 					}
 				}
-				if got, want := store.txs.Load()-opened, refusals*checks; got != want {
-					t.Fatalf("%d refused syncs opened %d transactions, want %d", refusals, got, want)
+				if got := store.txs.Load() - opened; got != 0 {
+					t.Fatalf("%d refused syncs opened %d transactions, want none", refusals, got)
 				}
 				stored, err := env.svc.Get(ctx, "agent-a")
 				if err != nil {
@@ -335,6 +336,137 @@ func TestLimitedSyncWritesNothing(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// An agent whose bucket is empty is refused before the token check, whatever
+// token the sync presents, so a flood of syncs for it opens no transaction and
+// makes no failure for the failure limiter. That shows the throttling state of
+// an agent ID to a caller that has not authenticated: a wrong token gets 429
+// for an agent that is throttled, where it gets 401 for one that has tokens
+// left, and the second takes nothing from the bucket either.
+func TestThrottledAgentIsRefusedBeforeTheTokenCheck(t *testing.T) {
+	const burst = 10
+	for _, tr := range limitTransports {
+		t.Run(tr.name, func(t *testing.T) {
+			logs := &lockedLogs{}
+			store := &txCount{Storage: inmemory.New()}
+			env := newLimitEnv(t, store)
+			env.logger = zerolog.New(logs)
+			env.limiter = discoveryLimiter() // five failures block a pair
+			env.enroll(t, map[string]string{"agent-a": "token-a", "agent-b": "token-b"})
+			send := tr.syncer(env)
+
+			for i := range burst {
+				if res := send(heartbeat(1, nil), "token-a"); res.outcome != synced {
+					t.Fatalf("sync %d of the burst: %s, want synced", i+1, res.outcome)
+				}
+			}
+
+			// agent-a is throttled: every token gets the same answer, and the store is not touched.
+			opened := store.txs.Load()
+			for i, token := range []string{"stale-token", "", "token-a", "stale-token", "stale-token", "stale-token", "stale-token", "stale-token"} {
+				want := syncResult{outcome: refused, message: syncLimited, retryAfter: tr.retryAfter}
+				if res := send(heartbeat(1, nil), token); res != want {
+					t.Fatalf("sync %d of throttled agent-a with token %q: %+v, want %+v", i+1, token, res, want)
+				}
+			}
+			if got := store.txs.Load() - opened; got != 0 {
+				t.Fatalf("syncs of a throttled agent opened %d transactions, want none", got)
+			}
+			// The WARN of the refusal is the same once a minute for the agent ID, whoever
+			// sent the sync, and it names no token.
+			if got := logs.levels(t, map[string]string{"agent_id": "agent-a", "message": syncLimited}); len(got) != 1 || got[0] != "warn" {
+				t.Fatalf("the refusals logged %v, want one warn", got)
+			}
+			if strings.Contains(logs.buf.String(), "stale-token") || strings.Contains(logs.buf.String(), "token-a") {
+				t.Fatalf("the log holds a token:\n%s", logs.buf.String())
+			}
+
+			// agent-b has tokens left: a wrong token is checked, and fails.
+			opened = store.txs.Load()
+			for i := range 3 {
+				if res := send(heartbeat(1, as("agent-b")), "stale-token"); res.outcome != unauthenticated {
+					t.Fatalf("wrong token %d for agent-b: %s, want unauthenticated", i+1, res.outcome)
+				}
+			}
+			if got := store.txs.Load() - opened; got != 3 {
+				t.Fatalf("three wrong tokens opened %d transactions, want one check each", got)
+			}
+			// They drained nothing: the burst of agent-b is whole.
+			for i := range burst {
+				if res := send(heartbeat(1, as("agent-b")), "token-b"); res.outcome != synced {
+					t.Fatalf("sync %d of agent-b after the wrong tokens: %s, want synced", i+1, res.outcome)
+				}
+			}
+
+			// The refusals before the check were no failures of agent-a: once its bucket
+			// is back, its token is accepted, though it was refused more than five times.
+			env.clock.Advance(10 * time.Second)
+			if res := send(heartbeat(1, nil), "token-a"); res.outcome != synced {
+				t.Fatalf("agent-a with its token after the refill: %s, want synced", res.outcome)
+			}
+		})
+	}
+}
+
+// The charge after the token check is what decides, and the peek before it can
+// race a concurrent sync: two syncs of an agent with one token left both pass the
+// peek and wait inside their token check, and then one lands and the other is
+// refused at the charge, with nothing written for it. The next sync is refused
+// at the peek, without a transaction.
+func TestSyncThatPassedThePeekMayBeRefusedAtTheCharge(t *testing.T) {
+	const burst = 10
+	for _, tr := range limitTransports {
+		t.Run(tr.name, func(t *testing.T) {
+			store := &gatedTx{Storage: inmemory.New(), entered: make(chan struct{}, 8), release: make(chan struct{})}
+			env := newLimitEnv(t, store)
+			env.enroll(t, map[string]string{"agent-a": "token-a"})
+			send := tr.syncer(env)
+			for i := range burst - 1 {
+				if res := send(heartbeat(1, nil), "token-a"); res.outcome != synced {
+					t.Fatalf("sync %d: %s, want synced", i+1, res.outcome)
+				}
+			}
+
+			// One token is left. Both syncs get past the peek, and wait in the token check.
+			store.armed.Store(true)
+			results := make(chan syncOutcome, 2)
+			for range 2 {
+				go func() { results <- send(heartbeat(1, nil), "token-a").outcome }()
+			}
+			for range 2 {
+				select {
+				case <-store.entered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("a sync was refused at the peek, though the bucket had a token")
+				}
+			}
+			close(store.release)
+			got := map[syncOutcome]int{}
+			for range 2 {
+				select {
+				case outcome := <-results:
+					got[outcome]++
+				case <-time.After(5 * time.Second):
+					t.Fatal("a sync did not end")
+				}
+			}
+			if got[synced] != 1 || got[refused] != 1 {
+				t.Fatalf("two syncs for one token ended %v, want one synced and one refused", got)
+			}
+			// Two token checks and the write of the winner: the loser wrote nothing.
+			if checks := store.checks.Load(); checks != 3 {
+				t.Fatalf("the two syncs opened %d transactions, want 3", checks)
+			}
+
+			if res := send(heartbeat(1, nil), "token-a"); res.outcome != refused {
+				t.Fatalf("sync after the race: %s, want refused", res.outcome)
+			}
+			if checks := store.checks.Load(); checks != 3 {
+				t.Fatalf("the refused sync opened a transaction: %d in all, want 3", checks)
+			}
+		})
 	}
 }
 

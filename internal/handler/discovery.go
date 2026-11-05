@@ -103,7 +103,7 @@ type HTTPDiscovery struct {
 // when it has one), later ones must present it (constant-time verify). limiter
 // bounds the token checks of each (client IP, agent ID) pair, see
 // verifyAgentToken; syncs bounds how often each agent ID may sync, see
-// NewSyncBuckets and admitSync; resolver gives the client IP (nil trusts no
+// NewSyncBuckets, syncOverRate and chargeSync; resolver gives the client IP (nil trusts no
 // proxy).
 func NewHTTPDiscovery(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, requireAuth bool) *HTTPDiscovery {
 	if agentSVC == nil {
@@ -137,12 +137,15 @@ func NewHTTPDiscovery(logger zerolog.Logger, agentSVC *agent.Service, eventHub *
 // this format via pbjson; both HTTP and gRPC paths therefore share a single
 // wire schema.
 //
-// The order is: the payload is validated, the agent's token is verified (and
-// enrolled, for an ID not seen before), the agent's bucket is charged, and only
-// then is the agent written. So a payload that breaks a limit enrolls and
-// charges nothing, a wrong token never takes from the bucket of the agent whose
-// ID it carries, and a sync over the rate is answered 429 with Retry-After and
-// writes nothing.
+// The order is: the payload is validated, the bucket of the agent is looked at
+// and a sync that finds it empty is answered 429 with Retry-After, then the
+// agent's token is verified (and enrolled, for an ID not seen before), the bucket
+// is charged, and only then is the agent written. So a payload that breaks a
+// limit enrolls and charges nothing; a sync of a throttled agent is refused
+// before the store is touched, with any token; a wrong token never takes from
+// the bucket of the agent whose ID it carries; and a sync over the rate writes
+// nothing. The look at the bucket takes nothing, so it can race a concurrent
+// sync, and the charge after the token check is what decides.
 func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 	mode := httpctx.ModeFromRequest(r)
 
@@ -174,6 +177,11 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if syncOverRate(h.logger, h.syncs, h.clock(), in.GetId()) {
+		tooManySyncs(w, r, mode)
+		return
+	}
+
 	if h.requireAuth {
 		token := bearerToken(r.Header.Get("Authorization"))
 		if err := verifyAgentToken(r.Context(), h.logger, h.agentSVC, h.limiter, h.resolver.IP(r), in.GetId(), token); err != nil {
@@ -192,8 +200,8 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !admitSync(h.logger, h.syncs, h.clock(), in.GetId()) {
-		response.TooManyRequests(w, r, mode, syncRefill, syncLimitedAnswer)
+	if !chargeSync(h.logger, h.syncs, h.clock(), in.GetId()) {
+		tooManySyncs(w, r, mode)
 		return
 	}
 
@@ -234,7 +242,7 @@ type GRPCDiscovery struct {
 // requireAuth turns on per-agent bearer-token authentication on every sync,
 // as for NewHTTPDiscovery. limiter bounds the token checks of each (client IP,
 // agent ID) pair, see verifyAgentToken. syncs bounds how often each agent ID may
-// sync, see NewSyncBuckets and admitSync. resolver gives the client IP from the
+// sync, see NewSyncBuckets, syncOverRate and chargeSync. resolver gives the client IP from the
 // peer and its x-forwarded-for metadata, see grpcClientIP; nil trusts no peer,
 // so the peer is the client.
 func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event.Hub, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, requireAuth bool) *GRPCDiscovery {
@@ -263,12 +271,17 @@ func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event
 }
 
 // Sync implements discoverv1.DiscoverServiceServer, in the order of
-// HTTPDiscovery.Sync: validate the payload, verify the token, charge the bucket
-// (ResourceExhausted over the rate), write the agent.
+// HTTPDiscovery.Sync: validate the payload, look at the bucket (ResourceExhausted
+// when it is empty), verify the token, charge the bucket (ResourceExhausted over
+// the rate), write the agent.
 func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (*discoverv1.SyncResponse, error) {
 	a, err := agentFromSyncRequest(req)
 	if err != nil {
 		return nil, status.Errorf(ctx, codes.InvalidArgument, "invalid agent data: %s", brokenRule(err))
+	}
+
+	if syncOverRate(g.logger, g.syncs, g.clock(), req.GetId()) {
+		return nil, throttledSync(ctx)
 	}
 
 	if g.requireAuth {
@@ -287,8 +300,8 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 		}
 	}
 
-	if !admitSync(g.logger, g.syncs, g.clock(), req.GetId()) {
-		return nil, status.Throttled(ctx, syncRefill, "%s", syncLimitedAnswer)
+	if !chargeSync(g.logger, g.syncs, g.clock(), req.GetId()) {
+		return nil, throttledSync(ctx)
 	}
 
 	existing, getErr := g.agentSVC.Get(ctx, req.GetId())
@@ -325,19 +338,51 @@ func grpcSyncFailed(ctx context.Context, err error) error {
 	return status.FromError(ctx, err).Err()
 }
 
-// admitSync charges one sync of agentID to its bucket in syncs, at time now, for
-// both Sync transports, and reports whether the sync may go on. Both call it
-// after the token check, so a sync that did not authenticate takes nothing from
-// the bucket of the agent whose ID it carries, and before any write. A refused
-// sync is answered 429 / ResourceExhausted and writes nothing. The refusal logs
-// a WARN with the agent ID, never a token, at most once per syncLimitNotice for
-// each agent ID.
-func admitSync(logger zerolog.Logger, syncs *ratelimit.Buckets, now time.Time, agentID string) bool {
+// syncOverRate reports whether the bucket of agentID in syncs is empty at time
+// now, for both Sync transports, without taking from it. Both call it before the
+// token check, so a sync of a throttled agent is refused whatever token it
+// carries and before the store is touched, and takes nothing from the bucket of
+// an agent that has tokens left. That shows the throttling state of an agent ID
+// to a caller that has not authenticated, and costs nothing else. The look can
+// race a concurrent sync: chargeSync decides. The refusal logs what logSyncLimited
+// says.
+func syncOverRate(logger zerolog.Logger, syncs *ratelimit.Buckets, now time.Time, agentID string) bool {
+	ok, notice := syncs.Peek(now, agentID)
+	logSyncLimited(logger, agentID, ok, notice)
+	return !ok
+}
+
+// chargeSync takes one token of the bucket of agentID in syncs, at time now, for
+// both Sync transports, and reports whether it did. Both call it after the token
+// check, so a sync that did not authenticate takes nothing from the bucket of the
+// agent whose ID it carries, and before any write. A refused sync writes nothing.
+// The refusal logs what logSyncLimited says.
+func chargeSync(logger zerolog.Logger, syncs *ratelimit.Buckets, now time.Time, agentID string) bool {
 	ok, notice := syncs.Take(now, agentID)
+	logSyncLimited(logger, agentID, ok, notice)
+	return ok
+}
+
+// logSyncLimited logs a WARN with the agent ID, never a token, for a refusal of
+// the bucket that asks to be logged: the first one of an agent ID, and then at
+// most one per syncLimitNotice for each ID, whichever of syncOverRate and
+// chargeSync refused.
+func logSyncLimited(logger zerolog.Logger, agentID string, ok, notice bool) {
 	if !ok && notice {
 		logger.Warn().Str("agent_id", agentID).Msg(syncLimitedAnswer)
 	}
-	return ok
+}
+
+// tooManySyncs answers an HTTP sync that the rate refuses: 429 with Retry-After,
+// which the access log takes for a throttle.
+func tooManySyncs(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
+	response.TooManyRequests(w, r, mode, syncRefill, syncLimitedAnswer)
+}
+
+// throttledSync is the gRPC answer to a sync that the rate refuses:
+// ResourceExhausted with RetryInfo, which the call log takes for a throttle.
+func throttledSync(ctx context.Context) error {
+	return status.Throttled(ctx, syncRefill, "%s", syncLimitedAnswer)
 }
 
 // verifyAgentToken checks the bearer token of agentID synced from clientIP, for

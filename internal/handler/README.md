@@ -245,8 +245,9 @@ token.
 | gRPC      | `DiscoverService/Sync` | proto-defined                |
 
 Both parse the agent heartbeat payload and call `model.NewAgentFrom`, which checks its field limits before anything
-is enrolled or charged. They then verify the token (`verifyAgentToken`), when agent auth is required, charge the sync to
-the bucket of its agent ID (`admitSync`, see "Sync rate" below), and call `agentSVC.Upsert`. The capability fields have
+is enrolled or charged. They then look at the bucket of the agent ID (`syncOverRate`, see "Sync rate" below), verify the
+token (`verifyAgentToken`) when agent auth is required, charge the sync to the bucket (`chargeSync`), and call
+`agentSVC.Upsert`. The capability fields have
 limits of their own: at most 64 runners, each name at most 128 bytes; per runner at most 256 labels (key at most 317
 bytes, value at most 1024 bytes) and at most 256 workloads (`api_version` at most 317 bytes, `kind` at most 128 bytes).
 Data that breaks one is answered 400 / `InvalidArgument` naming the field (such as
@@ -295,27 +296,36 @@ the call at WARN too, once (`interceptor.HintLeader`; `TestDiscoveryAnswersLeade
 ### Sync rate
 
 Each agent ID has a bucket of 10 syncs, refilled one per second (`NewSyncBuckets`; the numbers are constants, with no
-configuration keys). `admitSync` takes a token from it for each sync that passed the payload checks and the token
+configuration keys). It is used twice, for each sync that passed the payload checks. `syncOverRate` looks at it before the
+token check, without taking from it: a sync that finds it empty is refused at once, whatever token it carries, so a
+flood of syncs for a throttled agent opens no transaction (`TestThrottledAgentIsRefusedBeforeTheTokenCheck`,
+`TestLimitedSyncWritesNothing`) and makes no failure for the failure limiter. `chargeSync` takes the token after the token
 check, before the agent is written, so a sync with a wrong token, no token or an invalid payload takes nothing from the
-bucket of the agent whose ID it carries (`TestWrongTokenDoesNotDrainTheBucket`), and the sync that enrolls an ID is
-charged one token like any other (`TestEnrollingSyncIsChargedOneToken`). A sync that finds the bucket empty is answered
-429 with `Retry-After: 1` over HTTP (`response.TooManyRequests`) or `ResourceExhausted` over gRPC, and writes nothing:
-the store opens no transaction for its write (`TestLimitedSyncWritesNothing`), though the body read, the validation and
-the token check came first. `HTTPDiscovery` and `GRPCDiscovery` take the same buckets
+bucket of the agent whose ID it carries (`TestWrongTokenDoesNotDrainTheBucket`), and the sync that enrolls an ID is charged
+one token like any other (`TestEnrollingSyncIsChargedOneToken`). The look can race a concurrent sync, so a sync that found
+a token may be refused at the charge, with nothing written (`TestSyncThatPassedThePeekMayBeRefusedAtTheCharge`); thirty
+concurrent syncs of one agent land 10 all the same (`TestSyncBurstIsLimitedPerAgent`). A sync over the rate is answered
+429 with `Retry-After: 1` over HTTP (`response.TooManyRequests`) or `ResourceExhausted` over gRPC, and writes nothing,
+though the body read and the validation came first. `HTTPDiscovery` and `GRPCDiscovery` take the same buckets
 (`TestDiscoveryTransportsShareTheSyncBudget`), so an agent has one budget whichever transport it uses, and with
-`agent_auth.require=false` the rate still applies. Thirty concurrent syncs of one agent land 10
-(`TestSyncBurstIsLimitedPerAgent`).
+`agent_auth.require=false` the rate still applies.
 
-The refusal logs one WARN with the agent ID, the first time for an ID and then at most once a minute for it; the log
-never holds a token. The access loggers record each refused call at DEBUG instead of the WARN of a 4xx or the ERROR of a
-failed gRPC call, so that an agent that keeps syncing cannot flood the log: the 429 carries `Retry-After`
-(`response.TooManyRequests`), the gRPC status carries `RetryInfo` (`status.Throttled`), and `Logger` and `UnaryLogger`
-take either for a throttle, whichever node wrote it, so a follower that forwards a sync logs the leader's refusal at
-DEBUG too (`TestThrottledSyncsAreLoggedAtDebug`, `TestAccessLogOfAThrottleIsDebug`, `TestUnaryLoggerLogsAThrottleAtDebug`).
-The other refusals keep their levels: a wrong token, and the 429 / `ResourceExhausted` of the failure limiter. The buckets are in
-memory, on the node that runs the handlers: in raft mode the leader, where a follower forwards a sync, so the new leader
-counts from its own after a failover, and a restart clears them. A bucket that was not used for 10 minutes is dropped.
-The handlers read the time from a `clock` field that the tests replace, so a refill is never waited for.
+Refusing before the token check shows the throttling state of an agent ID to a caller that has not authenticated: a
+wrong token for an agent whose bucket is empty gets 429, and one for an agent with tokens left gets 401 and takes nothing
+from the bucket. Nobody can drain a bucket that way, since only a sync that passed the token check takes a token. The
+WARN of the next paragraph can be caused by such a caller too: it names the agent ID, not who sent the sync.
+
+The refusal logs one WARN with the agent ID, the first time for an ID and then at most once a minute for it, whichever of
+the two steps refused; the log never holds a token. The access loggers record each refused call at DEBUG instead of the
+WARN of a 4xx or the ERROR of a failed gRPC call, so that an agent that keeps syncing cannot flood the log: the 429
+carries `Retry-After` (`response.TooManyRequests`), the gRPC status carries `RetryInfo` (`status.Throttled`), and `Logger`
+and `UnaryLogger` take either for a throttle, whichever node wrote it, so a follower that forwards a sync logs the
+leader's refusal at DEBUG too (`TestThrottledSyncsAreLoggedAtDebug`, `TestAccessLogOfAThrottleIsDebug`,
+`TestUnaryLoggerLogsAThrottleAtDebug`). The other refusals keep their levels: a wrong token, and the 429 /
+`ResourceExhausted` of the failure limiter. The buckets are in memory, on the node that runs the handlers: in raft mode
+the leader, where a follower forwards a sync, so the new leader counts from its own after a failover, and a restart
+clears them. A bucket that was not used for 10 minutes is dropped, and a look at a bucket is no use of it. The handlers
+read the time from a `clock` field that the tests replace, so a refill is never waited for.
 
 ## UI pages
 | Path                | Handler          | Auth | Permission  |

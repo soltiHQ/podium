@@ -145,6 +145,101 @@ func TestBucketsNoticeAsksOncePerInterval(t *testing.T) {
 	}
 }
 
+// A peek reports what a take would find, and takes nothing.
+func TestBucketsPeekDoesNotSpend(t *testing.T) {
+	b, t0 := threeAtOnce(), time.Now()
+
+	for range 50 {
+		if ok, notice := b.Peek(t0, "k"); !ok || notice {
+			t.Fatalf("Peek of a whole bucket = (%v, %v), want (true, false)", ok, notice)
+		}
+	}
+	if got := takes(b, t0, "k", 5); got != 3 {
+		t.Fatalf("%d of 5 takes after the peeks got a token, want the burst of 3", got)
+	}
+	if ok, _ := b.Peek(t0, "k"); ok {
+		t.Fatal("Peek found a token in an empty bucket")
+	}
+	if ok, _ := b.Peek(t0.Add(time.Second), "k"); !ok {
+		t.Fatal("Peek found no token one interval after the burst")
+	}
+	if got := takes(b, t0.Add(time.Second), "k", 3); got != 1 {
+		t.Fatalf("%d of 3 takes after that peek got a token, want 1: the peek took it", got)
+	}
+}
+
+// At every instant a peek says what the take that follows it finds.
+func TestBucketsPeekAgreesWithTake(t *testing.T) {
+	b, t0 := threeAtOnce(), time.Now()
+	for _, ms := range []int{0, 0, 0, 0, 0, 200, 900, 1000, 1000, 1999, 2000, 2500, 3500, 3500, 3500, 9000, 9000, 9000, 9000} {
+		now := t0.Add(time.Duration(ms) * time.Millisecond)
+		peek, _ := b.Peek(now, "k")
+		if take, _ := b.Take(now, "k"); peek != take {
+			t.Fatalf("at +%d ms Peek found %v and the take %v", ms, peek, take)
+		}
+	}
+}
+
+// A key that was never taken has a full bucket, and a peek does not track it:
+// callers that have not authenticated cannot make the set grow.
+func TestBucketsPeekOfAnUnknownKeyTracksNothing(t *testing.T) {
+	b, t0 := threeAtOnce(), time.Now()
+
+	if ok, notice := b.Peek(t0, "stranger"); !ok || notice {
+		t.Fatalf("Peek of an unknown key = (%v, %v), want (true, false)", ok, notice)
+	}
+	if len(b.entries) != 0 || b.order.Len() != 0 {
+		t.Fatalf("a peek left %d keys tracked", len(b.entries))
+	}
+}
+
+// A peek is no use of a key: callers that have not authenticated cannot keep a
+// key from being dropped.
+func TestBucketsPeekIsNotAUse(t *testing.T) {
+	b, t0 := threeAtOnce(), time.Now()
+	takes(b, t0, "peeked", 1)
+	b.Peek(t0.Add(50*time.Second), "peeked")
+
+	takes(b, t0.Add(61*time.Second), "other", 1)
+	if _, tracked := b.entries["peeked"]; tracked {
+		t.Fatal("a peek kept an idle key")
+	}
+}
+
+// A peek that finds the bucket empty asks to be logged when a take would, and the
+// interval is the take's: neither asks again until Notice has passed.
+func TestBucketsPeekSharesTheNoticeWithTake(t *testing.T) {
+	b := NewBuckets(BucketConfig{Burst: 1, Refill: time.Hour, Idle: 2 * time.Hour, Notice: time.Minute})
+	t0 := time.Now()
+	b.Take(t0, "k")
+
+	for _, tc := range []struct {
+		step   string
+		after  time.Duration
+		take   bool // a take, or a peek
+		notice bool
+	}{
+		{"the first refusal, a peek", 0, false, true},
+		{"a take within the interval", 10 * time.Second, true, false},
+		{"a peek within the interval", 20 * time.Second, false, false},
+		{"a peek when the interval is over", time.Minute, false, true},
+		{"a take after that peek", 70 * time.Second, true, false},
+		{"a take when the interval is over", 2*time.Minute + time.Second, true, true},
+		{"a peek after that take", 2*time.Minute + 30*time.Second, false, false},
+	} {
+		now := t0.Add(tc.after)
+		var ok, notice bool
+		if tc.take {
+			ok, notice = b.Take(now, "k")
+		} else {
+			ok, notice = b.Peek(now, "k")
+		}
+		if ok || notice != tc.notice {
+			t.Fatalf("%s = (%v, %v), want (false, %v)", tc.step, ok, notice, tc.notice)
+		}
+	}
+}
+
 // At one instant exactly Burst takes win, whoever asks.
 func TestBucketsConcurrentTakes(t *testing.T) {
 	const burst, workers = 10, 100

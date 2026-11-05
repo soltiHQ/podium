@@ -360,15 +360,28 @@ second. These are constants; there are no configuration keys. A sync that finds
 the bucket empty is answered HTTP 429 with `Retry-After: 1` / gRPC
 `ResourceExhausted`, and writes nothing. The SDK treats both as retryable.
 
-The bucket is charged after the payload is validated and the token is checked,
-and before the agent is written. A sync with a wrong token, no token, or a
-payload that breaks a limit takes nothing from the bucket of the agent whose ID
-it carries: the failure limiter counts the token failures. The sync that enrolls
-an agent ID is charged one token, like any other. A refused sync still costs
-its body read, its validation and its token check, which come first. HTTP and
-gRPC share the buckets, so an agent has one budget whichever transport it uses.
-With `agent_auth.require: false` there is no token check, and the rate still
-applies.
+The bucket is used twice. Once the payload is validated, and before the token
+is checked, a sync looks at its agent's bucket without taking from it, and a sync
+that finds it empty is refused at once, whatever token it carries: it opens no
+transaction in the store and counts as no failure for the failure limiter. Then
+the token is checked, and only after that is a token taken, before the agent is
+written. So a sync with a wrong token, no token, or a payload that breaks a limit
+takes nothing from the bucket of the agent whose ID it carries, and the failure
+limiter counts the token failures. The look can race a concurrent sync, so a sync
+that found a token may find none when it is charged, and is refused then,
+having checked its token. The sync that enrolls an agent ID is charged one
+token, like any other. A refused sync still costs its body read and its
+validation. HTTP and gRPC share the buckets, so an agent has one budget
+whichever transport it uses. With `agent_auth.require: false` there is no token
+check, and the rate still applies.
+
+Refusing before the token check shows the throttling state of an agent ID to a
+caller that has not authenticated: a wrong token for an agent whose bucket is
+empty gets 429, where a wrong token for an agent that has tokens left gets 401.
+Nobody can drain a bucket that way, since only a sync that passed the token check
+takes a token; what the 429 tells is that the agent ID has synced too often just
+now. The WARN about a refusal can likewise be caused by a caller that has not
+authenticated: it names the agent ID, not who sent the sync.
 
 The buckets live in memory on the node that runs the discovery handlers. In
 raft mode that is the leader, where followers forward the syncs they get. A

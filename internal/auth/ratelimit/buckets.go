@@ -95,21 +95,58 @@ func (b *Buckets) Take(now time.Time, key string) (ok, notice bool) {
 		e.used = now
 	}
 
-	full := e.full
+	if full, has := b.spend(e, now); has {
+		e.full = full
+		return true, false
+	}
+	return false, b.asks(e, now)
+}
+
+// Peek reports whether a take of key at time now would get a token, without
+// taking it. A key it has not seen has a full bucket, and a peek does not track
+// it; nor is a peek a use of a key, which is dropped after Idle all the same. So
+// callers that have not authenticated cannot make the set grow, nor keep a key
+// in it.
+//
+// notice is as for Take, and shares its interval: a peek that finds the bucket
+// empty asks to be logged when a take would have, and then neither asks again
+// until Notice has passed.
+//
+// Safe for concurrent use.
+func (b *Buckets) Peek(now time.Time, key string) (ok, notice bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	el, found := b.entries[key]
+	if !found {
+		return true, false
+	}
+	e := el.Value.(*bucket)
+	if _, has := b.spend(e, now); has {
+		return true, false
+	}
+	return false, b.asks(e, now)
+}
+
+// spend returns the time at which e is full again once a token is taken at now,
+// and whether it has one to take.
+func (b *Buckets) spend(e *bucket, now time.Time) (full time.Time, ok bool) {
+	full = e.full
 	if full.Before(now) {
 		full = now
 	}
 	full = full.Add(b.cfg.Refill)
-	if full.Sub(now) <= time.Duration(b.cfg.Burst)*b.cfg.Refill {
-		e.full = full
-		return true, false
-	}
+	return full, full.Sub(now) <= time.Duration(b.cfg.Burst)*b.cfg.Refill
+}
 
+// asks reports whether a refusal of e at now should be logged, and if so
+// counts it as the one that asked.
+func (b *Buckets) asks(e *bucket, now time.Time) bool {
 	if e.noticed.IsZero() || now.Sub(e.noticed) >= b.cfg.Notice {
 		e.noticed = now
-		return false, true
+		return true
 	}
-	return false, false
+	return false
 }
 
 // prune drops the keys not used for Idle, from the least recently used end.
