@@ -41,6 +41,10 @@ const applyTimeout = 5 * time.Second
 //     absent row gives ErrNotFound to its caller and no command is proposed.
 //     So a command that fails to apply is a corrupted log entry or a version
 //     skew.
+//   - The first transaction of each leadership term of this node starts with
+//     a barrier, so that it reads every write committed before it; the later
+//     ones of the term start with none (awaitReady). A heartbeat, a token
+//     check that writes nothing and an upsert, so commits one entry.
 //
 // The inner store must be the plain inmemory one and MUST be the same store
 // the FSM applies against. Otherwise leader and followers diverge.
@@ -49,11 +53,17 @@ type Store struct {
 	raft  *hraft.Raft
 	// propose submits a command to raft: raft.Apply, which tests replace.
 	propose func(cmd []byte, timeout time.Duration) hraft.ApplyFuture
+	// barrier commits a barrier and waits until the FSM has applied every entry
+	// before it: awaitApplied, which tests replace.
+	barrier func(ctx context.Context) error
 	// stopped is closed once raft shuts down, which ends the wait for a write
 	// (awaitWrite).
 	stopped <-chan struct{}
 
 	txMu sync.Mutex // single in-flight WithTx at a time
+	// readyTerm is the term of the last barrier that succeeded while this node
+	// led, 0 before the first; txMu guards it (see awaitReady).
+	readyTerm uint64
 }
 
 // NewStore builds a Raft-backed Store.
@@ -64,7 +74,13 @@ func NewStore(inner storage.Storage, r *hraft.Raft) *Store {
 	if r == nil {
 		panic("raft: nil raft")
 	}
-	return &Store{inner: inner, raft: r, propose: r.Apply, stopped: stopSignal(r)}
+	return &Store{
+		inner:   inner,
+		raft:    r,
+		propose: r.Apply,
+		barrier: func(ctx context.Context) error { return awaitApplied(ctx, r) },
+		stopped: stopSignal(r),
+	}
 }
 
 // apply submits a Command to Raft, and waits for its commit until raft
@@ -313,10 +329,15 @@ func (s *Store) BuildSpecFilter(c storage.SpecQueryCriteria) storage.SpecFilter 
 // applied atomically on every replica; a transaction that recorded none
 // submits nothing.
 //
-// fn's reads within the tx see its own writes over the inner store. While this
-// node leads, the inner store does not move under fn: every write of this Store
-// holds txMu, and fn runs after the FSM has applied every committed command. A
-// node that loses leadership while fn runs fails the submission.
+// fn's reads within the tx see its own writes over the inner store, which holds
+// every write committed before the transaction began, unless this node is a
+// deposed leader that has not heard of the later term yet: a newly elected
+// leader may still be replaying committed commands, so the first transaction of
+// each leadership term of this node waits for a barrier, and every later one of
+// the term reads what the earlier ones applied (awaitReady). While this node
+// leads, the inner store does not move under fn: every write of this Store
+// holds txMu. A write whose term ended before it was proposed fails with
+// ErrNotLeader, having proposed nothing.
 //
 // Contract: only leader can run WithTx. If Raft.State() != Leader the tx is
 // rejected with ErrNotLeader before fn executes.
@@ -334,9 +355,8 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx storage.Storage) error) e
 	s.txMu.Lock()
 	defer s.txMu.Unlock()
 
-	// A newly elected leader may still be replaying committed commands. Never
-	// evaluate a transaction against the temporarily empty/stale inner store.
-	if err := awaitApplied(ctx, s.raft); err != nil {
+	term, err := s.awaitReady(ctx)
+	if err != nil {
 		return err
 	}
 	tx := overlay.New(s.inner)
@@ -348,6 +368,21 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx storage.Storage) error) e
 	}
 	if tx.Empty() {
 		return nil
+	}
+	// fn read the state of term. In a later term this node may have lost the
+	// leadership, and other leaders committed writes that fn did not read, and
+	// the inner store may have moved under fn as it applied them. So the term is
+	// read again right before the write is proposed, and a term that changed
+	// refuses the write: nothing was proposed, which is ErrNotLeader, as for a
+	// barrier that lost the leadership (barrierError). A window remains from
+	// this check to raft taking the command, in which a node that lost and
+	// regained the leadership would propose in the new term what fn read in the
+	// old one. It is narrower than the window from the barrier to the apply that
+	// every transaction had when each took a barrier, which spanned fn too. The
+	// FSM checks no term: during a rolling upgrade an older node would apply
+	// what a newer one refuses, and the replicas would diverge.
+	if s.raft.CurrentTerm() != term {
+		return fmt.Errorf("raft: WithTx: the leadership term changed before the write was proposed: %w", ErrNotLeader)
 	}
 	return s.apply(tx.Ops())
 }

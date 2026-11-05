@@ -14,8 +14,9 @@ import (
 )
 
 // commandsAfter returns how many entries of n's log after index after are
-// commands, the entries that carry a write. The barrier that starts every
-// transaction, a no-op and a configuration are entries too, but carry none.
+// commands, the entries that carry a write. The barrier that starts the first
+// transaction of a leadership term, a no-op and a configuration are entries
+// too, but carry none.
 func commandsAfter(t *testing.T, n *loopbackNode, after uint64) int {
 	t.Helper()
 	last, err := n.profile.logStore.LastIndex()

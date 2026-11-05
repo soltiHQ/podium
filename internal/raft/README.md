@@ -331,6 +331,83 @@ barrier no longer ends a runner, and with it the server
 run on one node on loopback TCP with mutual TLS, each with a `Leadership` of
 its own over the node's raft, whose barrier they replace.
 
+## One barrier per term
+
+A transaction of the store reads the leader's own state, and a newly elected
+leader's FSM can lag the committed log. So the first transaction of each
+leadership term of a node starts with a barrier, an entry that carries no write
+and that returns once the FSM applied every entry before it, and the node
+records the term as ready (`Store.awaitReady`); the later transactions of the
+term start without one. A heartbeat, a token check that writes nothing while
+the token matches and an upsert, so commits one entry, and the token check none
+(`TestOneBarrierPerTerm`). That is safe for these reasons:
+
+1. At the start of a term, its first barrier returns once the FSM applied every
+   entry before it, so the first transaction reads everything that earlier
+   terms committed.
+2. For the rest of the term only this node commits entries. A transaction
+   holds `txMu`, and its apply returns once the FSM applied its command, so a
+   later transaction reads every write committed before it. The other
+   proposers of a leader write nothing that a transaction reads, see below.
+3. A deposed leader, one that a later term replaced and that has not heard of
+   it yet, still leads in its own view, and reads its own, stale state. A write
+   it proposes cannot commit in its old term, so no write computed from that
+   state lands. A transaction that writes nothing proposes nothing, and returns
+   what that state holds, where it failed on its barrier when every transaction
+   took one. hashicorp/raft steps a leader down once it has not heard from a
+   quorum for `LeaderLeaseTimeout` (500 ms, or the heartbeat timeout if that is
+   shorter), and a follower votes for another node only once it has not heard
+   from its leader for a heartbeat timeout, or for a leadership transfer, so
+   that time is short; no clock bounds it for certain.
+4. A node that loses the leadership of a term never leads that term again: it
+   leads only a term it raised itself to, to win its election. So a later term
+   is never ready before its own barrier: after a leadership change, the new
+   leader's first transaction takes one, and reads every write that the
+   previous leader committed, even when the new leader was ready in an earlier
+   term (`TestNewLeaderBarriersBeforeItsFirstTransaction`). A term is recorded
+   as ready only when the node leads both before and after the barrier, in the
+   same term: a leadership lost and regained meanwhile is in a later term,
+   which the barrier does not cover, so the transaction fails with
+   `cluster.ErrNotLeader` before its function runs, having proposed nothing,
+   and the next transaction takes a barrier of its own
+   (`TestLeadershipChangeDuringBarrierLeavesTermNotReady`).
+
+A transaction reads the term again right before it proposes its write. A term
+that changed since the transaction began means that the node lost the
+leadership while the transaction's function ran, and that the function read a
+state that may lack the writes of later terms, even when the node leads again:
+the write fails with `cluster.ErrNotLeader`, the error of a barrier that lost
+the leadership, as nothing was proposed
+(`TestTermChangeBeforeApplyRefusesTheWrite`). From that check to raft taking
+the command a window remains, in which a node that lost and regained the
+leadership would propose in the new term what the function read in the old
+one. It is narrower than the window from the barrier to the apply that every
+transaction had when each took a barrier, which spanned the function too. The
+FSM checks no term: during a rolling upgrade, an older node would apply what a
+newer one refuses, and the replicas would diverge. One barrier per term needs
+nothing of a rolling upgrade: a node writes the same kinds of entries as
+before, only fewer barriers.
+
+The other proposers of a leader run outside `txMu`, and none writes what a
+transaction reads, so none needs `txMu`, nor keeps the barrier while its write
+is in flight. The event hub's writer (`EventWriter`) proposes commands of event
+operations only, which the FSM applies to the hub, never to the store that
+transactions read, and no transaction reads the hub. A membership change
+(`Admin.AddVoter`, `Admin.RemoveServer`) is a configuration entry, which
+hashicorp/raft never gives the FSM, as it is no `ConfigurationStore`. A
+barrier, `WaitReady`'s included, and the no-op that hashicorp/raft appends at
+the start of each term write nothing. No other code proposes. `WhenLeader`
+keeps its own barrier at the start of each term of each runner (see
+"Leadership terms"): sharing the store's readiness would save a few barriers
+per term, and `WaitReady`, which runs outside `txMu` and covers every operation
+before it, would then need `txMu` to cover a transaction's write in flight.
+
+The four tests run on three nodes on loopback with mutual TLS, and count the
+barriers and the commands that the leader's log gains, as the benchmarks do.
+The two race tests move the leadership to another node and back at the point of
+the race: inside the store's barrier, a seam that tests replace, and inside the
+transaction's own function.
+
 ## Membership
 
 `Profile.Admin` returns the node's cluster administration (`admin.go`): the
@@ -725,9 +802,11 @@ member"), is `cluster.ErrNotLeader`, as the write changed nothing;
 dispatched before its node shut down, below. They classify as `Unavailable`
 too (`TestClusterError`). A write that fails with `cluster.ErrLeadershipLost` is
 ambiguous, as it may still commit, so only a write that is safe to repeat should
-be retried. The barrier that starts a transaction writes nothing, so one that
-fails with `ErrLeadershipLost` is `ErrNotLeader`, which is safe to retry
-(`TestAwaitBarrierLeadershipLostIsNotLeader`).
+be retried. The barrier that starts the first transaction of a term writes
+nothing, so one that fails with `ErrLeadershipLost` is `ErrNotLeader`, which is
+safe to retry (`TestAwaitBarrierLeadershipLostIsNotLeader`), and so is a
+transaction that the leadership moved under before its write was proposed (see
+"One barrier per term").
 
 A write that the leader dispatched, appending it to its log, and whose node
 then shuts down has an unknown outcome too. hashicorp/raft v1.8.0 answers a
@@ -900,15 +979,15 @@ write is a transaction of one operation, as in the durable store: the overlay
 refuses what the FSM would refuse when it applies the operation. So the delete
 of an absent row gives its caller `ErrNotFound` and no command reaches the log,
 and a bulk delete that matches nothing proposes nothing
-(`TestSingleWritesAreValidatedBeforeTheyAreProposed`). Like every transaction it
-starts with a barrier, an entry that carries no write: every accepted single
-write now costs a barrier entry plus its command, two log entries and two round
-trips, a refused one a barrier alone, and `snapshot_threshold` counts entries,
-barriers included. The session clock the operations carry is the overlay's
-(`TestSingleWritesKeepTheSessionClock`). So a command that fails to apply is a
-corrupted entry or a version skew: a node that does not know an operation
-cannot apply a command a newer node proposed, and the replicas diverge, which
-the line is the only sign of (`TestFollowerLogsFailedApply`,
+(`TestSingleWritesAreValidatedBeforeTheyAreProposed`). The first transaction of
+a leader's term starts with a barrier, an entry that carries no write (see "One
+barrier per term"); after it, an accepted single write costs its command, one
+log entry and one round trip, and a refused one nothing. `snapshot_threshold`
+counts entries, barriers included. The session clock the operations carry is
+the overlay's (`TestSingleWritesKeepTheSessionClock`). So a command that fails
+to apply is a corrupted entry or a version skew: a node that does not know an
+operation cannot apply a command a newer node proposed, and the replicas
+diverge, which the line is the only sign of (`TestFollowerLogsFailedApply`,
 `TestFSMApplyLogsOnlyTheShapeOfAFailedCommand`). A restart replays the log
 entries since the last snapshot, so a command that failed is logged again at
 each restart until a snapshot compacts it away; the `index` tells it is the
@@ -995,8 +1074,9 @@ acknowledged write on both survivors, which hold the same state;
 stopped follower holds, which then installs the leader's snapshot, private on
 disk, matches the others, and restores that snapshot at its next start;
 `TestRejoinAfterRestart` restarts the leader from its data directory, which
-follows, catches up and votes again. `TestFollowerHTTPAndGRPCWritesLand`, in
-`internal/app`, runs three whole nodes, each on a loopback IP of its own: it
+follows, catches up and votes again. `readiness_test.go` runs the four tests of
+"One barrier per term" on three such nodes. `TestFollowerHTTPAndGRPCWritesLand`,
+in `internal/app`, runs three whole nodes, each on a loopback IP of its own: it
 skips on a host that is not Linux, and on Linux, where 127.0.0.0/8 is loopback,
 fails if 127.0.0.2 or 127.0.0.3 cannot be bound.
 
@@ -1011,19 +1091,27 @@ for that. The store is seeded through raft with the P2a fixture of
 `internal/storage/storagetest` (see "Performance" in
 `internal/storage/durable/README.md`) at 100, 1000 and 5000 agents: one command,
 which all three nodes apply, in 0.1 s, 0.15 s and 0.25 s.
-`BenchmarkThreeNodeBarrier` is the barrier that starts every write
-(`awaitApplied`) on the same cluster. Both report the entries the leader's log
-gained per iteration, as `commits/op`, with the `barriers/op` and `commands/op`
-among them. `BenchmarkLatestConfiguration` builds a log store and a snapshot
-store without a node and reads the latest configuration from them, as
-`Admin.Configuration` does. The numbers are indicative, not a gate.
+`BenchmarkThreeNodeBarrier` is the barrier that the first transaction of a
+leader's term starts with (`awaitApplied`), on the same cluster, which every
+transaction started with before "One barrier per term". Both report the entries
+the leader's log gained per iteration, as `commits/op`, with the `barriers/op`
+and `commands/op` among them. `BenchmarkLatestConfiguration` builds a log store
+and a snapshot store without a node and reads the latest configuration from
+them, as `Admin.Configuration` does. The numbers are indicative, not a gate.
 
 ### Conditions
 
 The Task container on an Apple M3 Max Mac (OrbStack, 14 vCPUs, linux/arm64, Go
 1.27.3), on loopback, with TLS, without `-race`, with the data on the
-container's overlay filesystem, between 21:48 and 22:01 UTC on 2026-11-04, at
-`2771c6a` plus this change:
+container's overlay filesystem. The cells marked "before" were measured between
+21:48 and 22:01 UTC on 2026-11-04, at `2771c6a` plus the change that added the
+benchmarks, when every transaction took a barrier, and the standalone cells
+then too; the cells marked "after" between 07:12 and 07:16 UTC on 2026-11-05,
+at `6382259` plus the change that takes one barrier per term. The three-node
+benchmarks run again at `6382259` itself, between 07:03 and 07:07 UTC on
+2026-11-05, had heartbeat medians of 7.5, 7.4 and 8.3 ms at 100, 1000 and 5000
+agents, and barrier medians of 2.4, 2.3 and 2.4 ms, close to the before cells.
+The commands:
 
 ```sh
 task golang:exec CMD='go test -run "^$" -bench "^(BenchmarkThreeNodeHeartbeat|BenchmarkThreeNodeBarrier)$" -benchtime=1000x -count=3 ./internal/raft/'
@@ -1055,46 +1143,64 @@ and 5000 agents.
 
 ### Heartbeat
 
-A heartbeat commits 3.000 entries at every fleet size: two barriers and one
-command. `VerifyOrEnrollToken` and `Upsert` each start a transaction, so each
-starts with a barrier, the token check writes nothing when the token matches,
-`Get` reads the leader's local store, and the upsert proposes one agent. The
-standalone store commits 1.000. No heartbeat changes what an operator watches
-(`refreshes/op` is 0).
+Before, a heartbeat committed 3.000 entries at every fleet size: two barriers
+and one command, as `VerifyOrEnrollToken` and `Upsert` each start a
+transaction, and each transaction started with a barrier. After, it commits
+1.000: one command, and no barrier, as the leader's store took the barrier of
+its term before the timed loop, at the seed. The token check writes nothing
+when the token matches, and commits nothing; `Get` reads the leader's local
+store; the upsert proposes one agent. The standalone store commits 1.000. No
+heartbeat changes what an operator watches (`refreshes/op` is 0).
 
-| agents | three-node p50 | three-node p99 | standalone p50 | standalone p99 | p50 ratio |
-| -- | -- | -- | -- | -- | -- |
-| 100 | 7.3 ms | 11 ms | 0.80 ms | 1.5 ms | 9.1x |
-| 1000 | 7.1 ms | 12 ms | 0.80 ms | 1.3 ms | 8.9x |
-| 5000 | 7.5 ms | 44 ms | 0.79 ms | 1.4 ms | 9.5x |
+| agents | before p50 | before p99 | after p50 | after p99 | standalone p50 | standalone p99 | after / standalone p50 |
+| -- | -- | -- | -- | -- | -- | -- | -- |
+| 100 | 7.3 ms | 11 ms | 2.7 ms | 6.7 ms | 0.80 ms | 1.5 ms | 3.3x |
+| 1000 | 7.1 ms | 12 ms | 3.0 ms | 23 ms | 0.80 ms | 1.3 ms | 3.8x |
+| 5000 | 7.5 ms | 44 ms | 4.7 ms | 14 ms | 0.79 ms | 1.4 ms | 6.0x |
 
-- The fleet size does not move the median: the time is in the commits, and a
-  command carries one agent.
-- The three-node p99 has outliers at 1000 and 5000 agents: one of three runs at
-  1000 agents and two of three at 5000 had a p99 of 44 to 51 ms, against 12 to
-  15 ms for the others. Three runs at 5000 agents with `GOGC=off` had 10.7, 15.8
-  and 10.9 ms (1000 agents was not tried), so the garbage collector is the
-  likely cause: the three nodes share a process, and so a heap.
-- A leader runs one transaction at a time: `Store.WithTx` holds `txMu` from the
-  barrier to the apply of the command. A heartbeat of 7.3 ms is therefore at
-  best about 135 heartbeats, or 400 log entries, a second on this machine, where
-  5000 agents at the fixture's 30 s interval send 167 a second.
+- Before, the fleet size did not move the median: the time was in the three
+  commits. After, it does: at 5000 agents a heartbeat takes 2 ms more than at
+  100. Every apply of a command copies every map of the in-memory store, which
+  `inmemory.Store.WithTx` keeps for a rollback, on each of the three nodes,
+  here in one process: a CPU profile of the 5000-agent heartbeat benchmark, its
+  setup and settle included, puts 34% of the CPU in that copy, and 27% in the
+  garbage collector's marking. Three runs at 5000 agents with `GOGC=off` had a
+  p50 of 5.6 to 5.9 ms, no better. The leader's own apply is on the path of
+  every write, so a write costs more as the state grows.
+- The p99 moves between runs. After, one of three runs at 1000 agents had a p50
+  of 7.6 ms and a p99 of 52 ms, against about 3 ms and 6 to 23 ms for the
+  others, probably a run that started in the slow state of the disk (see
+  "Conditions"). Before, one of three runs at 1000 agents and two of three at
+  5000 had a p99 of 44 to 51 ms, against 12 to 15 ms for the others; three runs
+  at 5000 agents with `GOGC=off` had 10.7, 15.8 and 10.9 ms (1000 agents was
+  not tried), so the garbage collector was the likely cause: the three nodes
+  share a process, and so a heap.
+- A leader runs one transaction at a time: `Store.WithTx` holds `txMu` until
+  the apply of its command. So one leader takes at best about 1000 / p50
+  heartbeats a second on this machine: about 135 before, at 7.3 ms, and about
+  370, 330 and 210 after, at 100, 1000 and 5000 agents. 5000 agents at the
+  fixture's 30 s interval send 167 a second, which one leader could not take
+  before, and takes after, with a quarter to spare, a margin that shrinks as the
+  state grows (the first point).
 
 ### Barrier
 
-A barrier is one log entry that carries nothing, committed like any other.
+A barrier is one log entry that carries nothing, committed like any other. The
+store's transactions take one per leadership term of their node, and
+`WhenLeader` one per term for each runner.
 
-| agents | barrier p50 | barrier p99 | one barrier / heartbeat p50 | two barriers / heartbeat p50 |
-| -- | -- | -- | -- | -- |
-| 100 | 2.3 ms | 10 ms | 32% | 63% |
-| 1000 | 2.2 ms | 3.3 ms | 32% | 63% |
-| 5000 | 2.1 ms | 2.9 ms | 29% | 57% |
+| agents | before p50 | before p99 | after p50 | after p99 | two barriers / heartbeat p50, before |
+| -- | -- | -- | -- | -- | -- |
+| 100 | 2.3 ms | 10 ms | 2.3 ms | 5.7 ms | 63% |
+| 1000 | 2.2 ms | 3.3 ms | 2.3 ms | 3.1 ms | 63% |
+| 5000 | 2.1 ms | 2.9 ms | 2.1 ms | 3.3 ms | 57% |
 
-A heartbeat starts two transactions, so it pays two barriers: 57% to 63% of its
-median here, and 59% to 67% in an earlier set of runs. Every write starts with a
-barrier, and a barrier taken once per leadership term would remove that round
-trip; it is not built. The p99 is one percentile of 1000 samples and moves: the
-100-agent barrier's was 4.4, 10 and 18 ms in its three runs.
+The barrier itself did not change. Before, a heartbeat paid two, one for each of
+its transactions: 57% to 63% of its median, and 59% to 67% in an earlier set of
+runs. After, it pays none, and a heartbeat at 100 agents, 2.7 ms, is about one
+commit, which a barrier's 2.3 ms is too, and the work around it. The p99 is one
+percentile of 1000 samples and moves: the 100-agent barrier's was 4.4, 10 and
+18 ms in its three runs before, and 4.1, 5.7 and 22 ms after.
 
 ### The configuration read
 
@@ -1114,7 +1220,8 @@ carry no data.
 | 70000 | 215 ms | 239 ms | 172 MiB, 2.2 million allocations |
 
 - 70000 entries are `snapshot_threshold` plus `snapshot_interval` (120 s) at
-  about 500 entries a second; a write is a barrier and a command, two entries.
+  about 500 entries a second; a write is one entry, its command, once the first
+  transaction of the term took the term's barrier.
 - The read is linear in the entries, about 3 µs each (2.5 µs, 177 ms for 70000,
   in an earlier set of runs). The snapshot check comes at a random time of
   between one and two intervals, so a leader that writes so fast for two

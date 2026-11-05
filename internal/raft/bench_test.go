@@ -124,11 +124,12 @@ func reportCommits(b *testing.B, leader *loopbackNode, first uint64) {
 
 // BenchmarkThreeNodeHeartbeat is BenchmarkHeartbeat of the durable store on the
 // store of a leader of three nodes with mutual TLS on loopback: the heartbeat
-// of an enrolled agent as discovery runs it. Verify the token, which starts a
-// transaction and so commits a barrier, and writes nothing while the token
-// matches; read the stored agent, which is local; then upsert the agent, a
-// barrier and a command. So a heartbeat commits three entries here, where the
-// durable store commits one. Each is replicated to a quorum and synced by the
+// of an enrolled agent as discovery runs it. Verify the token, a transaction
+// that writes nothing while the token matches, and so commits nothing; read
+// the stored agent, which is local; then upsert the agent, one command. Only
+// the first transaction of the leader's term commits a barrier, and the seed of
+// benchCluster is that one, so a heartbeat commits one entry here, as the
+// durable store does. The entry is replicated to a quorum and synced by the
 // leader and a follower before it is acknowledged. The leader's store is the
 // one measured. The followers apply every entry in the same process, so the
 // allocations that the framework counts would be the three nodes', and the
@@ -172,12 +173,12 @@ func BenchmarkThreeNodeHeartbeat(b *testing.B) {
 	}
 }
 
-// BenchmarkThreeNodeBarrier is the barrier that starts every write, on the
-// cluster of BenchmarkThreeNodeHeartbeat: awaitApplied on the leader, one log
-// entry replicated to a quorum and synced, which carries no write. A heartbeat
-// starts two transactions, so it pays this twice; the barrier's share of a
-// heartbeat is its median against that of BenchmarkThreeNodeHeartbeat at the
-// same fleet size.
+// BenchmarkThreeNodeBarrier is the barrier that the first transaction of a
+// leader's term starts with, on the cluster of BenchmarkThreeNodeHeartbeat:
+// awaitApplied on the leader, one log entry replicated to a quorum and synced,
+// which carries no write. A heartbeat in a term that its leader is ready for
+// pays none; it paid two when every transaction took one, one for each of its
+// two transactions (see "Performance" in the README).
 func BenchmarkThreeNodeBarrier(b *testing.B) {
 	for _, n := range fleetSizes() {
 		b.Run(strconv.Itoa(n), func(b *testing.B) {
@@ -285,8 +286,8 @@ func aboveSnapshot(b *testing.B, entries int) (hraft.LogStore, hraft.SnapshotSto
 // what a leader holds when its snapshot comes due under light writes; 70000 are
 // the heavy-write worst case, snapshot_threshold plus snapshot_interval (120 s)
 // at about 500 entries a second. Every entry is a command of the size of a
-// heartbeat's, where a heartbeat's barriers carry no data, which makes the log
-// the slowest to scan for its length.
+// heartbeat's, where a real log holds barriers too, which carry no data, so the
+// log is the slowest to scan for its length.
 func BenchmarkLatestConfiguration(b *testing.B) {
 	for _, entries := range []int{8192, 70_000} {
 		b.Run(strconv.Itoa(entries), func(b *testing.B) {
