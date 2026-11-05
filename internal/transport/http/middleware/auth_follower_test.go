@@ -51,17 +51,20 @@ func followerRefresh(t *testing.T, err error) (token.Verifier, *session.Service,
 
 // With auth.rotate_refresh a refresh rotates the refresh token, which only the
 // leader can write. A browser whose access token has expired and whose request
-// reaches a follower, or reaches a node that loses leadership as the rotation
-// commits, gets 503, with the leader's address in X-Leader when the node knows
-// it, and no cookie; Auth logs one WARN, no ERROR, and never a credential. Auth
-// and OptionalAuth alike.
+// reaches a follower, or reaches a node that loses leadership, or shuts down,
+// as the rotation commits, gets 503, with the leader's address in X-Leader when
+// the node knows it, and no cookie; Auth logs one WARN, no ERROR, and never a
+// credential, worded for what happened: a follower that cannot rotate the
+// token, or a rotation whose outcome is unknown. Auth and OptionalAuth alike.
 func TestRefreshOnAFollowerAsksForTheLeader(t *testing.T) {
 	for _, failure := range []struct {
 		name string
-		err  error // what the transaction fails with; nil for a follower
+		err  error  // what the transaction fails with; nil for a follower
+		says string // what the WARN says happened
+		not  string // what it must not say
 	}{
-		{"not the leader", nil},
-		{"leadership lost", fmt.Errorf("raft: apply: %w", cluster.ErrLeadershipLost)},
+		{"not the leader", nil, "a follower cannot rotate a refresh token", "outcome unknown"},
+		{"leadership lost", fmt.Errorf("raft: apply: %w", cluster.ErrLeadershipLost), "outcome unknown", "a follower"},
 	} {
 		verifier, svc, cookies := followerRefresh(t, failure.err)
 		for _, mw := range []struct {
@@ -101,6 +104,9 @@ func TestRefreshOnAFollowerAsksForTheLeader(t *testing.T) {
 					if err := json.Unmarshal(logs.Bytes(), &entry); err != nil || entry.Level != "warn" || entry.Method != http.MethodGet ||
 						entry.Path != "/ui/specs" || !strings.Contains(entry.Message, "auth.rotate_refresh") {
 						t.Fatalf("log %q, want one WARN line with the method, the path and auth.rotate_refresh", logs.String())
+					}
+					if !strings.Contains(entry.Message, failure.says) || strings.Contains(entry.Message, failure.not) {
+						t.Fatalf("the WARN says %q, want %q and not %q", entry.Message, failure.says, failure.not)
 					}
 					for _, secret := range []string{"test-only-original-refresh", "cookie-session"} {
 						if strings.Contains(logs.String(), secret) {

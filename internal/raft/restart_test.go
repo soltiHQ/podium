@@ -2,9 +2,13 @@ package raft
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	boltdb "github.com/hashicorp/raft-boltdb/v2"
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/domain/wire"
@@ -87,6 +91,97 @@ func TestRaftCurrentStateRestoresFromLogAndSnapshot(t *testing.T) {
 			}
 		})
 	}
+}
+
+// identityErrors returns the ERROR lines in which a node's start reported that
+// its stored configuration does not hold it.
+func identityErrors(t *testing.T, logs *logBuffer) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, line := range logLines(t, logs) {
+		if line["level"] == "error" && line["message"] == identityMismatch {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// A node with raft state checks at start that its stored configuration holds
+// it as its node_id at its advertise address, as its peers know it. A node
+// restarted under another node_id, or at another address, starts all the same,
+// and logs one ERROR that names its ID, its address and the stored servers, and
+// says that a renamed or re-addressed node must be removed and added again with
+// join: true. A node restarted as itself logs none, and neither does a node
+// whose state holds no configuration yet, as a joining node's before the
+// leader reaches it.
+func TestRestartChecksTheNodeAgainstItsStoredConfiguration(t *testing.T) {
+	ca := newTestCA(t)
+	addrs := reserveLoopbackAddrs(t, 2)
+	for _, tc := range []struct {
+		name     string
+		id, addr string // the node's node_id and advertise address at its restart
+		logged   bool
+	}{
+		{"as itself", "n1", addrs[0], false},
+		{"under another node_id", "n9", addrs[0], true},
+		{"at another address", "n1", addrs[1], true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := newLoopbackNode(t, ca, "n1", addrs[0])
+			t.Cleanup(n.stop)
+			n.start(t, n.self(), oneNodeTimeouts)
+			n.stop()
+			logs := n.capture()
+			n.start(t, n.self(), oneNodeTimeouts, func(c *Config) { c.NodeID, c.BindAddr = tc.id, tc.addr })
+			lines := identityErrors(t, logs)
+			if !tc.logged {
+				if len(lines) != 0 {
+					t.Fatalf("%s restarted as itself logged %v", n.id, lines)
+				}
+				return
+			}
+			if len(lines) != 1 {
+				t.Fatalf("the restart logged %d identity ERROR lines, want one: %s", len(lines), logs.String())
+			}
+			line := lines[0]
+			servers, _ := line["servers"].([]any)
+			if line["node_id"] != tc.id || line["advertise_addr"] != tc.addr || len(servers) != 1 || servers[0] != "n1="+addrs[0] {
+				t.Fatalf("the identity ERROR is %v, want node_id %s, advertise_addr %s and the servers [n1=%s]", line, tc.id, tc.addr, addrs[0])
+			}
+			message, _ := line["message"].(string)
+			if !strings.Contains(message, "never elected") || !strings.Contains(message, "cluster.raft.join: true") {
+				t.Fatalf("the identity ERROR %q does not say that the node is never elected, and how to rename or re-address it", message)
+			}
+			if n.profile == nil {
+				t.Fatal("the node did not start")
+			}
+		})
+	}
+
+	t.Run("with state but no configuration yet", func(t *testing.T) {
+		n := newLoopbackNode(t, ca, "n1", addrs[0])
+		t.Cleanup(n.stop)
+		if err := os.Mkdir(n.dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		stable, err := boltdb.New(boltdb.Options{Path: filepath.Join(n.dir, "raft-stable.bolt")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// hashicorp/raft's key of the current term (keyCurrentTerm in v1.8.0): a
+		// term alone is raft state, HasExistingState says.
+		if err := stable.SetUint64([]byte("CurrentTerm"), 3); err != nil {
+			t.Fatal(err)
+		}
+		if err := stable.Close(); err != nil {
+			t.Fatal(err)
+		}
+		logs := n.capture()
+		n.start(t, n.self(), oneNodeTimeouts)
+		if lines := identityErrors(t, logs); len(lines) != 0 {
+			t.Fatalf("a node whose state holds no configuration logged %v", lines)
+		}
+	})
 }
 
 // Unlike the explicit readiness test above, this exercises the first transaction

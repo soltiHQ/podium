@@ -2,13 +2,18 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
@@ -183,19 +188,23 @@ func (n *hopNode) start(leadership stubLeadership, port int) {
 // replicas on mixed ports can, pass a write on once and then answer 503,
 // instead of sending it round. A write carries the mark when it has the header,
 // whatever its value. A client that sends the mark itself only keeps its own
-// write from being forwarded, and the leader serves a marked write.
+// write from being forwarded, and the leader serves a marked write. A client
+// that names the mark in its Connection header, which makes the reverse proxy
+// drop that header as hop-by-hop, keeps no write from being marked.
 func TestLeaderForwardsAWriteOnce(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		leading bool     // a, the node the client sends the write to, leads
-		mark    []string // the values of the mark the client sends, nil for none
-		status  int      // the answer to the client
-		reached [2]int   // the requests that reached a and b
+		name       string
+		leading    bool     // a, the node the client sends the write to, leads
+		mark       []string // the values of the mark the client sends, nil for none
+		connection string   // the client's Connection header, "" for none
+		status     int      // the answer to the client
+		reached    [2]int   // the requests that reached a and b
 	}{
-		{"two followers that take each other for the leader", false, nil, http.StatusServiceUnavailable, [2]int{1, 1}},
-		{"a write the client marked", false, []string{"1"}, http.StatusServiceUnavailable, [2]int{1, 0}},
-		{"a write the client marked with an empty value", false, []string{""}, http.StatusServiceUnavailable, [2]int{1, 0}},
-		{"a marked write on the leader", true, []string{"1"}, http.StatusNoContent, [2]int{1, 0}},
+		{"two followers that take each other for the leader", false, nil, "", http.StatusServiceUnavailable, [2]int{1, 1}},
+		{"a write the client marked", false, []string{"1"}, "", http.StatusServiceUnavailable, [2]int{1, 0}},
+		{"a write the client marked with an empty value", false, []string{""}, "", http.StatusServiceUnavailable, [2]int{1, 0}},
+		{"a marked write on the leader", true, []string{"1"}, "", http.StatusNoContent, [2]int{1, 0}},
+		{"a Connection header that names the mark", false, nil, ForwardedHeader, http.StatusServiceUnavailable, [2]int{1, 1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, b := newHopNode(t), newHopNode(t)
@@ -210,6 +219,9 @@ func TestLeaderForwardsAWriteOnce(t *testing.T) {
 			}
 			for _, value := range tc.mark {
 				r.Header.Add(ForwardedHeader, value)
+			}
+			if tc.connection != "" {
+				r.Header.Set("Connection", tc.connection)
 			}
 			resp, err := a.srv.Client().Do(r)
 			if err != nil {
@@ -276,5 +288,51 @@ func TestLeaderPassesTheLeaderAddressOn(t *testing.T) {
 				t.Fatal("the request did not reach the handler")
 			}
 		})
+	}
+}
+
+// proxyChild marks the child process of TestLeaderForwardsWithoutTheProxyOfTheEnvironment.
+const proxyChild = "PODIUM_TEST_LEADER_PROXY_CHILD"
+
+// A follower forwards a write to the leader itself, never through the proxy
+// that HTTP_PROXY names: through it, the leader would see the proxy as the
+// peer of every forwarded write, which it trusts for no forwarding header, so
+// every client would share the proxy's address in the login limiter. net/http
+// reads the variable once per process, so the forward runs in a child process
+// whose environment names a proxy, a listener of the test, which then holds no
+// connection. The leader is at an address of TEST-NET-1 (RFC 5737), which a
+// proxy would be asked for and nothing answers at: a loopback address skips
+// any proxy.
+func TestLeaderForwardsWithoutTheProxyOfTheEnvironment(t *testing.T) {
+	if os.Getenv(proxyChild) != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("a write reached the handler of a follower") })
+		w := httptest.NewRecorder()
+		Leader(stubLeadership{leader: "192.0.2.1:7000"}, LeaderOptions{ForwardPort: 8080})(next).
+			ServeHTTP(w, httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/v1/users", nil))
+		fmt.Println("forwarded:", w.Code)
+		return
+	}
+	proxy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = proxy.Close() })
+	url := "http://" + proxy.Addr().String()
+	child := exec.Command(os.Args[0], "-test.run=^TestLeaderForwardsWithoutTheProxyOfTheEnvironment$")
+	child.Env = append(os.Environ(), proxyChild+"=1", "HTTP_PROXY="+url, "http_proxy="+url, "HTTPS_PROXY="+url, "https_proxy="+url, "NO_PROXY=", "no_proxy=")
+	out, err := child.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "forwarded:") {
+		t.Fatalf("the forward in a child process: %v\n%s", err, out)
+	}
+	// A connection the child opened to the proxy waits in its backlog, which an
+	// accept takes at once; a deadline already past would not try one.
+	if err := proxy.(*net.TCPListener).SetDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if conn, err := proxy.Accept(); err == nil {
+		_ = conn.Close()
+		t.Fatal("the follower forwarded the write through the proxy of the environment")
 	}
 }

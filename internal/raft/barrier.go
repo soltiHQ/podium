@@ -32,9 +32,9 @@ import (
 //     of it yet, still leads in its own view and reads its own, stale state.
 //     A write it proposes cannot commit in its old term, so no write computed
 //     from that state lands. A transaction that skipped the barrier and
-//     proposes nothing asks a quorum whether this node still leads before it
-//     answers (Store.answer), so that it does not answer what a stale state
-//     holds.
+//     proposes nothing asks a quorum whether this node still leads the term it
+//     read in before it answers, once it released txMu (Store.answer), so that
+//     it does not answer what a stale state holds.
 //  4. A node that loses the leadership of a term never leads that term again:
 //     hashicorp/raft makes a node leader only once it raised its term to that
 //     of the election it won. So a later term never matches readyTerm, and its

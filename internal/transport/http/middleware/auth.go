@@ -64,16 +64,28 @@ func OptionalAuth(verifier token.Verifier, sessionSvc *session.Service, secure f
 
 // checkFailed answers 503 to a request whose credentials could not be checked.
 // It logs why at ERROR: the method, the path and the error, never a cookie or a
-// token. The one exception is a refresh that needs the leader
-// (cluster.IsLeadershipError), which every refresh does on a follower when
-// auth.rotate_refresh is on: the follower cannot rotate the refresh token, a
-// write. That is the deployment's routing, not a failure of this node, so it is
-// logged at WARN, and the 503 carries the leader's address in X-Leader
-// (response.FromError), which makes the access log (Logger) a WARN as well.
+// token. The exception is a refresh that met the leadership
+// (cluster.IsLeadershipError), which only a refresh with auth.rotate_refresh
+// on can, as the rotation of the refresh token is a write. That is the
+// deployment's routing, not a failure of this node, so it is logged at WARN,
+// worded for what happened, and the 503 carries the leader's address in
+// X-Leader (response.FromError), which makes the access log (Logger) a WARN as
+// well:
+//
+//   - cluster.ErrNotLeader: the node does not lead, as every follower, and
+//     could not rotate the token, so nothing changed;
+//   - cluster.ErrLeadershipLost: the node lost its leadership, or shut down,
+//     while the rotation was committing, which may have taken effect. The hint
+//     stays: a retry at the leader refreshes the browser when the rotation did
+//     not commit, and when it did, the browser's refresh token no longer
+//     matches, and it logs in again.
 func checkFailed(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, logger zerolog.Logger, err error) {
 	if cluster.IsLeadershipError(err) {
-		logger.Warn().Err(err).Str("method", r.Method).Str("path", r.URL.Path).
-			Msg("auth refresh needs the leader: a follower cannot rotate a refresh token, so with auth.rotate_refresh route browsers to the leader (X-Leader), or turn rotation off")
+		message := "auth refresh needs the leader: a follower cannot rotate a refresh token, so with auth.rotate_refresh route browsers to the leader (X-Leader), or turn rotation off"
+		if errors.Is(err, cluster.ErrLeadershipLost) {
+			message = "auth refresh outcome unknown: with auth.rotate_refresh, this node lost its leadership, or shut down, while the rotation of the refresh token committed, which may have taken effect: a retry at the leader (X-Leader) refreshes the browser unless it did, and then the browser logs in again"
+		}
+		logger.Warn().Err(err).Str("method", r.Method).Str("path", r.URL.Path).Msg(message)
 		response.FromError(w, r, mode, err)
 		return
 	}

@@ -2,8 +2,12 @@ package interceptor
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"os"
+	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -48,6 +52,13 @@ func (l *leaderStub) moveTo(leader string) {
 	l.leader = leader
 }
 
+// stepDown makes a leading stub a follower of leader, "" for none known.
+func (l *leaderStub) stepDown(leader string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.leading, l.leader = false, leader
+}
+
 // served is a Sync a discovery served: the metadata and the deadline it got.
 type served struct {
 	md          metadata.MD
@@ -56,17 +67,21 @@ type served struct {
 }
 
 // discovery is a DiscoverService that records the syncs it serves and answers
-// them with answer, or with success when answer is nil.
+// them with answer, or with success when answer is nil, after during, when set.
 type discovery struct {
 	discoverv1.UnimplementedDiscoverServiceServer
 	calls  chan served
 	answer error
+	during func(ctx context.Context)
 }
 
 func (d *discovery) Sync(ctx context.Context, _ *discoverv1.SyncRequest) (*discoverv1.SyncResponse, error) {
 	md, _ := metadata.FromIncomingContext(ctx)
 	deadline, ok := ctx.Deadline()
 	d.calls <- served{md: md.Copy(), deadline: deadline, hasDeadline: ok}
+	if d.during != nil {
+		d.during(ctx)
+	}
 	if d.answer != nil {
 		return nil, d.answer
 	}
@@ -111,13 +126,19 @@ type node struct {
 // after UnaryRequestID as in the server, and returns its node.
 func serve(t *testing.T, answer error, interceptors ...grpc.UnaryServerInterceptor) *node {
 	t.Helper()
+	return serveDuring(t, nil, answer, interceptors...)
+}
+
+// serveDuring is serve with a discovery that runs during before it answers.
+func serveDuring(t *testing.T, during func(context.Context), answer error, interceptors ...grpc.UnaryServerInterceptor) *node {
+	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	n := &node{
 		port:      lis.Addr().(*net.TCPAddr).Port,
-		discovery: &discovery{calls: make(chan served, 16), answer: answer},
+		discovery: &discovery{calls: make(chan served, 16), answer: answer, during: during},
 		listener:  &countingListener{Listener: lis},
 	}
 	srv := grpc.NewServer(grpc.ChainUnaryInterceptor(append([]grpc.UnaryServerInterceptor{UnaryRequestID()}, interceptors...)...))
@@ -424,5 +445,47 @@ func TestStreamLeaderAnswersWithTheLeadersGRPCAddress(t *testing.T) {
 				t.Fatalf("x-leader %q, want %q", got, tc.hint)
 			}
 		})
+	}
+}
+
+// proxyChild marks the child process of TestForwarderIgnoresTheProxyOfTheEnvironment.
+const proxyChild = "PODIUM_TEST_FORWARDER_PROXY_CHILD"
+
+// A follower's Forwarder dials the leader itself, never through the proxy that
+// HTTPS_PROXY names: through it, the leader would see the proxy as the peer of
+// every forwarded call, which it trusts for no forwarding metadata. grpc-go
+// reads the variable once per process, so the forward runs in a child process
+// whose environment names a proxy, a listener of the test, which then holds no
+// connection. The leader is at an address of TEST-NET-1 (RFC 5737), which a
+// proxy would be asked for and nothing answers at: a loopback address skips
+// any proxy.
+func TestForwarderIgnoresTheProxyOfTheEnvironment(t *testing.T) {
+	if os.Getenv(proxyChild) != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		_, err := syncForwarder(t).forward(metadata.NewIncomingContext(ctx, metadata.MD{}), "192.0.2.1:50051", discoverv1.DiscoverService_Sync_FullMethodName, syncRequest())
+		fmt.Println("forwarded:", status.Code(err))
+		return
+	}
+	proxy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = proxy.Close() })
+	url := "http://" + proxy.Addr().String()
+	child := exec.Command(os.Args[0], "-test.run=^TestForwarderIgnoresTheProxyOfTheEnvironment$")
+	child.Env = append(os.Environ(), proxyChild+"=1", "HTTPS_PROXY="+url, "https_proxy="+url, "NO_PROXY=", "no_proxy=")
+	out, err := child.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "forwarded:") {
+		t.Fatalf("the forward in a child process: %v\n%s", err, out)
+	}
+	// A connection the child opened to the proxy waits in its backlog, which an
+	// accept takes at once; a deadline already past would not try one.
+	if err := proxy.(*net.TCPListener).SetDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if conn, err := proxy.Accept(); err == nil {
+		_ = conn.Close()
+		t.Fatal("the Forwarder dialed the leader through the proxy of the environment")
 	}
 }

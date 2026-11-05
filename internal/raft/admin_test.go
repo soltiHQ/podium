@@ -89,6 +89,36 @@ func TestConfigurationIndexIsTheChangesIndex(t *testing.T) {
 	}
 }
 
+// The configuration a node reads carries the term it read it in, and
+// VerifyLeader asks a quorum whether the node still leads that term, writing
+// nothing: it passes on the leader for the term of its read, and fails as
+// cluster.ErrNotLeader on a follower, and on the leader for another term, as
+// for a read before a leadership lost and regained. Three nodes on loopback
+// with mutual TLS.
+func TestAdminVerifiesTheLeadershipOfTheTermItRead(t *testing.T) {
+	c := newLoopbackCluster(t, "n1", "n2", "n3")
+	ctx := context.Background()
+	leader := c.leader(t, 10*time.Second)
+	conf := readConfiguration(t, leader)
+	if term := leader.profile.raft.CurrentTerm(); conf.Term != term {
+		t.Fatalf("the configuration was read in term %d, the leader is in term %d", conf.Term, term)
+	}
+	before := leader.profile.raft.LastIndex()
+	if err := leader.profile.Admin().VerifyLeader(ctx, conf.Term); err != nil {
+		t.Fatalf("VerifyLeader on the leader, for the term of its read = %v, want nil", err)
+	}
+	if err := leader.profile.Admin().VerifyLeader(ctx, conf.Term+1); !errors.Is(err, cluster.ErrNotLeader) {
+		t.Fatalf("VerifyLeader on the leader, for another term = %v, want %v", err, cluster.ErrNotLeader)
+	}
+	if after := leader.profile.raft.LastIndex(); after != before {
+		t.Fatalf("the checks wrote entries %d to %d, want none", before+1, after)
+	}
+	follower := c.follower(t, leader)
+	if err := follower.profile.Admin().VerifyLeader(ctx, readConfiguration(t, follower).Term); !errors.Is(err, cluster.ErrNotLeader) {
+		t.Fatalf("VerifyLeader on a follower = %v, want %v", err, cluster.ErrNotLeader)
+	}
+}
+
 // A snapshot that compacts the log past the entry of the latest configuration
 // keeps the configuration and its index: the node then reads them in the
 // snapshot, and a change against that index applies.

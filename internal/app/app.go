@@ -6,6 +6,7 @@ package app
 
 import (
 	"context"
+	"crypto/x509"
 	"sync"
 
 	"github.com/soltiHQ/control-plane/internal/loghub"
@@ -63,7 +64,12 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 	// A raft node digests the settings that every replica must share, answers
 	// its peers' configuration requests with the digests, and checks them
 	// against its leader's (raftpkg.Admin.ConfigCheck). Standalone does neither.
-	var digests cluster.Digests
+	var (
+		digests cluster.Digests
+		// clientCAs is the agents' CA bundle that a raft node reads once, for its
+		// digests and for the pool of its discovery listeners (agentListenerTLS).
+		clientCAs []*x509.Certificate
+	)
 	if raftMode {
 		// A raft node cannot know at start whether a term of its own will seed:
 		// it checks before anything starts what any seed needs, which would
@@ -71,7 +77,12 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		if err := bootstrapOptions(cfg).Check(); err != nil {
 			return nil, err
 		}
-		shared, err := sharedSettings(cfg)
+		cas, err := agentCAs(cfg)
+		if err != nil {
+			return nil, err
+		}
+		clientCAs = cas
+		shared, err := sharedSettings(cfg, clientCAs)
 		if err != nil {
 			return nil, err
 		}
@@ -113,8 +124,9 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 	// but WITHOUT a client-certificate requirement, so enabling mTLS for agents does
 	// not lock browsers (which have no client cert) out of the dashboard. One client
 	// config for outbound calls: to agents, and from a follower to the leader when it
-	// forwards a write. All opt-in (nil = plaintext).
-	serverTLS, err := cfg.TLS.Server.Build()
+	// forwards a write. All opt-in (nil = plaintext). A raft node builds the
+	// agent-facing listeners' pool from the bundle it read for its digests.
+	serverTLS, err := agentListenerTLS(cfg, raftMode, clientCAs)
 	if err != nil {
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
@@ -139,6 +151,9 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		Bool("client_mtls", cfg.TLS.Client.CertFile != "").
 		Msg("tls configuration")
 	warnOpenDiscovery(logger, cfg)
+	if raftMode {
+		warnForwarding(logger, cfg)
+	}
 
 	// In raft mode the resolver trusts the hosts of the raft configuration too, so
 	// the leader believes the client a follower forwards a write for. Those hosts

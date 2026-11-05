@@ -95,14 +95,18 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 	if timeout <= 0 {
 		timeout = defaultForwardTimeout
 	}
-	transport := &http.Transport{
-		DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
-		Proxy:                 http.ProxyFromEnvironment,
+	transport := markForwarded{next: &http.Transport{
+		DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+		// Straight to the leader, never through the proxy that HTTP_PROXY or
+		// HTTPS_PROXY names: the leader would see the proxy as the peer, which it
+		// trusts for no forwarding header, and every forwarded client as one
+		// client of its login limiter.
+		Proxy:                 nil,
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: timeout,
 		// A clone: other clients, such as the proxy pool, share the configuration.
 		TLSClientConfig: opts.TLSClientConfig.Clone(),
-	}
+	}}
 
 	leader := func() string { return leaderAddress(leadership, opts.ForwardPort) }
 	return func(next http.Handler) http.Handler {
@@ -140,12 +144,22 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 				response.SetLeader(w, leaderHTTPAddr(leaderAddr, opts.ForwardPort))
 				http.Error(w, "cluster: leader unreachable", http.StatusBadGateway)
 			}
-			// The mark goes on a copy, which the proxy forwards: a handler must not change the request it gets.
-			marked := r.Clone(r.Context())
-			marked.Header.Set(ForwardedHeader, "1")
-			proxy.ServeHTTP(w, marked)
+			// The transport marks what the proxy sends (markForwarded).
+			proxy.ServeHTTP(w, r)
 		})
 	}
+}
+
+// markForwarded is the transport of the forwards to the leader: it sets ForwardedHeader on every request it sends,
+// after the reverse proxy removed the hop-by-hop headers, as httputil.ReverseProxy does once its Director ran. A
+// client that names the header in its Connection header would make the proxy remove a mark set before, so that a
+// write would cross two nodes. RoundTrip changes no request it gets: it sends a copy.
+type markForwarded struct{ next http.RoundTripper }
+
+func (t markForwarded) RoundTrip(r *http.Request) (*http.Response, error) {
+	marked := r.Clone(r.Context())
+	marked.Header.Set(ForwardedHeader, "1")
+	return t.next.RoundTrip(marked)
 }
 
 // leaderAddress is where the leader serves this listener, as a follower knows it (see leaderHTTPAddr). It is

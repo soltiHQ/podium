@@ -125,11 +125,16 @@ func (a *API) clusterChangeFailed(w http.ResponseWriter, r *http.Request, mode h
 		response.Conflict(w, r, mode, "configuration changed, retry")
 	case errors.Is(err, cluster.ErrPeerUnreachable):
 		response.UnprocessableEntity(w, r, mode, fmt.Sprintf("No raft node of this cluster answers at %s: check the address, that the node runs, and its certificate. Nothing was changed.", address))
-	case errors.Is(err, clustersvc.ErrLeadershipMoved) && httpctx.Leader(r.Context()) == "":
-		// No new leader known within the wait, or none derivable: no X-Leader to name.
-		response.UnavailableMsg(w, r, mode, "Leadership moved; no leader is known yet, retry.")
 	case errors.Is(err, clustersvc.ErrLeadershipMoved):
-		response.NotLeader(w, r, mode, "This node handed its leadership over and is still a member: repeat the request, at the leader that X-Leader names, to remove it.")
+		// One read of the hint: the leader can move between two, and the answer
+		// that says to repeat the request at X-Leader must carry the one it read.
+		leader := httpctx.Leader(r.Context())
+		if leader == "" {
+			// No new leader known within the wait, or none derivable: no X-Leader to name.
+			response.UnavailableMsg(w, r, mode, "Leadership moved; no leader is known yet, retry.")
+			return
+		}
+		response.NotLeader(w, r, mode, leader, "This node handed its leadership over and is still a member: repeat the request, at the leader that X-Leader names, to remove it.")
 	case errors.Is(err, clustersvc.ErrTransferFailed):
 		a.logger.Warn().Err(err).Str("member_id", id).Msg("cluster member removal failed: the leadership transfer failed, nothing was removed")
 		response.UnavailableMsg(w, r, mode, "The leadership transfer failed, so nothing was removed: remove any dead member first, then retry.")

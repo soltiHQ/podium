@@ -46,7 +46,10 @@ type Server struct {
 
 // Configuration is a raft configuration and the index of the log entry that
 // holds it, which a change passes on to be applied to this configuration only.
+// Term is the leadership term of the node that read it, when it read it, which
+// [Admin.VerifyLeader] confirms before the node answers from it.
 type Configuration struct {
+	Term    uint64
 	Index   uint64
 	Servers []Server
 }
@@ -81,8 +84,14 @@ type Admin interface {
 	// cheaply and without its index.
 	Servers() []Server
 	// Configuration returns this node's latest configuration with its index,
-	// which a change is applied against.
+	// which a change is applied against, and the term the node read it in.
 	Configuration() (Configuration, error)
+	// VerifyLeader asks a quorum whether this node still leads, and writes
+	// nothing: nil when a quorum confirmed it and the node still leads term,
+	// the term of a Configuration it read, so that an answer from that
+	// configuration is not a deposed leader's; ErrNotLeader otherwise, or the
+	// error of a node that shut down.
+	VerifyLeader(ctx context.Context, term uint64) error
 	// Probe dials address as the raft transport dials a peer and reports, with
 	// ErrPeerUnreachable, when no node of this cluster answers there.
 	Probe(ctx context.Context, address string) error

@@ -126,12 +126,17 @@ func TestServerConfigBuildMTLS(t *testing.T) {
 
 // ClientCAs gives the certificates that the pool of Build holds, read from the
 // bundle as Build reads it: every CERTIFICATE block without headers that
-// parses, in order, other blocks skipped. It gives none while Build requires no
-// client certificate, and fails as Build fails on a bundle it cannot read or
-// that holds no certificate.
+// parses, in order, other blocks skipped, each by its own rule: a block of
+// another type whose bytes are a certificate's valid DER, a CERTIFICATE block
+// with headers, and one whose bytes do not parse. The pools of Build and of a
+// client's ca_file hold what Go's x509.CertPool.AppendCertsFromPEM puts in a
+// pool from the same bundle. ClientCAs gives none while Build requires no client
+// certificate, and fails as Build fails on a bundle it cannot read or that
+// holds no certificate.
 func TestServerConfigClientCAs(t *testing.T) {
 	cert, key := writeSelfSigned(t)
 	other, _ := writeSelfSigned(t)
+	third, _ := writeSelfSigned(t)
 	read := func(path string) []byte {
 		b, err := os.ReadFile(path)
 		if err != nil {
@@ -146,8 +151,8 @@ func TestServerConfigClientCAs(t *testing.T) {
 	bundle := filepath.Join(t.TempDir(), "bundle.pem")
 	parts := [][]byte{
 		read(cert),
-		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("not a certificate")}),
-		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Headers: map[string]string{"Proc-Type": "4,ENCRYPTED"}, Bytes: der(other)}),
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der(third)}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Headers: map[string]string{"Proc-Type": "4,ENCRYPTED"}, Bytes: der(third)}),
 		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("does not parse")}),
 		read(other),
 	}
@@ -163,8 +168,26 @@ func TestServerConfigClientCAs(t *testing.T) {
 	if len(got) != 2 || !bytes.Equal(got[0].Raw, der(cert)) || !bytes.Equal(got[1].Raw, der(other)) {
 		t.Fatalf("ClientCAs() gave %d certificates, want the two plain CERTIFICATE blocks in order", len(got))
 	}
-	if _, err := server.Build(); err != nil {
+	goPool := x509.NewCertPool()
+	if !goPool.AppendCertsFromPEM(bytes.Join(parts, nil)) {
+		t.Fatal("AppendCertsFromPEM found no certificate in the bundle")
+	}
+	if !certPool(got).Equal(goPool) {
+		t.Fatal("the pool of ClientCAs' certificates differs from AppendCertsFromPEM's of the same bundle")
+	}
+	built, err := server.Build()
+	if err != nil {
 		t.Fatalf("Build() of the same bundle: %v", err)
+	}
+	if !built.ClientCAs.Equal(goPool) {
+		t.Fatal("the ClientCAs of Build differ from AppendCertsFromPEM's pool of the same bundle")
+	}
+	client, err := ClientConfig{CAFile: bundle}.Build()
+	if err != nil {
+		t.Fatalf("a client's Build() with the bundle as ca_file: %v", err)
+	}
+	if !client.RootCAs.Equal(goPool) {
+		t.Fatal("the RootCAs of a client's Build differ from AppendCertsFromPEM's pool of the same bundle")
 	}
 
 	for _, tc := range []struct {
@@ -200,6 +223,58 @@ func TestServerConfigClientCAs(t *testing.T) {
 				t.Fatalf("Build() = %v, want an error saying %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// BuildWithClientCAs is Build with the certificates of a bundle that its caller
+// read already, ClientCAs': the same configuration from the same certificates,
+// without a read of ClientCAFile, which may have changed or gone since. No
+// certificates is no client certificate required. The key pair is read as
+// Build reads it, and fails as Build fails.
+func TestServerConfigBuildWithClientCAs(t *testing.T) {
+	cert, key := writeSelfSigned(t)
+	bundle := filepath.Join(t.TempDir(), "bundle.pem")
+	pemBytes, err := os.ReadFile(cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bundle, pemBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := ServerConfig{CertFile: cert, KeyFile: key, ClientCAFile: bundle}
+	cas, err := server.ClientCAs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := server.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(bundle); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.Build(); err == nil {
+		t.Fatal("Build() without its bundle succeeded: the test cannot tell a read")
+	}
+	cfg, err := server.BuildWithClientCAs(cas)
+	if err != nil {
+		t.Fatalf("BuildWithClientCAs() once the bundle is gone: %v", err)
+	}
+	if cfg.ClientAuth != tls.RequireAndVerifyClientCert || !cfg.ClientCAs.Equal(read.ClientCAs) || cfg.MinVersion != read.MinVersion || len(cfg.Certificates) != 1 {
+		t.Fatalf("BuildWithClientCAs() = %+v, want what Build() gave for the bundle: %+v", cfg, read)
+	}
+
+	none, err := ServerConfig{CertFile: cert, KeyFile: key}.BuildWithClientCAs(nil)
+	if err != nil || none.ClientAuth != tls.NoClientCert || none.ClientCAs != nil {
+		t.Fatalf("BuildWithClientCAs(nil) = %+v, %v, want no client certificate required", none, err)
+	}
+	if off, err := (ServerConfig{}).BuildWithClientCAs(cas); off != nil || err != nil {
+		t.Fatalf("BuildWithClientCAs() without server TLS = %v, %v, want nil, nil", off, err)
+	}
+	missing := ServerConfig{CertFile: cert + ".missing", KeyFile: key}
+	_, buildErr := missing.Build()
+	if _, err := missing.BuildWithClientCAs(cas); err == nil || buildErr == nil || err.Error() != buildErr.Error() {
+		t.Fatalf("BuildWithClientCAs() of a missing key pair = %v, want Build's error %v", err, buildErr)
 	}
 }
 

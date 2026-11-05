@@ -1,6 +1,7 @@
 package app
 
 import (
+	"crypto/tls"
 	"encoding/pem"
 	"os"
 	"path/filepath"
@@ -70,7 +71,11 @@ func sharedBase(files sharedFiles) config.Config {
 // digestsOf returns the digests of the settings of cfg that replicas must share.
 func digestsOf(t *testing.T, cfg config.Config) cluster.Digests {
 	t.Helper()
-	shared, err := sharedSettings(cfg)
+	cas, err := agentCAs(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared, err := sharedSettings(cfg, cas)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,9 +245,9 @@ func TestUnreadableAgentCABundleFailsTheStart(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := sharedBase(files)
 			cfg.TLS.Server.ClientCAFile = tc.bundle
-			_, err := sharedSettings(cfg)
+			_, err := agentCAs(cfg)
 			if err == nil || !strings.Contains(err.Error(), "tls server: client CA: ") || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("sharedSettings() = %v, want the error of tlsconf saying %q", err, tc.want)
+				t.Fatalf("agentCAs() = %v, want the error of tlsconf saying %q", err, tc.want)
 			}
 			if _, buildErr := cfg.TLS.Server.Build(); buildErr == nil || buildErr.Error() != err.Error() {
 				t.Fatalf("Build() = %v, want the same error as the digest, %v", buildErr, err)
@@ -261,5 +266,46 @@ func TestUnreadableAgentCABundleFailsTheStart(t *testing.T) {
 				t.Fatalf("the raft data directory of the refused node: %v, want none", err)
 			}
 		})
+	}
+}
+
+// A raft node reads the agents' CA bundle once, before it starts, for its
+// digests, and builds the pool of its agent-facing listeners from the
+// certificates it read: however the file changes after that read, the
+// listeners verify agents against the certificates the node's digest names.
+// Standalone builds the pool from the file, as it always did.
+func TestRaftNodeReadsTheAgentCABundleOnce(t *testing.T) {
+	files := newSharedFiles(t)
+	cfg := sharedBase(files)
+	bundle := filepath.Join(t.TempDir(), "agents-ca.pem")
+	pemBytes, err := os.ReadFile(files.ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bundle, pemBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.TLS.Server.ClientCAFile = bundle
+	cas, err := agentCAs(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := cfg.TLS.Server.Build()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(bundle); err != nil {
+		t.Fatal(err)
+	}
+
+	raft, err := agentListenerTLS(cfg, true, cas)
+	if err != nil {
+		t.Fatalf("the raft node's listener TLS once the bundle it read is gone: %v", err)
+	}
+	if raft.ClientAuth != tls.RequireAndVerifyClientCert || !raft.ClientCAs.Equal(read.ClientCAs) {
+		t.Fatal("the raft node's listeners do not verify agents against the certificates it read")
+	}
+	if _, err := agentListenerTLS(cfg, false, nil); err == nil || !strings.Contains(err.Error(), "no such file") {
+		t.Fatalf("standalone's listener TLS once the bundle is gone = %v, want the error of the file it reads", err)
 	}
 }

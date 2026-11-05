@@ -355,6 +355,54 @@ func TestNewChecksItsOwnCertificate(t *testing.T) {
 	}
 }
 
+// A node refuses an advertise address that peers cannot dial, every interface
+// or no host at all, before its transport listens, as hashicorp/raft's TCP
+// transport does: errNotAdvertisable, on plain TCP and over TLS alike. Over TLS
+// the node's own certificate is checked first, for the host of the advertise
+// address, so a certificate that does not name that unspecified host fails the
+// start earlier, as ErrNodeCertificate: that is what a caller of New that skips
+// cluster.Config.Validate, which refuses such an address, gets for 0.0.0.0.
+func TestNewRefusesAnAddressPeersCannotDial(t *testing.T) {
+	ca := newTestCA(t)
+	for _, tc := range []struct {
+		name  string
+		host  string // the host of the advertise address
+		files cluster.RaftTLSConfig
+		want  error
+	}{
+		{"every interface, plain TCP", "0.0.0.0", cluster.RaftTLSConfig{}, errNotAdvertisable},
+		{"every IPv6 interface, plain TCP", "::", cluster.RaftTLSConfig{}, errNotAdvertisable},
+		{"no host, plain TCP", "", cluster.RaftTLSConfig{}, errNotAdvertisable},
+		{"every interface, a certificate that names it", "0.0.0.0", ca.issue(t, "0.0.0.0"), errNotAdvertisable},
+		{"every interface, a certificate for another host", "0.0.0.0", ca.issue(t, "127.0.0.1"), ErrNodeCertificate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := newLoopbackNode(t, ca, "n1", reserveLoopbackAddrs(t, 1)[0])
+			t.Cleanup(n.stop)
+			_, port, err := net.SplitHostPort(n.addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			advertise := net.JoinHostPort(tc.host, port)
+			opts := []func(*Config){func(c *Config) { c.AdvertiseAddr = advertise }}
+			if tc.files.Enabled() {
+				opts = append(opts, withTLS(tc.files))
+			} else {
+				opts = append(opts, insecureTransport)
+			}
+			err = n.open(discovery.NewStatic([]cluster.Peer{{ID: n.id, Address: advertise}}), opts...)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("New() with the advertise address %q = %v, want %v", advertise, err, tc.want)
+			}
+			if l, err := net.Listen("tcp", n.addr); err != nil {
+				t.Fatalf("the bind address of the refused node is taken: %v", err)
+			} else {
+				_ = l.Close()
+			}
+		})
+	}
+}
+
 // partialClientHello is the start of a TLS record that announces a ClientHello
 // of 124 bytes and stops after its first two, as a host that stalls halfway.
 var partialClientHello = []byte{0x16, 0x03, 0x01, 0x00, 0x80, 0x01, 0x00, 0x00, 0x7c, 0x03, 0x03}

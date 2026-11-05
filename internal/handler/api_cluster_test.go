@@ -31,14 +31,14 @@ type clusterAdmin struct {
 	leaderID, leader string
 	conf             cluster.Configuration
 
-	probeErr, addErr, removeErr, transferErr error
+	probeErr, addErr, removeErr, transferErr, verifyErr error
 
 	changes   []string
 	transfers int
 }
 
 func newClusterAdmin() *clusterAdmin {
-	a := &clusterAdmin{role: cluster.RoleLeader, leaderID: "n1", leader: "10.0.0.1:7000", conf: cluster.Configuration{Index: 7}}
+	a := &clusterAdmin{role: cluster.RoleLeader, leaderID: "n1", leader: "10.0.0.1:7000", conf: cluster.Configuration{Term: 4, Index: 7}}
 	for i := 1; i <= 3; i++ {
 		a.conf.Servers = append(a.conf.Servers, cluster.Server{ID: fmt.Sprintf("n%d", i), Address: fmt.Sprintf("10.0.0.%d:7000", i), Suffrage: cluster.Voter})
 	}
@@ -70,8 +70,10 @@ func (a *clusterAdmin) Servers() []cluster.Server {
 func (a *clusterAdmin) Configuration() (cluster.Configuration, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return cluster.Configuration{Index: a.conf.Index, Servers: slices.Clone(a.conf.Servers)}, nil
+	return cluster.Configuration{Term: a.conf.Term, Index: a.conf.Index, Servers: slices.Clone(a.conf.Servers)}, nil
 }
+
+func (a *clusterAdmin) VerifyLeader(context.Context, uint64) error { return a.verifyErr }
 
 func (a *clusterAdmin) Probe(context.Context, string) error { return a.probeErr }
 
@@ -192,13 +194,14 @@ func TestClusterStatusAnswer(t *testing.T) {
 // under another name, which the message names, the force guard, the last voter
 // and a configuration that changed since it was read, 422 for an address where
 // no node answers, naming it, 500 for a configuration the leader cannot read,
-// and 503 with X-Leader on a follower or for a change that lost leadership while
-// it committed. The rules refuse before raft is asked for any change; a
-// configuration that changed is raft's refusal of the change it was asked for.
+// and 503 with X-Leader on a follower, for a change that lost leadership while
+// it committed, and for a refusal of the configuration's whose leadership the
+// node could not confirm. The rules refuse before raft is asked for any change;
+// a configuration that changed is raft's refusal of the change it was asked for.
 // The leader asked to remove itself hands its leadership over, removes nothing
-// and answers 503 with X-Leader and a message to repeat the request, or, when no
-// leader is known yet, a message to retry and no X-Leader; a transfer that fails
-// answers 503 without it.
+// and answers 503 with X-Leader and a message to repeat the request, naming the
+// leader it read once, or, when no leader is known yet, a message to retry and
+// no X-Leader; a transfer that fails answers 503 without it.
 func TestClusterRouteAnswers(t *testing.T) {
 	const (
 		post, del = http.MethodPost, http.MethodDelete
@@ -217,6 +220,7 @@ func TestClusterRouteAnswers(t *testing.T) {
 		code                        int
 		message, leader             string // the error body's message; X-Leader
 		noLeader                    bool   // the Leader middleware knows no leader
+		leaderOnce                  bool   // the Leader middleware knows the leader at its first ask only
 		changes                     []string
 		transfers                   int
 	}{
@@ -315,6 +319,20 @@ func TestClusterRouteAnswers(t *testing.T) {
 			message: "Leadership moved; no leader is known yet, retry.",
 		},
 		{
+			// The hint is read once: an answer that tells the client to repeat the
+			// request at X-Leader carries the leader it named.
+			name: "remove the leader, the leader known at the first ask only", method: del, target: members + "/n1?force=true",
+			leaderOnce: true, code: http.StatusServiceUnavailable, leader: hint, transfers: 1,
+			message: "This node handed its leadership over and is still a member: repeat the request, at the leader that X-Leader names, to remove it.",
+		},
+		{
+			name: "remove an unknown member, the leadership not confirmed", method: del, target: members + "/n9?force=true",
+			setup: func(a *clusterAdmin) {
+				a.verifyErr = fmt.Errorf("raft: confirm the leadership: %w", cluster.ErrNotLeader)
+			},
+			code: http.StatusServiceUnavailable, message: "service unavailable", leader: hint,
+		},
+		{
 			name: "remove the leader, the transfer fails", method: del, target: members + "/n1?force=true",
 			setup: func(a *clusterAdmin) { a.transferErr = errors.New("leadership transfer timeout") },
 			code:  http.StatusServiceUnavailable, transfers: 1,
@@ -346,8 +364,10 @@ func TestClusterRouteAnswers(t *testing.T) {
 			}
 			// The Leader middleware tells where the leader is; it is asked only for a
 			// write that met the wrong leadership.
+			asks := 0
 			ctx := httpctx.WithLeader(r.Context(), func() string {
-				if tc.noLeader {
+				asks++
+				if tc.noLeader || (tc.leaderOnce && asks > 1) {
 					return ""
 				}
 				return hint

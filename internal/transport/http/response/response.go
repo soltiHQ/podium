@@ -331,10 +331,13 @@ func UnavailableMsg(w http.ResponseWriter, r *http.Request, mode httpctx.RenderM
 }
 
 // NotLeader answers, with msg, a write that this node no longer leads the
-// cluster to serve: 503, with the leader's HTTP address in LeaderHeader when the
-// Leader middleware knows it, as FromError answers cluster.ErrNotLeader.
-func NotLeader(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, msg string) {
-	SetLeader(w, httpctx.Leader(r.Context()))
+// cluster to serve: 503, with leader, the leader's HTTP address, in
+// LeaderHeader, as FromError answers cluster.ErrNotLeader. The caller reads
+// leader once from the Leader middleware (httpctx.Leader), so that the answer
+// carries the address its message was chosen for: the leader can move between
+// two reads. An empty leader sends no header.
+func NotLeader(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, leader, msg string) {
+	SetLeader(w, leader)
 	UnavailableMsg(w, r, mode, msg)
 }
 

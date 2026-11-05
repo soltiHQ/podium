@@ -149,6 +149,86 @@ func TestRaftCompactionConfig(t *testing.T) {
 	}
 }
 
+// Validate refuses the election and heartbeat timeouts that hashicorp/raft would
+// refuse when the node starts: each, once 0 keeps its default of 1 s, at 5 ms at
+// least, and the election timeout no shorter than the heartbeat timeout, a
+// default included. One row per rule, each from YAML or the environment. A
+// negative value keeps the default, as 0 does, which the node is given as 0.
+func TestRaftTimeoutsConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name, yaml string
+		env        map[string]string
+		valid      bool
+		says       string // in the error of a value refused
+	}{
+		{name: "the defaults", valid: true},
+		{name: "set", yaml: "raft:\n  election_timeout_ms: 400\n  heartbeat_timeout_ms: 200\n", valid: true},
+		{name: "both at the minimum", env: map[string]string{"SOLTI_CLUSTER_RAFT_ELECTION_TIMEOUT_MS": "5", "SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS": "5"}, valid: true},
+		{name: "an election timeout equal to the heartbeat timeout", yaml: "raft:\n  election_timeout_ms: 300\n  heartbeat_timeout_ms: 300\n", valid: true},
+		{name: "a heartbeat timeout under the default election timeout", yaml: "raft:\n  heartbeat_timeout_ms: 500\n", valid: true},
+		{name: "negative values keep the defaults", yaml: "raft:\n  election_timeout_ms: -1\n  heartbeat_timeout_ms: -1\n", valid: true},
+		{name: "an election timeout under the minimum", yaml: "raft:\n  election_timeout_ms: 4\n  heartbeat_timeout_ms: 4\n", says: "raft.election_timeout_ms"},
+		{name: "a heartbeat timeout under the minimum", env: map[string]string{"SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS": "4"}, says: "raft.heartbeat_timeout_ms"},
+		{name: "an election timeout under the heartbeat timeout", yaml: "raft:\n  election_timeout_ms: 100\n  heartbeat_timeout_ms: 200\n", says: "raft.election_timeout_ms"},
+		{name: "a heartbeat timeout over the default election timeout", env: map[string]string{"SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS": "2000"}, says: "raft.heartbeat_timeout_ms"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := raftConfig()
+			if err := yaml.Unmarshal([]byte(tc.yaml), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			for key, value := range tc.env {
+				t.Setenv(key, value)
+			}
+			if err := envconfig.Process("SOLTI_CLUSTER", &cfg); err != nil {
+				t.Fatal(err)
+			}
+			err := cfg.Validate()
+			if (err == nil) != tc.valid || (err != nil && !strings.Contains(err.Error(), tc.says)) {
+				t.Fatalf("Validate() = %v, want valid %v, or an error naming %s", err, tc.valid, tc.says)
+			}
+		})
+	}
+}
+
+// The timeouts Validate accepts are the ones hashicorp/raft accepts when the
+// node starts, and their defaults are hashicorp/raft's: its ValidateConfig
+// (v1.8.0, config.go) wants each at 5 ms at least, and the election timeout no
+// shorter than the heartbeat timeout; this pins the minimum and the defaults to
+// it. The lease, which New lowers to the heartbeat timeout when it is shorter,
+// is then within its limits too.
+func TestRaftTimeoutLimitsAreHashicorps(t *testing.T) {
+	raft := hraft.DefaultConfig()
+	if raft.ElectionTimeout != cluster.DefaultRaftElectionTimeout || raft.HeartbeatTimeout != cluster.DefaultRaftHeartbeatTimeout {
+		t.Fatalf("cluster defaults %v and %v; hashicorp/raft defaults %v and %v: they must agree",
+			cluster.DefaultRaftElectionTimeout, cluster.DefaultRaftHeartbeatTimeout, raft.ElectionTimeout, raft.HeartbeatTimeout)
+	}
+	validate := func(election, heartbeat time.Duration) error {
+		c := hraft.DefaultConfig()
+		c.LocalID = "n1"
+		c.ElectionTimeout, c.HeartbeatTimeout = election, heartbeat
+		c.LeaderLeaseTimeout = min(c.LeaderLeaseTimeout, heartbeat)
+		return hraft.ValidateConfig(c)
+	}
+	least := cluster.MinRaftTimeout
+	for _, tc := range []struct {
+		name                string
+		election, heartbeat time.Duration
+		want                bool // whether hashicorp/raft accepts it
+	}{
+		{"both at the minimum", least, least, true},
+		{"an election timeout a nanosecond under it", least - 1, least - 1, false},
+		{"a heartbeat timeout a nanosecond under it", least, least - 1, false},
+		{"an election timeout under the heartbeat timeout", 100 * time.Millisecond, 200 * time.Millisecond, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validate(tc.election, tc.heartbeat); (err == nil) != tc.want {
+				t.Fatalf("hashicorp/raft's ValidateConfig = %v, want accepted %v", err, tc.want)
+			}
+		})
+	}
+}
+
 // The compaction settings Validate accepts are the ones hashicorp/raft accepts when
 // the node starts, so a refused value fails before anything is opened. Its
 // ValidateConfig (v1.8.0, config.go) limits only the snapshot interval, to 5ms at

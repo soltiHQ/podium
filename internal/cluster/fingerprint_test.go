@@ -110,11 +110,14 @@ func TestDigestsNameTheGroupsThatDiffer(t *testing.T) {
 
 // The digests of a fixed configuration are known answers of the v1 encoding,
 // which nodes of different versions compare: a change of the encoding, of the
-// order of a group's settings, or of how a secret enters it, changes them. The
-// values come from a separate implementation of the encoding as
-// internal/raft/README.md describes it, which shares no code with this one: a
-// secret enters as HMAC-SHA256(secret, "podium-config-fingerprint-v1"), and
-// every string and list is prefixed with its length as 8 bytes, big endian.
+// order of a group's settings, or of how a secret enters it, changes them. They
+// pin what this implementation encodes, not a derivation from a specification:
+// internal/raft/README.md gives the encoding's outline (a secret enters as
+// HMAC-SHA256(secret, "podium-config-fingerprint-v1"), every string and list is
+// prefixed with its length as 8 bytes, big endian), but the width of a boolean
+// and of max_age and the order of the settings within a group are only in the
+// encoder's code and comments (fingerprint.go). A review reproduced the values
+// once with an encoder of its own written from those.
 func TestDigestsOfAKnownConfiguration(t *testing.T) {
 	settings := cluster.SharedSettings{
 		JWTSecret:        "golden-jwt-secret",

@@ -192,10 +192,12 @@ func never(time.Duration) <-chan time.Time { return nil }
 // A check compares the node's digests with its leader's, at its start and at
 // each change of the leader the node knows, and logs a mismatch at ERROR once
 // per leader and digest set, naming the groups that differ: a leader seen
-// again with the digests it was logged with gives a DEBUG line only, and so
-// does a leader whose digests match, while a match after a mismatch is one INFO
-// line, after which a mismatch is logged again. A node that leads, or knows no
-// leader, checks nothing.
+// again with the digests it was logged with gives a DEBUG line only, unless the
+// WARN of a failed fetch came in between, which logs the mismatch at ERROR again
+// (TestConfigCheckRetriesAFailedFetch); a leader whose digests match gives a
+// DEBUG line, while a match after a mismatch is one INFO line, after which a
+// mismatch is logged again. A node that leads, or knows no leader, checks
+// nothing.
 func TestConfigCheckLogsEachMismatchOnce(t *testing.T) {
 	own := testDigests(1)
 	proxies, agentAuth := own, own
@@ -407,35 +409,73 @@ func moveLeadership(t *testing.T, c *loopbackCluster, id string) {
 	})
 }
 
-// waitForLine waits until the check that logs into logs logged want.
-func waitForLine(t *testing.T, node string, logs *logBuffer, want checkLine) {
+// checkRules returns what a check logs, by the rules of ConfigCheck's doc, for
+// the leaders that lines name in order: the node is self, and its digests
+// differ from a leader's in auth and CORS exactly when one of the two is
+// drifted. A mismatch is an ERROR the first time since the last match, or since
+// a WARN, and a DEBUG line after; a match is an INFO after a mismatch or a WARN
+// since the last match, and a DEBUG line otherwise. A WARN, the line of a
+// failed fetch, stays as it is. A line that names self, or no node of nodes,
+// fails the test: a node that leads checks nothing.
+func checkRules(t *testing.T, self, drifted string, nodes map[string]bool, lines []checkLine) []checkLine {
 	t.Helper()
-	waitFor(t, 10*time.Second, node+" logs "+want.String(), func() bool {
-		for _, line := range checkLines(t, logs) {
-			if line.String() == want.String() {
-				return true
-			}
+	var (
+		logged = map[string]bool{} // the leaders whose mismatch an ERROR logged since the last match
+		warned bool                // a WARN since the last line that compared digests
+	)
+	want := make([]checkLine, 0, len(lines))
+	for _, line := range lines {
+		if line.message == configFetchFailed {
+			warned = true
+			want = append(want, line)
+			continue
 		}
-		return false
-	})
+		if line.leader == self || !nodes[line.leader] {
+			t.Fatalf("%s's check logged %v, which names %q: neither itself nor another node can lead then", self, line, line.leader)
+		}
+		if (self == drifted) == (line.leader == drifted) {
+			level := "debug"
+			if len(logged) > 0 || warned {
+				level = "info"
+			}
+			want = append(want, checkLine{level: level, message: configMatches, leader: line.leader})
+			logged, warned = map[string]bool{}, false
+			continue
+		}
+		level := "debug"
+		if !logged[line.leader] || warned {
+			level = "error"
+		}
+		want = append(want, checkLine{level: level, message: configDiffers, leader: line.leader, groups: []string{cluster.GroupAuth, cluster.GroupCORS}})
+		logged[line.leader], warned = true, false
+	}
+	return want
 }
 
 // On real raft nodes over mutual TLS, the check of every follower fetches its
 // leader's digests over the raft port, at its start and again at each change
 // of leader, which leadership transfers make here: n1 and n2 share their
-// settings, and n3's differ in auth and CORS. While n1 and then n2 lead, n3
-// logs one ERROR for each, naming auth and CORS, and the other follower logs a
-// match at DEBUG. When n3 leads, it checks nothing, and n1 and n2 each log the
-// ERROR: a drifted node that comes to lead is caught too. When n1 leads again,
-// n2's match ends its mismatch with one INFO, and n3, which logged n1's digests
-// already, logs them at DEBUG only. No other ERROR or INFO line is logged.
+// settings, and n3's differ in auth and CORS. The leadership goes to n1, n2,
+// n3 and n1 again; each time the check of every other node logs a line for the
+// new leader. hashicorp/raft's transfer to a node can elect another first,
+// which moveLeadership then transfers from, so a check can see a leader more
+// than the four, and log lines for it too. So every line a check logged is held
+// against the rules of ConfigCheck's doc for the leaders the lines name, in
+// order (checkRules), and these hold whatever the extra leaders: n3 logs an
+// ERROR for n1 and for n2, as its digests differ from both; n1 and n2 each log
+// an ERROR for n3, so a drifted node that comes to lead is caught too; n2's
+// match with n1 at the end is an INFO, as it ends the mismatch with n3; and n3,
+// which never matches, logs n1's digests at DEBUG only at the end, as it logged
+// them before. No fetch fails between the running nodes, so no line is a WARN.
 func TestConfigCheckFollowsTheLeader(t *testing.T) {
 	shared, drifted := testDigests(1), testDigests(1)
 	drifted[0][0] ^= 0xFF
 	drifted[3][0] ^= 0xFF
 	c := loopbackNodes(t, "n1", "n2", "n3")
 	digests := map[string]cluster.Digests{"n1": shared, "n2": shared, "n3": drifted}
+	nodes := map[string]bool{}
 	for _, n := range c.nodes {
+		nodes[n.id] = true
 		n.start(t, c.discovery(t), withConfigDigests(digests[n.id]))
 	}
 	moveLeadership(t, c, "n1")
@@ -455,42 +495,96 @@ func TestConfigCheckFollowsTheLeader(t *testing.T) {
 			<-done
 		})
 	}
+	// checked waits until the check of every node but leader logged a line that
+	// names leader, among those it logged after the counts of before.
+	checked := func(leader string, before map[string]int) {
+		t.Helper()
+		for _, n := range c.nodes {
+			if n.id == leader {
+				continue
+			}
+			waitFor(t, 10*time.Second, n.id+" checks the leader "+leader, func() bool {
+				for _, line := range checkLines(t, logs[n.id])[before[n.id]:] {
+					if line.leader == leader {
+						return true
+					}
+				}
+				return false
+			})
+		}
+	}
+	// lead moves the leadership to id, and waits until every other node checked it.
+	lead := func(id string) {
+		t.Helper()
+		before := map[string]int{}
+		for _, n := range c.nodes {
+			before[n.id] = len(checkLines(t, logs[n.id]))
+		}
+		moveLeadership(t, c, id)
+		checked(id, before)
+	}
+	checked("n1", map[string]int{})
+	lead("n2")
+	lead("n3")
+	lead("n1")
+
 	differs := func(level, leader string) checkLine {
 		return checkLine{level: level, message: configDiffers, leader: leader, groups: []string{cluster.GroupAuth, cluster.GroupCORS}}
 	}
 	matches := func(level, leader string) checkLine {
 		return checkLine{level: level, message: configMatches, leader: leader}
 	}
-
-	waitForLine(t, "n3", logs["n3"], differs("error", "n1"))
-	waitForLine(t, "n2", logs["n2"], matches("debug", "n1"))
-
-	moveLeadership(t, c, "n2")
-	waitForLine(t, "n3", logs["n3"], differs("error", "n2"))
-	waitForLine(t, "n1", logs["n1"], matches("debug", "n2"))
-
-	moveLeadership(t, c, "n3")
-	waitForLine(t, "n1", logs["n1"], differs("error", "n3"))
-	waitForLine(t, "n2", logs["n2"], differs("error", "n3"))
-
-	moveLeadership(t, c, "n1")
-	waitForLine(t, "n2", logs["n2"], matches("info", "n1"))
-	waitForLine(t, "n3", logs["n3"], differs("debug", "n1"))
-
-	want := map[string][]checkLine{
-		"n1": {differs("error", "n3")},
-		"n2": {differs("error", "n3"), matches("info", "n1")},
-		"n3": {differs("error", "n1"), differs("error", "n2")},
-	}
+	lines := map[string][]checkLine{}
 	for _, n := range c.nodes {
-		var got []checkLine
-		for _, line := range checkLines(t, logs[n.id]) {
-			if line.level != "debug" {
-				got = append(got, line)
+		lines[n.id] = checkLines(t, logs[n.id])
+		if want := checkRules(t, n.id, "n3", nodes, lines[n.id]); fmt.Sprint(lines[n.id]) != fmt.Sprint(want) {
+			t.Fatalf("%s's check logged\n%v\nwant by the rules, for the leaders it names\n%v", n.id, lines[n.id], want)
+		}
+		for _, line := range lines[n.id] {
+			if line.level == "warn" {
+				t.Fatalf("%s's check logged %v: a fetch failed between running nodes", n.id, line)
 			}
 		}
-		if fmt.Sprint(got) != fmt.Sprint(want[n.id]) {
-			t.Fatalf("%s's check logged\n%v\nabove DEBUG, want\n%v", n.id, got, want[n.id])
+	}
+	// has reports whether node logged want, after the first line that is after.
+	has := func(node string, want checkLine, after *checkLine) bool {
+		seen := after == nil
+		for _, line := range lines[node] {
+			if seen && line.String() == want.String() {
+				return true
+			}
+			seen = seen || line.String() == after.String()
 		}
+		return false
+	}
+	for _, must := range []struct {
+		node        string
+		line, after checkLine
+		ordered     bool
+	}{
+		{node: "n3", line: differs("error", "n1")},
+		{node: "n3", line: differs("error", "n2")},
+		{node: "n1", line: differs("error", "n3")},
+		{node: "n2", line: differs("error", "n3")},
+		{node: "n2", line: matches("info", "n1"), after: differs("error", "n3"), ordered: true},
+		{node: "n3", line: differs("debug", "n1"), after: differs("error", "n1"), ordered: true},
+	} {
+		after := (*checkLine)(nil)
+		if must.ordered {
+			after = &must.after
+		}
+		if !has(must.node, must.line, after) {
+			t.Fatalf("%s's check did not log %v, after %v: it logged\n%v", must.node, must.line, after, lines[must.node])
+		}
+	}
+	// The last line for n1 on n3 is the one of n1's last leadership: a DEBUG.
+	var last checkLine
+	for _, line := range lines["n3"] {
+		if line.leader == "n1" {
+			last = line
+		}
+	}
+	if last.String() != differs("debug", "n1").String() {
+		t.Fatalf("n3's last line for n1 is %v, want %v", last, differs("debug", "n1"))
 	}
 }

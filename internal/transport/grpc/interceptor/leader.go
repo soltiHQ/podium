@@ -65,16 +65,24 @@ type LeaderOptions struct {
 //     codes.Unavailable "not the leader" with the x-leader hint.
 //
 // The x-leader hint is the leader's gRPC address, host:port ([cluster.LeaderAddr] with LeaderOptions.Port), in the
-// header metadata. It is not sent when that address cannot be derived: no leader is known, or the port is 0.
+// header metadata. It is not sent when that address cannot be derived: no leader is known, or the port is 0. A call
+// it passes on carries, in its context, how to ask where the leader is, for a handler whose call meets a leadership
+// error all the same (HintLeader).
 func UnaryLeader(leadership cluster.Leadership, opts LeaderOptions) grpc.UnaryServerInterceptor {
 	isWrite := opts.IsWrite
 	if isWrite == nil {
 		isWrite = allWrites
 	}
+	leaderOf := func() string {
+		if leadership.AmLeader() {
+			return ""
+		}
+		return cluster.LeaderAddr(leadership.CurrentLeader(), opts.Port)
+	}
 
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		if !isWrite(info.FullMethod) || leadership.AmLeader() {
-			return handler(ctx, req)
+			return handler(context.WithValue(ctx, leaderKey{}, leaderOf), req)
 		}
 		leader := cluster.LeaderAddr(leadership.CurrentLeader(), opts.Port)
 		if leader != "" && opts.Forwarder.forwards(info.FullMethod) && !forwarded(ctx) {
@@ -86,6 +94,25 @@ func UnaryLeader(leadership cluster.Leadership, opts LeaderOptions) grpc.UnarySe
 }
 
 func allWrites(string) bool { return true }
+
+// leaderKey is the context key of the function, which UnaryLeader puts in the context of a call it passes on, that
+// gives the leader's gRPC address as this node knows it when it is called: empty while this node leads or knows no
+// leader.
+type leaderKey struct{}
+
+// HintLeader answers, for a handler, a call that met a leadership error after UnaryLeader passed it on: on a leader
+// that lost its leadership while it served the call, or on a deposed leader whose check of its leadership failed. It
+// sets the x-leader hint to the leader's gRPC address as this node knows it then, and marks the call as a routing
+// answer, which UnaryLogger logs at WARN, as it logs a write UnaryLeader refuses. The handler answers the call
+// Unavailable. Without a leader known, or for a call that UnaryLeader did not pass on, it sets nothing, and the call
+// stays a failure, at ERROR, as an Unavailable without the hint is.
+func HintLeader(ctx context.Context) {
+	leader, ok := ctx.Value(leaderKey{}).(func() string)
+	if !ok {
+		return
+	}
+	hintNotLeader(ctx, leader())
+}
 
 // hintKey is the context key of a hintSlot.
 type hintKey struct{}
@@ -205,15 +232,20 @@ func (f *Forwarder) conn(addr string) (*grpc.ClientConn, error) {
 	if f.client != nil && f.addr == addr {
 		return f.client, nil
 	}
-	conn, err := grpc.NewClient("passthrough:///"+addr, grpc.WithTransportCredentials(f.creds))
+	// Straight to the leader, never through the proxy that HTTPS_PROXY names: grpc-go would take it from the
+	// environment, and the leader would then see the proxy as the peer, which it trusts for no forwarding
+	// metadata, and every forwarded agent as one client of its limiter.
+	conn, err := grpc.NewClient("passthrough:///"+addr, grpc.WithTransportCredentials(f.creds), grpc.WithNoProxy())
 	if err != nil {
 		return nil, err
 	}
 	if f.client != nil {
 		// The former leader's. Closing it ends the calls still in flight on it: each answers its caller
-		// Unavailable "leader unreachable", or Canceled when the former leader had begun to answer. That is
-		// transient, as this node now knows another leader, and the caller retries it as any Unavailable; a Sync
-		// is safe to repeat.
+		// Unavailable "leader unreachable", when the former leader had not begun to answer, or Canceled, the
+		// code grpc-go gives a call cut on a closing connection, when it had. That is transient, as this node now
+		// knows another leader: a client retries an Unavailable as any other, and a Canceled call as it retries
+		// one it gave up itself, and an agent's next sync goes to the new leader in either case; a Sync is safe
+		// to repeat.
 		_ = f.client.Close()
 	}
 	f.addr, f.client = addr, conn

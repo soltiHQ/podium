@@ -50,8 +50,11 @@ func (s *logSink) levels(t *testing.T, message string) []string {
 // that reached a follower is a routing condition, not a failure of the node, as
 // the HTTP access log has it for a 503 with X-Leader. A follower passes on the
 // routing answer of a node it forwarded to, that node's hint included, and logs
-// it at WARN too. Every other failure stays an ERROR: an Unavailable without the
-// hint, and "leader unreachable", which keeps its hint, as HTTP's 502 does.
+// it at WARN too, and so does a handler whose call met a leadership error after
+// UnaryLeader passed it on, and that answers it with HintLeader, which gives the
+// hint of the leader the node knows by then. Every other failure stays an
+// ERROR: an Unavailable without the hint, such as a handler's when no leader is
+// known, and "leader unreachable", which keeps its hint, as HTTP's 502 does.
 func TestUnaryLoggerLogsRoutingAnswersAtWarn(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -84,6 +87,22 @@ func TestUnaryLoggerLogsRoutingAnswersAtWarn(t *testing.T) {
 		}, codes.Unavailable, "", "error"},
 		{"an Unavailable of the handler", func(t *testing.T, logged grpc.UnaryServerInterceptor) *node {
 			return serve(t, status.Error(codes.Unavailable, "unavailable"), logged, UnaryLeader(&leaderStub{leading: true}, LeaderOptions{Port: 50051}))
+		}, codes.Unavailable, "", "error"},
+		{"a leadership error of the handler", func(t *testing.T, logged grpc.UnaryServerInterceptor) *node {
+			leadership := &leaderStub{leading: true, leader: "10.0.0.1:7000"}
+			lost := func(ctx context.Context) {
+				leadership.stepDown("10.0.0.2:7000")
+				HintLeader(ctx)
+			}
+			return serveDuring(t, lost, status.Error(codes.Unavailable, "unavailable"), logged, UnaryLeader(leadership, LeaderOptions{Port: 50051}))
+		}, codes.Unavailable, "10.0.0.2:50051", "warn"},
+		{"a leadership error of the handler, no leader known", func(t *testing.T, logged grpc.UnaryServerInterceptor) *node {
+			leadership := &leaderStub{leading: true, leader: "10.0.0.1:7000"}
+			lost := func(ctx context.Context) {
+				leadership.stepDown("")
+				HintLeader(ctx)
+			}
+			return serveDuring(t, lost, status.Error(codes.Unavailable, "unavailable"), logged, UnaryLeader(leadership, LeaderOptions{Port: 50051}))
 		}, codes.Unavailable, "", "error"},
 		{"another error", func(t *testing.T, logged grpc.UnaryServerInterceptor) *node {
 			return serve(t, status.Error(codes.Unauthenticated, "agent authentication failed"), logged, UnaryLeader(&leaderStub{leading: true}, LeaderOptions{Port: 50051}))

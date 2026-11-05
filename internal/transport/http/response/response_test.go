@@ -136,11 +136,15 @@ func TestPreconditionFailedNegotiates(t *testing.T) {
 }
 
 // UnprocessableEntity and NotLeader answer with the message they are given:
-// 422, and 503 with the leader's HTTP address in X-Leader when the Leader
-// middleware knows it, none otherwise. UnavailableMsg is the 503 without it.
+// 422, and 503 with the leader's HTTP address that its caller read from the
+// Leader middleware in X-Leader, none when it read none. UnavailableMsg is the
+// 503 without it.
 func TestAnswersWithAMessage(t *testing.T) {
 	const msg = "a message of the handler"
 	hint := func() string { return "10.0.0.2:8080" }
+	notLeader := func(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, msg string) {
+		NotLeader(w, r, mode, httpctx.Leader(r.Context()), msg)
+	}
 	for _, tt := range []struct {
 		name   string
 		answer func(http.ResponseWriter, *http.Request, httpctx.RenderMode, string)
@@ -149,8 +153,8 @@ func TestAnswersWithAMessage(t *testing.T) {
 		header string // X-Leader
 	}{
 		{"unprocessable", UnprocessableEntity, hint, http.StatusUnprocessableEntity, ""},
-		{"not the leader", NotLeader, hint, http.StatusServiceUnavailable, "10.0.0.2:8080"},
-		{"not the leader, no leader known", NotLeader, nil, http.StatusServiceUnavailable, ""},
+		{"not the leader", notLeader, hint, http.StatusServiceUnavailable, "10.0.0.2:8080"},
+		{"not the leader, no leader known", notLeader, nil, http.StatusServiceUnavailable, ""},
 		{"unavailable", UnavailableMsg, hint, http.StatusServiceUnavailable, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

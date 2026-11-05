@@ -106,6 +106,11 @@ var ErrDataDirNotPrivate = errors.New("the raft data directory and its snapshots
 // so that tests can see what the stores hold when raft starts.
 var newRaft = hraft.NewRaft
 
+// identityMismatch is the ERROR of a node with raft state whose stored
+// configuration holds no server with its node_id at its advertise address (see
+// checkIdentity).
+const identityMismatch = "raft: this node is not in its stored raft configuration as its node_id at its advertise_addr, and the cluster knows its nodes by the IDs and addresses of that configuration (servers): under another node_id this node is never elected, and at another advertise_addr its peers still dial the stored address. A node renamed or re-addressed since its raft state was written must be removed from the cluster, its data_dir wiped, and added again with cluster.raft.join: true"
+
 // Profile bundles the Raft-backed storage.Storage with a cluster.Leadership.
 type Profile struct {
 	cfg Config
@@ -126,11 +131,15 @@ type Profile struct {
 
 // New builds and starts a Raft profile. It expects a configuration that
 // [cluster.Config.Validate] accepted, and checks only that NodeID, BindAddr
-// and DataDir are set, and that the transport has TLS or may run plain TCP.
-// It loads the TLS files and checks the node's certificate before it makes
-// DataDir, which it makes 0700, as its snapshots directory, and refuses, before
-// it opens anything there, when either is open to its group or others (see
-// privateDir).
+// and DataDir are set, that the transport has TLS or may run plain TCP, and
+// that hashicorp/raft accepts the timings. It loads the TLS files and checks
+// the node's certificate before it makes DataDir, which it makes 0700, as its
+// snapshots directory, and refuses, before it opens anything there, when either
+// is open to its group or others (see privateDir). A caller that skipped
+// Validate and advertises every interface (0.0.0.0, ::) or no host gets
+// ErrNodeCertificate over TLS, as the node's certificate is checked for that
+// host first, and errNotAdvertisable on plain TCP, before the transport
+// listens.
 //
 // On first start (empty DataDir) the node derives its server list from
 // disco.Peers() (see bootstrapServers) before its transport listens, and
@@ -138,7 +147,9 @@ type Profile struct {
 // A node that joins (Config.Join) does neither on its first start: it starts
 // raft with no configuration, and the leader of a running cluster adds it. On
 // subsequent starts the on-disk state is loaded and the cluster re-formed
-// automatically, without asking disco, join or not.
+// automatically, without asking disco, join or not; the node checks that its
+// stored configuration holds it as NodeID at its advertise address, and logs an
+// ERROR when not (checkIdentity).
 func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discovery, logger zerolog.Logger) (*Profile, error) {
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("raft: NodeID is required")
@@ -165,38 +176,20 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 	}
 	logger = logger.With().Str("profile", "raft").Logger()
 
+	rcfg := raftConfig(cfg, logger)
+	// hashicorp/raft checks its settings only once BootstrapCluster or NewRaft
+	// runs, after the stores open and the transport listens, and names its own
+	// fields: the error names the settings an operator writes, before anything
+	// is made. cluster.Config.Validate refuses the same values earlier.
+	if err := hraft.ValidateConfig(rcfg); err != nil {
+		return nil, fmt.Errorf("raft: hashicorp/raft refuses the timing settings (cluster.raft.election_timeout_ms, heartbeat_timeout_ms, snapshot_interval): %w", err)
+	}
+
 	for _, dir := range []string{cfg.DataDir, filepath.Join(cfg.DataDir, snapshotsDir)} {
 		if err := privateDir(dir); err != nil {
 			return nil, err
 		}
 	}
-
-	rcfg := hraft.DefaultConfig()
-	rcfg.LocalID = hraft.ServerID(cfg.NodeID)
-	if cfg.ElectionTimeout > 0 {
-		rcfg.ElectionTimeout = cfg.ElectionTimeout
-	}
-	if cfg.HeartbeatTimeout > 0 {
-		rcfg.HeartbeatTimeout = cfg.HeartbeatTimeout
-	}
-	if cfg.SnapshotInterval > 0 {
-		rcfg.SnapshotInterval = cfg.SnapshotInterval
-	}
-	if cfg.SnapshotThreshold > 0 {
-		rcfg.SnapshotThreshold = cfg.SnapshotThreshold
-	}
-	if cfg.TrailingLogs > 0 {
-		rcfg.TrailingLogs = cfg.TrailingLogs
-	}
-	// LeaderLeaseTimeout must be <= HeartbeatTimeout; Raft rejects the
-	// config otherwise. Default is 500ms — when the caller tightens
-	// heartbeats (e.g. tests with 50ms) we must bring the lease down too.
-	if rcfg.LeaderLeaseTimeout > rcfg.HeartbeatTimeout {
-		rcfg.LeaderLeaseTimeout = rcfg.HeartbeatTimeout
-	}
-	// hashicorp/raft logs through the node's logger, in place of its own on
-	// stderr, as do the snapshot store and the transport below.
-	rcfg.Logger = newHCLog(logger, "raft")
 
 	// The advertise address is resolved only to check that peers can dial it.
 	// The transport gives raft the address as written, as the bootstrap
@@ -261,6 +254,9 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 	if err != nil {
 		return nil, fmt.Errorf("raft: has existing state: %w", err)
 	}
+	if hasState {
+		checkIdentity(cfg.NodeID, advertise, logStore, snap, logger)
+	}
 	// Bootstrap if log is empty (first start in this DataDir), unless the node
 	// joins a running cluster. The server list comes first, so a list this node
 	// cannot bootstrap with fails the start before the transport listens and
@@ -320,6 +316,70 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 	hub.SetWriter(NewEventWriter(r, hub))
 	constructed = true
 	return p, nil
+}
+
+// raftConfig is the hashicorp/raft configuration of cfg: hashicorp/raft's
+// defaults, with the timings and the compaction settings that cfg sets, and the
+// node's logger in place of hashicorp/raft's own on stderr.
+func raftConfig(cfg Config, logger zerolog.Logger) *hraft.Config {
+	rcfg := hraft.DefaultConfig()
+	rcfg.LocalID = hraft.ServerID(cfg.NodeID)
+	if cfg.ElectionTimeout > 0 {
+		rcfg.ElectionTimeout = cfg.ElectionTimeout
+	}
+	if cfg.HeartbeatTimeout > 0 {
+		rcfg.HeartbeatTimeout = cfg.HeartbeatTimeout
+	}
+	if cfg.SnapshotInterval > 0 {
+		rcfg.SnapshotInterval = cfg.SnapshotInterval
+	}
+	if cfg.SnapshotThreshold > 0 {
+		rcfg.SnapshotThreshold = cfg.SnapshotThreshold
+	}
+	if cfg.TrailingLogs > 0 {
+		rcfg.TrailingLogs = cfg.TrailingLogs
+	}
+	// LeaderLeaseTimeout must be <= HeartbeatTimeout; Raft rejects the
+	// config otherwise. Default is 500ms — when the caller tightens
+	// heartbeats (e.g. tests with 50ms) we must bring the lease down too.
+	if rcfg.LeaderLeaseTimeout > rcfg.HeartbeatTimeout {
+		rcfg.LeaderLeaseTimeout = rcfg.HeartbeatTimeout
+	}
+	// hashicorp/raft logs through the node's logger, in place of its own on
+	// stderr, as do the snapshot store and the transport New opens.
+	rcfg.Logger = newHCLog(logger, "raft")
+	return rcfg
+}
+
+// checkIdentity logs one ERROR, identityMismatch, when the latest
+// configuration stored in logs and snaps holds no server with nodeID at
+// advertise, compared as written: the node of a restart under another
+// node_id, or at another advertise address, which its peers know by the ID and
+// the address of that configuration. hashicorp/raft makes a candidate only of a
+// voter of its configuration, by ID (runFollower in v1.8.0, which logs a WARN
+// "not part of stable configuration, aborting election"), and its peers dial a
+// member at its stored address. It fails nothing, so that no edge case keeps a
+// node down. A stored configuration without a server, that of a joining node
+// the leader has not reached, logs nothing; stores it cannot read log a WARN,
+// and NewRaft reads them next.
+func checkIdentity(nodeID, advertise string, logs hraft.LogStore, snaps hraft.SnapshotStore, logger zerolog.Logger) {
+	conf, _, err := latestConfiguration(logs, snaps)
+	if err != nil {
+		logger.Warn().Err(err).Str("node_id", nodeID).Str("advertise_addr", advertise).
+			Msg("raft: cannot read the stored configuration to check this node's node_id and advertise address against it")
+		return
+	}
+	if len(conf.Servers) == 0 {
+		return
+	}
+	servers := make([]string, 0, len(conf.Servers))
+	for _, s := range conf.Servers {
+		if string(s.ID) == nodeID && string(s.Address) == advertise {
+			return
+		}
+		servers = append(servers, string(s.ID)+"="+string(s.Address))
+	}
+	logger.Error().Str("node_id", nodeID).Str("advertise_addr", advertise).Strs("servers", servers).Msg(identityMismatch)
 }
 
 // Store returns the Raft-backed storage.Storage.

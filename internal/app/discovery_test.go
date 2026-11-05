@@ -33,7 +33,82 @@ import (
 const (
 	agentAuthDisabledWarning = "agent authentication disabled: any host that reaches the discovery listeners can register agents"
 	openDiscoveryWarning     = "agent authentication covers enrolled agents only: the first sync of an unknown agent ID enrolls it and sets the endpoint podium calls, so set SOLTI_AGENT_AUTH_ENROLL_SECRET or tls.server.client_ca_file, or keep the discovery listeners reachable only from agent networks"
+	// The startup warnings of a raft node about its forwards to the leader.
+	plaintextForwardingWarning = "raft forwarding runs plaintext: without tls.server a follower forwards the writes it gets, logins, cookies and tokens included, and the agents' syncs to the leader over plain HTTP and gRPC; set tls.server on every node, and tls.client.ca_file to the CA of the nodes' server certificates"
+	uncertifiedForwardWarning  = "agent mTLS is on (tls.server.client_ca_file) and tls.client.cert_file is unset: a follower presents no client certificate when it forwards an agent's sync to the leader, whose discovery listeners require one, so every sync that reaches a follower fails; set tls.client.cert_file and key_file to a certificate the agents' CA signed"
 )
+
+// forwardingWarnings returns the messages of the startup warnings about a raft
+// node's forwards, found in a JSON log.
+func forwardingWarnings(t *testing.T, logs []byte) []string {
+	t.Helper()
+	var out []string
+	for _, line := range bytes.Split(bytes.TrimSpace(logs), []byte("\n")) {
+		var entry map[string]any
+		if json.Unmarshal(line, &entry) != nil || entry["level"] != "warn" {
+			continue
+		}
+		if msg, _ := entry["message"].(string); msg == plaintextForwardingWarning || msg == uncertifiedForwardWarning {
+			out = append(out, msg)
+		}
+	}
+	return out
+}
+
+// A raft node says at start what its forwards to the leader lack, once per
+// case: without tls.server a follower forwards logins, cookies and tokens in
+// plaintext; with agent mTLS on and no tls.client certificate, it forwards an
+// agent's sync without the client certificate the leader's discovery listeners
+// require. TLS with a client certificate, or without agent mTLS, needs nothing.
+func TestRaftNodeWarnsWhatItsForwardsLack(t *testing.T) {
+	for _, tc := range []struct {
+		name                      string
+		serverTLS, clientCA, cert bool
+		want                      []string
+	}{
+		{name: "plaintext", want: []string{plaintextForwardingWarning}},
+		{name: "tls", serverTLS: true},
+		{name: "agent mTLS without a client certificate", serverTLS: true, clientCA: true, want: []string{uncertifiedForwardWarning}},
+		{name: "agent mTLS with a client certificate", serverTLS: true, clientCA: true, cert: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			if tc.serverTLS {
+				cfg.TLS.Server.CertFile, cfg.TLS.Server.KeyFile = "server.crt", "server.key"
+			}
+			if tc.clientCA {
+				cfg.TLS.Server.ClientCAFile = "agents-ca.pem"
+			}
+			if tc.cert {
+				cfg.TLS.Client.CertFile, cfg.TLS.Client.KeyFile = "client.crt", "client.key"
+			}
+			var logs bytes.Buffer
+			warnForwarding(zerolog.New(&logs), cfg)
+			if got := forwardingWarnings(t, logs.Bytes()); fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("warnings %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Standalone forwards nothing, and says nothing about forwards: a node without
+// TLS, which warns in raft mode, starts without the warning.
+func TestStandaloneWarnsOfNoForwarding(t *testing.T) {
+	var logs bytes.Buffer
+	cfg := config.Default()
+	cfg.Cluster.Standalone.Ephemeral = true
+	cfg.Auth.JWTSecret = strings.Repeat("standalone-forwarding-secret", 2)
+	a, err := New(context.Background(), cfg, zerolog.New(&logs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := forwardingWarnings(t, logs.Bytes()); len(got) != 0 {
+		t.Fatalf("standalone warned %q", got)
+	}
+}
 
 // discoveryWarnings returns the startup warnings about who can register
 // agents, found in a JSON log.

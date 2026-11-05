@@ -120,7 +120,13 @@ func TestMismatchedReplicaLogsError(t *testing.T) {
 		}
 		return counts
 	}
+	// The drifted node's ERRORs name the leaders it followed: n1 or n2, which
+	// share their settings, never itself, nor another ID or none.
+	followed := map[string]bool{nodes[0].id: true, nodes[1].id: true}
 	for id, count := range errorsByLeader(drifted) {
+		if !followed[id] {
+			t.Fatalf("%s logged an ERROR for the leader %q, want %s or %s", drifted.id, id, nodes[0].id, nodes[1].id)
+		}
 		if count != 1 {
 			t.Fatalf("%s logged %d ERROR lines for the leader %s, want one", drifted.id, count, id)
 		}

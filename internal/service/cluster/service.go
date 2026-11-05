@@ -108,7 +108,9 @@ func (s *Service) Status(_ context.Context) Status {
 //     would dial it (cluster.ErrPeerUnreachable): a typo must not add a voter
 //     nobody reaches, which would raise the quorum.
 //
-// A node that does not lead refuses with cluster.ErrNotLeader.
+// A node that does not lead refuses with cluster.ErrNotLeader, and so does one
+// that cannot confirm its leadership before it refuses from its configuration
+// (refuse).
 func (s *Service) AddMember(ctx context.Context, actor *identity.Identity, req AddRequest) error {
 	if err := checkMember(req.ID, req.Address); err != nil {
 		return err
@@ -120,13 +122,13 @@ func (s *Service) AddMember(ctx context.Context, actor *identity.Identity, req A
 	for _, m := range conf.Servers {
 		switch {
 		case m.ID == req.ID:
-			return ErrMemberExists
+			return s.refuse(ctx, conf, ErrMemberExists)
 		case m.Address == req.Address:
-			return &AddressInUseError{Member: m.ID, At: m.Address}
+			return s.refuse(ctx, conf, &AddressInUseError{Member: m.ID, At: m.Address})
 		}
 	}
 	if err := s.secondName(ctx, conf.Servers, req.Address); err != nil {
-		return err
+		return s.refuse(ctx, conf, err)
 	}
 	if err := s.raft.Probe(ctx, req.Address); err != nil {
 		s.logger.Warn().Err(err).Str("member_id", req.ID).Str("member_address", req.Address).
@@ -147,8 +149,11 @@ func (s *Service) AddMember(ctx context.Context, actor *identity.Identity, req A
 // address and the host of each member resolve as the transport dials them, to
 // themselves when they are IPs; a member's host that does not resolve, such as
 // the name of a dead member, counts for nothing, and a new address whose host
-// does not resolve is left to the probe, which then fails. The lookups end
-// within resolveTimeout.
+// does not resolve is left to the probe, which then fails. The lookups share
+// one bound, resolveTimeout: a lookup that it cuts short counts as a host that
+// does not resolve, so a DNS slower than the bound lets the address past this
+// check, which fails open, and only the probe stands between it and the
+// configuration.
 func (s *Service) secondName(ctx context.Context, members []cluster.Server, address string) error {
 	ctx, cancel := context.WithTimeout(ctx, resolveTimeout)
 	defer cancel()
@@ -205,7 +210,8 @@ func (s *Service) endpoints(ctx context.Context, address string) []netip.AddrPor
 // leaderWait passed, and the removal is repeated at the new leader, where it
 // removes a follower. A transfer that fails removes nothing either
 // (ErrTransferFailed). A node that does not lead refuses with
-// cluster.ErrNotLeader.
+// cluster.ErrNotLeader, and so does one that cannot confirm its leadership
+// before it refuses from its configuration (refuse).
 func (s *Service) RemoveMember(ctx context.Context, actor *identity.Identity, req RemoveRequest) error {
 	if req.ID == "" {
 		return ErrInvalidMember
@@ -216,15 +222,15 @@ func (s *Service) RemoveMember(ctx context.Context, actor *identity.Identity, re
 	}
 	i := slices.IndexFunc(conf.Servers, func(m cluster.Server) bool { return m.ID == req.ID })
 	if i < 0 {
-		return ErrUnknownMember
+		return s.refuse(ctx, conf, ErrUnknownMember)
 	}
 	member := conf.Servers[i]
 	if member.Suffrage == cluster.Voter {
 		switch left := conf.Voters() - 1; {
 		case left == 0:
-			return ErrLastVoter
+			return s.refuse(ctx, conf, ErrLastVoter)
 		case left < minVoters && !req.Force:
-			return ErrForceRequired
+			return s.refuse(ctx, conf, ErrForceRequired)
 		}
 	}
 	if member.ID == s.raft.NodeID() {
@@ -259,6 +265,23 @@ func (s *Service) leaderConfiguration() (cluster.Configuration, error) {
 		return cluster.Configuration{}, ErrConfigurationUnreadable
 	}
 	return conf, nil
+}
+
+// refuse returns refusal, a refusal that the rules read from conf, the node's
+// own configuration, once a quorum confirmed that this node still leads the
+// term it read conf in (cluster.Admin.VerifyLeader). A deposed leader, one
+// that a later term replaced and that has not heard of it yet, still leads in
+// its own view and reads a configuration that may lack the later term's
+// changes, so its refusal could be wrong: a member it calls unknown may have
+// been added, an ID it calls in use removed. A change that the rules let
+// through needs no check, as a deposed leader cannot commit it. A check that
+// fails is the answer in place of refusal: cluster.ErrNotLeader, which a client
+// may retry at the leader, and changed nothing.
+func (s *Service) refuse(ctx context.Context, conf cluster.Configuration, refusal error) error {
+	if err := s.raft.VerifyLeader(ctx, conf.Term); err != nil {
+		return fmt.Errorf("cluster: this node could not confirm its leadership before it refused the change: %w: %w", cluster.ErrNotLeader, err)
+	}
+	return refusal
 }
 
 // handOver transfers this node's leadership before its removal, and waits until
@@ -309,17 +332,18 @@ func (s *Service) changed(actor *identity.Identity, op, id, address string, forc
 		Msg("cluster membership changed")
 }
 
-// unknownOutcome logs a change whose outcome nobody knows: one that err says
-// lost leadership while it committed (cluster.ErrLeadershipLost), which can still
-// take effect. It is one WARN line with the fields that changed logs, as the
-// change may be one; a change that failed otherwise logs nothing here.
+// unknownOutcome logs a change whose outcome nobody knows, which err says
+// (cluster.ErrLeadershipLost): the node lost its leadership while the change
+// committed, or shut down before the change's future answered, and the change
+// can still take effect. It is one WARN line with the fields that changed logs,
+// as the change may be one; a change that failed otherwise logs nothing here.
 func (s *Service) unknownOutcome(err error, actor *identity.Identity, op, id, address string, force bool) {
 	if !errors.Is(err, cluster.ErrLeadershipLost) {
 		return
 	}
 	s.logger.Warn().Err(err).Str("actor_user_id", actorID(actor)).Str("operation", op).
 		Str("member_id", id).Str("member_address", address).Bool("force", force).
-		Msg("cluster membership change outcome unknown: leadership was lost while it committed, so it may still take effect; read the cluster status")
+		Msg("cluster membership change outcome unknown: the node lost its leadership, or shut down, before the change's outcome was known, so it may still take effect; read the cluster status")
 }
 
 // actorID is the user ID of actor, "unknown" without one.

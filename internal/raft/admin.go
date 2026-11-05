@@ -53,13 +53,24 @@ func (a *Admin) Servers() []cluster.Server {
 
 // Configuration implements cluster.Admin from the node's own stores, as
 // latestConfiguration reads them: hashicorp/raft v1.8.0 has no call that gives
-// the latest configuration with its index.
+// the latest configuration with its index. Its Term is the node's term, read
+// before the stores.
 func (a *Admin) Configuration() (cluster.Configuration, error) {
+	term := a.p.raft.CurrentTerm()
 	conf, index, err := latestConfiguration(a.p.logStore, a.p.snap)
 	if err != nil {
 		return cluster.Configuration{}, err
 	}
-	return cluster.Configuration{Index: index, Servers: servers(conf)}, nil
+	return cluster.Configuration{Term: term, Index: index, Servers: servers(conf)}, nil
+}
+
+// VerifyLeader implements cluster.Admin as a transaction of the store confirms
+// its leadership (confirmLeadership): hashicorp/raft's VerifyLeader, which
+// heartbeats the followers and writes nothing, within the bound of
+// awaitLeadership, and then a node that still leads term. A check that fails
+// is cluster.ErrNotLeader, or storage.ErrUnavailable once the node shut down.
+func (a *Admin) VerifyLeader(ctx context.Context, term uint64) error {
+	return confirmLeadership(ctx, a.p.raft, a.p.store.verifyLeader, term)
 }
 
 // Probe implements cluster.Admin with probe, within probeTimeout.
@@ -74,8 +85,12 @@ func (a *Admin) Probe(ctx context.Context, address string) error {
 
 // AddVoter implements cluster.Admin with hashicorp/raft's AddVoter, which
 // returns once the change committed, or failed, or the node shut down first
-// (awaitWrite). Its errors have the meaning membershipError gives them.
+// (awaitWrite). Its errors have the meaning membershipError gives them. A node
+// that shut down already proposes nothing (refuseStopped).
 func (a *Admin) AddVoter(id, address string, prevIndex uint64) (uint64, error) {
+	if err := refuseStopped(a.p.store.stopped); err != nil {
+		return 0, err
+	}
 	future := a.p.raft.AddVoter(hraft.ServerID(id), hraft.ServerAddress(address), prevIndex, 0)
 	if err := awaitWrite(future, a.p.store.stopped); err != nil {
 		return 0, membershipError(future, err)
@@ -86,6 +101,9 @@ func (a *Admin) AddVoter(id, address string, prevIndex uint64) (uint64, error) {
 // RemoveServer implements cluster.Admin as AddVoter does, with hashicorp/raft's
 // RemoveServer.
 func (a *Admin) RemoveServer(id string, prevIndex uint64) (uint64, error) {
+	if err := refuseStopped(a.p.store.stopped); err != nil {
+		return 0, err
+	}
 	future := a.p.raft.RemoveServer(hraft.ServerID(id), prevIndex, 0)
 	if err := awaitWrite(future, a.p.store.stopped); err != nil {
 		return 0, membershipError(future, err)

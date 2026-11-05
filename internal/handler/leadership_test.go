@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/soltiHQ/control-plane/domain/enum"
+	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
@@ -50,7 +51,9 @@ func TestWriteHandlersAnswerLeadershipErrorsWithTheLeader(t *testing.T) {
 			{"user update", http.MethodPut, "/api/v1/users/reader", `{"name":"Reader"}`},
 			{"user delete", http.MethodDelete, "/api/v1/users/reader", ""},
 			{"user disable", http.MethodPost, "/api/v1/users/reader/disable", ""},
+			{"password change", http.MethodPost, "/api/v1/users/reader/password", `{"password":"a-password-long-enough"}`},
 			{"session revoke", http.MethodPost, "/api/v1/session/reader-session/revoke", ""},
+			{"spec update", http.MethodPut, "/api/v1/specs/saved", `{"name":"Renamed","version":1,` + validKind + `}`},
 			{"spec delete", http.MethodDelete, "/api/v1/specs/saved", ""},
 			{"spec force-delete", http.MethodDelete, "/api/v1/specs/saved/force", ""},
 		} {
@@ -59,6 +62,13 @@ func TestWriteHandlersAnswerLeadershipErrorsWithTheLeader(t *testing.T) {
 				f := newAPIFixtureLogging(t, func(s storage.Storage) storage.Storage { return writesFail{Storage: s, err: failure.err} }, zerolog.New(&logs))
 				admin := f.user(t, "admin", enum.RoleAdminID)
 				f.user(t, "reader", enum.RoleUserReaderID)
+				saved, err := model.NewSpec("saved", "Saved spec", "lane")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := f.store.UpsertSpec(context.Background(), saved); err != nil {
+					t.Fatal(err)
+				}
 				logs.Reset()
 
 				r := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))

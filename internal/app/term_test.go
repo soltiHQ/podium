@@ -285,14 +285,19 @@ func waitForSeed(t *testing.T, nodes []*clusterNode) seedOutcome {
 	})
 
 	seed := seedOutcome{hash: hash}
+	generated, total := map[string]int{}, 0 // the generated lines of each node that logged any, and their sum
 	for _, n := range nodes {
 		lines := n.logged(t, map[string]any{"message": passwordGenerated})
-		if len(lines) > 1 || (len(lines) == 1 && seed.node != nil) {
-			t.Fatal("a password was generated twice")
+		if len(lines) > 0 {
+			generated[n.id] = len(lines)
+			total += len(lines)
 		}
-		if len(lines) == 1 {
+		if len(lines) == 1 && seed.node == nil {
 			seed.node, seed.line = n, lines[0]
 		}
+	}
+	if total > 1 {
+		t.Fatalf("a password was generated %d times, want once at most: %v", total, generated)
 	}
 	if seed.node != nil {
 		if path := seed.line.fields["path"]; path != seed.node.passwordFilePath() {
@@ -385,9 +390,11 @@ func TestSeedingIsIdempotentAcrossLeaders(t *testing.T) {
 	}
 
 	// The node whose file holds the password stops, and leadership leaves it if
-	// it still leads. A bootstrap run that another node finished found the
-	// administrator seeded, whatever its term: a run with something to seed
-	// generates a password or fails, and neither logs "done".
+	// it still leads. A bootstrap run that another node finished after that
+	// logged "done", which a run that seeded logs too, after its "generated"
+	// line: so the checks below make the test, not the wait. Every node held
+	// the administrator before the stop (waitForSeed), so a run that seeded again
+	// would leave a "generated" line on another node, or another stored hash.
 	seed.node.stop()
 	done := map[string]any{"runner": "bootstrap", "message": termTaskDone}
 	var next *clusterNode

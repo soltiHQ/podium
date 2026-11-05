@@ -9,13 +9,17 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/rs/zerolog"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	grpcstatus "google.golang.org/grpc/status"
@@ -23,12 +27,15 @@ import (
 	discoverv1 "github.com/soltiHQ/control-plane/api/gen/solti/discover/v1"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/clientip"
+	"github.com/soltiHQ/control-plane/internal/transport/grpc/interceptor"
+	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
 )
 
 // syncHTTP posts one proto-JSON heartbeat, with a bearer token when token is set.
@@ -887,5 +894,154 @@ func TestDeletedAgentSyncsAgainWithItsStoredToken(t *testing.T) {
 				t.Fatalf("stored token of agent-1: %q %v, want the one it enrolled with", token, err)
 			}
 		})
+	}
+}
+
+// lockedLogs collects what a logger writes; a gRPC server's goroutines write
+// while the test reads it.
+type lockedLogs struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *lockedLogs) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+// levels returns the level of every line whose fields hold every field of want.
+func (l *lockedLogs) levels(t *testing.T, want map[string]string) []string {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var levels []string
+	for _, raw := range strings.Split(strings.TrimSpace(l.buf.String()), "\n") {
+		var line map[string]any
+		if err := json.Unmarshal([]byte(raw), &line); err != nil {
+			t.Fatalf("log line %q: %v", raw, err)
+		}
+		matches := true
+		for key, value := range want {
+			matches = matches && line[key] == value
+		}
+		if matches {
+			levels = append(levels, fmt.Sprint(line["level"]))
+		}
+	}
+	return levels
+}
+
+// movedLeadership leads when it is first asked, as UnaryLeader asks before it
+// passes a write on, and follows leader after: a leader that lost its
+// leadership while it served the call.
+type movedLeadership struct {
+	asks   atomic.Int32
+	leader string // the raft address of the leader it follows once it lost its own leadership
+}
+
+func (l *movedLeadership) AmLeader() bool        { return l.asks.Add(1) == 1 }
+func (l *movedLeadership) CurrentLeader() string { return l.leader }
+func (*movedLeadership) WhenLeader(ctx context.Context, _ func(context.Context) error) error {
+	<-ctx.Done()
+	return nil
+}
+
+// A sync that meets a leadership error, on a leader that lost its leadership
+// while it served the sync or on a deposed leader whose check of the
+// leadership failed, is a routing condition, as for the API: both discovery
+// handlers log it at WARN, not ERROR, and answer it with the leader's address
+// when one is known. HTTP answers 503 with X-Leader; gRPC answers Unavailable
+// with x-leader, and marks the call, so that UnaryLogger logs it at WARN too,
+// once. Any other failure stays an ERROR, answered as before: 503 without the
+// header, and the gRPC code of the error. The sync fails at the token check,
+// with agent authentication required, or at the upsert, without.
+func TestDiscoveryAnswersLeadershipErrorsWithTheLeader(t *testing.T) {
+	const (
+		raftLeader = "10.0.0.2:7000"
+		body       = `{"id":"agent-a","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
+	)
+	for _, failure := range []struct {
+		name   string
+		err    error
+		routed bool // whether it is a leadership error
+	}{
+		{"not the leader", fmt.Errorf("raft: WithTx: %w", cluster.ErrNotLeader), true},
+		{"leadership lost", fmt.Errorf("raft: apply: %w", cluster.ErrLeadershipLost), true},
+		{"another failure", errors.New("disk on fire"), false},
+	} {
+		level := map[bool]string{true: "warn", false: "error"}[failure.routed]
+		for _, site := range []struct {
+			name        string
+			requireAuth bool
+			message     string // the handler's line about the failure
+		}{
+			{"token check", true, "token verify failed"},
+			{"upsert", false, "upsert failed"},
+		} {
+			t.Run(failure.name+", "+site.name+", http", func(t *testing.T) {
+				logs := &lockedLogs{}
+				hub := event.NewHub(zerolog.Nop())
+				defer hub.Close()
+				svc := agent.New(writesFail{Storage: inmemory.New(), err: failure.err}, zerolog.Nop())
+				h := NewHTTPDiscovery(zerolog.New(logs), svc, hub, discoveryLimiter(), nil, site.requireAuth)
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/sync", strings.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Authorization", "Bearer token-a")
+				// The Leader middleware tells the handler where the leader serves the listener.
+				req = req.WithContext(httpctx.WithLeader(req.Context(), func() string { return "10.0.0.2:8082" }))
+				res := httptest.NewRecorder()
+				h.Sync(res, req)
+
+				wantLeader := map[bool]string{true: "10.0.0.2:8082", false: ""}[failure.routed]
+				if res.Code != http.StatusServiceUnavailable || res.Header().Get("X-Leader") != wantLeader {
+					t.Fatalf("HTTP %d with X-Leader %q, want 503 with %q: %s", res.Code, res.Header().Get("X-Leader"), wantLeader, res.Body.String())
+				}
+				if got := logs.levels(t, map[string]string{"message": site.message}); len(got) != 1 || got[0] != level {
+					t.Fatalf("the handler logged %v for the failed sync, want one %s", got, level)
+				}
+			})
+			t.Run(failure.name+", "+site.name+", grpc", func(t *testing.T) {
+				logs := &lockedLogs{}
+				hub := event.NewHub(zerolog.Nop())
+				defer hub.Close()
+				svc := agent.New(writesFail{Storage: inmemory.New(), err: failure.err}, zerolog.Nop())
+				logger := zerolog.New(logs)
+				srv := grpc.NewServer(grpc.ChainUnaryInterceptor(
+					interceptor.UnaryRequestID(),
+					interceptor.UnaryLogger(logger),
+					interceptor.UnaryLeader(&movedLeadership{leader: raftLeader}, interceptor.LeaderOptions{Port: 50051}),
+				))
+				discoverv1.RegisterDiscoverServiceServer(srv, NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), nil, site.requireAuth))
+				lis, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				go func() { _ = srv.Serve(lis) }()
+				t.Cleanup(srv.Stop)
+				conn, err := grpc.NewClient("passthrough:///"+lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = conn.Close() })
+
+				var header metadata.MD
+				ctx := metadata.AppendToOutgoingContext(context.Background(), "authorization", "Bearer token-a")
+				_, err = discoverv1.NewDiscoverServiceClient(conn).Sync(ctx, &discoverv1.SyncRequest{Id: "agent-a", Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1}, grpc.Header(&header))
+				wantCode, wantHint := codes.Internal, []string(nil)
+				if failure.routed {
+					wantCode, wantHint = codes.Unavailable, []string{"10.0.0.2:50051"}
+				}
+				if grpcstatus.Code(err) != wantCode || !slices.Equal(header.Get(interceptor.LeaderKey), wantHint) {
+					t.Fatalf("Sync = %v with x-leader %q, want %v with %q", err, header.Get(interceptor.LeaderKey), wantCode, wantHint)
+				}
+				if got := logs.levels(t, map[string]string{"handler": "discovery-grpc", "message": site.message}); len(got) != 1 || got[0] != level {
+					t.Fatalf("the handler logged %v for the failed sync, want one %s", got, level)
+				}
+				if got := logs.levels(t, map[string]string{"message": "grpc request"}); len(got) != 1 || got[0] != level {
+					t.Fatalf("UnaryLogger logged the call at %v, want once at %s", got, level)
+				}
+			})
+		}
 	}
 }

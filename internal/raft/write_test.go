@@ -8,6 +8,7 @@ import (
 
 	hraft "github.com/hashicorp/raft"
 
+	raftv1 "github.com/soltiHQ/control-plane/api/gen/solti/raft/v1"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
@@ -82,6 +83,52 @@ func TestWriteOutcomeOfARaftShutdown(t *testing.T) {
 	}
 	if err := membershipError(&stubFuture{err: changed}, changed); !errors.Is(err, cluster.ErrConfigurationChanged) {
 		t.Fatalf("membershipError(%v) = %v, want %v", changed, err, cluster.ErrConfigurationChanged)
+	}
+
+	// A write of a node whose stop signal is closed already is refused before
+	// it is proposed: raft would refuse it unwritten, so it is
+	// storage.ErrUnavailable, never the unknown outcome that the closed signal
+	// gives a write in flight.
+	t.Run("proposed once the node shut down", func(t *testing.T) {
+		p := newSingleNode(t)
+		proposed := proposeStub(t, p, &stubFuture{index: 7})
+		stopped := make(chan struct{})
+		close(stopped)
+		p.store.stopped = stopped
+		err := p.Store().UpsertAgent(context.Background(), testAgent(t, "a1"))
+		if !errors.Is(err, storage.ErrUnavailable) || !errors.Is(err, hraft.ErrRaftShutdown) || errors.Is(err, cluster.ErrLeadershipLost) {
+			t.Fatalf("UpsertAgent = %v, want %v and %v, not %v", err, storage.ErrUnavailable, hraft.ErrRaftShutdown, cluster.ErrLeadershipLost)
+		}
+		if len(proposed) != 0 {
+			t.Fatal("the write of a node that shut down was proposed")
+		}
+	})
+}
+
+// The event hub's writer and the membership changes of a node that shut down
+// refuse every write before raft sees it: storage.ErrUnavailable, as raft wrote
+// nothing, every time. Proposed, each would race the closed stop signal in
+// awaitWrite, which answers a future that has not answered yet as an unknown
+// outcome.
+func TestWritesOfAStoppedNodeAreRefusedUnwritten(t *testing.T) {
+	p := newSingleNode(t)
+	if err := p.raft.Shutdown().Error(); err != nil {
+		t.Fatal(err)
+	}
+	events := NewEventWriter(p.raft, p.hub)
+	notify := &raftv1.Op{Op: &raftv1.Op_EventNotify{EventNotify: "refresh"}}
+	admin := p.Admin()
+	for i := range 20 {
+		for name, write := range map[string]func() error{
+			"an event":      func() error { return events.submit(notify) },
+			"an addition":   func() error { _, err := admin.AddVoter("n9", "127.0.0.1:1", 1); return err },
+			"a removal":     func() error { _, err := admin.RemoveServer("n1", 1); return err },
+			"a store write": func() error { return p.store.apply([]*raftv1.Op{notify}) },
+		} {
+			if err := write(); !errors.Is(err, storage.ErrUnavailable) || !errors.Is(err, hraft.ErrRaftShutdown) || errors.Is(err, cluster.ErrLeadershipLost) {
+				t.Fatalf("%s, attempt %d, on a node that shut down = %v, want %v, not %v", name, i+1, err, storage.ErrUnavailable, cluster.ErrLeadershipLost)
+			}
+		}
 	}
 }
 

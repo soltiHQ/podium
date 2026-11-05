@@ -325,8 +325,10 @@ func TestTermChangeBeforeApplyRefusesTheWrite(t *testing.T) {
 // storage.ErrUnavailable for a node that shut down. A check that passes leaves
 // the verdict as it is, and logs nothing. The first transaction of a term,
 // whose barrier committed through a quorum, and a transaction that proposes a
-// write, which a deposed leader cannot commit, check nothing. The seam is the
-// store's VerifyLeader. Three nodes on loopback with mutual TLS.
+// write, which a deposed leader cannot commit, check nothing. The check runs
+// once the transaction released txMu, so the round trip holds up no other
+// transaction. The seam is the store's VerifyLeader. Three nodes on loopback
+// with mutual TLS.
 func TestWriteFreeTransactionConfirmsTheLeadership(t *testing.T) {
 	c := newLoopbackCluster(t, "n1", "n2", "n3")
 	leader := c.leader(t, 10*time.Second)
@@ -334,11 +336,17 @@ func TestWriteFreeTransactionConfirmsTheLeadership(t *testing.T) {
 	ctx := context.Background()
 	var (
 		checks   atomic.Int32 // the checks of the leadership the store made
+		locked   atomic.Int32 // the checks that ran while txMu was held
 		checkErr error        // what the next check answers, the real check's answer when nil
 	)
 	verify := store.verifyLeader
 	store.verifyLeader = func() error {
 		checks.Add(1)
+		if store.txMu.TryLock() {
+			store.txMu.Unlock()
+		} else {
+			locked.Add(1)
+		}
 		if checkErr != nil {
 			return checkErr
 		}
@@ -418,5 +426,61 @@ func TestWriteFreeTransactionConfirmsTheLeadership(t *testing.T) {
 	checkErr = nil
 	if err := sessions.Revoke(ctx, nil, session.RevokeRequest{ID: "absent"}); err != nil {
 		t.Fatalf("a revoke of a missing session, the leadership confirmed = %v, want nil", err)
+	}
+	if n, all := locked.Load(), checks.Load(); n != 0 {
+		t.Fatalf("%d of %d checks of the leadership ran while the transaction held txMu, want none", n, all)
+	}
+}
+
+// The check of a transaction that skipped the barrier and proposes nothing
+// answers for the leadership term its function read in. A leadership that moved
+// away and back while the function ran is in a later term, which the check
+// confirms: the transaction answers cluster.ErrNotLeader, as the function may
+// have read a state that lacks what the other leader committed, and not its
+// function's verdict, though the check passed. The seam is the transaction's
+// own function, which moves the leadership to another node and back after its
+// read, and the store's VerifyLeader, which counts the checks that passed.
+// Three nodes on loopback with mutual TLS.
+func TestLeadershipCheckAnswersForTheTermOfTheRead(t *testing.T) {
+	c := newLoopbackCluster(t, "n1", "n2", "n3")
+	ctx := context.Background()
+	leader := c.leader(t, 10*time.Second)
+	other := c.follower(t, leader)
+	store := leader.profile.store
+	if err := store.UpsertAgent(ctx, testAgent(t, "ready")); err != nil { // the barrier of the term
+		t.Fatal(err)
+	}
+	var passed atomic.Int32
+	verify := store.verifyLeader
+	store.verifyLeader = func() error {
+		err := verify()
+		if err == nil {
+			passed.Add(1)
+		}
+		return err
+	}
+
+	startTerm := leader.profile.raft.CurrentTerm()
+	before := leader.profile.raft.LastIndex()
+	err := store.WithTx(ctx, func(tx storage.Storage) error {
+		if _, err := tx.GetSession(ctx, "absent"); !errors.Is(err, storage.ErrNotFound) {
+			return fmt.Errorf("a read of a missing session: %w", err)
+		}
+		moveLeadership(t, c, other.id)
+		moveLeadership(t, c, leader.id)
+		return storage.ErrNotFound // the verdict of a revoke of a missing session
+	})
+	if now := leader.profile.raft.CurrentTerm(); now <= startTerm || !leader.profile.leadership.AmLeader() {
+		t.Fatalf("%s is in term %d, leading: %v, want it to lead a term after %d", leader.id, now, leader.profile.leadership.AmLeader(), startTerm)
+	}
+	if passed.Load() != 1 {
+		t.Fatalf("%d checks of the leadership passed, want the one of the transaction, in its later term", passed.Load())
+	}
+	refusedBeforeProposing(t, "the transaction whose term changed before it answered", err)
+	if errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("WithTx = %v, the function's verdict from a read of an earlier term", err)
+	}
+	if got := loggedAfter(t, leader, before); got.commands != 0 {
+		t.Fatalf("the transaction logged %+v, want no command", got)
 	}
 }

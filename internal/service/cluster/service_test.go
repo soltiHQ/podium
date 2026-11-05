@@ -41,17 +41,18 @@ type stubAdmin struct {
 	asks       int            // the asks for the leader
 	conf       cluster.Configuration
 
-	confErr, probeErr, addErr, removeErr, transferErr error
+	confErr, probeErr, addErr, removeErr, transferErr, verifyErr error
 
 	probes    []string
 	changes   []change
 	transfers int
+	verified  []uint64 // the term of each check of the leadership
 }
 
 // leading is a stubAdmin for n1, which leads voters of the IDs, each at
-// 10.0.0.<i+1>:7000, in a configuration at index 7.
+// 10.0.0.<i+1>:7000, in a configuration at index 7 that it read in term 4.
 func leading(ids ...string) *stubAdmin {
-	s := &stubAdmin{nodeID: "n1", role: cluster.RoleLeader, conf: cluster.Configuration{Index: 7}}
+	s := &stubAdmin{nodeID: "n1", role: cluster.RoleLeader, conf: cluster.Configuration{Term: 4, Index: 7}}
 	for i, id := range ids {
 		s.conf.Servers = append(s.conf.Servers, cluster.Server{ID: id, Address: fmt.Sprintf("10.0.0.%d:7000", i+1), Suffrage: cluster.Voter})
 	}
@@ -84,7 +85,14 @@ func (s *stubAdmin) LastIndex() uint64 { return 42 }
 func (s *stubAdmin) Servers() []cluster.Server { return slices.Clone(s.conf.Servers) }
 
 func (s *stubAdmin) Configuration() (cluster.Configuration, error) {
-	return cluster.Configuration{Index: s.conf.Index, Servers: slices.Clone(s.conf.Servers)}, s.confErr
+	return cluster.Configuration{Term: s.conf.Term, Index: s.conf.Index, Servers: slices.Clone(s.conf.Servers)}, s.confErr
+}
+
+func (s *stubAdmin) VerifyLeader(_ context.Context, term uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.verified = append(s.verified, term)
+	return s.verifyErr
 }
 
 func (s *stubAdmin) Probe(_ context.Context, address string) error {
@@ -229,6 +237,79 @@ func TestAddMemberRules(t *testing.T) {
 	}
 }
 
+// A refusal that the rules read from the node's own configuration, an ID or an
+// address in use, an unknown ID, the force guard or the last voter, is answered
+// only once a quorum confirmed that the node still leads the term it read the
+// configuration in: a deposed leader reads a stale configuration, and would
+// refuse on it. A check that fails answers cluster.ErrNotLeader in place of the
+// refusal, and changes nothing. A refusal of the request itself checks
+// nothing, and neither does a change that the rules let through, which a
+// deposed leader cannot commit.
+func TestRefusalsFromTheConfigurationConfirmTheLeadership(t *testing.T) {
+	add := func(id, address string) func(*Service, *stubAdmin) error {
+		return func(svc *Service, _ *stubAdmin) error {
+			return svc.AddMember(context.Background(), admin, AddRequest{ID: id, Address: address})
+		}
+	}
+	remove := func(id string, force bool, voters ...string) func(*Service, *stubAdmin) error {
+		return func(svc *Service, raft *stubAdmin) error {
+			if len(voters) > 0 {
+				raft.conf.Servers = leading(voters...).conf.Servers
+			}
+			return svc.RemoveMember(context.Background(), admin, RemoveRequest{ID: id, Force: force})
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		change  func(*Service, *stubAdmin) error
+		refusal error // nil: no refusal of the configuration's
+		checked bool
+	}{
+		{"an ID in use", add("n2", "10.0.0.4:7000"), ErrMemberExists, true},
+		{"an address in use", add("n4", "10.0.0.2:7000"), ErrAddressInUse, true},
+		{"another name of a member's address", add("n4", "podium-2.podium:7000"), ErrAddressInUse, true},
+		{"an unknown ID", remove("n9", true), ErrUnknownMember, true},
+		{"a removal that needs force", remove("n3", false), ErrForceRequired, true},
+		{"the last voter", remove("n1", true, "n1"), ErrLastVoter, true},
+		{"a member without an ID", add("", "10.0.0.4:7000"), ErrInvalidMember, false},
+		{"an addition", add("n4", "10.0.0.4:7000"), nil, false},
+		{"a removal", remove("n3", true), nil, false},
+	} {
+		for _, confirmed := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s, leadership confirmed %v", tc.name, confirmed), func(t *testing.T) {
+				raft := leading("n1", "n2", "n3")
+				if !confirmed {
+					raft.verifyErr = fmt.Errorf("raft: confirm the leadership: %w", cluster.ErrNotLeader)
+				}
+				before := len(raft.changes)
+				err := tc.change(newService(raft, zerolog.Nop()), raft)
+				want := tc.refusal
+				if tc.checked && !confirmed {
+					want = cluster.ErrNotLeader
+				}
+				switch {
+				case want == nil && err != nil:
+					t.Fatalf("the change = %v, want nil", err)
+				case want != nil && !errors.Is(err, want):
+					t.Fatalf("the change = %v, want %v", err, want)
+				case tc.checked && !confirmed && errors.Is(err, tc.refusal):
+					t.Fatalf("the change = %v, the refusal of a configuration whose term was not confirmed", err)
+				}
+				if tc.checked && len(raft.changes) != before {
+					t.Fatalf("a refused change made the changes %v", raft.changes[before:])
+				}
+				wantChecks := []uint64(nil)
+				if tc.checked {
+					wantChecks = []uint64{4}
+				}
+				if !slices.Equal(raft.verified, wantChecks) {
+					t.Fatalf("checked the leadership of the terms %v, want %v", raft.verified, wantChecks)
+				}
+			})
+		}
+	}
+}
+
 // A removal that leaves fewer than three voters needs force, and the last voter
 // cannot be removed, force or not: hashicorp/raft has no configuration without
 // a voter. The guard counts the configuration the removal is applied against,
@@ -274,9 +355,10 @@ func TestRemoveMemberForceGuard(t *testing.T) {
 // The leader that is asked to remove itself first hands its leadership over and
 // removes nothing: it answers that leadership moved, a not-the-leader error,
 // once it knows the new leader, so that the answer can name it, and the removal
-// is repeated there. A transfer that fails removes nothing either, and the node
-// still leads. The guard still comes first: a removal it refuses transfers
-// nothing.
+// is repeated there. A transfer that fails removes nothing either; whether the
+// node still leads after it is not known, as a transfer that timed out can still
+// see its target win the election it was told to start. The guard still comes
+// first: a removal it refuses transfers nothing.
 func TestRemovingTheLeaderHandsItsLeadershipOverFirst(t *testing.T) {
 	ctx := context.Background()
 	t.Run("transferred", func(t *testing.T) {
@@ -449,9 +531,10 @@ func TestUnreadableConfigurationRefusesEveryChange(t *testing.T) {
 	}
 }
 
-// A change that lost leadership while it committed can still take effect: it
-// logs one WARN line that its outcome is unknown, with who changed what, the
-// fields of the INFO line of a change, and no such INFO line. A change that
+// A change that lost leadership while it committed, or whose node shut down
+// before its outcome was known, can still take effect: it logs one WARN line
+// that its outcome is unknown, which names both causes, with who changed what,
+// the fields of the INFO line of a change, and no such INFO line. A change that
 // failed otherwise, refused for a configuration that changed, logs none.
 func TestAChangeOfUnknownOutcomeIsLogged(t *testing.T) {
 	lost := fmt.Errorf("raft: %w", cluster.ErrLeadershipLost)
@@ -493,8 +576,12 @@ func TestAChangeOfUnknownOutcomeIsLogged(t *testing.T) {
 				}
 				return
 			}
-			if len(lines) != 1 || lines[0]["level"] != "warn" || !strings.Contains(fmt.Sprint(lines[0]["message"]), "outcome unknown") {
+			if len(lines) != 1 {
 				t.Fatalf("logged %v, want one WARN line of an outcome unknown", lines)
+			}
+			if message := fmt.Sprint(lines[0]["message"]); lines[0]["level"] != "warn" ||
+				!strings.Contains(message, "outcome unknown") || !strings.Contains(message, "lost its leadership") || !strings.Contains(message, "shut down") {
+				t.Fatalf("logged %v, want one WARN line of an outcome unknown, after a lost leadership or a shutdown", lines)
 			}
 			for key, value := range tc.line {
 				if lines[0][key] != value {

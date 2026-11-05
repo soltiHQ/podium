@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"net/http"
@@ -214,23 +215,44 @@ func entries(n int) uint64 {
 	return uint64(n)
 }
 
-// sharedSettings are the settings of cfg that every replica of a raft cluster
-// must share (cluster.SharedSettings), as the node applies them: auth with its
-// defaults, trusted_proxies as the client IP resolver parses them, cors with
-// the defaults that the CORS middleware fills in, and the agents' CA bundle as
-// the discovery listeners' pool holds it. That bundle is read as
+// agentCAs reads the agents' CA bundle, tls.server.client_ca_file, as
 // tlsconf.ServerConfig.Build reads it, and fails as Build fails on it, with its
 // error: a bundle that cannot be read, or holds no certificate, fails the start
 // of a raft node here, before the node starts, as it fails a standalone start
-// in Build. cluster.Fingerprint cannot take cfg itself: config imports cluster.
-func sharedSettings(cfg config.Config) (cluster.SharedSettings, error) {
+// in Build. It gives no certificates while the discovery listeners require no
+// client certificate. A raft node reads the bundle once, with this, and both
+// digests it (sharedSettings) and builds the discovery listeners' pool from
+// what it read (agentListenerTLS), so the node's digest names the very
+// certificates its listeners verify agents against.
+func agentCAs(cfg config.Config) ([]*x509.Certificate, error) {
+	cas, err := cfg.TLS.Server.ClientCAs()
+	if err != nil {
+		return nil, fmt.Errorf("tls server: client CA: %w", err)
+	}
+	return cas, nil
+}
+
+// agentListenerTLS is the TLS of the agent-facing listeners, HTTP discovery and
+// gRPC: in raft mode built from cas, the agents' CA bundle that New read for the
+// digests (agentCAs), so the bundle is read once, however the file changes in
+// between; in standalone from the file, by Build, as before.
+func agentListenerTLS(cfg config.Config, raftMode bool, cas []*x509.Certificate) (*tls.Config, error) {
+	if raftMode {
+		return cfg.TLS.Server.BuildWithClientCAs(cas)
+	}
+	return cfg.TLS.Server.Build()
+}
+
+// sharedSettings are the settings of cfg that every replica of a raft cluster
+// must share (cluster.SharedSettings), as the node applies them: auth with its
+// defaults, trusted_proxies as the client IP resolver parses them, cors with
+// the defaults that the CORS middleware fills in, and cas, the agents' CA
+// bundle as agentCAs read it and the discovery listeners' pool holds it.
+// cluster.Fingerprint cannot take cfg itself: config imports cluster.
+func sharedSettings(cfg config.Config, cas []*x509.Certificate) (cluster.SharedSettings, error) {
 	proxies, err := clientip.ParseTrusted(cfg.TrustedProxies)
 	if err != nil {
 		return cluster.SharedSettings{}, fmt.Errorf("trusted_proxies: %w", err)
-	}
-	cas, err := cfg.TLS.Server.ClientCAs()
-	if err != nil {
-		return cluster.SharedSettings{}, fmt.Errorf("tls server: client CA: %w", err)
 	}
 	agentCAs := make([][]byte, 0, len(cas))
 	for _, ca := range cas {
@@ -361,6 +383,27 @@ func warnOpenDiscovery(logger zerolog.Logger, cfg config.Config) {
 			Str("http_discovery_addr", cfg.HTTPDiscovery.Addr).
 			Str("grpc_addr", cfg.GRPC.Addr).
 			Msg("agent authentication covers enrolled agents only: the first sync of an unknown agent ID enrolls it and sets the endpoint podium calls, so set SOLTI_AGENT_AUTH_ENROLL_SECRET or tls.server.client_ca_file, or keep the discovery listeners reachable only from agent networks")
+	}
+}
+
+// warnForwarding logs, once at the start of a raft node, what its forwards to
+// the leader lack, one WARN per case; standalone forwards nothing and New calls
+// it in raft mode only. A follower forwards the writes it gets, logins, cookies
+// and tokens included, and the agents' syncs to the leader:
+//   - without tls.server, in plaintext, over HTTP and gRPC alike;
+//   - with agent mTLS on (tls.server.client_ca_file) and no tls.client.cert_file,
+//     without a client certificate, which the leader's discovery listeners
+//     require, so every sync that reaches a follower fails, 502 over HTTP and
+//     "leader unreachable" over gRPC.
+func warnForwarding(logger zerolog.Logger, cfg config.Config) {
+	if !cfg.TLS.Server.Enabled() {
+		logger.Warn().
+			Msg("raft forwarding runs plaintext: without tls.server a follower forwards the writes it gets, logins, cookies and tokens included, and the agents' syncs to the leader over plain HTTP and gRPC; set tls.server on every node, and tls.client.ca_file to the CA of the nodes' server certificates")
+		return
+	}
+	if cfg.TLS.Server.ClientCAFile != "" && cfg.TLS.Client.CertFile == "" {
+		logger.Warn().
+			Msg("agent mTLS is on (tls.server.client_ca_file) and tls.client.cert_file is unset: a follower presents no client certificate when it forwards an agent's sync to the leader, whose discovery listeners require one, so every sync that reaches a follower fails; set tls.client.cert_file and key_file to a certificate the agents' CA signed")
 	}
 }
 

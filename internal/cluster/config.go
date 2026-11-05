@@ -67,6 +67,22 @@ const (
 	MinRaftSnapshotInterval = 5 * time.Millisecond
 )
 
+// The raft timeouts of [RaftConfig]: hashicorp/raft's defaults, which an
+// ElectionTimeoutMs or HeartbeatTimeoutMs of 0 or less keeps, and its limits.
+const (
+	// DefaultRaftElectionTimeout is the election timeout a node keeps without
+	// raft.election_timeout_ms.
+	DefaultRaftElectionTimeout = time.Second
+	// DefaultRaftHeartbeatTimeout is the heartbeat timeout a node keeps without
+	// raft.heartbeat_timeout_ms.
+	DefaultRaftHeartbeatTimeout = time.Second
+	// MinRaftTimeout is the shortest election or heartbeat timeout
+	// hashicorp/raft accepts: its ValidateConfig refuses a shorter one when a
+	// node starts (v1.8.0, config.go), and an election timeout shorter than the
+	// heartbeat timeout too.
+	MinRaftTimeout = 5 * time.Millisecond
+)
+
 // RaftConfig parametrises the raft backend; no other backend reads it.
 // AdvertiseAddr is the address peers dial, BindAddr when it is empty. The raft
 // transport runs mutual TLS with the files of TLS, or plain TCP when
@@ -330,10 +346,11 @@ func (c Config) Validate() error {
 // validateRaft fails a raft node before it opens anything: node_id, bind_addr
 // and data_dir are required, and so is the transport's mutual TLS or the
 // explicit choice of plain TCP; the compaction settings are not negative, and the
-// snapshot interval is one hashicorp/raft accepts;
-// bind_addr and advertise_addr are host:port, and a bind_addr on every interface
-// needs an advertise_addr; the peers must list this node as node_id at its
-// advertise address, unless it joins a running cluster (see validateJoining).
+// snapshot interval and the timeouts are ones hashicorp/raft accepts (see
+// validateTimeouts); bind_addr and advertise_addr are host:port, and a bind_addr
+// on every interface needs an advertise_addr; the peers must list this node as
+// node_id at its advertise address, unless it joins a running cluster (see
+// validateJoining).
 func (c Config) validateRaft() error {
 	r := c.Raft
 	for _, setting := range []struct{ key, value string }{
@@ -363,6 +380,9 @@ func (c Config) validateRaft() error {
 	if r.SnapshotInterval > 0 && r.SnapshotInterval < MinRaftSnapshotInterval {
 		return fmt.Errorf("raft.snapshot_interval %s is under the %s that hashicorp/raft accepts", r.SnapshotInterval, MinRaftSnapshotInterval)
 	}
+	if err := r.validateTimeouts(); err != nil {
+		return err
+	}
 	bindHost, err := hostPort(r.BindAddr)
 	if err != nil {
 		return fmt.Errorf("raft.bind_addr %q: %w", r.BindAddr, err)
@@ -383,6 +403,37 @@ func (c Config) validateRaft() error {
 		return c.Discovery.validateJoining()
 	}
 	return c.Discovery.validate(r.NodeID, r.advertise())
+}
+
+// validateTimeouts refuses the election and heartbeat timeouts that
+// hashicorp/raft refuses when the node starts, in BootstrapCluster or NewRaft,
+// once the stores are open and the transport listens: each, a value of 0 or
+// less taken as its default, must be MinRaftTimeout at least, and the election
+// timeout no shorter than the heartbeat timeout. The lease, which the node
+// lowers to the heartbeat timeout when that is shorter, is then within
+// hashicorp/raft's limits as well, and nothing else of its ValidateConfig
+// depends on the configuration but node_id and the snapshot interval.
+func (r RaftConfig) validateTimeouts() error {
+	election := raftTimeout(r.ElectionTimeoutMs, DefaultRaftElectionTimeout)
+	heartbeat := raftTimeout(r.HeartbeatTimeoutMs, DefaultRaftHeartbeatTimeout)
+	switch {
+	case election < MinRaftTimeout:
+		return fmt.Errorf("raft.election_timeout_ms %d is under the %s that hashicorp/raft accepts", r.ElectionTimeoutMs, MinRaftTimeout)
+	case heartbeat < MinRaftTimeout:
+		return fmt.Errorf("raft.heartbeat_timeout_ms %d is under the %s that hashicorp/raft accepts", r.HeartbeatTimeoutMs, MinRaftTimeout)
+	case election < heartbeat:
+		return fmt.Errorf("raft.election_timeout_ms (%s) is under raft.heartbeat_timeout_ms (%s): hashicorp/raft needs the election timeout to be at least the heartbeat timeout; 0 keeps the default of %s", election, heartbeat, DefaultRaftElectionTimeout)
+	}
+	return nil
+}
+
+// raftTimeout is the timeout of ms milliseconds that a node runs with, or def
+// for 0 or less, as the node gives hashicorp/raft no value then.
+func raftTimeout(ms int, def time.Duration) time.Duration {
+	if ms <= 0 {
+		return def
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 // validateJoining checks the discovery of a node that joins a running cluster

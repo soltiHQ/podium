@@ -44,9 +44,10 @@ const applyTimeout = 5 * time.Second
 //   - The first transaction of each leadership term of this node starts with
 //     a barrier, so that it reads every write committed before it; the later
 //     ones of the term start with none (awaitReady), and those that propose
-//     nothing ask a quorum whether this node still leads before they answer,
-//     which writes nothing (answer). A heartbeat, a token check that writes
-//     nothing and an upsert, so commits one entry.
+//     nothing ask a quorum whether this node still leads the term they read
+//     in before they answer, which writes nothing, once they released txMu
+//     (answer). A heartbeat, a token check that writes nothing and an upsert,
+//     so commits one entry.
 //
 // The inner store must be the plain inmemory one and MUST be the same store
 // the FSM applies against. Otherwise leader and followers diverge.
@@ -94,12 +95,16 @@ func NewStore(inner storage.Storage, r *hraft.Raft) *Store {
 // answers, or shuts down (awaitWrite); applyTimeout bounds only the enqueueing
 // of the command. Its errors from raft are given their meaning by writeError:
 // a write of unknown outcome, which may have committed, is
-// cluster.ErrLeadershipLost. Its caller holds txMu, which it releases once
-// apply returns.
+// cluster.ErrLeadershipLost. A node that shut down already proposes nothing:
+// storage.ErrUnavailable (refuseStopped). Its caller holds txMu, which it
+// releases once apply returns.
 func (s *Store) apply(ops []*raftv1.Op) error {
 	data, err := overlay.EncodeCommand(ops)
 	if err != nil {
 		return err
+	}
+	if err := refuseStopped(s.stopped); err != nil {
+		return fmt.Errorf("raft: apply: %w", err)
 	}
 	f := s.propose(data, applyTimeout)
 	if err := awaitWrite(f, s.stopped); err != nil {
@@ -346,7 +351,8 @@ func (s *Store) BuildSpecFilter(c storage.SpecQueryCriteria) storage.SpecFilter 
 // holds txMu. A write whose term ended before it was proposed fails with
 // ErrNotLeader, having proposed nothing. A later transaction of the term that
 // proposes nothing answers once a quorum confirmed that this node still leads
-// (answer), so that a deposed leader does not answer from its stale state.
+// the term fn read in (answer), so that a deposed leader does not answer from
+// its stale state; the check runs after txMu is released.
 //
 // Contract: only leader can run WithTx. If Raft.State() != Leader the tx is
 // rejected with ErrNotLeader before fn executes.
@@ -360,23 +366,36 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx storage.Storage) error) e
 	if s.raft.State() != hraft.Leader {
 		return fmt.Errorf("raft: WithTx: %w", ErrNotLeader)
 	}
+	term, check, verdict := s.transact(ctx, fn)
+	if !check {
+		return verdict
+	}
+	return s.answer(ctx, term, verdict)
+}
 
+// transact runs the transaction of WithTx under txMu: it waits until the term
+// is ready (awaitReady), runs fn on an overlay of the inner store, and proposes
+// what fn wrote. It returns the term fn read in, and the transaction's error,
+// and whether that verdict still needs answer's check of the leadership: one of
+// a transaction that skipped the barrier of its term and proposes nothing. Any
+// other verdict is final.
+func (s *Store) transact(ctx context.Context, fn func(tx storage.Storage) error) (term uint64, check bool, verdict error) {
 	s.txMu.Lock()
 	defer s.txMu.Unlock()
 
 	term, skipped, err := s.awaitReady(ctx)
 	if err != nil {
-		return err
+		return 0, false, err
 	}
 	tx := overlay.New(s.inner)
 	if err := fn(tx); err != nil {
-		return s.answer(ctx, skipped, err)
+		return term, skipped, err
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return 0, false, err
 	}
 	if tx.Empty() {
-		return s.answer(ctx, skipped, nil)
+		return term, skipped, nil
 	}
 	// fn read the state of term. In a later term this node may have lost the
 	// leadership, and other leaders committed writes that fn did not read, and
@@ -391,34 +410,60 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx storage.Storage) error) e
 	// FSM checks no term: during a rolling upgrade an older node would apply
 	// what a newer one refuses, and the replicas would diverge.
 	if s.raft.CurrentTerm() != term {
-		return fmt.Errorf("raft: WithTx: the leadership term changed before the write was proposed: %w", ErrNotLeader)
+		return 0, false, fmt.Errorf("raft: WithTx: the leadership term changed before the write was proposed: %w", ErrNotLeader)
 	}
-	return s.apply(tx.Ops())
+	return 0, false, s.apply(tx.Ops())
 }
 
-// answer returns verdict, what fn made of a transaction that proposes nothing:
-// fn's error, or nil for a transaction that wrote nothing. A transaction that
-// took the barrier of its term knows that this node led when fn read: the
-// barrier committed through a quorum after the transaction began. One that
-// skipped the barrier asks a quorum first. A deposed leader still leads in its
-// own view, and fn read a state that may lack what a later term committed, so
-// verdict would be that of a stale state, such as the "not found" that a
-// session revoke or a user delete takes for done. VerifyLeader heartbeats the
-// followers and writes nothing to the log; a follower in a later term answers
-// that this node no longer leads, which steps it down, and a leader cut off
-// from its quorum waits until its lease steps it down, within the bound of
-// awaitLeadership. A check that fails is the answer in place of verdict:
-// ErrNotLeader for a leadership lost, storage.ErrUnavailable for a node that
-// shut down (barrierError). hashicorp/raft v1.8.0 counts for a check the
-// answer to a request that a follower had in flight when the check began
-// (notifyAll in its replication.go), so a deposed leader can still pass one
-// within that round trip.
-func (s *Store) answer(ctx context.Context, skipped bool, verdict error) error {
-	if !skipped {
-		return verdict
-	}
-	if err := awaitLeadership(ctx, s.verifyLeader); err != nil {
+// answer returns verdict, what fn made of a transaction that skipped the
+// barrier of its term and proposes nothing: fn's error, or nil for a
+// transaction that wrote nothing, once a quorum confirmed that this node still
+// leads term, the term fn read in (confirmLeadership). A transaction that took
+// the barrier needs no check: the barrier committed through a quorum in its
+// term after the transaction began, which shows that no later term had
+// committed anything before fn read. One that skipped it may run on a deposed
+// leader, which still leads in its own view, and fn read a state that may lack
+// what a later term committed, so verdict would be that of a stale state, such
+// as the "not found" that a session revoke or a user delete takes for done.
+//
+// answer runs after the transaction released txMu, so the check's round trip
+// holds up no other transaction. That leaves verdict as it was: fn read under
+// txMu, so a write of this node that runs between the release and the answer is
+// concurrent with the transaction, and comes after its read.
+func (s *Store) answer(ctx context.Context, term uint64, verdict error) error {
+	if err := confirmLeadership(ctx, s.raft, s.verifyLeader, term); err != nil {
 		return err
 	}
 	return verdict
+}
+
+// confirmLeadership returns nil once verify, hashicorp/raft's VerifyLeader on
+// r, confirmed that this node still leads, and the node leads term still: the
+// term in which it read the state that the check stands for. VerifyLeader
+// heartbeats the followers and writes nothing to the log; a follower in a later
+// term answers that this node no longer leads, which steps it down, and a
+// leader cut off from its quorum waits until its lease steps it down, within
+// the bound of awaitLeadership. A check that fails is ErrNotLeader for a
+// leadership lost, storage.ErrUnavailable for a node that shut down
+// (barrierError). hashicorp/raft v1.8.0 counts for a check the answer to a
+// request that a follower had in flight when the check began (notifyAll in its
+// replication.go), so a deposed leader can still pass one within that round
+// trip.
+//
+// A check that passes confirms the term the node was in when raft took it,
+// which can be later than term: a leadership lost and regained since the read
+// is in a later term, whose leaders may have committed what the read lacks. So
+// the state, then the term, are read again, as awaitReady reads them. Terms
+// only grow, so a node in term before the check and after it was in term when
+// raft took the check, which confirmed it, and a node seen leading, then in
+// term, still leads term. Any other answer is ErrNotLeader.
+func confirmLeadership(ctx context.Context, r *hraft.Raft, verify func() error, term uint64) error {
+	if err := awaitLeadership(ctx, verify); err != nil {
+		return err
+	}
+	leading := r.State() == hraft.Leader
+	if now := r.CurrentTerm(); !leading || now != term {
+		return fmt.Errorf("raft: confirm the leadership: the term moved from %d to %d, leading: %v, since the state was read: %w", term, now, leading, ErrNotLeader)
+	}
+	return nil
 }

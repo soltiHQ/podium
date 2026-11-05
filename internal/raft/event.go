@@ -66,10 +66,13 @@ func (w *EventWriter) DeleteIssues(kind, id string) int {
 // submit encodes and applies a single-op command. Returns error if Raft
 // rejects the submission (non-leader, timeout, quorum loss), or shuts down
 // before its outcome is known (awaitWrite), with the meaning writeError gives
-// it.
+// it. A node that shut down already submits nothing (refuseStopped).
 func (w *EventWriter) submit(op *raftv1.Op) error {
 	data, err := overlay.EncodeCommand([]*raftv1.Op{op})
 	if err != nil {
+		return err
+	}
+	if err := refuseStopped(w.stopped); err != nil {
 		return err
 	}
 	f := w.raft.Apply(data, applyTimeout)
