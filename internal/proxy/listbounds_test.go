@@ -53,8 +53,8 @@ func wantTooManyItems(t *testing.T, err, op error) {
 	if !errors.Is(err, op) || !errors.Is(err, ErrDecode) || !errors.Is(err, ErrTooManyItems) {
 		t.Fatalf("%v: want a %v decode error that is ErrTooManyItems", err, op)
 	}
-	if errors.Is(err, ErrTooManyElements) {
-		t.Fatalf("%v: a page of too many items is no flood of elements", err)
+	if errors.Is(err, ErrTooManyElements) || errors.Is(err, ErrTooManyConditions) {
+		t.Fatalf("%v: a page of too many items is no flood of elements, nor a task with too many conditions", err)
 	}
 	if errors.Is(err, ErrResponseTooLarge) {
 		t.Fatalf("%v: a page of too many items is no page too large, a smaller one is not what to ask for", err)

@@ -55,9 +55,17 @@ func tooManyItems() error {
 }
 
 // tooManyElementsErr is what the proxy returns for an answer that holds more
-// repeated elements than it builds: a decode error, and an ErrTooManyItems too.
+// repeated elements than it builds in all: a decode error, and an ErrTooManyItems
+// too. A smaller page may come under it.
 func tooManyElementsErr() error {
-	return agentErr{errkind.Internal, fmt.Errorf("%w: %w: %w: a task holds more than 64 conditions", proxy.ErrListTasks, proxy.ErrDecode, proxy.ErrTooManyElements)}
+	return agentErr{errkind.Internal, fmt.Errorf("%w: %w: %w: more than 262144 elements in an answer", proxy.ErrListTasks, proxy.ErrDecode, proxy.ErrTooManyElements)}
+}
+
+// tooManyConditionsErr is what the proxy returns for a task with more conditions
+// than a task may hold: a decode error, and an ErrTooManyItems too, but no
+// ErrTooManyElements. No smaller page avoids the task.
+func tooManyConditionsErr() error {
+	return agentErr{errkind.Internal, fmt.Errorf("%w: %w: %w: a task holds more than 64", proxy.ErrListTasks, proxy.ErrDecode, proxy.ErrTooManyConditions)}
 }
 
 // cursorTooLongErr is what the proxy returns for a page whose next cursor is over
@@ -287,6 +295,7 @@ func TestListErrorsKeepTheObservationClasses(t *testing.T) {
 		{"answer malformed", agentErr{errkind.Internal, fmt.Errorf("%w: %w: unexpected end of JSON input", proxy.ErrListTasks, proxy.ErrDecode)}, 1, false, false},
 		{"answer refused as too large", tooLarge(), 10, false, false},
 		{"answer refused for too many elements", tooManyElementsErr(), 10, false, false},
+		{"answer with a task of too many conditions", tooManyConditionsErr(), 1, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fp := &fakeProxy{listErr: tc.err}
@@ -450,6 +459,53 @@ func TestATaskRefusedEvenAloneLeavesTheListingIncomplete(t *testing.T) {
 				t.Fatalf("logged %d warnings, want one naming %q: %s", warns, tc.cause, logs.String())
 			}
 		})
+	}
+}
+
+// A task with more conditions than a task may hold is refused in any page that holds
+// it, so the runner does not ask for a smaller page: the listing ends at the first
+// call, incomplete, with a cause of its own, and no rollout is judged missing. This is
+// the difference from a page over the budget of elements, which is asked again
+// smaller and listed whole when the halves fit (TestRefusedPagesAreAskedAgainSmaller).
+func TestATaskWithTooManyConditionsEndsTheListingAtOnce(t *testing.T) {
+	fp := &fakeProxy{}
+	r, s, _ := newFakeRunner(t, fp)
+	var logs bytes.Buffer
+	r.logger = zerolog.New(&logs)
+	holdN(fp, 2300)
+	fp.onList = func(_ context.Context, page *proxyv1.ListTasksResponse) error {
+		for _, task := range page.Tasks {
+			if task.ID == "task-0500" {
+				return tooManyConditionsErr()
+			}
+		}
+		return nil
+	}
+	rollouts := []*model.Rollout{
+		seedRollout(t, s, "sp-before", "agent-a", enum.RolloutIntentNoop, "task-0000"),
+		seedRollout(t, s, "sp-bad", "agent-a", enum.RolloutIntentNoop, "task-0500"),
+		seedRollout(t, s, "sp-after", "agent-a", enum.RolloutIntentNoop, "task-2299"),
+		seedRollout(t, s, "sp-lost", "agent-a", enum.RolloutIntentNoop, "task-lost"),
+	}
+
+	r.tick(context.Background())
+
+	if want := []proxy.TaskFilter{{Limit: 1000}}; !slices.Equal(fp.lists, want) {
+		t.Fatalf("agent listed with %+v, want one call, %+v", fp.lists, want)
+	}
+	for _, ro := range rollouts {
+		if !unchanged(t, s, ro) {
+			t.Fatalf("rollout %s changed on an incomplete listing", ro.ID())
+		}
+	}
+	if b, ok := r.backoffs["agent-a"]; ok {
+		t.Fatalf("the agent answered, but is backed off: %+v", b)
+	}
+	if got := r.incomplete["agent-a"]; got != causeConditions {
+		t.Fatalf("the listing is incomplete for %q, want %q", got, causeConditions)
+	}
+	if warns := strings.Count(logs.String(), `"level":"warn"`); warns != 1 || !strings.Contains(logs.String(), causeConditions) {
+		t.Fatalf("logged %d warnings, want one naming %q: %s", warns, causeConditions, logs.String())
 	}
 }
 

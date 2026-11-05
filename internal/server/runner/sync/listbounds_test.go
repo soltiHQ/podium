@@ -180,6 +180,9 @@ func TestListingsThatBreakABoundJudgeNothing(t *testing.T) {
 		{"the proxy refuses a page of any size for its elements", func(int, proxy.TaskFilter) ([]string, string, error) {
 			return nil, "", tooManyElementsErr()
 		}, 10, causeElements},
+		{"the proxy refuses a task with too many conditions", func(int, proxy.TaskFilter) ([]string, string, error) {
+			return nil, "", tooManyConditionsErr()
+		}, 1, causeConditions},
 		{"the proxy refuses a cursor that is too long", func(int, proxy.TaskFilter) ([]string, string, error) {
 			return nil, "", cursorTooLongErr()
 		}, 1, causeLongCursor},

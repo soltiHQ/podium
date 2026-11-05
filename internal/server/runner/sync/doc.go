@@ -11,13 +11,15 @@
 //     - Uninstall  → DeleteTask(actualTaskID) (or noop if empty)   → drop rollout
 //     - Noop       → ListTasks (every page, once per agent)        → reinstall what the agent lost
 //     A page starts at 1000 tasks. One that the proxy refuses as too large, or as holding more elements than it
-//     builds, is asked again from the same cursor with half the limit, down to one task. The runner also bounds
-//     what an agent can make a listing cost: a page that holds more tasks than it was asked for, or names a
-//     cursor longer than 4096 bytes, is refused, and a listing that would hold more than 65536 task IDs or
-//     32 MiB of them, or take more than 1024 calls, refused pages included, stops. Only a complete listing
-//     shows a task missing: if the turn's budget runs out, a task is too large to list or holds too many
-//     elements even alone, a page fails or is refused, the listing passes a bound, the agent returns a cursor
-//     it returned before, or its pages name different snapshots (resource versions that differ; a page
+//     builds in all, is asked again from the same cursor with half the limit, down to one task. A task with
+//     more than 64 conditions is a bound of the task, not of the page: no smaller page avoids it, so the page is
+//     not asked again and the listing ends at the call that meets it. The runner also bounds what an agent
+//     can make a listing cost: a page that holds more tasks than it was asked for, or names a cursor longer
+//     than 4096 bytes, is refused, and a listing that would hold more than 65536 task IDs or 32 MiB of them,
+//     or take more than 1024 calls, refused pages included, stops. Only a complete listing shows a task missing: if
+//     the turn's budget runs out, a task is too large to list or holds too many elements even alone, a task
+//     has more than 64 conditions, a page fails or is refused, the listing passes a bound, the agent returns a
+//     cursor it returned before, or its pages name different snapshots (resource versions that differ; a page
 //     without one is let through), no rollout is judged and the next tick lists again from the first page,
 //     at 1000. So every synced rollout of an agent is observed each tick when, after the turn's pushes, its
 //     task list can be listed within those bounds, with the last page starting inside PushTimeout. The

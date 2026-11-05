@@ -67,25 +67,29 @@ builds, before it builds it where it can. An answer over a bound fails the call 
 an error that wraps `ErrDecode` and has the Kind of a decode error. It carries no
 `ErrResponseTooLarge`, which stays for an answer over the size the proxy reads.
 Whether a smaller page helps depends on the bound. It does against the budget of
-elements in all (`ErrTooManyElements`), and the sync runner then asks again with half
-the limit, as it does for `ErrResponseTooLarge`. It does not against more items than
-the limit, an ID or a cursor over its bound; and a task with more conditions than the
-cap is refused in any page that holds it, though the runner, which cannot tell it
-from the budget, asks again smaller for it too, down to a page of that task alone.
-Every call goes through these, the sync runner's listing and the REST listing of an
-agent's tasks as well.
+elements in all (`ErrTooManyElements`), and the sync runner then asks again with
+half the limit, as it does for `ErrResponseTooLarge`. It does not against more items
+than the limit, an ID or a cursor over its bound, nor against a task with more
+conditions than the cap (`ErrTooManyConditions`): the page that holds that task is
+refused whatever its size, so the sync runner does not ask again for it, and the
+listing ends. Every call goes through these, the sync runner's listing and the REST
+listing of an agent's tasks as well.
 
 | What | Bound | Where it is checked | Error |
 |---|---|---|---|
 | Items of a `ListTasks` page | the request's limit; 1000, the most a page holds, when it names none | gRPC: on the wire, before decoding. HTTP: while decoding, before the item past the limit is decoded | `ErrTooManyItems` |
 | Runs of a `ListTaskRuns` page | the page size of the request | as the items of a page | `ErrTooManyItems` |
 | Elements of every repeated field and map of a gRPC answer, at any depth | 262144 (`1 << 18`) in all | on the wire, before decoding | `ErrTooManyElements` |
-| Conditions of a task, in a listing, `GetTask` and the answer of `ApplyTask` | 64 (`MaxTaskConditions`) | HTTP: while decoding, before the 65th is decoded. gRPC: after decoding, which the budget above has capped | `ErrTooManyElements` |
+| Conditions of a task, in a listing, `GetTask` and the answer of `ApplyTask` | 64 (`MaxTaskConditions`) | HTTP: while decoding, before the 65th is decoded. gRPC: after decoding, which the budget above has capped | `ErrTooManyConditions` |
 | Task ID in a listing | 1024 bytes (`MaxTaskIDBytes`; the SDK limits a name to 63 bytes a segment) | after the item (HTTP) or the page (gRPC) is decoded | `ErrDecode` |
 | Next cursor of a listing | 4096 bytes (`MaxCursorBytes`) | after the page is decoded | `ErrCursorTooLong` |
 
-`ErrTooManyElements` is an `ErrTooManyItems` too; the sync runner tells the two apart:
-it asks again with half the limit on the first, and ends the listing on the second.
+`ErrTooManyElements` and `ErrTooManyConditions` are each an `ErrTooManyItems`
+too, and the second an `ErrDecode` (the errors of the calls carry `ErrDecode`
+either way), but neither is the other. The sync runner tells them apart: on
+`ErrTooManyElements` it asks again with half the limit, down to a page of one
+task; on `ErrTooManyConditions`, or on an `ErrTooManyItems` of neither kind (a
+page over its limit), it ends the listing.
 
 Over gRPC every unary call (`ListTasks`, `GetTask`, `ApplyTask`, `DeleteTask`,
 `CancelTask`, `ListTaskRuns`) is made with a codec of its own. Before

@@ -238,9 +238,10 @@ func checkListed(t *taskv1.Task) error {
 	return checkConditions(t)
 }
 
-// checkConditions refuses a task with more conditions than MaxTaskConditions, as
-// the JSON of an HTTP agent is refused while it is decoded. The scan of the answer
-// has bounded what the task cost; this keeps the transports to one rule.
+// checkConditions refuses a task with more conditions than MaxTaskConditions, with
+// ErrTooManyConditions, as the JSON of an HTTP agent is refused while it is decoded.
+// The scan of the answer has bounded what the task cost; this keeps the transports
+// to one rule.
 func checkConditions(t *taskv1.Task) error {
 	if len(t.GetStatus().GetConditions()) > MaxTaskConditions {
 		return tooManyConditions()

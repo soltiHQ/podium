@@ -31,12 +31,16 @@ var (
 	// before it builds them, and the error is a decode failure too: no agent
 	// answers so.
 	ErrTooManyItems = errors.New("proxy: too many items")
-	// ErrTooManyElements indicates an answer, or an item of one, that holds more
-	// repeated elements than the proxy builds: more than a gRPC answer may hold in
-	// all, or more conditions than a task may. It is an ErrTooManyItems, and a decode
-	// failure too. A page with a lower limit may come under the first bound, so the
-	// sync runner asks again for one; no page does under the second.
+	// ErrTooManyElements indicates a gRPC answer that holds more repeated elements
+	// in all than the proxy builds. It is an ErrTooManyItems, and a decode failure
+	// too. A page with a lower limit may come under the bound, so the sync runner
+	// asks again for one.
 	ErrTooManyElements error = elementsError{}
+	// ErrTooManyConditions indicates a task with more conditions than a task may
+	// hold, MaxTaskConditions, over either transport. It is an ErrTooManyItems and
+	// an ErrDecode, and no ErrTooManyElements: no smaller page avoids the task, so
+	// the sync runner ends the listing on it, without asking again.
+	ErrTooManyConditions error = conditionsError{}
 	// ErrCursorTooLong indicates a ListTasks page whose next cursor is longer than
 	// MaxCursorBytes. It is a decode failure too.
 	ErrCursorTooLong = errors.New("proxy: cursor too long")
@@ -66,3 +70,11 @@ type elementsError struct{}
 func (elementsError) Error() string { return "proxy: too many elements" }
 
 func (elementsError) Unwrap() error { return ErrTooManyItems }
+
+// conditionsError is the type of ErrTooManyConditions: it reads as its own error and
+// is also an ErrTooManyItems and an ErrDecode, but not an ErrTooManyElements.
+type conditionsError struct{}
+
+func (conditionsError) Error() string { return "proxy: too many conditions" }
+
+func (conditionsError) Unwrap() []error { return []error{ErrTooManyItems, ErrDecode} }

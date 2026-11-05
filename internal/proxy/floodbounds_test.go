@@ -146,22 +146,86 @@ func serveJSON(t *testing.T, body string) *httpProxyV1 {
 }
 
 // wantTooManyElements fails unless err is an answer of the call op refused for the
-// elements it holds: a decode error that is an ErrTooManyElements, and so an
-// ErrTooManyItems. It is not one the proxy refused for its size, and errkind sorts
-// it as the error of an agent.
+// elements it holds in all: a decode error that is an ErrTooManyElements, and so an
+// ErrTooManyItems. It is not a task with too many conditions, which no smaller page
+// avoids, nor one the proxy refused for its size, and errkind sorts it as the error
+// of an agent.
 func wantTooManyElements(t *testing.T, err, op error) {
 	t.Helper()
 	if !errors.Is(err, op) || !errors.Is(err, ErrDecode) || !errors.Is(err, ErrTooManyElements) || !errors.Is(err, ErrTooManyItems) {
 		t.Fatalf("%v: want a %v decode error that is ErrTooManyElements", err, op)
 	}
+	if errors.Is(err, ErrTooManyConditions) {
+		t.Fatalf("%v: a budget of elements is no task with too many conditions: only the first is avoided by a smaller page", err)
+	}
 	if errors.Is(err, ErrResponseTooLarge) {
 		t.Fatalf("%v: a flood of elements is no answer too large: the runner has a path of its own for each", err)
 	}
+	wantAgentError(t, err)
+}
+
+// wantTooManyConditions fails unless err is an answer of the call op refused for a
+// task with more conditions than MaxTaskConditions: a decode error that is an
+// ErrTooManyConditions, and so an ErrTooManyItems. It is not a budget of elements,
+// which a smaller page may come under, nor an answer too large.
+func wantTooManyConditions(t *testing.T, err, op error) {
+	t.Helper()
+	if !errors.Is(err, op) || !errors.Is(err, ErrDecode) || !errors.Is(err, ErrTooManyConditions) || !errors.Is(err, ErrTooManyItems) {
+		t.Fatalf("%v: want a %v decode error that is ErrTooManyConditions", err, op)
+	}
+	if errors.Is(err, ErrTooManyElements) {
+		t.Fatalf("%v: a task with too many conditions is no budget of elements: a smaller page does not avoid it", err)
+	}
+	if errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("%v: a task with too many conditions is no answer too large", err)
+	}
+	wantAgentError(t, err)
+}
+
+// wantAgentError fails unless errkind sorts err as the error of an agent, and the
+// error is short.
+func wantAgentError(t *testing.T, err error) {
+	t.Helper()
 	if kind := errkind.Classify(err); kind != errkind.Internal {
 		t.Fatalf("kind = %v, want Internal", kind)
 	}
 	if len(err.Error()) > 1<<10 {
 		t.Fatalf("the error is %d bytes long", len(err.Error()))
+	}
+}
+
+// A task with too many conditions and a budget of elements are two refusals, and
+// neither is the other: the sync runner asks again with half the limit for the budget,
+// which a smaller page may come under, and ends the listing for the task, which no
+// smaller page avoids.
+func TestTooManyConditionsIsNotTheBudgetOfElements(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		target error
+		want   bool
+	}{
+		{"conditions are items", ErrTooManyConditions, ErrTooManyItems, true},
+		{"conditions are a decode error", ErrTooManyConditions, ErrDecode, true},
+		{"conditions are not the budget", ErrTooManyConditions, ErrTooManyElements, false},
+		{"conditions are no answer too large", ErrTooManyConditions, ErrResponseTooLarge, false},
+		{"the budget is items", ErrTooManyElements, ErrTooManyItems, true},
+		{"the budget is not conditions", ErrTooManyElements, ErrTooManyConditions, false},
+		{"the budget is no answer too large", ErrTooManyElements, ErrResponseTooLarge, false},
+		{"the error for conditions is conditions", tooManyConditions(), ErrTooManyConditions, true},
+		{"the error for conditions is items", tooManyConditions(), ErrTooManyItems, true},
+		{"the error for conditions is a decode error", tooManyConditions(), ErrDecode, true},
+		{"the error for conditions is not the budget", tooManyConditions(), ErrTooManyElements, false},
+		{"the error for the budget is the budget", tooManyElements("more"), ErrTooManyElements, true},
+		{"the error for the budget is not conditions", tooManyElements("more"), ErrTooManyConditions, false},
+		{"a page over its limit is neither", tooManyItems(10), ErrTooManyConditions, false},
+		{"a page over its limit is not the budget", tooManyItems(10), ErrTooManyElements, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := errors.Is(tc.err, tc.target); got != tc.want {
+				t.Fatalf("errors.Is(%v, %v) = %v, want %v", tc.err, tc.target, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -250,7 +314,7 @@ func TestHTTPListTasksRefusesConditionFlood(t *testing.T) {
 				}
 				return
 			}
-			wantTooManyElements(t, err, ErrListTasks)
+			wantTooManyConditions(t, err, ErrListTasks)
 		})
 	}
 }
@@ -301,8 +365,10 @@ var taskAgents = []struct {
 	}},
 }
 
-// Both transports refuse the same tasks: one with more conditions than
-// MaxTaskConditions, in a listing, in GetTask and in the answer of ApplyTask.
+// Both transports refuse the same tasks, with the same error: one with more
+// conditions than MaxTaskConditions, in a listing, in GetTask and in the answer of
+// ApplyTask. Over gRPC it passes the scan, which counts 640 conditions well under the
+// budget, and is refused after it is decoded.
 func TestTaskConditionsBound(t *testing.T) {
 	for _, agent := range taskAgents {
 		for _, n := range []int{0, 1, MaxTaskConditions, MaxTaskConditions + 1, 10 * MaxTaskConditions} {
@@ -323,9 +389,9 @@ func TestTaskConditionsBound(t *testing.T) {
 					}
 					return
 				}
-				wantTooManyElements(t, listErr, ErrListTasks)
-				wantTooManyElements(t, getErr, ErrGetTask)
-				wantTooManyElements(t, applyErr, ErrApplyTask)
+				wantTooManyConditions(t, listErr, ErrListTasks)
+				wantTooManyConditions(t, getErr, ErrGetTask)
+				wantTooManyConditions(t, applyErr, ErrApplyTask)
 			})
 		}
 	}
@@ -337,16 +403,17 @@ func TestGetTaskRefusesNestedElementFlood(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		agent func(t *testing.T) AgentProxy
+		want  func(t *testing.T, err, op error) // the refusal: HTTP has the bound on conditions only
 	}{
 		{"http/a million empty conditions", func(t *testing.T) AgentProxy {
 			return serveJSON(t, `{"metadata":{"name":"task","uid":"u"},"status":{"conditions":[`+jsonEmpties(million)+`]}}`)
-		}},
+		}, wantTooManyConditions},
 		{"grpc/a million empty conditions", func(t *testing.T) AgentProxy {
 			return newRawAnswers(answers{get: flood(&taskv1.GetTaskResponse{}, million, "task", "status", "conditions")}).proxy(t)
-		}},
+		}, wantTooManyElements},
 		{"grpc/a million empty env entries", func(t *testing.T) AgentProxy {
 			return newRawAnswers(answers{get: flood(&taskv1.GetTaskResponse{}, million, "task", "spec", "workload", "container", "env")}).proxy(t)
-		}},
+		}, wantTooManyElements},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := tc.agent(t)
@@ -355,7 +422,7 @@ func TestGetTaskRefusesNestedElementFlood(t *testing.T) {
 			grew := allocated(func() { _, err = p.GetTask(context.Background(), "task") })
 
 			checkAllocated(t, grew)
-			wantTooManyElements(t, err, ErrGetTask)
+			tc.want(t, err, ErrGetTask)
 		})
 	}
 }
@@ -366,13 +433,14 @@ func TestApplyTaskRefusesNestedElementFlood(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		agent func(t *testing.T) AgentProxy
+		want  func(t *testing.T, err, op error)
 	}{
 		{"http", func(t *testing.T) AgentProxy {
 			return serveJSON(t, `{"metadata":{"name":"task","uid":"u"},"status":{"conditions":[`+jsonEmpties(million)+`]}}`)
-		}},
+		}, wantTooManyConditions},
 		{"grpc", func(t *testing.T) AgentProxy {
 			return newRawAnswers(answers{apply: flood(&taskv1.ApplyTaskResponse{}, million, "task", "status", "conditions")}).proxy(t)
-		}},
+		}, wantTooManyElements},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := tc.agent(t)
@@ -383,7 +451,7 @@ func TestApplyTaskRefusesNestedElementFlood(t *testing.T) {
 			})
 
 			checkAllocated(t, grew)
-			wantTooManyElements(t, err, ErrApplyTask)
+			tc.want(t, err, ErrApplyTask)
 		})
 	}
 }

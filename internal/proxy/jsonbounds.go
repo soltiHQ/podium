@@ -67,7 +67,9 @@ func (t *taskItems) UnmarshalJSON(data []byte) (err error) {
 	return err
 }
 
-// taskConditions is the conditions of a task, at most MaxTaskConditions of them.
+// taskConditions is the conditions of a task, at most MaxTaskConditions of them. A
+// task with more fails the decode with ErrTooManyConditions: a bound of the task,
+// which no smaller page avoids.
 type taskConditions []taskConditionResource
 
 func (c *taskConditions) UnmarshalJSON(data []byte) (err error) {

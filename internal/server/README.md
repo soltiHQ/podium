@@ -173,36 +173,36 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   Each page is a call like any other and starts only while the turn is within
   its budget. A page starts at 1000 tasks. One that the proxy refuses as too
   large (an answer over 4 MiB) or as holding too many elements (more than 262144
-  repeated elements in all, or a task with more than 64 conditions) is asked
-  again from the same cursor with half the limit, down to one task, and the
-  smaller limit holds for the rest of the turn; the next turn starts at 1000
-  again. A smaller page helps against the size and the budget of elements, and
-  not against a task that is over its own bound, whichever page holds it: the
-  listing then ends at a page of that task alone. The listing is bounded,
-  whatever the agent answers. The proxy bounds what a page builds (see "What an
-  answer may build" in `internal/proxy/README.md`). What is past a bound is
-  not built: the task past the limit, the element past 262144 in all (gRPC) and
-  the condition past the 64th of a task (HTTP). What is under it is built first:
-  the first tasks of a page up to the limit, and the first 64 conditions of an
-  HTTP task, are decoded and dropped with the error. A gRPC task with more than
-  64 conditions, a task ID over 1024 bytes and a cursor over 4096 bytes are
-  refused once decoded, at the cost of a page the other bounds have capped. The
-  tests measure a refused `ListTasks` flood at 2 to 21 MiB allocated in all (what
-  each sends is in the proxy README). The runner counts the tasks of a page
-  again, and refuses a cursor over 4096 bytes itself. A listing that would hold
-  more than 65536 task IDs or 32 MiB of them, or take more than 1024 calls,
-  refused pages included, stops. A synced rollout whose task is missing from the
-  listing is queued for a reinstall, but only a complete listing shows a task
-  missing. If the budget runs out, a page fails or is refused (a task too large
-  to list, or with too many elements, even alone included), the listing passes a
-  bound, the agent returns a cursor it returned before, or its pages name
-  different snapshots (resource versions that differ; a page without one is let
-  through), no rollout is judged and none is touched, and the next tick lists
-  again from the first page, as a cursor holds only within a tick. So every
-  synced rollout of an agent is observed each tick when, after the turn's
-  pushes, the agent's task list can be listed within those bounds, with the last
-  page starting inside `push_timeout`; an agent whose list cannot is not
-  observed. A synced rollout without a task makes no call.
+  repeated elements in all) is asked again from the same cursor with half the
+  limit, down to one task, and the smaller limit holds for the rest of the turn;
+  the next turn starts at 1000 again. A task with more than 64 conditions is a
+  bound of the task, not of the page: no smaller page avoids it, so the page is
+  not asked again and the listing ends at the call that meets it. The listing is
+  bounded, whatever the agent answers. The proxy bounds what a page builds (see
+  "What an answer may build" in `internal/proxy/README.md`). What is past a
+  bound is not built: the task past the limit, the element past 262144 in all
+  (gRPC) and the condition past the 64th of a task (HTTP). What is under it is
+  built first: the first tasks of a page up to the limit, and the first 64
+  conditions of an HTTP task, are decoded and dropped with the error. A gRPC
+  task with more than 64 conditions, a task ID over 1024 bytes and a cursor over
+  4096 bytes are refused once decoded, at the cost of a page the other bounds
+  have capped. The tests measure a refused `ListTasks` flood at 2 to 21 MiB
+  allocated in all (what each sends is in the proxy README). The runner counts
+  the tasks of a page again, and refuses a cursor over 4096 bytes itself. A
+  listing that would hold more than 65536 task IDs or 32 MiB of them, or take
+  more than 1024 calls, refused pages included, stops. A synced rollout whose
+  task is missing from the listing is queued for a reinstall, but only a
+  complete listing shows a task missing. If the budget runs out, a page fails or
+  is refused (a task too large to list, or with too many elements, even alone,
+  or with more than 64 conditions, included), the listing passes a bound, the
+  agent returns a cursor it returned before, or its pages name different
+  snapshots (resource versions that differ; a page without one is let through),
+  no rollout is judged and none is touched, and the next tick lists again from
+  the first page, as a cursor holds only within a tick. So every synced rollout
+  of an agent is observed each tick when, after the turn's pushes, the agent's
+  task list can be listed within those bounds, with the last page starting
+  inside `push_timeout`; an agent whose list cannot is not observed. A synced
+  rollout without a task makes no call.
 - **Reinstalls are not bounded by `push_timeout`.** After a complete listing,
   each rollout whose task is missing is queued for a reinstall by a write to
   the store, about 1 ms on the durable store; in raft mode each write is a

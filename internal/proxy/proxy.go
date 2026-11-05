@@ -124,15 +124,16 @@ func tooManyItems(limit int) error {
 	return fmt.Errorf("%w: more than %d items", ErrTooManyItems, limit)
 }
 
-// tooManyElements is the error for an answer, or an item of one, that holds more
-// repeated elements than the proxy builds; what says which.
+// tooManyElements is the error for a gRPC answer that holds more repeated elements
+// in all than the proxy builds; what says how many.
 func tooManyElements(what string) error {
 	return fmt.Errorf("%w: %s", ErrTooManyElements, what)
 }
 
 // tooManyConditions is the error for a task that holds more than MaxTaskConditions.
+// It is no budget of elements: no smaller page avoids the task.
 func tooManyConditions() error {
-	return tooManyElements(fmt.Sprintf("a task holds more than %d conditions", MaxTaskConditions))
+	return fmt.Errorf("%w: a task holds more than %d", ErrTooManyConditions, MaxTaskConditions)
 }
 
 // checkCursor refuses a next cursor over MaxCursorBytes. The cursor is not in the
