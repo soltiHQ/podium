@@ -132,14 +132,17 @@ present the new one, so the old token ends in both directions at once (`TestRese
 new credential keeps the enrollment time.
 
 - With an enrollment secret set it is a derived credential (see `internal/config`, "Enrollment secret"), and it names
-  the current secret, whatever secret the old one derived from. Its generation is the old one plus one for a derived
-  credential. A stored credential has no generation, and its agent may have held derived ones before (a secret removed,
-  a reset while none was set, the same secret set again), so it gets the time of the reset in Unix seconds, at least 1
-  and below the last generation (`TestResetOfAStoredCredentialTakesTheTimeFloor` and
-  `TestResetAfterAStoredInterludeRevivesNoGeneration` in `internal/service/agent`). That floor is above every earlier
-  generation as long as the leader's clock does not run back past an earlier floor, and the credential was reset fewer
-  times since that floor than seconds have passed. The answer is `{"agent_id", "token", "generation"}`, and `podium
-  agent-token --generation <generation> <agent-id>`, run with the secret, prints the token again.
+  the current secret, whatever secret the old one derived from. Its generation is the later of the old generation plus
+  one (a stored credential has none and counts as 0) and the time of the reset in Unix seconds, at least 1 and below the
+  last generation (`TestResetCredentialIssuesTheLaterOfTheNextGenerationAndTheTime` and `TestResetTakesTheTimeFloor` in
+  `internal/service/agent`). The time is there because the old generation can be below one that was issued and revoked:
+  a stored credential counts as 0 though its agent held derived ones before (a secret removed, a reset while none was
+  set, the same secret set again), and a restored backup brings a credential back below the generations reset since
+  (`TestResetAfterAStoredInterludeRevivesNoGeneration` and `TestResetAfterARestoredBackupExceedsEveryGenerationIssued`).
+  The generation is above every earlier one as long as each reset of the agent falls in a later second than the one
+  before it, on the clock of the leader, the node that serves the reset; a reset in the same second as the last takes
+  the generation after it. The answer is `{"agent_id", "token", "generation"}`, and `podium agent-token --generation
+  <generation> <agent-id>`, run with the secret, prints the token again.
 - Without a secret it is a stored credential, as trust on first use stores tokens, with a new random token of 32 bytes
   as 64 lowercase hex digits (`TestResetWithoutSecretIssuesRandomToken`). The answer has no `generation`, and nothing
   derives that token again.

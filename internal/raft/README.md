@@ -327,8 +327,11 @@ every rotation restarts the nodes it touches.
   new token. The old token stays in the log entries, snapshots and backups
   written before the reset. It authenticates nothing while the state holds the
   new credential, but restoring a backup taken before a reset brings the old
-  credential back, and the old token with it: reset the credential again after
-  restoring an older backup.
+  credential back, and the old token with it. One reset after restoring an older
+  backup ends it again: with the enrollment secret set, the new generation is
+  above every one issued before, as long as each reset of the agent fell in a
+  later second than the one before it, on the leader's clock; without a secret
+  the new token is random.
 - The first administrator's password. A generated one is in
   `bootstrap-admin-password` in the `data_dir` of the node that seeded it (mode
   0600), and one set with `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` stays in that

@@ -580,9 +580,9 @@ func (s *Service) now() time.Time {
 // directions at once. The credential keeps its enrollment time.
 //
 // With an enrollment secret set, the new credential is derived, and names the
-// current secret, whatever secret the old one derived from. Its generation is
-// that of a derived credential it replaces plus one, and for a stored one, which
-// has no generation, the time of the reset (generationFloor).
+// current secret, whatever secret the old one derived from. Its generation is the
+// later of the one after the old generation, a stored credential counting as
+// generation 0, and the time of the reset (generationFloor).
 // IssuedCredential.Generation says which `podium agent-token --generation`
 // prints the token again. Without a secret it is a stored credential with a new
 // random token, since trust on first use stores the token an agent holds;
@@ -636,30 +636,29 @@ func (s *Service) ResetCredential(ctx context.Context, agentID string) (IssuedCr
 }
 
 // nextGeneration is the generation a reset with the secret set gives in place of
-// the credential c: the one after c's for a derived credential, or
-// ErrGenerationExhausted at the last one, which would wrap around to generation
-// 0, and generationFloor for a stored credential, which has none.
+// the credential c: the later of the generation after c's, a stored credential
+// counting as generation 0, and generationFloor at the time of the reset. It is
+// ErrGenerationExhausted at the last generation, whose successor would wrap
+// around to generation 0.
 func (s *Service) nextGeneration(c *model.AgentCredential) (uint32, error) {
-	if !c.Derived() {
-		return generationFloor(s.now()), nil
-	}
-	if c.Generation() == math.MaxUint32 {
+	previous := c.Generation() // 0 for a stored credential
+	if previous == math.MaxUint32 {
 		return 0, ErrGenerationExhausted
 	}
-	return c.Generation() + 1, nil
+	return max(previous+1, generationFloor(s.now())), nil
 }
 
-// generationFloor is the generation a reset with the secret set gives a stored
-// credential at the time now: now in Unix seconds, 1 for a time at or before the
-// epoch, and math.MaxUint32-1 at most, so that ErrGenerationExhausted stays the
-// guard of the last generation. Counting a stored credential as generation 0
-// would issue generation 1, whose token a reset may have revoked: an agent
-// derived at generation 2 whose secret was removed, reset to a stored credential,
-// and reset again once the same secret is back, would get the token of
-// generation 1 again. The floor is above every generation the agent held before
-// as long as the clock of the node that serves the reset, the leader, has not run
-// back past an earlier floor, and the credential was reset fewer times since that
-// floor than seconds have passed: each reset of a derived credential adds one.
+// generationFloor is the least generation a reset with the secret set gives at the
+// time now: now in Unix seconds, 1 for a time at or before the epoch, and
+// math.MaxUint32-1 at most, so that ErrGenerationExhausted stays the guard of the
+// last generation. The generation after the old one alone could issue one that a
+// reset revoked, since the old generation can be below those issued to the agent
+// before: a stored credential counts as generation 0 after derived ones, when the
+// secret was removed and set again, and a restored backup brings a credential back
+// below the generations reset since. The time is above every generation issued
+// before as long as each reset of the agent falls in a later second than the one
+// before it, on the clock of the node that serves the reset, the leader. A reset
+// in the same second as the last takes the generation after it, ahead of the clock.
 func generationFloor(now time.Time) uint32 {
 	switch seconds := now.Unix(); {
 	case seconds < 1:

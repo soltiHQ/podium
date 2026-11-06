@@ -226,7 +226,9 @@ whoever holds that former secret. To re-provision the fleet under a new secret:
 1. Set the new secret on every node and restart them; in raft mode every node
    needs the same secret (see "Settings every replica must share").
 2. For each agent the WARN names, derive its token under the new secret with
-   the generation the WARN gives, and give the token to the agent:
+   the generation the WARN gives, and give the token to the agent. The
+   generation is 0 for an agent that was never reset; for one that was, it is
+   about the time of its last reset in Unix seconds, ten digits:
 
    ```sh
    export SOLTI_AGENT_AUTH_ENROLL_SECRET=...   # the new secret
@@ -239,10 +241,11 @@ whoever holds that former secret. To re-provision the fleet under a new secret:
    `internal/service/agent`).
 
 Resetting the agent's credential (see "Resetting a credential" below) is the
-other way: it moves a credential of another secret to the current one at the
-next generation, and the answer holds the token to give the agent, with no host
-that runs `podium agent-token` needed
-(`TestResetCredentialIssuesTheNextGeneration`, in `internal/service/agent`).
+other way: it moves a credential of another secret to the current one at a
+later generation, and the answer holds the token to give the agent, with no
+host that runs `podium agent-token` needed
+(`TestResetCredentialIssuesTheLaterOfTheNextGenerationAndTheTime`, in
+`internal/service/agent`).
 
 Removing the secret leaves those agents two ways in: setting the same secret
 again, since without one podium derives no token, or resetting each one's
@@ -296,20 +299,27 @@ one it holds, and ends the old one. It replaces a token that leaked or was
 lost, and moves a stored credential to a derived one.
 
 - With the enrollment secret set, the new credential is derived, and it names
-  the current secret, whatever secret the old credential derived from. A
-  derived credential gets the old generation plus one. A stored credential has
-  no generation, and its agent may have held derived ones before (a secret
-  removed, a reset while none was set, the same secret set again), so it gets
-  the time of the reset in Unix seconds, at least 1 and below the last
-  generation, not 1, whose token an earlier reset may have revoked
-  (`TestResetAfterAStoredInterludeRevivesNoGeneration`, in
-  `internal/service/agent`). That floor is above every earlier generation as
-  long as the leader's clock does not run back past an earlier floor, and the
-  credential was reset fewer times since that floor than seconds have passed.
-  The answer is `{"agent_id", "token", "generation"}`, and `podium agent-token
-  --generation <generation> <agent-id>`, run with the secret, prints the token
-  again. A stored credential reset this way is no longer stored: the next start,
-  or leadership term, counts one fewer in the WARN above.
+  the current secret, whatever secret the old credential derived from. Its
+  generation is the later of the old generation plus one, a stored credential
+  having none and counting as 0, and the time of the reset in Unix seconds, at
+  least 1 and below the last generation, so the generation of an agent that was
+  reset is about the time in seconds, ten digits, not a small number
+  (`TestResetCredentialIssuesTheLaterOfTheNextGenerationAndTheTime` and
+  `TestResetTakesTheTimeFloor`, in `internal/service/agent`). The time is there
+  because the old generation can be below one that was issued and revoked: a
+  stored credential counts as 0 though its agent held derived ones before (a
+  secret removed, a reset while none was set, the same secret set again), and a
+  restored backup brings a credential back below the generations reset since
+  (`TestResetAfterAStoredInterludeRevivesNoGeneration` and
+  `TestResetAfterARestoredBackupExceedsEveryGenerationIssued`, in the same
+  package). The generation is above every earlier one as long as each reset of
+  the agent falls in a later second than the one before it, on the clock of the
+  leader, the node that serves the reset; a reset in the same second as the last
+  takes the generation after it. The answer is `{"agent_id", "token",
+  "generation"}`, and `podium agent-token --generation <generation>
+  <agent-id>`, run with the secret, prints the token again. A stored credential
+  reset this way is no longer stored: the next start, or leadership term, counts
+  one fewer in the WARN above.
 - Without a secret, the new credential is stored, with a new random token of 32
   bytes as 64 hex digits (`TestResetWithoutSecretIssuesRandomToken`, in
   `internal/handler`). The answer has no `generation`, and nothing derives that

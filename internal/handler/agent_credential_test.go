@@ -204,9 +204,19 @@ func TestResetCredentialRevokesBothDirections(t *testing.T) {
 			}
 			dialed := fake.dials()
 
+			before := time.Now().Unix()
 			issued, raw := issuedBy(t, f, "agent-1", admin)
-			if issued.AgentID != "agent-1" || issued.Token != agent.DeriveToken(resetSecret, "agent-1", 1) || issued.Generation == nil || *issued.Generation != 1 {
-				t.Fatalf("answer %+v, want agent-1, its token at generation 1 and generation 1", issued)
+			after := time.Now().Unix()
+			if issued.Generation == nil {
+				t.Fatalf("answer %+v, want a generation", issued)
+			}
+			// The agent holds generation 0, so the reset issues the time of the reset in Unix seconds.
+			generation := *issued.Generation
+			if int64(generation) < before || int64(generation) > after {
+				t.Fatalf("generation %d, want the time of the reset, from %d to %d", generation, before, after)
+			}
+			if issued.AgentID != "agent-1" || issued.Token != agent.DeriveToken(resetSecret, "agent-1", generation) {
+				t.Fatalf("answer %+v, want agent-1 and its token at generation %d", issued, generation)
 			}
 			if len(raw) != 3 {
 				t.Fatalf("answer %v, want exactly agent_id, token and generation", raw)

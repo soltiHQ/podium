@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -19,11 +20,11 @@ import (
 // enrolls through one follower, and an operator who holds agents:reset resets
 // its credential through another: the follower forwards the POST to the leader,
 // which applies it as any write, and answers the new token, once, through the
-// follower. Every node then holds the credential derived at the next
-// generation, the leader's access log holds the reset and the follower's does
-// not, and every node holds the event of the reset. The old token is refused at
-// the next sync, through a follower, and the new one is accepted. The token is
-// in no node's log.
+// follower. Every node then holds the credential derived at the generation of
+// the answer, the time of the reset in Unix seconds, the leader's access log
+// holds the reset and the follower's does not, and every node holds the event
+// of the reset. The old token is refused at the next sync, through a follower,
+// and the new one is accepted. The token is in no node's log.
 func TestResetThroughFollowerForwards(t *testing.T) {
 	const secret = "0123456789abcdef0123456789abcdef"
 	ctx := context.Background()
@@ -70,7 +71,9 @@ func TestResetThroughFollowerForwards(t *testing.T) {
 	}
 
 	const path = "/api/v1/agents/agent-1/credential"
+	before := time.Now().Unix()
 	resp, body := send(t, client, http.MethodPost, "http://"+resetting.cfg.HTTP.Addr+path, "", "", "", cookies)
+	after := time.Now().Unix()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("reset through %s: %d %q, want the leader's 200", resetting.id, resp.StatusCode, body)
 	}
@@ -81,11 +84,19 @@ func TestResetThroughFollowerForwards(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &issued); err != nil {
 		t.Fatalf("answer %q: %v", body, err)
 	}
-	newToken := agent.DeriveToken(secret, "agent-1", 1)
-	if issued.AgentID != "agent-1" || issued.Token != newToken || issued.Generation == nil || *issued.Generation != 1 {
-		t.Fatalf("answer %+v, want agent-1, its token at generation 1 and generation 1", issued)
+	if issued.Generation == nil {
+		t.Fatalf("answer %+v, want a generation", issued)
 	}
-	nodesHold(t, nodes, "the credential of agent-1 at generation 1", generationHeld(1))
+	// The agent holds generation 0, so the leader issues the time of the reset in Unix seconds.
+	generation := *issued.Generation
+	if int64(generation) < before || int64(generation) > after {
+		t.Fatalf("generation %d, want the time of the reset, from %d to %d", generation, before, after)
+	}
+	newToken := agent.DeriveToken(secret, "agent-1", generation)
+	if issued.AgentID != "agent-1" || issued.Token != newToken {
+		t.Fatalf("answer %+v, want agent-1 and its token at generation %d", issued, generation)
+	}
+	nodesHold(t, nodes, fmt.Sprintf("the credential of agent-1 at generation %d", generation), generationHeld(generation))
 
 	// The access log of an API route runs behind the Leader middleware, so the
 	// node that logs the request served it.
