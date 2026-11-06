@@ -227,8 +227,8 @@ whoever holds that former secret. To re-provision the fleet under a new secret:
    needs the same secret (see "Settings every replica must share").
 2. For each agent the WARN names, derive its token under the new secret with
    the generation the WARN gives, and give the token to the agent. The
-   generation is 0 for an agent that was never reset; for one that was, it is
-   about the time of its last reset in Unix seconds, ten digits:
+   generation is 0 for an agent that was never reset; for one that was, it is a
+   ten-digit number, about the time of its last reset in Unix seconds:
 
    ```sh
    export SOLTI_AGENT_AUTH_ENROLL_SECRET=...   # the new secret
@@ -303,8 +303,8 @@ lost, and moves a stored credential to a derived one.
   the current secret, whatever secret the old credential derived from. Its
   generation is the later of the old generation plus one, a stored credential
   having none and counting as 0, and the time of the reset in Unix seconds, at
-  least 1 and below the last generation, so the generation of an agent that was
-  reset is about the time in seconds, ten digits, not a small number
+  least 1 and below the last generation: the generation of an agent that was
+  reset is a ten-digit number, about the time in seconds
   (`TestResetCredentialIssuesTheLaterOfTheNextGenerationAndTheTime` and
   `TestResetTakesTheTimeFloor`, in `internal/service/agent`). The time is there
   because the old generation can be below one that was issued and revoked: a

@@ -18,10 +18,10 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
 )
 
-// tokenA1g2 is the token of "agent-1" at generation 2 under secret A, and the
-// others its tokens at the generations around floorSeconds, derived outside
-// podium like the fixtures of token_test.go: tokenA1Floor at floorSeconds, and
-// the others at the seconds in their names, before or after it.
+// tokenA1g2 is the token of "agent-1" at generation 2 under secret A. The others
+// are its tokens at floorSeconds (tokenA1Floor) and at the generation in the name,
+// that many seconds before or after it (tokenA1After60 is floorSeconds+60). All
+// are derived outside podium like the fixtures of token_test.go.
 const (
 	tokenA1g2 = "089a433310152c9aa06043ed2151343c55f47fa0da583cfcbd14d149070e51e0"
 
@@ -207,7 +207,7 @@ func TestResetTakesTheTimeFloor(t *testing.T) {
 // new generation is the time of that reset, above the two before the interlude,
 // so their tokens, which the resets revoked, stay refused, and so do the token it
 // enrolled with and the stored one. A stored credential counts as generation 0,
-// so a generation that only counted up from it would start again at 1.
+// so without the time the reset would issue generation 1, below the two.
 func TestResetAfterAStoredInterludeRevivesNoGeneration(t *testing.T) {
 	ctx := context.Background()
 	store := inmemory.New()
