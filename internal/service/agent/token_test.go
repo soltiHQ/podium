@@ -318,40 +318,44 @@ func TestDerivedCredentialNeedsItsSecret(t *testing.T) {
 // agent-token prints for its generation, syncs again: its credential moves to
 // the current secret, at the same generation, in the transaction that checks
 // it, and podium presents that token from then on. The token of the old secret
-// no longer works.
+// no longer works. A generation that resets raised above 0 is kept as well.
 func TestReprovisionedAgentMovesToTheCurrentSecret(t *testing.T) {
 	ctx := context.Background()
-	store := inmemory.New()
-	logger := zerolog.New(io.Discard)
-	withA := New(store, logger, WithEnrollSecret(enrollSecretA))
-	if err := withA.VerifyOrEnrollToken(ctx, "agent-1", tokenA1); err != nil {
-		t.Fatal(err)
-	}
-	enrolled, err := store.GetAgentCredential(ctx, "agent-1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	created := time.Unix(1700000000, 0)
+	for _, tc := range []struct {
+		name       string
+		generation uint32
+		old, token string // the tokens of agent-1 at the generation under secrets A and B
+	}{
+		{"at generation 0", 0, tokenA1, tokenB1},
+		{"at generation 1", 1, tokenA1g1, tokenB1g1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := inmemory.New()
+			putCredential(t, store, created)(model.NewDerivedAgentCredential("agent-1", tc.generation, SecretID(enrollSecretA)))
+			counted := &countingTx{Storage: store}
+			withB := New(counted, zerolog.New(io.Discard), WithEnrollSecret(enrollSecretB))
 
-	counted := &countingTx{Storage: store}
-	withB := New(counted, logger, WithEnrollSecret(enrollSecretB))
-	if err := withB.VerifyOrEnrollToken(ctx, "agent-1", tokenB1); err != nil {
-		t.Fatalf("agent-1 with the token of secret B: %v", err)
-	}
-	if counted.txs != 1 {
-		t.Fatalf("the check took %d transactions, want 1", counted.txs)
-	}
-	cred, err := store.GetAgentCredential(ctx, "agent-1")
-	if err != nil || !cred.Derived() || cred.Generation() != 0 || hex.EncodeToString(cred.SecretID()) != secretIDB || cred.Token() != "" {
-		t.Fatalf("credential after the re-provisioning: %v, want derived at 0 under %s", err, secretIDB)
-	}
-	if !cred.CreatedAt().Equal(enrolled.CreatedAt()) {
-		t.Fatalf("the credential's enrollment time moved: %v, want %v", cred.CreatedAt(), enrolled.CreatedAt())
-	}
-	if token, err := withB.AgentToken(ctx, "agent-1"); err != nil || token != tokenB1 {
-		t.Fatalf("AgentToken under secret B: %q %v, want the token of secret B", token, err)
-	}
-	if err := withB.VerifyOrEnrollToken(ctx, "agent-1", tokenA1); !errors.Is(err, ErrUnauthenticated) {
-		t.Fatalf("the token of secret A after the move: %v, want ErrUnauthenticated", err)
+			if err := withB.VerifyOrEnrollToken(ctx, "agent-1", tc.token); err != nil {
+				t.Fatalf("agent-1 with the token of secret B: %v", err)
+			}
+			if counted.txs != 1 {
+				t.Fatalf("the check took %d transactions, want 1", counted.txs)
+			}
+			cred, err := store.GetAgentCredential(ctx, "agent-1")
+			if err != nil || !cred.Derived() || cred.Generation() != tc.generation || hex.EncodeToString(cred.SecretID()) != secretIDB || cred.Token() != "" {
+				t.Fatalf("credential after the re-provisioning: %v, want derived at %d under %s", err, tc.generation, secretIDB)
+			}
+			if !cred.CreatedAt().Equal(created) {
+				t.Fatalf("the credential's enrollment time moved: %v, want %v", cred.CreatedAt(), created)
+			}
+			if token, err := withB.AgentToken(ctx, "agent-1"); err != nil || token != tc.token {
+				t.Fatalf("AgentToken under secret B: %q %v, want the token of secret B", token, err)
+			}
+			if err := withB.VerifyOrEnrollToken(ctx, "agent-1", tc.old); !errors.Is(err, ErrUnauthenticated) {
+				t.Fatalf("the token of secret A after the move: %v, want ErrUnauthenticated", err)
+			}
+		})
 	}
 }
 

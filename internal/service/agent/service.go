@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -91,6 +92,9 @@ type Service struct {
 	enrollSecret string
 	secretID     []byte // SecretID of enrollSecret, nil without one
 	authDisabled bool
+
+	// clock replaces time.Now in tests; nil means time.Now.
+	clock func() time.Time
 }
 
 // Option configures a Service.
@@ -562,24 +566,34 @@ func replaceLabels(a *model.Agent, labels map[string]string) {
 // enrollment secret is set: 32 bytes, as 64 hex digits.
 const resetTokenBytes = 32
 
+// now is the time of the service's clock.
+func (s *Service) now() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
+}
+
 // ResetCredential issues the agent a new credential in place of the one it
 // holds, in one transaction: from its commit discovery refuses the old token,
 // and AgentToken returns the new one, so the old token stops working in both
 // directions at once. The credential keeps its enrollment time.
 //
-// With an enrollment secret set, the new credential is derived: its generation
-// is that of the credential it replaces plus one, a stored credential counting as
-// generation 0, and it names the current secret, whatever secret the old one
-// derived from. IssuedCredential.Generation says which `podium agent-token
-// --generation` prints the token again. Without a secret it is a stored
-// credential with a new random token, since trust on first use stores the token
-// an agent holds; nothing derives that token again.
+// With an enrollment secret set, the new credential is derived, and names the
+// current secret, whatever secret the old one derived from. Its generation is
+// that of a derived credential it replaces plus one, and for a stored one, which
+// has no generation, the time of the reset (generationFloor).
+// IssuedCredential.Generation says which `podium agent-token --generation`
+// prints the token again. Without a secret it is a stored credential with a new
+// random token, since trust on first use stores the token an agent holds;
+// nothing derives that token again, and the credential holds it like any stored
+// one.
 //
-// The token is returned here and nowhere else: a caller must neither log it nor
-// keep it. An agent with no credential is storage.ErrNotFound, and nothing is
-// written. With agent authentication disabled a reset is ErrAuthDisabled, and a
-// credential at the last generation ErrGenerationExhausted, both of which change
-// nothing.
+// The token is returned here and in no other result: a caller must neither log
+// it nor keep it. An agent with no credential is storage.ErrNotFound, and
+// nothing is written. With agent authentication disabled a reset is
+// ErrAuthDisabled, and a derived credential at the last generation
+// ErrGenerationExhausted, both of which change nothing.
 func (s *Service) ResetCredential(ctx context.Context, agentID string) (IssuedCredential, error) {
 	if agentID == "" {
 		return IssuedCredential{}, storage.ErrInvalidArgument
@@ -594,35 +608,67 @@ func (s *Service) ResetCredential(ctx context.Context, agentID string) (IssuedCr
 		if err != nil {
 			return err
 		}
-		var cred *model.AgentCredential
 		if s.enrollSecret != "" {
-			generation := old.Generation()
-			if generation == math.MaxUint32 {
-				return ErrGenerationExhausted
-			}
-			generation++
-			if cred, err = model.NewDerivedAgentCredential(agentID, generation, s.secretID); err != nil {
+			generation, err := s.nextGeneration(old)
+			if err != nil {
 				return err
 			}
 			issued = IssuedCredential{AgentID: agentID, Token: DeriveToken(s.enrollSecret, agentID, generation), Derived: true, Generation: generation}
-		} else {
-			var raw [resetTokenBytes]byte
-			if _, err = rand.Read(raw[:]); err != nil {
-				return err
-			}
-			token := hex.EncodeToString(raw[:])
-			if cred, err = model.NewStoredAgentCredential(agentID, token); err != nil {
-				return err
-			}
-			issued = IssuedCredential{AgentID: agentID, Token: token}
+			return s.rederive(ctx, tx, old, generation)
+		}
+		var raw [resetTokenBytes]byte
+		if _, err = rand.Read(raw[:]); err != nil {
+			return err
+		}
+		token := hex.EncodeToString(raw[:])
+		cred, err := model.NewStoredAgentCredential(agentID, token)
+		if err != nil {
+			return err
 		}
 		cred.SetCreatedAt(old.CreatedAt())
+		issued = IssuedCredential{AgentID: agentID, Token: token}
 		return tx.UpsertAgentCredential(ctx, cred)
 	})
 	if err != nil {
 		return IssuedCredential{}, err
 	}
 	return issued, nil
+}
+
+// nextGeneration is the generation a reset with the secret set gives in place of
+// the credential c: the one after c's for a derived credential, or
+// ErrGenerationExhausted at the last one, which would wrap around to generation
+// 0, and generationFloor for a stored credential, which has none.
+func (s *Service) nextGeneration(c *model.AgentCredential) (uint32, error) {
+	if !c.Derived() {
+		return generationFloor(s.now()), nil
+	}
+	if c.Generation() == math.MaxUint32 {
+		return 0, ErrGenerationExhausted
+	}
+	return c.Generation() + 1, nil
+}
+
+// generationFloor is the generation a reset with the secret set gives a stored
+// credential at the time now: now in Unix seconds, 1 for a time at or before the
+// epoch, and math.MaxUint32-1 at most, so that ErrGenerationExhausted stays the
+// guard of the last generation. Counting a stored credential as generation 0
+// would issue generation 1, whose token a reset may have revoked: an agent
+// derived at generation 2 whose secret was removed, reset to a stored credential,
+// and reset again once the same secret is back, would get the token of
+// generation 1 again. The floor is above every generation the agent held before
+// as long as the clock of the node that serves the reset, the leader, has not run
+// back past an earlier floor, and the credential was reset fewer times since that
+// floor than seconds have passed: each reset of a derived credential adds one.
+func generationFloor(now time.Time) uint32 {
+	switch seconds := now.Unix(); {
+	case seconds < 1:
+		return 1
+	case seconds >= math.MaxUint32:
+		return math.MaxUint32 - 1
+	default:
+		return uint32(seconds)
+	}
 }
 
 // Delete removes the agent's row and every rollout of the agent in one

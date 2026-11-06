@@ -18,9 +18,20 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
 )
 
-// tokenA1g2 is the token of "agent-1" at generation 2 under secret A, derived
+// tokenA1g2 is the token of "agent-1" at generation 2 under secret A, and
+// tokenA1Floor its token at the generation floorAt gives, floorSeconds, derived
 // outside podium like the fixtures of token_test.go.
-const tokenA1g2 = "089a433310152c9aa06043ed2151343c55f47fa0da583cfcbd14d149070e51e0"
+const (
+	tokenA1g2    = "089a433310152c9aa06043ed2151343c55f47fa0da583cfcbd14d149070e51e0"
+	tokenA1Floor = "733efc9f2aad156bbb305681bfc6e3c5d1fd2222d5253c4e72f6e7a5f79a588e"
+)
+
+// floorSeconds is the time of floorAt, in Unix seconds: the generation a reset
+// gives a stored credential at that time while the secret is set.
+const floorSeconds = 1762400000
+
+// floorAt is the clock of the tests that reset a stored credential.
+func floorAt() time.Time { return time.Unix(floorSeconds, 0) }
 
 // putCredential stores the credential c, built by the constructor that returned
 // (c, err), with the enrollment time created.
@@ -39,11 +50,11 @@ func putCredential(t *testing.T, store storage.Storage, created time.Time) func(
 }
 
 // With the enrollment secret set, a reset replaces the credential, in one
-// transaction with one write, by a derived one at the next generation under the
-// current secret: a stored credential counts as generation 0, and a derived one
-// of another secret moves to the current secret. The old token no longer
-// verifies, the new one does and is the one podium presents, and the enrollment
-// time stays.
+// transaction with one write, by a derived one under the current secret: a
+// derived credential gets the next generation, and one of another secret moves
+// to the current secret; a stored credential, which has no generation, gets the
+// time of the reset in Unix seconds. The old token no longer verifies, the new
+// one does and is the one podium presents, and the enrollment time stays.
 func TestResetCredentialIssuesTheNextGeneration(t *testing.T) {
 	ctx := context.Background()
 	created := time.Unix(1700000000, 0)
@@ -59,9 +70,9 @@ func TestResetCredentialIssuesTheNextGeneration(t *testing.T) {
 		generation uint32 // the generation of the new credential
 		token      string // its token
 	}{
-		{"a stored credential counts as generation 0", func() (*model.AgentCredential, error) {
+		{"a stored credential gets the time of the reset", func() (*model.AgentCredential, error) {
 			return model.NewStoredAgentCredential("agent-1", "legacy-token")
-		}, "legacy-token", 1, tokenA1g1},
+		}, "legacy-token", floorSeconds, tokenA1Floor},
 		{"derived at generation 0", derived(0, SecretID(enrollSecretA)), tokenA1, 1, tokenA1g1},
 		{"derived at generation 1", derived(1, SecretID(enrollSecretA)), tokenA1g1, 2, tokenA1g2},
 		{"derived under another secret, at generation 0", derived(0, SecretID(enrollSecretB)), tokenB1, 1, tokenA1g1},
@@ -72,6 +83,7 @@ func TestResetCredentialIssuesTheNextGeneration(t *testing.T) {
 			putCredential(t, store, created)(tc.row())
 			counted := &countingTx{Storage: store}
 			svc := New(counted, zerolog.New(io.Discard), WithEnrollSecret(enrollSecretA))
+			svc.clock = floorAt
 
 			issued, err := svc.ResetCredential(ctx, "agent-1")
 			if err != nil {
@@ -104,6 +116,127 @@ func TestResetCredentialIssuesTheNextGeneration(t *testing.T) {
 				t.Fatalf("AgentToken after the reset: %q %v, want the new token", token, err)
 			}
 		})
+	}
+}
+
+// The generation a reset gives a stored credential is the time in Unix seconds,
+// at least 1, so that a clock at or before the epoch gives no generation 0, the
+// token the agent ID enrolls with, and below the last generation, so that the
+// floor leaves a derived reset to come before ErrGenerationExhausted refuses
+// the next one.
+func TestResetOfAStoredCredentialTakesTheTimeFloor(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		clock time.Time
+		want  uint32
+	}{
+		{"now", floorAt(), floorSeconds},
+		{"one second after the epoch", time.Unix(1, 0), 1},
+		{"the epoch", time.Unix(0, 0), 1},
+		{"before the epoch", time.Unix(-5, 0), 1},
+		{"the zero time", time.Time{}, 1},
+		{"the second before the last generation", time.Unix(math.MaxUint32-1, 0), math.MaxUint32 - 1},
+		{"the second of the last generation", time.Unix(math.MaxUint32, 0), math.MaxUint32 - 1},
+		{"past the last generation", time.Unix(1<<40, 0), math.MaxUint32 - 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := inmemory.New()
+			putCredential(t, store, time.Unix(1700000000, 0))(model.NewStoredAgentCredential("agent-1", "legacy-token"))
+			svc := New(store, zerolog.New(io.Discard), WithEnrollSecret(enrollSecretA))
+			svc.clock = func() time.Time { return tc.clock }
+
+			issued, err := svc.ResetCredential(ctx, "agent-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := (IssuedCredential{AgentID: "agent-1", Token: DeriveToken(enrollSecretA, "agent-1", tc.want), Derived: true, Generation: tc.want}); issued != want {
+				t.Fatalf("issued %+v, want %+v", issued, want)
+			}
+			if cred, err := store.GetAgentCredential(ctx, "agent-1"); err != nil || !cred.Derived() || cred.Generation() != tc.want {
+				t.Fatalf("credential after the reset: %v, want derived at %d", err, tc.want)
+			}
+		})
+	}
+
+	// The top stays guarded: a floor at the generation before the last leaves one
+	// reset, and the one after it is refused.
+	store := inmemory.New()
+	putCredential(t, store, time.Unix(1700000000, 0))(model.NewStoredAgentCredential("agent-1", "legacy-token"))
+	svc := New(store, zerolog.New(io.Discard), WithEnrollSecret(enrollSecretA))
+	svc.clock = func() time.Time { return time.Unix(1<<40, 0) }
+	for _, want := range []uint32{math.MaxUint32 - 1, math.MaxUint32} {
+		if issued, err := svc.ResetCredential(ctx, "agent-1"); err != nil || issued.Generation != want {
+			t.Fatalf("reset: %+v %v, want generation %d", issued, err, want)
+		}
+	}
+	if _, err := svc.ResetCredential(ctx, "agent-1"); !errors.Is(err, ErrGenerationExhausted) {
+		t.Fatalf("reset at the last generation: %v, want ErrGenerationExhausted", err)
+	}
+}
+
+// A stored interlude brings no revoked generation back. The agent is derived at
+// generation 2 by two resets, its secret is removed and a reset gives it a stored
+// credential, then the same secret is set again and it is reset once more: the
+// new generation is the time floor, above 2, so the tokens of generations 1 and 2,
+// which the resets revoked, stay refused, and so do the token it enrolled with and
+// the stored one. Counting from 1 again would let the token of generation 1 back
+// in.
+func TestResetAfterAStoredInterludeRevivesNoGeneration(t *testing.T) {
+	ctx := context.Background()
+	store := inmemory.New()
+	logger := zerolog.New(io.Discard)
+	withA := New(store, logger, WithEnrollSecret(enrollSecretA))
+	withA.clock = floorAt
+	if err := withA.VerifyOrEnrollToken(ctx, "agent-1", tokenA1); err != nil {
+		t.Fatalf("enroll under secret A: %v", err)
+	}
+	for _, step := range []struct {
+		generation uint32
+		token      string
+	}{{1, tokenA1g1}, {2, tokenA1g2}} {
+		issued, err := withA.ResetCredential(ctx, "agent-1")
+		if err != nil || issued.Generation != step.generation || issued.Token != step.token {
+			t.Fatalf("reset under secret A: %+v %v, want generation %d", issued, err, step.generation)
+		}
+		if err := withA.VerifyOrEnrollToken(ctx, "agent-1", step.token); err != nil {
+			t.Fatalf("sync at generation %d: %v", step.generation, err)
+		}
+	}
+
+	// The secret is removed: the reset stores a random token, which lets the agent in.
+	without := New(store, logger)
+	stored, err := without.ResetCredential(ctx, "agent-1")
+	if err != nil || stored.Derived {
+		t.Fatalf("reset with no secret: %+v %v, want a stored credential", stored, err)
+	}
+	if err := without.VerifyOrEnrollToken(ctx, "agent-1", stored.Token); err != nil {
+		t.Fatalf("sync with the stored token: %v", err)
+	}
+
+	// The same secret is set again, and the stored credential is reset.
+	issued, err := withA.ResetCredential(ctx, "agent-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (IssuedCredential{AgentID: "agent-1", Token: tokenA1Floor, Derived: true, Generation: floorSeconds}); issued != want {
+		t.Fatalf("reset after the interlude: %+v, want %+v, above generation 2", issued, want)
+	}
+	for _, old := range []struct{ name, token string }{
+		{"the enrollment token", tokenA1},
+		{"the token of generation 1", tokenA1g1},
+		{"the token of generation 2", tokenA1g2},
+		{"the stored token", stored.Token},
+	} {
+		if err := withA.VerifyOrEnrollToken(ctx, "agent-1", old.token); !errors.Is(err, ErrUnauthenticated) {
+			t.Fatalf("%s after the interlude: %v, want ErrUnauthenticated", old.name, err)
+		}
+	}
+	if err := withA.VerifyOrEnrollToken(ctx, "agent-1", issued.Token); err != nil {
+		t.Fatalf("the new token: %v", err)
+	}
+	if token, err := withA.AgentToken(ctx, "agent-1"); err != nil || token != issued.Token {
+		t.Fatalf("AgentToken after the interlude: %q %v, want the new token", token, err)
 	}
 }
 
