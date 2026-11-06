@@ -191,10 +191,17 @@ func (p *grpcProxyV1) CancelTask(ctx context.Context, taskID string) error {
 	return nil
 }
 
+// maxLogMessageBytes is the most a message of an agent's log stream may hold over
+// gRPC: 1 MiB, as a line of the stream is over HTTP. A message over it ends the
+// stream with the client's error. The answers of the unary calls keep the 4 MiB
+// of the pool (maxAgentMessageBytes).
+const maxLogMessageBytes = 1 << 20
+
 // StreamTaskLogs opens the agent's StreamTaskLogs server-stream, forwards
 // each StreamTaskLogsResponse into a channel, and closes it on EOF, ctx
-// cancellation, or transport error. Channel buffer is 64 — typical chunk
-// cadence (~10 lines/sec) is well below; bursts are absorbed.
+// cancellation, or transport error, a message over maxLogMessageBytes
+// included. Channel buffer is 64 — typical chunk cadence (~10 lines/sec) is
+// well below; bursts are absorbed.
 func (p *grpcProxyV1) StreamTaskLogs(ctx context.Context, taskID string) (<-chan *taskv1.StreamTaskLogsResponse, error) {
 	task, err := p.GetTask(ctx, taskID)
 	if err != nil {
@@ -208,7 +215,7 @@ func (p *grpcProxyV1) StreamTaskLogsForUID(ctx context.Context, taskID, uid stri
 		return nil, fmt.Errorf("%w: missing task UID", ErrStreamTaskLogs)
 	}
 	client := taskv1.NewTaskServiceClient(p.conn)
-	stream, err := client.StreamTaskLogs(p.authCtx(ctx), &taskv1.StreamTaskLogsRequest{Name: taskID, TaskUid: uid})
+	stream, err := client.StreamTaskLogs(p.authCtx(ctx), &taskv1.StreamTaskLogsRequest{Name: taskID, TaskUid: uid}, grpc.MaxCallRecvMsgSize(maxLogMessageBytes))
 	if err != nil {
 		return nil, agentError(ErrStreamTaskLogs, err)
 	}
