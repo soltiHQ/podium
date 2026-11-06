@@ -288,18 +288,32 @@ A heartbeat that moves only the time of the sync and the uptime sends none. The 
 With agent auth required, the first sync of an unknown agent ID enrolls the token it presents (trust on first use) and
 sets the endpoint podium calls; every later sync of that ID must present the same token. With an enrollment secret
 (`SOLTI_AGENT_AUTH_ENROLL_SECRET`, held by the agent service as `agent.WithEnrollSecret`), the first sync enrolls only
-the token derived for that ID (`agent.EnrollToken`, printed by `podium agent-token`): any other token is an
-`ErrEnrollRefused`, an `ErrUnauthenticated` like a wrong one, so 401 / `Unauthenticated`, nothing stored, one failure for
-the limiter, and a WARN with the agent ID and the client IP, never the token. Known IDs
-are checked against their stored token, secret or not. Without a secret, only the network or client certificates keep
-other hosts from enrolling new IDs (see `internal/config`, "Agent authentication"). A token over 1024 bytes
+the token derived for that ID at generation 0 (`agent.DeriveToken`, printed by `podium agent-token`), as a derived
+credential, which stores no token: any other token is an `ErrEnrollRefused`, an `ErrUnauthenticated` like a wrong one,
+so 401 / `Unauthenticated`, nothing stored, one failure for the limiter, and a WARN with the agent ID and the client IP,
+never the token. A known ID is checked against its credential: a stored token, of an agent that enrolled without the
+secret, as it always was, secret or not; a derived credential against the token the secret derives for its generation.
+With the secret set, a stored token that it derives at generation 0 becomes a derived credential in the transaction of
+the check, and a derived credential of another secret that presents the token of the current secret for its generation,
+as an agent re-provisioned under it does, moves to the current secret. Any other sync of a derived credential with no
+secret set, or of another secret than the current one, is refused as an
+`agent.DerivedCredentialError`, an `ErrUnauthenticated` too, with one failure for the limiter and a WARN with the agent ID,
+the client IP and the error's text, which says the agent enrolled under another enrollment secret and which
+`podium agent-token --generation` command gives the token it needs, or that no secret is set
+(`TestChangedSecretRefusesDerivedAgentClearly`); the agent service's token lookup for the agent's calls fails with the
+same error, so podium makes no call to it. The agent routes that would call it answer as for their other failures:
+`GET /api/v1/agents/{id}/tasks` with 503 and an ERROR line that holds the error, the task detail and cancel with 409
+(`errkind` classifies the error as `FailedPrecondition`), and the log stream with 503 and a WARN line that holds it.
+Without a secret, only the network or client certificates keep other hosts
+from enrolling new IDs (see `internal/config`, "Agent authentication" and "Enrollment secret"). A token over 1024 bytes
 (`model.AgentTokenMaxBytes`) is refused first, with HTTP 400
 `Agent token is too long.` / gRPC `InvalidArgument`, and counts as no failure; `VerifyOrEnrollToken` never enrolls one
 either, while stored credentials load whatever their length. Then each sync reserves an attempt on
 the pair (client IP, agent ID) before its token check (`verifyAgentToken`), so checks in flight count like failures; a
 missing or wrong token turns the attempt into a failure, any other outcome releases it. A missing token is also logged
 at WARN with the agent ID and the ways out; with an enrollment secret they name `podium agent-token`, not
-`agent_auth.require=false`. Only attempts the limiter admits log, so each WARN comes at most `auth.rate_attempts` times
+`agent_auth.require=false`. Only attempts the limiter admits log, so each WARN, the one of a derived credential podium
+cannot use included, comes at most `auth.rate_attempts` times
 per `auth.rate_window` for a pair. Both transports share one limiter, so failures over HTTP count toward gRPC
 and back. `auth.rate_attempts` failures block that pair for `auth.rate_window`: HTTP answers 429, gRPC `ResourceExhausted`.
 There is no per-IP limit, so agents behind one egress IP (NAT, Kubernetes) never block each other.

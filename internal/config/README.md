@@ -76,10 +76,12 @@ Standalone forwards nothing, and logs neither WARN.
 
 `agent_auth.require` defaults to `true`. It authenticates enrolled agents: a
 sync for an agent ID that has a token, but without that token, gets HTTP 401 /
-gRPC `Unauthenticated`, and outbound calls to the agent present the stored
-token. By itself it does not keep other hosts out: the first sync of an unknown
-agent ID enrolls the token it presents (trust on first use) and sets the
-endpoint podium will call. Close enrollment with an enrollment secret (see
+gRPC `Unauthenticated`, and outbound calls to the agent present that token:
+the one podium stores for it, or, for an agent enrolled with the enrollment
+secret, the one podium derives from the secret again (see "Enrollment secret"
+below). By itself it does not keep other hosts out: the first sync of an
+unknown agent ID enrolls the token it presents (trust on first use) and sets
+the endpoint podium will call. Close enrollment with an enrollment secret (see
 "Enrollment secret" below) or with client certificates
 (`tls.server.client_ca_file`), or keep the discovery listeners
 (`http_discovery.addr`, default `:8082`, and `grpc.addr`, default `:50051`)
@@ -151,17 +153,84 @@ the value. So does setting it while `agent_auth.require` is `false`, where it
 would close nothing.
 
 With the secret set, the first sync of an unknown agent ID enrolls only if its
-bearer token is the lowercase hex of HMAC-SHA256 of the agent ID under the
-secret (64 characters). Any other token, a missing one included, is refused
-like a wrong one: HTTP 401 / gRPC `Unauthenticated`, nothing is enrolled, and
-it counts as a failure of the discovery limiter (see "Rate limiting"). A wrong
-token is also logged at WARN with the agent ID and the client IP, never the
-token, bounded by the discovery limiter like the WARN for a missing token. A
-token over 1024 bytes still gets the 400 above. Agents that are already enrolled are
-unaffected: their stored token is compared as before, so the secret revokes
-nobody, and changing or removing it leaves them enrolled. No API resets a
-stored credential yet. In raft mode each replica reads its own environment:
-give every replica the same secret.
+bearer token is the token of generation 0 derived for the ID: the lowercase hex
+of HMAC-SHA256 of the agent ID under the secret (64 characters). Any other
+token, a missing one included, is refused like a wrong one: HTTP 401 / gRPC
+`Unauthenticated`, nothing is enrolled, and it counts as a failure of the
+discovery limiter (see "Rate limiting"). A wrong token is also logged at WARN
+with the agent ID and the client IP, never the token, bounded by the discovery
+limiter like the WARN for a missing token. A token over 1024 bytes still gets
+the 400 above. In raft mode each replica reads its own environment: give every
+replica the same secret.
+
+The secret is the root of every credential enrolled under it. Such an agent
+gets a derived credential, which stores no token: only its generation and an
+ID of the secret, the first 8 bytes of HMAC-SHA256 of a fixed label under the
+secret, which tells two secrets apart and from which no token follows (like any
+token, it would confirm a guess of a weak secret offline). Podium derives
+the token again from the secret, the agent ID and the generation to check each
+sync and to call the agent, so with the secret set no file in the data
+directory holds the token of an agent enrolled under it, after a snapshot too
+(`TestDerivedCredentialStoresNoToken`, in `internal/storage/durable` and
+`internal/raft`). An agent that enrolled without the secret has a stored
+credential, which holds the token it chose; a stored token is compared as it
+always was, whether a secret is set or not. A stored token that is the
+generation-0 token of its agent ID under the secret, as `podium agent-token`
+printed it for agents provisioned before this version, becomes a derived
+credential: at the agent's next sync, in the transaction that checks it, and at
+each start of standalone and each leadership term of a raft node, for every
+such credential (`TestLegacyRowsConvertedAtStart`, in `internal/app`, shows a
+standalone start). That
+start then logs, at WARN, how many stored credentials are left, `agent
+credentials: agents that enrolled without the enrollment secret hold stored
+tokens, kept raw in podium's state and in its backups` with
+`stored_credentials`, and, at ERROR with `unusable_credentials`, how many
+derived credentials it cannot use, because no secret is set or they derive
+from another one. With `agent_auth.require: false` podium neither converts nor
+counts anything.
+
+Upgrading leaves the raw tokens already written where they are: in the
+backups taken before the upgrade; in the snapshot and the log entries written
+before it, until the store compacts them; and in the freed pages of the
+database files that held them, until bbolt writes over those. Standalone
+compacts at its next snapshot (see "Standalone storage"). A raft node drops log
+entries at a snapshot but keeps the last `cluster.raft.trailing_logs` of them,
+and keeps its two latest snapshots (see "Log compaction" in
+`internal/raft/README.md`). Take a fresh backup once the store has compacted
+past the upgrade, and drop the older ones; a copy of a database file copies its
+freed pages too, which may still hold some of those bytes.
+
+Changing or removing the secret locks out every agent enrolled under it: each
+sync it makes with the token it has is refused like a wrong token, and logged
+at WARN, bounded by the discovery limiter, with its agent ID, its client IP and
+`agent <id> enrolled under another enrollment secret: it needs the token that
+podium agent-token --generation <g> <id> prints with the current secret`
+(`agent <id> holds a credential derived from an enrollment secret, and no
+enrollment secret is set: it needs the secret it enrolled under` without a
+secret). Podium makes no call to it either: its token lookup fails with the
+same text, which a rollout to it records in its error
+(`TestChangedSecretRefusesDerivedAgentClearly`, in `internal/handler`;
+`TestOutboundUsesDerivedToken`, in `internal/server/runner/sync`). Agents with
+a stored token are not affected.
+To re-provision the fleet under a new secret:
+
+1. Set the new secret on every node and restart them; in raft mode every node
+   needs the same secret (see "Settings every replica must share").
+2. For each agent the WARN names, derive its token under the new secret with
+   the generation the WARN gives, and give the token to the agent:
+
+   ```sh
+   export SOLTI_AGENT_AUTH_ENROLL_SECRET=...   # the new secret
+   podium agent-token --generation 0 agent-1   # the generation the WARN names
+   ```
+
+3. The agent's next sync with that token moves its credential to the new secret,
+   at the same generation, and podium calls it again
+   (`TestReprovisionedAgentMovesToTheCurrentSecret`, in
+   `internal/service/agent`).
+
+Removing the secret leaves no way in for those agents but setting the same
+secret again: without one, podium derives no token.
 
 To provision an agent, derive its token on a host that has the secret, then
 give the token to the agent as its bearer token. The agent must run with the
@@ -178,22 +247,26 @@ calls to that agent. The SDK still sends it over TLS only, unless the agent
 opts in with `allow_insecure_token_transport()`. Agents never see the secret,
 only their own token: a leaked token lets nobody enroll another ID.
 
-Derive a token only for an agent ID that is not enrolled yet. An enrolled agent
-is checked against the token it enrolled with, so re-provisioning it with a
-derived token that differs (it enrolled before the secret was set, or under
-another secret) locks it out: every sync it makes gets 401, and no API resets a
-stored credential. That includes an agent that lifecycle deleted: deletion
-drops the agent row but keeps its credential, so the ID stays enrolled.
-Instead, keep the agent's existing token, or, if that token is lost, run the
-agent under a new agent ID and derive the token for that one.
+An agent with a stored token, which enrolled without the secret with a token it
+chose, is checked against that token, so re-provisioning it with a derived
+token locks it out: every sync it makes gets 401, and no API resets a stored
+credential. That includes an agent that lifecycle deleted: deletion drops the
+agent row but keeps its credential, so the ID stays enrolled. Instead, keep the
+agent's existing token, or, if that token is lost, run the agent under a new
+agent ID and derive the token for that one. For an agent enrolled under the
+current secret, `podium agent-token` with the agent's generation prints the
+token it already has.
 
-`podium agent-token <agent-id>` must come first among the arguments. It checks
-the ID like discovery does (1 to 128 bytes of `[A-Za-z0-9._-]`) and reads the
-secret from the environment only. It never prints the secret, and exits non-zero
-with one short line when the secret is missing or shorter than 32 bytes, or the
-ID is invalid. It needs no configuration file. A bare `-h` or `--help` prints
-the usage and exits 0; for an agent ID that starts with `-`, put `--` before
-it: `podium agent-token -- -h`.
+`podium agent-token [--generation N] <agent-id>` must come first among the
+arguments. It prints the token of the ID at generation `N`, 0 by default, the
+token the ID enrolls with; `--generation=N` works too, with `N` a whole number
+from 0 to 4294967295, and comes before the ID. It checks the ID like discovery
+does (1 to 128 bytes of `[A-Za-z0-9._-]`) and reads the secret from the
+environment only. It never prints the secret, and exits non-zero with one short
+line when the secret is missing or shorter than 32 bytes, the ID is invalid, or
+`--generation` has no value or one that is no such number. It needs no configuration
+file. A bare `-h` or `--help` prints the usage and exits 0; for an agent ID that
+starts with `-`, put `--` before it: `podium agent-token -- -h`.
 
 ## Client IPs and trusted proxies
 
@@ -613,7 +686,7 @@ may reach any of them:
   and cookies are marked otherwise;
 - `agent_auth.require` and `agent_auth.enroll_secret` (env
   `SOLTI_AGENT_AUTH_ENROLL_SECRET` only): the nodes authenticate and enroll
-  agents otherwise, and send agents tokens or not;
+  agents otherwise, derive other tokens, and send agents tokens or not;
 - `trusted_proxies`: a proxy one node trusts is a client on another, and the
   limiters key its clients otherwise;
 - `cors.*`: a browser origin one node allows, another refuses;
@@ -725,8 +798,9 @@ against `tls.client.ca_file` until it expires. That matters when a replacement
 reuses the node's host name or IP; then also replace the CA behind
 `tls.client.ca_file` and the CA that agents trust for the server. A compromised
 host holds more than its raft key: its other keys, `auth.jwt_secret`,
-`agent_auth.enroll_secret`, and in `data_dir` the agents' tokens, raw, and the
-password hashes. "A compromised node" in `internal/raft/README.md` lists
+`agent_auth.enroll_secret`, which derives the token of every agent enrolled
+under it, and in `data_dir` the raw tokens of the agents that enrolled without
+it, and the password hashes. "A compromised node" in `internal/raft/README.md` lists
 everything podium keeps on a node, with each rotation and its cost; see also
 "Transport security" there.
 
@@ -817,6 +891,18 @@ The old leader logs one ERROR, `failed to decode incoming command` with
 `unknown rpc type 240`, for each of those attempts of each such follower. Both
 stop once a node of this version leads.
 
+Versions from the one with derived agent credentials (see "Enrollment secret"
+above) on write the raft log and the snapshots in version 4 of the command and
+snapshot codecs, and earlier versions read version 3 at most: mixed versions
+are unsupported. Stop every node, upgrade them all and start them again, in one
+full stop and start, during which the cluster takes no write. A node of an
+earlier version cannot apply what a node of this version proposes: it drops
+each command, logs `raft: committed command is not decodable and was dropped
+on this replica (corrupted entry or version skew)` and diverges, and started
+again it refuses its own log with `unsupported command version 4`. Rolling
+back needs a backup of `data_dir` taken before the upgrade, for the same
+reason.
+
 ## Observed run history
 
 ```yaml
@@ -888,7 +974,7 @@ before its status changes. Zero or negative values inherit the defaults shown;
 Deleting an agent drops its row and the labels operators set on it. Its
 rollouts and its credential stay: until the agent syncs again, its pushes fail
 with `agent not found` until `max_retries`, and its synced rollouts are
-skipped. When it syncs again, with its stored token, it comes back without
+skipped. When it syncs again, with its token, it comes back without
 labels, so the next Deploy of a spec that targets it by labels turns its
 rollout into an uninstall unless the labels are restored first.
 

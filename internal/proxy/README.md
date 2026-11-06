@@ -162,10 +162,11 @@ explicit migration: old inline-script flags cannot safely be inferred as the
 new file-script interpreter arguments. The original saved configuration stays
 available to the user for that choice.
 
-Raft snapshot version 3 and the `SOLTI-CMD` command header/version 3 retain
-structured capabilities and durable terminal execution records. Readers accept
-compatible version-2 state; unversioned legacy command logs and version-1
-snapshots remain unsupported. Startup validates retained snapshots and command
+Raft snapshot version 4 and the `SOLTI-CMD` command header/version 4 retain
+structured capabilities, durable terminal execution records and derived agent
+credentials. Readers accept version-3 state, which has no derived credential;
+version-2 state, unversioned legacy command logs and version-1 snapshots remain
+unsupported. Startup validates retained snapshots and command
 logs before replay, writable stores and TCP transport. Legacy unversioned logs
 or version-1 snapshots fail with an actionable backup/offline-migration error.
 There is no automatic legacy state migration; do not mix old and new replicas.
@@ -223,6 +224,10 @@ and trailing `/` tolerated by `normalizeGrpcTarget` are also accepted, and TLS
 still comes from `tls.client`. The pool dials `dns:///host:port`, so a host
 named after a grpc-go resolver scheme (`unix:1`) is still a TCP host.
 
-The stored bearer token is sent only when `agent_auth.require` is true. The
-HTTP client does not follow redirects: a 3xx answer fails the call as
-`ErrUnexpectedStatus`.
+The bearer token is sent only when `agent_auth.require` is true. The callers
+take it from the agent service (`agent.Service.AgentToken`): the stored token of
+an agent that enrolled without the enrollment secret, or the token derived from
+the secret for one enrolled under it, which no store holds. An agent whose
+derived credential podium cannot use, with no secret set or of another secret,
+gets no call: the token lookup fails first. The HTTP client does not follow
+redirects: a 3xx answer fails the call as `ErrUnexpectedStatus`.

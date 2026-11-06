@@ -29,7 +29,11 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   `internal/bootstrap/README.md`. On error `New` releases anything already
   acquired (Raft node, event hub) before returning.
 - `Run` delegates to [`server.Server.Run`] which orchestrates lifecycle of
-  all runners (HTTP, gRPC, sync, lifecycle, history, and in raft mode
+  all runners (HTTP, gRPC, sync, lifecycle, history; while agent auth is
+  required, agent-credentials, which at each start of standalone and each
+  leadership term of a raft node converts the stored agent credentials that the
+  enrollment secret derives and logs how many are stored or unusable, see
+  "Enrollment secret" in `internal/config/README.md`; and in raft mode
   bootstrap and config-check, which compares the settings every replica must
   share with the leader's, see "Configuration drift" in
   `internal/raft/README.md`).
@@ -76,7 +80,7 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   htmx.Configure() + hooks        ← global UI ↔ transport wiring (errorPage, loginPath)
         │
         ▼
-  build runners                   ← lifecycle, sync, history, http, http-discovery, grpc (+ bootstrap and config-check if raft)
+  build runners                   ← lifecycle, sync, history, http, http-discovery, grpc (+ agent-credentials if agent auth is required; + bootstrap and config-check if raft)
         │
         ▼
   server.New(runners…)            ← lifecycle orchestrator

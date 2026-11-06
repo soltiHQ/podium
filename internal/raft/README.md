@@ -284,24 +284,40 @@ every rotation restarts the nodes it touches.
   stays logged in (with `auth.rotate_refresh`, only the leader refreshes it).
   Device cookies signed before the change count as unknown devices.
 - `agent_auth.enroll_secret`, in the environment only, the same on every node.
-  Its holder derives the token of any agent ID (HMAC-SHA256 of the ID), so it
-  enrolls any ID that is not enrolled yet, and knows the token of every agent
-  that was given a derived one. Rotation: a new secret of 32 bytes or more on
-  every node. Cost: it revokes nobody. An enrolled agent keeps the token it
-  enrolled with, which the old secret still derives, and no API resets a stored
-  credential: an agent whose token leaked runs under a new agent ID, with a
-  token derived from the new secret.
+  It is the root of every derived credential: its holder derives the token of
+  any agent ID at any generation (HMAC-SHA256), so it enrolls any ID that is
+  not enrolled yet, and knows the token of every agent enrolled under the
+  secret: it syncs as such an agent, which also sets the endpoint podium calls
+  for it, and calls the agent as podium does. Rotation: a new secret of 32
+  bytes or more on every node, then each agent enrolled under the old one
+  re-provisioned: `podium agent-token --generation <g> <id>` with the new
+  secret, `g` from the WARN on the agent's refused sync, given to the agent,
+  whose next sync moves its credential to the new secret (see "Enrollment
+  secret" in `internal/config/README.md`). Cost: every agent enrolled under
+  the old secret is locked out, refused at sync and not called, until it is
+  re-provisioned. Agents with a stored token, which enrolled without the
+  secret, are not affected.
 - The state in `data_dir`, in the raft log and the snapshots. Every node holds
   all of it, and podium does not encrypt it. Users hold no secret. Passwords
   are stored as bcrypt hashes, which can be guessed at offline, and refresh
   tokens as SHA3-256 hashes of 32 random bytes; session IDs and user IDs are
-  stored as they are. Agent tokens are stored raw, as podium presents them to
-  the agents: their holder syncs as the agent, which also sets the endpoint
-  podium calls for it, and calls the agent as podium does. Rotation: reset the
+  stored as they are. A derived credential, of an agent enrolled under the
+  enrollment secret, holds no token: its generation and an ID of the secret,
+  the first 8 bytes of an HMAC under it, from which no token follows (like any
+  token, it would confirm a guess of a weak secret offline). A stored
+  credential, of an agent that enrolled without the secret, holds the agent's
+  token raw, as podium presents it to the agent: its holder syncs as the
+  agent, which also sets the endpoint podium calls for it, and calls the agent
+  as podium does. Raw tokens also stay in what was written before an upgrade
+  to derived credentials: in log entries until log compaction drops them,
+  which keeps the last `trailing_logs` entries, in the two snapshots a node
+  keeps until newer ones replace them, in the freed pages of `raft-log.bolt`
+  until bbolt writes over them, and in older backups. Rotation: reset the
   passwords (`POST /api/v1/users/{id}/password`), which ends that user's
-  sessions; an agent token has no rotation but the new agent ID above. Cost:
-  every user signs in again with a new password, and an agent whose token
-  leaked is a new agent, as the old ID's credential stays valid.
+  sessions; a stored agent token has no rotation but a new agent ID, with a
+  token derived from the secret. Cost: every user signs in again with a new
+  password, and an agent whose stored token leaked is a new agent, as the old
+  ID's credential stays valid.
 - The first administrator's password. A generated one is in
   `bootstrap-admin-password` in the `data_dir` of the node that seeded it (mode
   0600), and one set with `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` stays in that
@@ -377,6 +393,15 @@ logs while the leader runs the earlier version. During the upgrade the built-in
 roles follow whichever version leads, as each leadership term reconciles them
 to the leader's definitions (see "Built-in roles" in
 `internal/bootstrap/README.md`).
+
+An upgrade to the version with derived agent credentials cannot go one node at
+a time: that version writes commands and snapshots in version 4, which earlier
+versions cannot read, so mixed versions are unsupported. Stop all three nodes,
+upgrade them and start them again, in one full stop and start; a node of an
+earlier version would drop every command the others propose and diverge, and
+refuse its own log at its next start (see "Upgrading a raft node" in
+`internal/config/README.md`). Rolling back needs a backup of each `data_dir`
+taken before the upgrade.
 
 Earlier versions ran the transport on plain TCP, and a node on TLS and a node
 on plain TCP cannot reach each other (`TestRaftRefusesPeerWithoutClusterCert`):
@@ -534,7 +559,8 @@ term start without one, and those that propose nothing confirm the leadership
 with a quorum before they answer, a round trip that writes nothing (point 3). A
 heartbeat, a token check that writes nothing while the token matches and an
 upsert, so commits one entry, and the token check none
-(`TestOneBarrierPerTerm`). That is safe for these reasons:
+(`TestOneBarrierPerTerm`); a token check writes only to convert a credential,
+once, as "Enrollment secret" in `internal/config/README.md` says. That is safe for these reasons:
 
 1. At the start of a term, its first barrier returns once the FSM applied every
    entry before it, so the first transaction reads everything that earlier

@@ -122,7 +122,7 @@ by how long they have been silent. `hb` is the heartbeat the agent reported, or
   connection it holds to the agent (`Pool.Forget`); a later call dials afresh.
   Until the agent syncs again, each of its pushes fails with `agent not found`
   until `max_retries`, and its synced rollouts are skipped: no call goes out,
-  so its backoff does not change. When it syncs again, its stored token still
+  so its backoff does not change. When it syncs again, its credential still
   authenticates it, and it is created anew, without labels: the next Deploy
   of a spec that targets it by labels turns its rollout into an uninstall,
   unless the labels are restored first.
