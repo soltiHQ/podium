@@ -64,10 +64,11 @@ func ApiUserRevokeSession(id string) string { return ApiSession + url.PathEscape
 
 // Agents.
 
-func PageAgentInfoByID(id string) string { return PageAgentInfo + url.PathEscape(id) }
-func ApiAgentByID(id string) string      { return ApiAgent + url.PathEscape(id) }
-func ApiAgentLabels(id string) string    { return ApiAgent + url.PathEscape(id) + "/labels" }
-func ApiAgentTasks(id string) string     { return ApiAgent + url.PathEscape(id) + "/tasks" }
+func PageAgentInfoByID(id string) string  { return PageAgentInfo + url.PathEscape(id) }
+func ApiAgentByID(id string) string       { return ApiAgent + url.PathEscape(id) }
+func ApiAgentLabels(id string) string     { return ApiAgent + url.PathEscape(id) + "/labels" }
+func ApiAgentTasks(id string) string      { return ApiAgent + url.PathEscape(id) + "/tasks" }
+func ApiAgentCredential(id string) string { return ApiAgent + url.PathEscape(id) + "/credential" }
 
 func ApiAgentTaskLogs(agentID, taskID string, uid ...string) string {
 	path := ApiAgent + url.PathEscape(agentID) + "/tasks/" + url.PathEscape(taskID) + "/logs/stream"

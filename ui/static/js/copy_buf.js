@@ -48,6 +48,8 @@
         setTimeout(() => el.setAttribute("data-copy-state", prev), 900);
     }
 
+    // The capture phase: a dialog stops the clicks inside it from bubbling to the
+    // document, and the copy button of a dialog is one of the elements this serves.
     document.addEventListener("click", async (e) => {
         const el = e.target.closest("[data-copy]");
         if (!el) return;
@@ -59,5 +61,5 @@
         const ok = await copyText(text);
         flash(el, ok);
         showToast(ok ? "Copied to buffer" : "Copy failed", ok);
-    });
+    }, true);
 })();

@@ -53,6 +53,8 @@ func TestWriteHandlersAnswerLeadershipErrorsWithTheLeader(t *testing.T) {
 			{"user disable", http.MethodPost, "/api/v1/users/reader/disable", ""},
 			{"password change", http.MethodPost, "/api/v1/users/reader/password", `{"password":"a-password-long-enough"}`},
 			{"session revoke", http.MethodPost, "/api/v1/session/reader-session/revoke", ""},
+			{"agent credential reset", http.MethodPost, "/api/v1/agents/agent-1/credential", ""},
+			{"agent delete", http.MethodDelete, "/api/v1/agents/agent-1", ""},
 			{"spec update", http.MethodPut, "/api/v1/specs/saved", `{"name":"Renamed","version":1,` + validKind + `}`},
 			{"spec delete", http.MethodDelete, "/api/v1/specs/saved", ""},
 			{"spec force-delete", http.MethodDelete, "/api/v1/specs/saved/force", ""},

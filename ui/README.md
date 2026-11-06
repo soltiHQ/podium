@@ -100,6 +100,29 @@ message stays in the dialog, with a Reload link to the user's page, which
 loads the current user and its tag. Reloading discards what was typed. The
 create dialog sends no `If-Match`.
 
+The agent page offers two actions next to the label editor, each only to a user
+who holds its permission: "Reset credential" (`agents:reset`) and "Delete agent"
+(`agents:delete`); `agents:edit` gives neither. The page does not render an
+action the viewer may not use, and the API refuses it anyway (see
+`internal/handler`, "Agents"). Reset credential asks for confirmation, then
+posts to `/api/v1/agents/{id}/credential`. The answer is JSON, and the dialog
+that follows shows the new token once, with a button that copies it and, for a
+derived credential (the answer has a `generation`), the line `podium agent-token
+--generation N <agent-id>`, which prints the token again with the enrollment
+secret; a random token of a stored credential has no such line. The server
+never renders the token into the page: it lives in the state that the two
+dialogs share, and is in the page's markup only while the dialog that shows it
+is open. The dialog clears it when it closes, by any means, and an open dialog
+is not replaced by a background refresh. A copy button inside a dialog works
+because `copy_buf.js` listens for clicks in the capture phase: a dialog stops
+the clicks inside it from bubbling to the document. An answer that holds no
+token reopens the confirmation with an error, since the credential is reset by
+then. Delete agent asks for confirmation with a
+list of what goes, the agent and every rollout of it, and what stays, its
+credential and its execution history; it says that an agent that still runs
+registers again at its next sync, and that resetting its credential first keeps
+it out. On success the browser goes to the agents page (`HX-Redirect`).
+
 The task list passes exact slot filters to the agent before pagination and uses
 opaque continuation cursors. Run history is bounded by the agent's history
 retention. Logs are live streams, not a durable log archive. Log stream URLs

@@ -15,6 +15,13 @@ const (
 	AgentsGet  Permission = "agents:get"
 	AgentsEdit Permission = "agents:edit"
 
+	// AgentsReset issues an agent a new credential, which ends the one it holds,
+	// and AgentsDelete removes an agent and its rollouts. Of the built-in roles
+	// only Admin holds them, as it holds All; a user who holds every permission
+	// directly does not gain them.
+	AgentsDelete Permission = "agents:delete"
+	AgentsReset  Permission = "agents:reset"
+
 	UsersGet    Permission = "users:get"
 	UsersAdd    Permission = "users:add"
 	UsersEdit   Permission = "users:edit"
@@ -37,6 +44,8 @@ const (
 var All = []Permission{
 	AgentsGet,
 	AgentsEdit,
+	AgentsDelete,
+	AgentsReset,
 
 	UsersGet,
 	UsersAdd,

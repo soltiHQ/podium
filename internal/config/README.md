@@ -96,9 +96,9 @@ With `require: true`, a token longer than 1024 bytes is refused before any
 check, with HTTP 400 `Agent token is too long.` / gRPC `InvalidArgument`, and
 nothing is enrolled. The cap applies to what agents send, never to stored
 state: a credential an older version stored with a longer token still loads, so
-podium starts, but that agent's syncs are refused with 400, and no API resets a
-stored credential yet. gRPC discovery caps request headers at 16 KiB, like the
-HTTP listeners.
+podium starts, but that agent's syncs are refused with 400, until its credential
+is reset (see "Resetting a credential" below). gRPC discovery caps request
+headers at 16 KiB, like the HTTP listeners.
 
 The capability fields of a sync have limits, checked with the rest of the
 payload before any token is checked or enrolled: at most 64 runners, each name
@@ -190,10 +190,12 @@ and term then logs, at WARN with `stored_credentials`, how many stored
 credentials are left, `agent credentials: stored tokens are left, kept raw in
 podium's state and in its backups: tokens agents chose while no enrollment
 secret was set, and tokens an earlier secret derived, which stay valid and
-which that secret still derives`, and, at ERROR with `unusable_credentials`,
-how many derived credentials it cannot use, because no secret is set or they
-derive from another one. With `agent_auth.require: false` podium neither
-converts nor counts anything.
+which that secret still derives; resetting an agent's credential (POST
+/api/v1/agents/{id}/credential) while an enrollment secret is set moves it to a
+derived credential`, and, at ERROR with `unusable_credentials`, how many
+derived credentials it cannot use, because no secret is set or they derive from
+another one. With `agent_auth.require: false` podium neither converts nor
+counts anything.
 
 Upgrading leaves the raw tokens already written where they are: in the
 backups taken before the upgrade; in the snapshot and the log entries written
@@ -236,6 +238,12 @@ whoever holds that former secret. To re-provision the fleet under a new secret:
    (`TestReprovisionedAgentMovesToTheCurrentSecret`, in
    `internal/service/agent`).
 
+Resetting the agent's credential (see "Resetting a credential" below) is the
+other way: it moves a credential of another secret to the current one at the
+next generation, and the answer holds the token to give the agent, with no host
+that runs `podium agent-token` needed
+(`TestResetCredentialIssuesTheNextGeneration`, in `internal/service/agent`).
+
 Removing the secret leaves no way in for those agents but setting the same
 secret again: without one, podium derives no token.
 
@@ -256,13 +264,14 @@ only their own token: a leaked token lets nobody enroll another ID.
 
 An agent with a stored token, which it chose or which an older version stored,
 is checked against that token, so re-provisioning it with a token derived from
-the current secret locks it out: every sync it makes gets 401, and no API
-resets a stored credential. That includes an agent that lifecycle deleted: deletion drops the
-agent row but keeps its credential, so the ID stays enrolled. Instead, keep the
-agent's existing token, or, if that token is lost, run the agent under a new
-agent ID and derive the token for that one. For an agent enrolled under the
-current secret, `podium agent-token` with the agent's generation prints the
-token it already has.
+the current secret locks it out: every sync it makes gets 401. That includes an
+agent that lifecycle deleted: deletion drops the agent row but keeps its
+credential, so the ID stays enrolled. Instead, keep the agent's existing token,
+or reset its credential (see "Resetting a credential" below), which with the
+secret set replaces the stored token by a derived credential and gives the
+token to hand to the agent. For an agent enrolled under the current secret,
+`podium agent-token` with the agent's generation prints the token it already
+has.
 
 `podium agent-token [--generation N] <agent-id>` must come first among the
 arguments. It prints the token of the ID at generation `N`, 0 by default, the
@@ -274,6 +283,47 @@ line when the secret is missing or shorter than 32 bytes, the ID is invalid, or
 `--generation` has no value or one that is no such number. It needs no configuration
 file. A bare `-h` or `--help` prints the usage and exits 0; for an agent ID that
 starts with `-`, put `--` before it: `podium agent-token -- -h`.
+
+### Resetting a credential
+
+`POST /api/v1/agents/{id}/credential`, which needs `agents:reset` (see
+`internal/handler/README.md`), issues the agent a new credential in place of the
+one it holds, and ends the old one. It replaces a token that leaked or was
+lost, and moves a stored credential to a derived one.
+
+- With the enrollment secret set, the new credential is derived. Its generation
+  is the old one plus one, a stored credential counting as generation 0, and it
+  names the current secret, whatever secret the old credential derived from. The
+  answer is `{"agent_id", "token", "generation"}`, and `podium agent-token
+  --generation <generation> <agent-id>`, run with the secret, prints the token
+  again. A stored credential reset this way is no longer stored: the next start,
+  or leadership term, counts one fewer in the WARN above.
+- Without a secret, the new credential is stored, with a new random token of 32
+  bytes as 64 hex digits (`TestResetWithoutSecretIssuesRandomToken`, in
+  `internal/handler`). The answer has no `generation`, and nothing derives that
+  token again.
+- The old token stops working at the commit, in both directions: a sync with it
+  gets 401 / `Unauthenticated`, and podium's calls to the agent carry the new
+  token (`TestResetCredentialRevokesBothDirections`). The agent has to be given
+  the new token: until it is, podium refuses its syncs, and the calls podium
+  makes to it carry a token that it does not hold. The node that served the
+  reset also closes its pooled gRPC connection to the agent.
+- The token is in the answer and nowhere else: not in the event the reset
+  records (`agent_credential_reset`, with the actor and the agent ID), not in a
+  log, and not in any later read.
+- With `agent_auth.require: false` no token is checked or presented, so there is
+  no credential to reset: the answer is 409 and nothing changes. An ID with no
+  credential gets 404; it needs no agent row. A derived credential that has
+  reached generation 4294967295 gets 409, since the next generation would wrap
+  around to 0, the token its agent ID enrolls with.
+- In raft mode the reset is a leader write, which a follower forwards like any
+  write (`TestResetThroughFollowerForwards`, in `internal/app`).
+
+`DELETE /api/v1/agents/{id}` (`agents:delete`) removes the agent and its
+rollouts and keeps its credential, as lifecycle deletion keeps it: an agent that
+still runs registers again at its next sync with that credential. To keep it
+out, reset its credential first, so that its old token is refused, and delete it
+after (see "Lifecycle runner" in `internal/server/README.md`).
 
 ## Client IPs and trusted proxies
 
@@ -889,6 +939,13 @@ This version also adds the permissions `cluster:get` and `cluster:manage`, in
 standalone too, which the Admin role gets when bootstrap reconciles it, and a
 user who holds every permission directly, not through the Admin role, needs the
 two new permissions to keep counting as an administrator.
+
+Versions from the one with the credential reset and the agent delete add the
+permissions `agents:reset` and `agents:delete` the same way, in standalone too:
+the Admin role gets them when bootstrap reconciles it, no other built-in role
+holds them, and a user who holds every permission directly, not through the
+Admin role, does not gain them and needs both to keep counting as an
+administrator.
 
 This version's nodes check their settings against the leader's (see "Settings
 every replica must share" above), which a node of an earlier version cannot

@@ -101,6 +101,29 @@ func TestBuildAgentDetail(t *testing.T) {
 	}
 }
 
+// Each of the two operator actions on an agent shows with its own permission:
+// agents:reset the credential reset, agents:delete the delete. The other
+// agent permissions, and the permission of the other action, show neither.
+func TestBuildAgentDetailOperatorActions(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		perms []enum.Permission
+		want  AgentDetail
+	}{
+		{"agents:reset", []enum.Permission{agentsReset}, AgentDetail{CanResetCredential: true}},
+		{"agents:delete", []enum.Permission{agentsDelete}, AgentDetail{CanDelete: true}},
+		{"both", []enum.Permission{agentsReset, agentsDelete}, AgentDetail{CanResetCredential: true, CanDelete: true}},
+		{"agents:get and agents:edit", []enum.Permission{agentsGet, agentsEdit}, AgentDetail{CanEditLabels: true, CanOperateTasks: true, CanViewHistory: true}},
+		{"none", nil, AgentDetail{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := BuildAgentDetail(id("u1", tc.perms...)); got != tc.want {
+				t.Fatalf("BuildAgentDetail = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildSpecDetail(t *testing.T) {
 	if got := BuildSpecDetail(nil); got != (SpecDetail{}) {
 		t.Fatalf("BuildSpecDetail(nil) = %+v, want zero", got)

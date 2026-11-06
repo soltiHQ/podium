@@ -19,7 +19,7 @@ const AgentTokenMaxBytes = 1024
 // on every sync and podium presents on its own calls to the agent. Keyed by
 // agent ID: one credential per agent. The first sync of an unknown agent ID
 // enrolls it. It outlives the agent row: deleting an agent leaves its
-// credential, and nothing resets one yet.
+// credential, and only a reset replaces one (agent.Service.ResetCredential).
 //
 // A credential is one of two kinds:
 //   - derived: enrolled while an enrollment secret is set. Podium recomputes
@@ -33,7 +33,9 @@ const AgentTokenMaxBytes = 1024
 //
 // A stored token is a raw secret. It is replicated through Raft so any replica
 // can verify inbound discovery and authenticate outbound proxy calls, but it
-// MUST NOT be serialized to any API/UI response or logged in clear.
+// MUST NOT be serialized to any API/UI response or logged in clear. The one
+// exception is the answer to a reset, which returns the token it has just
+// issued, once.
 type AgentCredential struct {
 	createdAt time.Time
 	updatedAt time.Time

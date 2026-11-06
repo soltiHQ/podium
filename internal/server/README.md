@@ -126,6 +126,17 @@ by how long they have been silent. `hb` is the heartbeat the agent reported, or
   authenticates it, and it is created anew, without labels: the next Deploy
   of a spec that targets it by labels turns its rollout into an uninstall,
   unless the labels are restored first.
+- **An operator's delete drops the rollouts too.** `DELETE /api/v1/agents/{id}`
+  (`agents:delete`, see `internal/handler/README.md`) removes the agent's row and
+  every rollout of the agent in one transaction, where lifecycle deletion leaves
+  the rollouts so that a returning agent resumes them. It keeps the credential
+  and the execution history, as lifecycle deletion does, closes the pooled
+  connection the same way, and records `agent_deleted` with the actor. An agent
+  that still runs registers again at its next sync with its credential, and
+  comes back with no labels and no rollouts
+  (`TestDeletedAgentReturnsWithoutRollouts`). To keep it out, reset its
+  credential first (`POST /api/v1/agents/{id}/credential`): its old token is then
+  refused, so only the new one brings it back.
 - **`delete_after` is a floor.** No agent is deleted sooner, whatever
   `delete_multiplier` says. Discovery refuses a reported heartbeat above 3600s
   (1h), so with the defaults (multiplier 10, `delete_after` 24h) the multiplier

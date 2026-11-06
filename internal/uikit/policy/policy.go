@@ -8,8 +8,10 @@ import (
 // Convenience aliases to keep policy builders readable.
 const (
 	// agents
-	agentsGet  = enum.AgentsGet
-	agentsEdit = enum.AgentsEdit
+	agentsGet    = enum.AgentsGet
+	agentsEdit   = enum.AgentsEdit
+	agentsDelete = enum.AgentsDelete
+	agentsReset  = enum.AgentsReset
 
 	// users
 	usersGet    = enum.UsersGet

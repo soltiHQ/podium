@@ -184,9 +184,11 @@ the endpoint the agent advertises now. `Pool.Get` takes the agent ID: a `Get` fo
 another endpoint closes the agent's old connection, and so does one for an HTTP
 endpoint, so the pool grows with the agents and not with the endpoints they once
 advertised. `Pool.Forget(agentID)` closes the agent's connection for an agent that
-is gone: the lifecycle runner calls it once it has deleted the agent. The pool
-holds no token, `Get` takes it on every call, so the call after `Forget` presents
-the token it is given. A call in flight on a connection that is closed fails.
+is gone or whose credential was reset: the lifecycle runner calls it once it has
+deleted the agent, and so does the API once the delete of an agent, or the reset
+of its credential, is committed. The pool holds no token, `Get` takes it on every
+call, so the call after `Forget` presents the token it is given. A call in flight
+on a connection that is closed fails.
 `Close` releases them all.
 
 `agentError` translates HTTP/gRPC status into the shared `errkind` boundary while

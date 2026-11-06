@@ -43,13 +43,17 @@ func (a *API) Agents(w http.ResponseWriter, r *http.Request) {
 // AgentsRouter handles /api/v1/agents/{id} and subroutes.
 //
 // Supported:
-//   - GET  /api/v1/agents/{id}
-//   - PUT  /api/v1/agents/{id}/labels
-//   - GET  /api/v1/agents/{id}/tasks
+//   - GET    /api/v1/agents/{id}
+//   - DELETE /api/v1/agents/{id}
+//   - PUT    /api/v1/agents/{id}/labels
+//   - POST   /api/v1/agents/{id}/credential
+//   - GET    /api/v1/agents/{id}/tasks
 func (a *API) AgentsRouter(w http.ResponseWriter, r *http.Request) {
 	route.Router(w, r, routepath.ApiAgent,
 		route.Subroute{Action: "", Method: http.MethodGet, Perm: enum.AgentsGet, Fn: a.agentDetails},
+		route.Subroute{Action: "", Method: http.MethodDelete, Perm: enum.AgentsDelete, Fn: a.agentDelete},
 		route.Subroute{Action: "labels", Method: http.MethodPut, Perm: enum.AgentsEdit, Fn: a.agentPatchLabels},
+		route.Subroute{Action: "credential", Method: http.MethodPost, Perm: enum.AgentsReset, Fn: a.agentResetCredential},
 		route.Subroute{Action: "tasks", Method: http.MethodGet, Perm: enum.AgentsGet, Fn: a.agentTasksList},
 	)
 }
@@ -127,6 +131,77 @@ func (a *API) agentPatchLabels(w http.ResponseWriter, r *http.Request, mode http
 	htmx.Trigger(w, event.RefreshAgents)
 	a.hub.Notify(event.RefreshAgents)
 	response.NoContent(w, r)
+}
+
+// agentDelete removes an agent's row and every rollout of the agent, in one
+// transaction. Its credential and its execution history stay, so an agent that
+// still runs registers again at its next sync, with no rollouts: reset its
+// credential first to keep it out. The pooled connection to the agent is closed
+// once the delete is committed, and agent_deleted records who deleted it.
+func (a *API) agentDelete(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
+	removed, err := a.agentSVC.Delete(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			response.NotFound(w, r, mode)
+			return
+		}
+		a.failure(err).Str("agent_id", id).Msg("agent delete failed")
+		response.StoreFailed(w, r, mode, err)
+		return
+	}
+
+	a.proxyPool.Forget(id)
+	a.logger.Info().Str("agent_id", id).Str("by", a.actor(r)).Msg("agent deleted")
+	a.hub.Record(event.AgentDeleted, event.Payload{ID: id, Name: removed.Name(), By: a.actor(r)})
+	a.hub.Notify(event.RefreshAgents)
+	htmx.Redirect(w, routepath.PageAgents)
+	response.NoContent(w, r)
+}
+
+// agentResetCredential issues the agent a new credential and answers its token,
+// once: the token is in this answer and nowhere else, not in the event the reset
+// records, not in a log. The old token is refused from the commit on, and the
+// pooled connection to the agent is closed once the reset is committed, so that
+// no connection that podium opened with the old credential outlives it. With
+// agent authentication off there is nothing to reset: 409.
+func (a *API) agentResetCredential(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
+	issued, err := a.agentSVC.ResetCredential(r.Context(), id)
+	switch {
+	case err == nil:
+	case errors.Is(err, storage.ErrNotFound):
+		response.NotFound(w, r, mode)
+		return
+	case errors.Is(err, agent.ErrAuthDisabled):
+		response.Conflict(w, r, mode, "Agent authentication is off (agent_auth.require is false), so there is no credential to reset.")
+		return
+	case errors.Is(err, agent.ErrGenerationExhausted):
+		response.Conflict(w, r, mode, "The credential is at its last generation and cannot be reset.")
+		return
+	default:
+		a.failure(err).Str("agent_id", id).Msg("agent credential reset failed")
+		response.StoreFailed(w, r, mode, err)
+		return
+	}
+
+	a.proxyPool.Forget(id)
+	logged := a.logger.Info().Str("agent_id", id).Str("by", a.actor(r))
+	if issued.Derived {
+		logged = logged.Uint32("generation", issued.Generation)
+	}
+	logged.Msg("agent credential reset")
+	var name string
+	if ag, err := a.agentSVC.Get(r.Context(), id); err == nil {
+		name = ag.Name()
+	}
+	a.hub.Record(event.AgentCredentialReset, event.Payload{ID: id, Name: name, By: a.actor(r)})
+	a.hub.Notify(event.RefreshDashboard)
+
+	out := restv1.ResetAgentCredentialResponse{AgentID: issued.AgentID, Token: issued.Token}
+	if issued.Derived {
+		generation := issued.Generation
+		out.Generation = &generation
+	}
+	response.OK(w, r, mode, &responder.View{Data: out})
 }
 
 // streamKeepalive is how long the log stream may stay silent before it writes

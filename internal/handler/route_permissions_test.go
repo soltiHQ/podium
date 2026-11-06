@@ -70,8 +70,8 @@ func newAPIFixtureOver(t *testing.T, wrap func(storage.Storage) storage.Storage)
 }
 
 // newAPIFixtureLogging is newAPIFixtureOver with the API and its services logging
-// into logger.
-func newAPIFixtureLogging(t *testing.T, wrap func(storage.Storage) storage.Storage, logger zerolog.Logger) *apiFixture {
+// into logger, and with agentOpts for the agent service.
+func newAPIFixtureLogging(t *testing.T, wrap func(storage.Storage) storage.Storage, logger zerolog.Logger, agentOpts ...agent.Option) *apiFixture {
 	t.Helper()
 	ctx := context.Background()
 	store := inmemory.New()
@@ -112,7 +112,7 @@ func newAPIFixtureLogging(t *testing.T, wrap func(storage.Storage) storage.Stora
 		access.New(kit.New(st, auth.Config{JWTSecret: strings.Repeat("k", auth.MinJWTSecretLen)}), st, logger),
 		session.New(st, logger),
 		credential.New(st, logger),
-		agent.New(st, logger),
+		agent.New(st, logger, agentOpts...),
 		spec.New(st, logger),
 		archive, pool, hub, logs, streams, allowAccess,
 		WithCluster(clustersvc.New(raft, logger, clustersvc.WithFingerprint(fixtureFingerprint))),
@@ -260,7 +260,9 @@ var routePermissionMatrix = []routePermission{
 	{method: http.MethodPost, pattern: "/api/v1/session/{id}/revoke", id: "target-session", perms: []enum.Permission{enum.UsersEdit}},
 	{method: http.MethodGet, pattern: "/api/v1/agents", perms: []enum.Permission{enum.AgentsGet}},
 	{method: http.MethodGet, pattern: "/api/v1/agents/{id}", id: "agent-1", perms: []enum.Permission{enum.AgentsGet}},
+	{method: http.MethodDelete, pattern: "/api/v1/agents/{id}", id: "agent-1", perms: []enum.Permission{enum.AgentsDelete}},
 	{method: http.MethodPut, pattern: "/api/v1/agents/{id}/labels", id: "agent-1", body: `{}`, perms: []enum.Permission{enum.AgentsEdit}},
+	{method: http.MethodPost, pattern: "/api/v1/agents/{id}/credential", id: "agent-1", perms: []enum.Permission{enum.AgentsReset}},
 	{method: http.MethodGet, pattern: "/api/v1/agents/{id}/tasks", id: "agent-1", perms: []enum.Permission{enum.AgentsGet}},
 	{method: http.MethodGet, pattern: "/api/v1/agents/{id}/tasks/{taskID}", id: "agent-1", perms: []enum.Permission{enum.AgentsGet}},
 	{method: http.MethodPost, pattern: "/api/v1/agents/{id}/tasks/{taskID}/cancel", id: "agent-1", perms: []enum.Permission{enum.AgentsEdit}},

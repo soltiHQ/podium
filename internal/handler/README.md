@@ -113,16 +113,61 @@ The user, credential and session services enforce these inside the transaction o
 - **Last admin.** A delete, disable or role/permission change that would leave no enabled user holding every permission → 409.
 
 ### Agents `/api/v1/agents`
-| Method | Path                                             | Permission   |
-|--------|--------------------------------------------------|--------------|
-| GET    | `/api/v1/agents`                                 | `AgentsGet`  |
-| GET    | `/api/v1/agents/{id}`                            | `AgentsGet`  |
-| PUT    | `/api/v1/agents/{id}/labels`                     | `AgentsEdit` |
-| GET    | `/api/v1/agents/{id}/tasks`                      | `AgentsGet`  |
-| GET    | `/api/v1/agents/{id}/tasks/{taskID}`             | `AgentsGet`  |
-| POST   | `/api/v1/agents/{id}/tasks/{taskID}/cancel`      | `AgentsEdit` |
-| GET    | `/api/v1/agents/{id}/tasks/{taskID}/logs/stream` | `AgentsGet`  |
-| GET    | `/api/v1/history`                                | `AgentsGet`  |
+| Method | Path                                             | Permission     |
+|--------|--------------------------------------------------|----------------|
+| GET    | `/api/v1/agents`                                 | `AgentsGet`    |
+| GET    | `/api/v1/agents/{id}`                            | `AgentsGet`    |
+| DELETE | `/api/v1/agents/{id}`                            | `AgentsDelete` |
+| PUT    | `/api/v1/agents/{id}/labels`                     | `AgentsEdit`   |
+| POST   | `/api/v1/agents/{id}/credential`                 | `AgentsReset`  |
+| GET    | `/api/v1/agents/{id}/tasks`                      | `AgentsGet`    |
+| GET    | `/api/v1/agents/{id}/tasks/{taskID}`             | `AgentsGet`    |
+| POST   | `/api/v1/agents/{id}/tasks/{taskID}/cancel`      | `AgentsEdit`   |
+| GET    | `/api/v1/agents/{id}/tasks/{taskID}/logs/stream` | `AgentsGet`    |
+| GET    | `/api/v1/history`                                | `AgentsGet`    |
+
+`POST /api/v1/agents/{id}/credential` (no body) issues the agent a new credential in place of the one it holds, in one
+transaction. From its commit discovery refuses the old token (401 / `Unauthenticated`), and podium's calls to the agent
+present the new one, so the old token ends in both directions at once (`TestResetCredentialRevokesBothDirections`). The
+new credential keeps the enrollment time.
+
+- With an enrollment secret set it is a derived credential (see `internal/config`, "Enrollment secret"): its generation
+  is the old one plus one, a stored credential counting as generation 0, and it names the current secret, whatever secret
+  the old one derived from. The answer is `{"agent_id", "token", "generation"}`, and `podium agent-token --generation
+  <generation> <agent-id>`, run with the secret, prints the token again.
+- Without a secret it is a stored credential, as trust on first use stores tokens, with a new random token of 32 bytes
+  as 64 lowercase hex digits (`TestResetWithoutSecretIssuesRandomToken`). The answer has no `generation`, and nothing
+  derives that token again.
+- 404 when the ID has no credential, with or without an agent row. 409 while `agent_auth.require` is false, where
+  podium checks and presents no token, so there is nothing to reset and nothing changes (`TestResetRefusals`). 409 too
+  for a derived credential at the last generation (4294967295): the next would wrap around to 0, the token its agent ID
+  enrolls with.
+
+The token is in this answer and nowhere else. The answer carries `Cache-Control: no-store`; the event
+`agent_credential_reset` holds the agent ID, its name and the actor, no token; no log line holds one, and no read returns
+it. A token that was not kept is replaced by another reset. Once the reset is committed, the node that served it closes
+its pooled gRPC connection to the agent (`Pool.Forget`), so that none opened before it outlives the old credential: the
+leader, in a raft cluster, since followers forward the write. The agent has to be given the new token: until it is,
+podium refuses its syncs, and the calls podium makes to it carry a token that it does not hold.
+
+`DELETE /api/v1/agents/{id}` removes the agent's row and every rollout of the agent in one transaction, so that it never
+loses one and keeps the other (`TestDeleteIsAtomic` in `internal/service/agent`). Its credential and its execution
+history stay. It answers 204 with `HX-Redirect: /agents`, and 404 when the agent has no row: an agent that only
+lifecycle deleted has none, and its rollouts stay (see `internal/server/README.md`). Once the delete is committed it
+closes the pooled gRPC connection to the agent the same way, and records `agent_deleted` with the actor. That kind is an
+issue kind, so the dashboard lists an operator's delete among its issues as it lists lifecycle's, and `AgentsEdit`
+dismisses it. An agent that still runs registers again at its next sync with its credential, as a new agent with no
+labels and no rollouts (`TestDeletedAgentReturnsWithoutRollouts`). To keep it out, reset its credential first: its old
+token is then refused, and only the new one brings it back.
+
+Both are leader writes: a follower forwards them like any write (`TestResetThroughFollowerForwards`, in
+`internal/app`), and a write that reached a follower or lost leadership answers 503 with `X-Leader`
+(`TestWriteHandlersAnswerLeadershipErrorsWithTheLeader`).
+
+`AgentsDelete` and `AgentsReset` are in `enum.All`, so the Admin role holds them, and no other built-in role does
+(`TestOnlyAdminMayResetOrDeleteAnAgent`). As with `ClusterGet` and `ClusterManage`, a user who holds every permission
+directly, not through the Admin role, does not gain them: bootstrap gives them to the Admin role only, and such a user
+needs both to keep counting as an administrator. `AgentsEdit` gives neither action.
 
 The task log stream and the event stream (see "Other") run their route's access check again every keepalive interval
 (15s), whether they wrote or not: the session is live, the user enabled and, for task logs, still holds `AgentsGet`.
@@ -172,12 +217,12 @@ clients that never preview keep working.
 
 Every event kind maps to a subject (`event.SubjectOf`):
 
-| Subject | Event kinds                                                                | Read        | Dismiss      |
-|---------|----------------------------------------------------------------------------|-------------|--------------|
-| agent   | `agent_connected`, `agent_inactive`, `agent_disconnected`, `agent_deleted` | `AgentsGet` | `AgentsEdit` |
-| spec    | `spec_created`, `spec_updated`, `spec_deployed`, `sync_failed`             | `SpecsGet`  | `SpecsEdit`  |
-| user    | `user_*`, `session_created`, `rate_limited`                                | `UsersGet`  | `UsersEdit`  |
-| unknown | `issue_closed` (it can name any subject) and unknown kinds                 | all three   | all three    |
+| Subject | Event kinds                                                                                          | Read        | Dismiss      |
+|---------|------------------------------------------------------------------------------------------------------|-------------|--------------|
+| agent   | `agent_connected`, `agent_inactive`, `agent_disconnected`, `agent_deleted`, `agent_credential_reset` | `AgentsGet` | `AgentsEdit` |
+| spec    | `spec_created`, `spec_updated`, `spec_deployed`, `sync_failed`                                       | `SpecsGet`  | `SpecsEdit`  |
+| user    | `user_*`, `session_created`, `rate_limited`                                                          | `UsersGet`  | `UsersEdit`  |
+| unknown | `issue_closed` (it can name any subject) and unknown kinds                                           | all three   | all three    |
 
 ### Cluster `/api/v1/cluster`
 | Method | Path                           | Permission      |

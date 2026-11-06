@@ -113,7 +113,9 @@ type AgentCredentialStore interface {
 	//   - ErrInternal for unexpected storage failures.
 	ListAgentCredentials(ctx context.Context, opts ListOptions) (*AgentCredentialListResult, error)
 
-	// DeleteAgentCredential removes an agent's credential (revoke / reset).
+	// DeleteAgentCredential removes an agent's credential. A reset does not use
+	// it: it replaces the credential (agent.Service.ResetCredential), since an
+	// ID without a credential is open to enrollment again.
 	//
 	// Returns:
 	//   - ErrNotFound if no credential exists for the agent.

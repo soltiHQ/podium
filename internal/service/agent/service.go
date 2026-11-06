@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 
 	"github.com/rs/zerolog"
@@ -32,6 +34,29 @@ var ErrEnrollRefused = fmt.Errorf("%w: not the enrollment token of this agent ID
 // which discovery never enrolls. Handlers map it to HTTP 400 / gRPC
 // InvalidArgument.
 var ErrTokenTooLong = errors.New("agent: token too long")
+
+// refusal is the error of a request that podium cannot carry out in the state it
+// is in, whatever the request says. errkind classifies it as FailedPrecondition,
+// which handlers answer with 409.
+type refusal string
+
+func (e refusal) Error() string { return string(e) }
+
+// ErrorKind classifies the error for the transports (errkind).
+func (refusal) ErrorKind() errkind.Kind { return errkind.FailedPrecondition }
+
+var (
+	// ErrAuthDisabled refuses ResetCredential while agent authentication is off
+	// (agent_auth.require false): podium checks and presents no token, so there is
+	// no credential to reset.
+	ErrAuthDisabled = refusal("agent: agent authentication is off, so there is no credential to reset")
+
+	// ErrGenerationExhausted refuses ResetCredential for a derived credential at
+	// the last generation: the next one would wrap around to generation 0, the
+	// token its agent ID enrolls with, which podium agent-token printed before
+	// there were generations.
+	ErrGenerationExhausted = refusal("agent: the credential is at the last generation and cannot be reset")
+)
 
 // DerivedCredentialError says that podium cannot use the derived credential of
 // an agent: no enrollment secret is set (NoSecret), or the credential derives
@@ -531,4 +556,110 @@ func replaceLabels(a *model.Agent, labels map[string]string) {
 		}
 		a.LabelAdd(k, v)
 	}
+}
+
+// resetTokenBytes is the size of the random token a reset issues while no
+// enrollment secret is set: 32 bytes, as 64 hex digits.
+const resetTokenBytes = 32
+
+// ResetCredential issues the agent a new credential in place of the one it
+// holds, in one transaction: from its commit discovery refuses the old token,
+// and AgentToken returns the new one, so the old token stops working in both
+// directions at once. The credential keeps its enrollment time.
+//
+// With an enrollment secret set, the new credential is derived: its generation
+// is that of the credential it replaces plus one, a stored credential counting as
+// generation 0, and it names the current secret, whatever secret the old one
+// derived from. IssuedCredential.Generation says which `podium agent-token
+// --generation` prints the token again. Without a secret it is a stored
+// credential with a new random token, since trust on first use stores the token
+// an agent holds; nothing derives that token again.
+//
+// The token is returned here and nowhere else: a caller must neither log it nor
+// keep it. An agent with no credential is storage.ErrNotFound, and nothing is
+// written. With agent authentication disabled a reset is ErrAuthDisabled, and a
+// credential at the last generation ErrGenerationExhausted, both of which change
+// nothing.
+func (s *Service) ResetCredential(ctx context.Context, agentID string) (IssuedCredential, error) {
+	if agentID == "" {
+		return IssuedCredential{}, storage.ErrInvalidArgument
+	}
+	if s.authDisabled {
+		return IssuedCredential{}, ErrAuthDisabled
+	}
+
+	var issued IssuedCredential
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		old, err := tx.GetAgentCredential(ctx, agentID)
+		if err != nil {
+			return err
+		}
+		var cred *model.AgentCredential
+		if s.enrollSecret != "" {
+			generation := old.Generation()
+			if generation == math.MaxUint32 {
+				return ErrGenerationExhausted
+			}
+			generation++
+			if cred, err = model.NewDerivedAgentCredential(agentID, generation, s.secretID); err != nil {
+				return err
+			}
+			issued = IssuedCredential{AgentID: agentID, Token: DeriveToken(s.enrollSecret, agentID, generation), Derived: true, Generation: generation}
+		} else {
+			var raw [resetTokenBytes]byte
+			if _, err = rand.Read(raw[:]); err != nil {
+				return err
+			}
+			token := hex.EncodeToString(raw[:])
+			if cred, err = model.NewStoredAgentCredential(agentID, token); err != nil {
+				return err
+			}
+			issued = IssuedCredential{AgentID: agentID, Token: token}
+		}
+		cred.SetCreatedAt(old.CreatedAt())
+		return tx.UpsertAgentCredential(ctx, cred)
+	})
+	if err != nil {
+		return IssuedCredential{}, err
+	}
+	return issued, nil
+}
+
+// Delete removes the agent's row and every rollout of the agent in one
+// transaction, so that an agent never loses its rollouts and keeps its row, or
+// the reverse. It returns the row it removed. The credential of the agent stays,
+// and so does its execution history: an agent that still runs registers again at
+// its next sync, with its credential, and without the labels operators set and
+// without rollouts (lifecycle deletion, in contrast, leaves the rollouts).
+// ErrNotFound if the agent has no row, whatever else the store holds of it.
+func (s *Service) Delete(ctx context.Context, id string) (*model.Agent, error) {
+	if id == "" {
+		return nil, storage.ErrInvalidArgument
+	}
+
+	var removed *model.Agent
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		ag, err := tx.GetAgent(ctx, id)
+		if err != nil {
+			return err
+		}
+		rollouts, err := storage.AllRollouts(ctx, tx, tx.BuildRolloutFilter(storage.RolloutQueryCriteria{AgentID: id}))
+		if err != nil {
+			return err
+		}
+		for _, ro := range rollouts {
+			if err = tx.DeleteRollout(ctx, ro.ID()); err != nil {
+				return err
+			}
+		}
+		if err = tx.DeleteAgent(ctx, id); err != nil {
+			return err
+		}
+		removed = ag
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return removed, nil
 }

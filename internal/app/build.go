@@ -309,7 +309,7 @@ func seedingRunner(cfg config.Config, logger zerolog.Logger, leadership cluster.
 // What credentialSweepRunner logs of a sweep (agent.CredentialSweep).
 const (
 	convertedCredentials = "agent credentials: stored tokens that the enrollment secret derives are now derived credentials: no snapshot or log entry written from now on holds them"
-	storedCredentials    = "agent credentials: stored tokens are left, kept raw in podium's state and in its backups: tokens agents chose while no enrollment secret was set, and tokens an earlier secret derived, which stay valid and which that secret still derives"
+	storedCredentials    = "agent credentials: stored tokens are left, kept raw in podium's state and in its backups: tokens agents chose while no enrollment secret was set, and tokens an earlier secret derived, which stay valid and which that secret still derives; resetting an agent's credential (POST /api/v1/agents/{id}/credential) while an enrollment secret is set moves it to a derived credential"
 	otherSecretCreds     = "agent credentials: derived credentials of another enrollment secret than the current one: podium refuses these agents and makes no call to them until each is re-provisioned with the token podium agent-token prints for it under the current secret"
 	noSecretCreds        = "agent credentials: derived credentials and no enrollment secret is set: podium refuses these agents and makes no call to them until the secret they derive from is set again"
 )

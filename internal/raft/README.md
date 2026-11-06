@@ -318,11 +318,14 @@ every rotation restarts the nodes it touches.
   `trailing_logs` entries, in the two snapshots a node keeps until newer ones
   replace them, in the freed pages of `raft-log.bolt` until bbolt writes over
   them, and in older backups. Rotation: reset the passwords (`POST
-  /api/v1/users/{id}/password`), which ends that user's sessions; a stored
-  agent token has no rotation but a new agent ID, with a token derived from
-  the secret. Cost: every user signs in again with a new password, and an
-  agent whose stored token leaked is a new agent, as the old ID's credential
-  stays valid.
+  /api/v1/users/{id}/password`), which ends that user's sessions; reset the
+  credential of each agent whose token leaked (`POST
+  /api/v1/agents/{id}/credential`), which issues the agent a new token and ends
+  the old one at once (see "Resetting a credential" in
+  `internal/config/README.md`). Cost: every user signs in again with a new
+  password, and each agent whose token leaked is refused until it is given the
+  new token. The old token stays in the log entries, snapshots and backups
+  written before the reset, where it no longer authenticates anything.
 - The first administrator's password. A generated one is in
   `bootstrap-admin-password` in the `data_dir` of the node that seeded it (mode
   0600), and one set with `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` stays in that

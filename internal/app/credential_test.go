@@ -26,7 +26,7 @@ import (
 // What the credential sweep logs: the stored credentials left, and the derived
 // ones podium cannot use, under another secret or with none set.
 const (
-	storedCredentialsWarning = "agent credentials: stored tokens are left, kept raw in podium's state and in its backups: tokens agents chose while no enrollment secret was set, and tokens an earlier secret derived, which stay valid and which that secret still derives"
+	storedCredentialsWarning = "agent credentials: stored tokens are left, kept raw in podium's state and in its backups: tokens agents chose while no enrollment secret was set, and tokens an earlier secret derived, which stay valid and which that secret still derives; resetting an agent's credential (POST /api/v1/agents/{id}/credential) while an enrollment secret is set moves it to a derived credential"
 	otherSecretError         = "agent credentials: derived credentials of another enrollment secret than the current one: podium refuses these agents and makes no call to them until each is re-provisioned with the token podium agent-token prints for it under the current secret"
 	noSecretError            = "agent credentials: derived credentials and no enrollment secret is set: podium refuses these agents and makes no call to them until the secret they derive from is set again"
 )

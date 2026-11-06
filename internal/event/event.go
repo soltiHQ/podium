@@ -69,6 +69,10 @@ const (
 	AgentDisconnected = "agent_disconnected"
 	AgentDeleted      = "agent_deleted"
 
+	// AgentCredentialReset records who issued an agent a new credential. The
+	// token is never in the event.
+	AgentCredentialReset = "agent_credential_reset"
+
 	SpecCreated  = "spec_created"
 	SpecUpdated  = "spec_updated"
 	SpecDeployed = "spec_deployed"
@@ -121,7 +125,7 @@ const (
 // issue can name an agent, a spec or a login subject.
 func SubjectOf(kind string) Subject {
 	switch kind {
-	case AgentConnected, AgentInactive, AgentDisconnected, AgentDeleted:
+	case AgentConnected, AgentInactive, AgentDisconnected, AgentDeleted, AgentCredentialReset:
 		return SubjectAgent
 	case SpecCreated, SpecUpdated, SpecDeployed, SyncFailed:
 		return SubjectSpec

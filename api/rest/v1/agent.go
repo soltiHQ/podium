@@ -32,6 +32,15 @@ type AgentPatchLabelsRequest struct {
 	Labels map[string]string `json:"labels"`
 }
 
+// ResetAgentCredentialResponse is the answer to POST /agents/{id}/credential: the
+// agent's new token, which no other call returns. Generation is the generation of
+// a derived credential, and absent for a stored one.
+type ResetAgentCredentialResponse struct {
+	AgentID    string  `json:"agent_id"`
+	Token      string  `json:"token"`
+	Generation *uint32 `json:"generation,omitempty"`
+}
+
 // RunnerCapability advertises one named runner and every supported workload GVK.
 type RunnerCapability struct {
 	Name      string            `json:"name"`
