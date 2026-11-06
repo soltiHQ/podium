@@ -823,10 +823,13 @@ func refusedAsTooBig(err error) bool {
 // task may be judged missing by it: the budget is used, a task is too large to list
 // or holds too many elements even alone, a task has more conditions than a task may
 // hold (a bound of the task, not of the page: the call that meets it is not repeated
-// with a smaller page, and the listing ends there), a page fails, a page holds more
-// tasks than it was asked for (the proxy refuses it before it builds the tasks, as
-// ErrTooManyItems, and the runner counts them again), a cursor is longer than
-// maxCursorBytes (the proxy refuses it first too), the listing would hold more than
+// with a smaller page, and the listing ends there; over gRPC a status split into
+// occurrences of 64 or fewer that pass the budget, or a budget spent by the tasks
+// ahead, is refused as too many elements first, before decoding, and halved up to
+// ten calls), a page fails, a page holds more tasks than it was asked for (the
+// proxy refuses it before it builds the tasks, as ErrTooManyItems, and the runner
+// counts them again), a cursor is longer than maxCursorBytes (the proxy refuses it
+// first too), the listing would hold more than
 // maxListedTasks task IDs or maxListedIDBytes bytes of them, or take more than
 // maxListedPages calls (a refused page is a call), the agent returns a cursor it
 // returned before, the pages name different snapshots (a resource version that

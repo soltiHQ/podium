@@ -114,9 +114,10 @@ func (c *answerCodec) Unmarshal(data mem.BufferSlice, v any) error {
 // the bytes are not a message, or nest messages deeper than protobuf decodes.
 // Nothing is decoded or allocated: a field the schema does not know, or that the
 // schema's wire type does not fit, is skipped, as proto.Unmarshal keeps it as
-// unknown bytes. A status that the sender splits in several occurrences of its field
-// is counted by occurrence, though the decoder merges them: the check after decoding
-// sees the whole.
+// unknown bytes. A status that the sender splits in several occurrences of the task's
+// status field is counted by occurrence, though the decoder merges them: occurrences
+// that pass the budget are refused here, and the check after decoding sees the whole
+// of those within it.
 func scanElements(b []byte, md protoreflect.MessageDescriptor, page protowire.Number, limit int) error {
 	s := scanner{maxDepth: protowire.DefaultRecursionLimit, page: page, limit: limit}
 	return s.message(b, md, 0)

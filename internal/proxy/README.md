@@ -72,17 +72,24 @@ half the limit, as it does for `ErrResponseTooLarge`. It does not against more i
 than the limit, an ID or a cursor over its bound, nor against a task with more
 conditions than the cap (`ErrTooManyConditions`): the page that holds that task is
 refused whatever its size, so the sync runner does not ask again for it, and the
-listing ends. Every call goes through these, the sync runner's listing and the REST
-listing of an agent's tasks as well.
+listing ends. That holds for a task whose conditions come in one status on the wire
+with nothing ahead of it in the answer spending the budget. Over gRPC a status split
+into several occurrences of the task's `status` field, each of 64 conditions or
+fewer, and a flood behind tasks that spent the budget, are refused as elements
+(`ErrTooManyElements`) before anything is decoded, and the sync runner halves the
+page: up to ten calls, and ten for a split flood that passes the budget even alone,
+every one refused before decoding. Every call goes through these, the sync runner's
+listing and the REST listing of an agent's tasks as well.
 
 | What | Bound | Where it is checked | Error |
 |---|---|---|---|
 | Items of a `ListTasks` page | the request's limit; 1000, the most a page holds, when it names none | gRPC: on the wire, before decoding. HTTP: while decoding, before the item past the limit is decoded | `ErrTooManyItems` |
 | Runs of a `ListTaskRuns` page | the page size of the request | as the items of a page | `ErrTooManyItems` |
 | Elements of every repeated field and map of a gRPC answer, at any depth | 262144 (`1 << 18`) in all | on the wire, before decoding | `ErrTooManyElements` |
-| Conditions of a task, in a listing, `GetTask` and the answer of `ApplyTask` | 64 (`MaxTaskConditions`) | HTTP: while decoding, before the 65th is decoded. gRPC: on the wire, at the 65th of a status message, before decoding; a status split in several occurrences of its field is refused after decoding | `ErrTooManyConditions` |
+| Conditions of a task, in a listing, `GetTask` and the answer of `ApplyTask` | 64 (`MaxTaskConditions`) | HTTP: while decoding, before the 65th is decoded. gRPC: on the wire, at the 65th of a status message, before decoding; a status split in several occurrences of the task's `status` field is refused after decoding, or as elements when the occurrences pass the budget | `ErrTooManyConditions` |
 | Task ID in a listing | 1024 bytes (`MaxTaskIDBytes`; the SDK limits a name to 63 bytes a segment) | after the item (HTTP) or the page (gRPC) is decoded | `ErrDecode` |
 | Next cursor of a listing | 4096 bytes (`MaxCursorBytes`) | after the page is decoded | `ErrCursorTooLong` |
+| Phase of a run in a `ListTaskRuns` page, over HTTP (gRPC sends an enum) | 64 bytes (`MaxRunPhaseBytes`) | after the run is decoded | `ErrDecode` |
 
 `ErrTooManyElements` and `ErrTooManyConditions` are each an `ErrTooManyItems`
 too, and the second an `ErrDecode` (the errors of the calls carry `ErrDecode`
@@ -98,19 +105,33 @@ the response message, and counts every element of every repeated field and map i
 the tree of messages under it: each entry of a map, each value of a packed scalar
 field. It counts the conditions of each task status as well, and refuses the answer
 at the 65th in a status message, as `ErrTooManyConditions`, before the budget of
-elements can trip: a task with a million conditions is one refusal over gRPC as it
-is over HTTP, and the sync runner ends its listing at once. The cap is keyed by the
-full name of the field, `solti.task.v1.TaskStatus.conditions`, and not by its
-number: field 6 of the object metadata, the labels, has the same number and is not
-capped. The scan counts a status by occurrence on the wire. A sender that splits one
-status in several occurrences of the field gets by it, since `proto.Unmarshal`
-merges them; the check after decoding refuses the merged task, at the cost of
-decoding what the budget lets through (40 MiB in the test below, for 262144 empty
-conditions). A field the schema does not know, or whose wire type it does not fit,
-is skipped, as `proto.Unmarshal` keeps it as unknown bytes. Messages nested deeper
-than protobuf decodes (10000) are refused. The codec names no content-subtype, so
-the call sends the same `application/grpc` as a call without it. The log stream
-needs no scan: its messages hold no repeated field and no map.
+elements can trip in that status: a task with a million conditions in one status
+is one refusal over gRPC as it is over HTTP, and the sync runner ends its listing at
+once, as long as nothing ahead of that task in the answer has spent the budget,
+which trips first then (`ErrTooManyElements`, which the runner asks again smaller
+for). The cap is keyed by the full name of the field,
+`solti.task.v1.TaskStatus.conditions`, and not by its number: field 6 of the object
+metadata, the labels, has the same number and is not capped. The scan counts a
+status by occurrence on the wire. A sender that splits one status in several
+occurrences of the task's `status` field, each of 64 conditions or fewer, gets by
+the cap, since `proto.Unmarshal` merges them. Occurrences that pass the budget are
+refused as elements, before decoding; within it, the check after decoding refuses
+the merged task, at the cost of decoding what the budget lets through (40 MiB in the
+test below, for 262144 empty conditions). A field the schema does not know, or whose
+wire type it does not fit, is skipped, as `proto.Unmarshal` keeps it as unknown
+bytes. Messages nested deeper than protobuf decodes (10000) are refused. The codec
+names no content-subtype, so the call sends the same `application/grpc` as a call
+without it.
+
+The log stream needs no scan: its messages hold no repeated field and no map. A
+message of it holds at most 1 MiB over either transport: over HTTP a line, and the
+data lines of a frame together, are read up to 1 MiB; over gRPC `StreamTaskLogs`
+receives with `grpc.MaxCallRecvMsgSize(1 << 20)` instead of the 4 MiB of the unary
+calls. One over it ends the stream (`TestGRPCLogStreamCapsAMessageAt1MiB`, over gRPC;
+no test sends an HTTP line over the cap). The proxy buffers 64 messages of a stream,
+and the log hub (`internal/loghub`) up to `streams.subscriber_buffer`, 64 by
+default, for each subscriber, so a subscriber's worst case is 64 messages of at most
+1 MiB each by default. No byte budget bounds it further.
 
 Over HTTP every list the proxy builds from JSON is one of the three in the table:
 they are decoded an element at a time by `jsonbounds.go`, and a key that comes twice
@@ -180,16 +201,20 @@ The authoritative schemas live in `soltiHQ/proto`. `task generate` vendors the
 plugins are the `tool` versions from `go.mod`. Both directories are git-ignored.
 
 The pool shares HTTP connections and holds one gRPC connection for each agent, to
-the endpoint the agent advertises now. `Pool.Get` takes the agent ID: a `Get` for
-another endpoint closes the agent's old connection, and so does one for an HTTP
-endpoint, so the pool grows with the agents and not with the endpoints they once
+the endpoint the agent advertises now. Each node has a pool of its own. `Pool.Get`
+takes the agent ID: a `Get` for another endpoint closes the agent's old connection,
+and so does one for an HTTP endpoint, so the pool of a node grows with the agents
+that node has called, deleted agents included, and not with the endpoints they once
 advertised. `Pool.Forget(agentID)` closes the agent's connection for an agent that
-is gone or whose credential was reset: the lifecycle runner calls it once it has
-deleted the agent, and so does the API once the delete of an agent, or the reset
-of its credential, is committed. The pool holds no token, `Get` takes it on every
-call, so the call after `Forget` presents the token it is given. A call in flight
-on a connection that is closed fails.
-`Close` releases them all.
+is gone or whose credential was reset, in the pool of the node that calls it: the
+lifecycle runner calls it once it has deleted the agent, and so does the API once
+the delete of an agent, or the reset of its credential, is committed, on the node
+that served it, the leader in a raft cluster. The pools of the other nodes keep
+their connections to the agent, and an HTTP agent's open log stream keeps running.
+The pool holds no token, `Get` takes it on every call, so the call after `Forget`,
+and every new call on any node, presents the token it is given. A call in flight on
+a connection that is closed fails, a log stream included
+(`TestPoolForgetEndsALogStreamOnTheConnection`). `Close` releases them all.
 
 `agentError` translates HTTP/gRPC status into the shared `errkind` boundary while
 preserving operation and transport errors for `errors.Is`. Request deadlines come
@@ -202,13 +227,15 @@ the chain behind it is whole. The sync runner puts words of its own before such 
 error and stores it in the rollout and records it in the `sync_failed` event, so it
 cuts the message once more: both hold at most 4 KiB and the marker. A log line that
 carries such an error carries the cut text. An error the proxy makes itself (a bad
-endpoint, a task name that does not match) holds no text of an agent. The helper
-cuts nothing else: the archive of history keeps the error an agent reports for a
-run under a bound of its own, `ExecutionErrorMaxBytes` (32 KiB), and refuses a
-record over it instead of cutting it. An HTTP error body is read up to 4 KiB. A gRPC
-client accepts a header list of 64 KiB at most (the status message travels in the
-trailers); a status over that fails the call with an error of the transport, instead
-of the 16 MiB that grpc-go allows by default.
+endpoint, a task name that does not match) holds no text of an agent. The history
+service quotes the status of a run that it does not know, and cuts it the same way,
+in the error it returns, which its runner logs (`TestUnknownRunStatusIsCutInTheError`).
+The helper cuts nothing else: the archive of history keeps the error an agent
+reports for a run under a bound of its own, `ExecutionErrorMaxBytes` (32 KiB), and
+refuses a record over it instead of cutting it. An HTTP error body is read up to 4
+KiB. A gRPC client accepts a header list of 64 KiB at most (the status message
+travels in the trailers); a status over that fails the call with an error of the
+transport, instead of the 16 MiB that grpc-go allows by default.
 
 ## Endpoints and credentials
 

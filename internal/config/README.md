@@ -109,19 +109,19 @@ bytes, `kind` at most 128 bytes). A sync that breaks one is refused with HTTP
 capabilities.runners[1].labels has a value over 1024 bytes`, and nothing is
 enrolled or stored. The SDK treats a 400 as permanent and does not retry it, so
 an agent that breaks one stays refused until it sends data within the limits.
-No byte limit is below the SDK's own: there a label key is a qualified name, an
-optional DNS prefix of at most 253 bytes, a slash and a name of at most 63, and
-an `api_version` is a CRD group of at most 253 bytes, a slash and a version of
-at most 63, so both are 317 bytes at most, and its runner names, label values
-and kinds are 63 bytes at most. The counts are below what the SDK lets an agent
-send, since it sets no limit on how many runners, labels or workloads there
-are: an agent with more than 64 runners, or more than 256 labels or 256
-workloads in one runner, gets that 400. `os`, `arch` and `platform` are never
-refused for their length: each is cut to 256 bytes, on a rune boundary, and the
-sync lands (on Linux the SDK sends the `PRETTY_NAME` of the host's
-`/etc/os-release` as `os`, and does not bound it). The limits apply to what
-agents send, not to rows already stored. Whatever the limits, a sync is still
-bounded by the 256 KiB of its body.
+No byte limit that refuses is below the SDK's own: there a label key is a
+qualified name, an optional DNS prefix of at most 253 bytes, a slash and a name
+of at most 63, and an `api_version` is a CRD group of at most 253 bytes, a slash
+and a version of at most 63, so both are 317 bytes at most, and its runner
+names, label values and kinds are 63 bytes at most. The counts are below what
+the SDK lets an agent send, since it sets no limit on how many runners, labels
+or workloads there are: an agent with more than 64 runners, or more than 256
+labels or 256 workloads in one runner, gets that 400. `os`, `arch` and
+`platform` are never refused for their length: each is cut to 256 bytes, on a
+rune boundary, and the sync lands (on Linux the SDK sends the `PRETTY_NAME` of
+the host's `/etc/os-release` as `os`, and does not bound it). The limits apply
+to what agents send, not to rows already stored. Whatever the limits, a sync is
+still bounded by the 256 KiB of its body.
 
 SDK agents send their token only over TLS unless the agent explicitly allows
 insecure token transport (`allow_insecure_token_transport()`). With `require:
@@ -244,8 +244,12 @@ next generation, and the answer holds the token to give the agent, with no host
 that runs `podium agent-token` needed
 (`TestResetCredentialIssuesTheNextGeneration`, in `internal/service/agent`).
 
-Removing the secret leaves no way in for those agents but setting the same
-secret again: without one, podium derives no token.
+Removing the secret leaves those agents two ways in: setting the same secret
+again, since without one podium derives no token, or resetting each one's
+credential while no secret is set, which issues it a stored random token that
+lets it back in (see "Resetting a credential" below;
+`TestResetCredentialWithoutSecretStoresARandomToken`, in
+`internal/service/agent`).
 
 To provision an agent, derive its token on a host that has the secret, then
 give the token to the agent as its bearer token. The agent must run with the
@@ -291,10 +295,18 @@ starts with `-`, put `--` before it: `podium agent-token -- -h`.
 one it holds, and ends the old one. It replaces a token that leaked or was
 lost, and moves a stored credential to a derived one.
 
-- With the enrollment secret set, the new credential is derived. Its generation
-  is the old one plus one, a stored credential counting as generation 0, and it
-  names the current secret, whatever secret the old credential derived from. The
-  answer is `{"agent_id", "token", "generation"}`, and `podium agent-token
+- With the enrollment secret set, the new credential is derived, and it names
+  the current secret, whatever secret the old credential derived from. A
+  derived credential gets the old generation plus one. A stored credential has
+  no generation, and its agent may have held derived ones before (a secret
+  removed, a reset while none was set, the same secret set again), so it gets
+  the time of the reset in Unix seconds, at least 1 and below the last
+  generation, not 1, whose token an earlier reset may have revoked
+  (`TestResetAfterAStoredInterludeRevivesNoGeneration`, in
+  `internal/service/agent`). That floor is above every earlier generation as
+  long as the leader's clock does not run back past an earlier floor, and the
+  credential was reset fewer times since that floor than seconds have passed.
+  The answer is `{"agent_id", "token", "generation"}`, and `podium agent-token
   --generation <generation> <agent-id>`, run with the secret, prints the token
   again. A stored credential reset this way is no longer stored: the next start,
   or leadership term, counts one fewer in the WARN above.
@@ -308,9 +320,11 @@ lost, and moves a stored credential to a derived one.
   the new token: until it is, podium refuses its syncs, and the calls podium
   makes to it carry a token that it does not hold. The node that served the
   reset also closes its pooled gRPC connection to the agent.
-- The token is in the answer and nowhere else: not in the event the reset
-  records (`agent_credential_reset`, with the actor and the agent ID), not in a
-  log, and not in any later read.
+- No response, event or log other than the answer holds the token: not the
+  event the reset records (`agent_credential_reset`, with the actor and the
+  agent ID), no log line, and no later read. A reset without a secret also keeps
+  its random token in podium's state, as every stored token is kept; a derived
+  credential holds no token.
 - With `agent_auth.require: false` no token is checked or presented, so there is
   no credential to reset: the answer is 409 and nothing changes. An ID with no
   credential gets 404; it needs no agent row. A derived credential that has
@@ -319,11 +333,13 @@ lost, and moves a stored credential to a derived one.
 - In raft mode the reset is a leader write, which a follower forwards like any
   write (`TestResetThroughFollowerForwards`, in `internal/app`).
 
-`DELETE /api/v1/agents/{id}` (`agents:delete`) removes the agent and its
-rollouts and keeps its credential, as lifecycle deletion keeps it: an agent that
-still runs registers again at its next sync with that credential. To keep it
-out, reset its credential first, so that its old token is refused, and delete it
-after (see "Lifecycle runner" in `internal/server/README.md`).
+`DELETE /api/v1/agents/{id}` (`agents:delete`) removes the agent's row, if it
+has one, and every rollout of the ID, so it also drops the rollouts that
+lifecycle deletion leaves, and keeps its credential, as lifecycle deletion keeps
+it: an agent that still runs registers again at its next sync with that
+credential. To keep it out, reset its credential first, so that its old token is
+refused, and delete it after (see "Lifecycle runner" in
+`internal/server/README.md`).
 
 ## Client IPs and trusted proxies
 

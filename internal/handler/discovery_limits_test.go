@@ -681,8 +681,8 @@ func TestCapabilityCapsAcceptWhatTheSDKSends(t *testing.T) {
 }
 
 // os, arch and platform are cut to 256 bytes, on a rune boundary, and the sync
-// lands: os is the PRETTY_NAME of the host, which the SDK does not bound, and a
-// refusal would be permanent there.
+// lands: on Linux, os is the PRETTY_NAME of the host, which the SDK does not
+// bound, and a refusal would be permanent there.
 func TestLongPlatformFieldsAreCut(t *testing.T) {
 	text := func(n int) string { return strings.Repeat("o", n) }
 	for _, tc := range []struct{ name, in, want string }{

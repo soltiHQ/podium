@@ -131,10 +131,15 @@ transaction. From its commit discovery refuses the old token (401 / `Unauthentic
 present the new one, so the old token ends in both directions at once (`TestResetCredentialRevokesBothDirections`). The
 new credential keeps the enrollment time.
 
-- With an enrollment secret set it is a derived credential (see `internal/config`, "Enrollment secret"): its generation
-  is the old one plus one, a stored credential counting as generation 0, and it names the current secret, whatever secret
-  the old one derived from. The answer is `{"agent_id", "token", "generation"}`, and `podium agent-token --generation
-  <generation> <agent-id>`, run with the secret, prints the token again.
+- With an enrollment secret set it is a derived credential (see `internal/config`, "Enrollment secret"), and it names
+  the current secret, whatever secret the old one derived from. Its generation is the old one plus one for a derived
+  credential. A stored credential has no generation, and its agent may have held derived ones before (a secret removed,
+  a reset while none was set, the same secret set again), so it gets the time of the reset in Unix seconds, at least 1
+  and below the last generation (`TestResetOfAStoredCredentialTakesTheTimeFloor` and
+  `TestResetAfterAStoredInterludeRevivesNoGeneration` in `internal/service/agent`). That floor is above every earlier
+  generation as long as the leader's clock does not run back past an earlier floor, and the credential was reset fewer
+  times since that floor than seconds have passed. The answer is `{"agent_id", "token", "generation"}`, and `podium
+  agent-token --generation <generation> <agent-id>`, run with the secret, prints the token again.
 - Without a secret it is a stored credential, as trust on first use stores tokens, with a new random token of 32 bytes
   as 64 lowercase hex digits (`TestResetWithoutSecretIssuesRandomToken`). The answer has no `generation`, and nothing
   derives that token again.
@@ -143,26 +148,35 @@ new credential keeps the enrollment time.
   for a derived credential at the last generation (4294967295): the next would wrap around to 0, the token its agent ID
   enrolls with.
 
-The token is in this answer and nowhere else. The answer carries `Cache-Control: no-store`; the event
-`agent_credential_reset` holds the agent ID, its name and the actor, no token; no log line holds one, and no read returns
-it. A token that was not kept is replaced by another reset. Once the reset is committed, the node that served it closes
-its pooled gRPC connection to the agent (`Pool.Forget`), so that none opened before it outlives the old credential: the
-leader, in a raft cluster, since followers forward the write. The agent has to be given the new token: until it is,
-podium refuses its syncs, and the calls podium makes to it carry a token that it does not hold.
+No response, event or log other than this answer holds the token. The answer carries `Cache-Control: no-store`; the
+event `agent_credential_reset` holds the agent ID, its name and the actor, no token; no log line holds one, and no read
+returns it. A reset without a secret also keeps its random token in the state, as every stored token is kept, replicated
+and in backups; a derived credential holds no token. A token that was not kept is replaced by another reset.
 
-`DELETE /api/v1/agents/{id}` removes the agent's row and every rollout of the agent in one transaction, so that it never
-loses one and keeps the other (`TestDeleteIsAtomic` in `internal/service/agent`). Its credential and its execution
-history stay. It answers 204 with `HX-Redirect: /agents`, and 404 when the agent has no row: an agent that only
-lifecycle deleted has none, and its rollouts stay (see `internal/server/README.md`). Once the delete is committed it
-closes the pooled gRPC connection to the agent the same way, and records `agent_deleted` with the actor. That kind is an
-issue kind, so the dashboard lists an operator's delete among its issues as it lists lifecycle's, and `AgentsEdit`
-dismisses it. An agent that still runs registers again at its next sync with its credential, as a new agent with no
-labels and no rollouts (`TestDeletedAgentReturnsWithoutRollouts`). To keep it out, reset its credential first: its old
-token is then refused, and only the new one brings it back.
+Once the reset is committed, the node that served it, the leader in a raft cluster since followers forward the write,
+closes its pooled gRPC connection to the agent (`Pool.Forget`); a call in flight on it fails, a log stream included.
+That is all it closes: an HTTP agent's open log stream (SSE), and the pooled connections of the followers with the log
+streams open on them, keep running. No pool keeps a token, so every new call to the agent, on any node that holds the
+reset, carries the new token. The agent has to be given the new token: until it is, podium refuses its syncs, and the
+calls podium makes to it carry a token that it does not hold.
 
-Both are leader writes: a follower forwards them like any write (`TestResetThroughFollowerForwards`, in
-`internal/app`), and a write that reached a follower or lost leadership answers 503 with `X-Leader`
-(`TestWriteHandlersAnswerLeadershipErrorsWithTheLeader`).
+`DELETE /api/v1/agents/{id}` removes the agent's row, if it has one, and every rollout of the agent ID in one
+transaction, so that it never loses one and keeps the other (`TestDeleteIsAtomic` in `internal/service/agent`). An agent
+that lifecycle deleted has no row and keeps its rollouts (see `internal/server/README.md`): its delete drops them
+(`TestDeleteDropsTheRolloutsOfAnAgentWithoutARow`). Its credential and its execution history stay. It answers 204 with
+`HX-Redirect: /agents`, and 404 only when the ID has neither a row nor a rollout. Once the delete is committed it closes
+the serving node's pooled gRPC connection to the agent the same way, records `agent_removed` with the actor and the
+agent ID, and closes the agent's open `agent_inactive` and `agent_disconnected` issues, as a reconnect does, recording
+`issue_closed` by the actor when it closed one. `agent_removed` is no issue kind, so the dashboard lists an operator's
+delete in its activity only; lifecycle's deletion records `agent_deleted`, which stays an issue. An agent that still runs registers
+again at its next sync with its credential, as a new agent with no labels and no rollouts
+(`TestDeletedAgentReturnsWithoutRollouts`). To keep it out, reset its credential first: its old token is then refused,
+and only the new one brings it back.
+
+Both are leader writes. A follower forwards the reset like any write (`TestResetThroughFollowerForwards`, in
+`internal/app`); no test sends the delete through a follower, which forwards it by construction: the `Leader` middleware
+forwards every `DELETE`, as every `POST`, `PUT` and `PATCH`. A write that reached a follower or lost leadership answers
+503 with `X-Leader` (`TestWriteHandlersAnswerLeadershipErrorsWithTheLeader`, both routes).
 
 `AgentsDelete` and `AgentsReset` are in `enum.All`, so the Admin role holds them, and no other built-in role does
 (`TestOnlyAdminMayResetOrDeleteAnAgent`). As with `ClusterGet` and `ClusterManage`, a user who holds every permission
@@ -217,12 +231,12 @@ clients that never preview keep working.
 
 Every event kind maps to a subject (`event.SubjectOf`):
 
-| Subject | Event kinds                                                                                          | Read        | Dismiss      |
-|---------|------------------------------------------------------------------------------------------------------|-------------|--------------|
-| agent   | `agent_connected`, `agent_inactive`, `agent_disconnected`, `agent_deleted`, `agent_credential_reset` | `AgentsGet` | `AgentsEdit` |
-| spec    | `spec_created`, `spec_updated`, `spec_deployed`, `sync_failed`                                       | `SpecsGet`  | `SpecsEdit`  |
-| user    | `user_*`, `session_created`, `rate_limited`                                                          | `UsersGet`  | `UsersEdit`  |
-| unknown | `issue_closed` (it can name any subject) and unknown kinds                                           | all three   | all three    |
+| Subject | Event kinds                                                                                                           | Read        | Dismiss      |
+|---------|-----------------------------------------------------------------------------------------------------------------------|-------------|--------------|
+| agent   | `agent_connected`, `agent_inactive`, `agent_disconnected`, `agent_deleted`, `agent_removed`, `agent_credential_reset` | `AgentsGet` | `AgentsEdit` |
+| spec    | `spec_created`, `spec_updated`, `spec_deployed`, `sync_failed`                                                        | `SpecsGet`  | `SpecsEdit`  |
+| user    | `user_*`, `session_created`, `rate_limited`                                                                           | `UsersGet`  | `UsersEdit`  |
+| unknown | `issue_closed` (it can name any subject) and unknown kinds                                                            | all three   | all three    |
 
 ### Cluster `/api/v1/cluster`
 | Method | Path                           | Permission      |
@@ -315,12 +329,12 @@ limits of their own: at most 64 runners, each name at most 128 bytes; per runner
 bytes, value at most 1024 bytes) and at most 256 workloads (`api_version` at most 317 bytes, `kind` at most 128 bytes).
 Data that breaks one is answered 400 / `InvalidArgument` naming the field (such as
 `agent capabilities.runners[1].name exceeds 128 bytes`), with nothing enrolled or stored
-(`TestCapabilityCapsRefuseOversizedFields`). The SDK treats a 400 as permanent. No byte limit is below the SDK's own:
-there a label key is a qualified name, an optional DNS prefix of at most 253 bytes, a slash and a name of at most 63, and
-an `api_version` is a CRD group of at most 253 bytes, a slash and a version of at most 63, so both are 317 bytes at most.
-The three counts are below what the SDK lets an agent send, since it sets none: an agent with more than 64 runners, or
-more than 256 labels or 256 workloads in one, gets that 400. A sync with the longest key and `api_version` the SDK
-allows and the counts at the caps is stored whole (`TestCapabilityCapsAcceptWhatTheSDKSends`).
+(`TestCapabilityCapsRefuseOversizedFields`). The SDK treats a 400 as permanent. No byte limit that refuses is below the
+SDK's own: there a label key is a qualified name, an optional DNS prefix of at most 253 bytes, a slash and a name of at
+most 63, and an `api_version` is a CRD group of at most 253 bytes, a slash and a version of at most 63, so both are 317
+bytes at most. The three counts are below what the SDK lets an agent send, since it sets none: an agent with more than
+64 runners, or more than 256 labels or 256 workloads in one, gets that 400. A sync with the longest key and
+`api_version` the SDK allows and the counts at the caps is stored whole (`TestCapabilityCapsAcceptWhatTheSDKSends`).
 `os`, `arch` and `platform` are not refused for their length: each is cut to 256 bytes on a rune boundary
 (`TestLongPlatformFieldsAreCut`). The limits are not applied to rows already stored. The upsert reports what
 the sync changed in the stored row (`agent.UpsertResult`), and discovery sends the `agent_update` refresh pulse only
@@ -403,8 +417,8 @@ podium sets no minimum log level (`cmd/main.go` builds its logger with none), so
 and an agent that keeps syncing writes one for each refused sync (`TestThrottledSyncsAreLoggedAtDebug` counts them).
 The 429 carries `Retry-After` (`response.TooManyRequests`), the gRPC status carries `RetryInfo` (`status.Throttled`), and
 `Logger` and `UnaryLogger` take either for a throttle, whichever node wrote it, so a follower that forwards a sync logs
-the leader's refusal at DEBUG too (`TestAccessLogOfAThrottleIsDebug`, `TestUnaryLoggerLogsAThrottleAtDebug`). The other
-refusals keep their levels: a wrong token, and the 429 / `ResourceExhausted` of the failure limiter.
+the leader's refusal at DEBUG too (`TestAccessLogOfAForwardedThrottleIsDebug`, `TestUnaryLoggerLogsAThrottleAtDebug`).
+The other refusals keep their levels: a wrong token, and the 429 / `ResourceExhausted` of the failure limiter.
 
 The buckets are in memory, on the node that runs the handlers: in raft mode the leader, where a follower forwards a
 sync, so the new leader counts from its own after a failover, and a restart clears them. A bucket that was not used for 10

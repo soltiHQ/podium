@@ -176,9 +176,8 @@ func holdsNoneOf(t *testing.T, what, text string, secrets ...string) {
 
 // A reset ends the old token in both directions at once: discovery refuses a
 // sync with it, and podium's next call to the agent presents the new token. The
-// token travels in the answer to the reset and nowhere else: not in the event it
-// records, not in a log. The reset closes the pooled gRPC connection too, so the
-// call after it dials afresh.
+// token travels in the answer to the reset, and in no event and no log line. The
+// reset closes the pooled gRPC connection too, so the call after it dials afresh.
 func TestResetCredentialRevokesBothDirections(t *testing.T) {
 	for _, transport := range []struct {
 		name  string

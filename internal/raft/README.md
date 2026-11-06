@@ -325,7 +325,10 @@ every rotation restarts the nodes it touches.
   `internal/config/README.md`). Cost: every user signs in again with a new
   password, and each agent whose token leaked is refused until it is given the
   new token. The old token stays in the log entries, snapshots and backups
-  written before the reset, where it no longer authenticates anything.
+  written before the reset. It authenticates nothing while the state holds the
+  new credential, but restoring a backup taken before a reset brings the old
+  credential back, and the old token with it: reset the credential again after
+  restoring an older backup.
 - The first administrator's password. A generated one is in
   `bootstrap-admin-password` in the `data_dir` of the node that seeded it (mode
   0600), and one set with `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` stays in that

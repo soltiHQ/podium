@@ -127,16 +127,20 @@ by how long they have been silent. `hb` is the heartbeat the agent reported, or
   of a spec that targets it by labels turns its rollout into an uninstall,
   unless the labels are restored first.
 - **An operator's delete drops the rollouts too.** `DELETE /api/v1/agents/{id}`
-  (`agents:delete`, see `internal/handler/README.md`) removes the agent's row and
-  every rollout of the agent in one transaction, where lifecycle deletion leaves
-  the rollouts so that a returning agent resumes them. It keeps the credential
-  and the execution history, as lifecycle deletion does, closes the pooled
-  connection the same way, and records `agent_deleted` with the actor. An agent
-  that still runs registers again at its next sync with its credential, and
-  comes back with no labels and no rollouts
-  (`TestDeletedAgentReturnsWithoutRollouts`). To keep it out, reset its
-  credential first (`POST /api/v1/agents/{id}/credential`): its old token is then
-  refused, so only the new one brings it back.
+  (`agents:delete`, see `internal/handler/README.md`) removes the agent's row, if
+  it has one, and every rollout of the agent ID in one transaction, where
+  lifecycle deletion leaves the rollouts so that a returning agent resumes them.
+  So it also drops what lifecycle deletion leaves: the rollouts of an agent that
+  lifecycle deleted, which has no row. It answers 404 only when the ID has
+  neither a row nor a rollout. It keeps the credential and the execution
+  history, as lifecycle deletion does, closes the pooled connection the same
+  way, and records `agent_removed` with the actor, which is no issue, unlike
+  lifecycle's `agent_deleted`; it also closes the agent's open `agent_inactive`
+  and `agent_disconnected` issues, as a reconnect does. An agent that still runs
+  registers again at its next sync with its credential, and comes back with no
+  labels and no rollouts (`TestDeletedAgentReturnsWithoutRollouts`). To keep it
+  out, reset its credential first (`POST /api/v1/agents/{id}/credential`): its
+  old token is then refused, so only the new one brings it back.
 - **`delete_after` is a floor.** No agent is deleted sooner, whatever
   `delete_multiplier` says. Discovery refuses a reported heartbeat above 3600s
   (1h), so with the defaults (multiplier 10, `delete_after` 24h) the multiplier
@@ -190,18 +194,27 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   bound of the task, not of the page: no smaller page avoids it, so the page is
   not asked again and the listing ends at the call that meets it. The proxy
   refuses it at the 65th condition over either transport, so a flood of
-  conditions is one call with one cause whichever the agent speaks. The listing
-  is bounded, whatever the agent answers. The proxy bounds what a page builds
-  (see "What an answer may build" in `internal/proxy/README.md`). What is past a
-  bound is not built: the task past the limit, the element past 262144 in all
-  (gRPC) and the condition past the 64th of a task (both). What is under it is
-  built first: the first tasks of a page up to the limit, and the first 64
-  conditions of an HTTP task, are decoded and dropped with the error. A task ID
-  over 1024 bytes and a cursor over 4096 bytes are refused once decoded, and so
-  is a gRPC task whose status the agent split in several occurrences of the
-  conditions field, which the decoder merges, at the cost of a page the other
-  bounds have capped. The tests measure a refused `ListTasks` flood at 1 to 21
-  MiB allocated in all (what each sends is in the proxy README). The runner
+  conditions in one status is one call with one cause whichever the agent
+  speaks, as long as nothing ahead of it in the answer has spent the budget of
+  elements. Over gRPC two floods go another way: a status that the agent splits
+  into several occurrences of the task's `status` field, each of 64 conditions
+  or fewer, which the scan counts one occurrence at a time, and a flood behind
+  tasks that spent the budget. The scan refuses either as too many elements,
+  before anything is decoded, and the page is asked again with half the limit as
+  above: up to ten calls, and ten for a split flood that passes the budget even
+  alone, every one refused before decoding. The listing is bounded, whatever the
+  agent answers. The proxy bounds what a page builds (see "What an answer may
+  build" in `internal/proxy/README.md`). What is past a bound is not built: the
+  task past the limit, the element past 262144 in all (gRPC) and the condition
+  past the 64th of a task (both). Over HTTP what is under a bound is built
+  first: the first tasks of a page up to the limit, and the first 64 conditions
+  of a task, are decoded and dropped with the error; over gRPC the scan refuses
+  such an answer before any of it is decoded. A task ID over 1024 bytes and a cursor
+  over 4096 bytes are refused once decoded, and so is a gRPC task whose `status`
+  field the agent split in several occurrences that hold more than 64 conditions
+  in all within the budget, which the decoder merges, at the cost of a page the
+  other bounds have capped. The tests measure a refused `ListTasks` flood at 1
+  to 21 MiB allocated in all (what each sends is in the proxy README). The runner
   counts the tasks of a page again, and refuses a cursor over 4096 bytes itself.
   A listing that would hold more than 65536 task IDs or 32 MiB of them, or take
   more than 1024 calls, refused pages included, stops. A synced rollout whose

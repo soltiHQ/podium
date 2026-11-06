@@ -5,6 +5,11 @@
 // Slow-subscriber policy: per-subscriber buffer; on overflow events are
 // dropped and a Lagged sentinel is enqueued so the client can render
 // "N events skipped" without falling further behind the source.
+//
+// The buffer counts events, not bytes. The proxy caps a message of an agent's
+// log stream at 1 MiB over either transport, so a subscriber holds at most
+// SubscriberBuffer messages of at most 1 MiB each: 64 MiB with the default of 64
+// (streams.subscriber_buffer). No byte budget bounds a subscriber further.
 package loghub
 
 import (

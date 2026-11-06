@@ -196,9 +196,9 @@ func TestNewAgentFromEnforcesCapabilityLimits(t *testing.T) {
 	}
 }
 
-// os, arch and platform are cut to 256 bytes, never refused: os is the
-// PRETTY_NAME of the host, which the SDK does not bound, and the SDK treats a
-// refusal as permanent. The cut falls on a rune boundary and adds nothing.
+// os, arch and platform are cut to 256 bytes, never refused: on Linux, os is
+// the PRETTY_NAME of the host, which the SDK does not bound, and the SDK treats
+// a refusal as permanent. The cut falls on a rune boundary and adds nothing.
 func TestNewAgentFromCutsPlatformFields(t *testing.T) {
 	text := func(n int) string { return strings.Repeat("o", n) }
 	for _, tc := range []struct {

@@ -367,8 +367,8 @@ func chargeSync(logger zerolog.Logger, syncs *ratelimit.Buckets, now time.Time, 
 // logSyncLimited logs a WARN with the agent ID, never a token, for a refusal of
 // the bucket that asks to be logged: the first one of an agent ID, and then at
 // most one per syncLimitNotice for each ID, whichever of syncOverRate and
-// chargeSync refused. The first runs before the token check, so the WARN can come
-// from a caller that has not authenticated.
+// chargeSync refused. syncOverRate runs before the token check, so the WARN can
+// come from a caller that has not authenticated.
 func logSyncLimited(logger zerolog.Logger, agentID string, ok, notice bool) {
 	if !ok && notice {
 		logger.Warn().Str("agent_id", agentID).Msg(syncLimitedAnswer)

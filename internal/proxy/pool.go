@@ -50,9 +50,10 @@ type grpcEntry struct {
 // For HTTP it holds a single *http.Client whose Transport pools TCP connections.
 // For gRPC it holds one *grpc.ClientConn for each agent, to the endpoint the agent
 // advertises now: a Get for another endpoint closes the old connection, Forget
-// closes it for an agent that is gone, so the pool grows with the agents and not
-// with the endpoints they once advertised. The pool keeps no token: Get takes it
-// on every call.
+// closes it for an agent that is gone, when it is called on this pool, so the pool
+// grows with the agents this node has called, deleted ones included that it was
+// not told of, and not with the endpoints they once advertised. The pool keeps no
+// token: Get takes it on every call.
 type Pool struct {
 	mu     sync.RWMutex
 	closed bool

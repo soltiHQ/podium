@@ -174,11 +174,13 @@ func (a *API) agentDelete(w http.ResponseWriter, r *http.Request, mode httpctx.R
 }
 
 // agentResetCredential issues the agent a new credential and answers its token,
-// once: the token is in this answer and nowhere else, not in the event the reset
-// records, not in a log. The old token is refused from the commit on, and the
-// pooled connection to the agent is closed once the reset is committed, so that
-// no connection that podium opened with the old credential outlives it. With
-// agent authentication off there is nothing to reset: 409.
+// once: no other response, no event and no log line holds it, though a reset
+// without a secret keeps its random token in the state, as every stored token
+// is. The old token is refused from the commit on. Once the reset is committed
+// this node closes its pooled gRPC connection to the agent, and a call in flight
+// on it fails; an HTTP agent's open log stream and the connections of other
+// nodes keep running. No pool keeps a token, so every new call carries the new
+// one. With agent authentication off there is nothing to reset: 409.
 func (a *API) agentResetCredential(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	issued, err := a.agentSVC.ResetCredential(r.Context(), id)
 	switch {

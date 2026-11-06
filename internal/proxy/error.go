@@ -38,10 +38,14 @@ var (
 	ErrTooManyElements error = elementsError{}
 	// ErrTooManyConditions indicates a task with more conditions than a task may
 	// hold, MaxTaskConditions, over either transport: over HTTP while the JSON is
-	// decoded, over gRPC at the 65th condition of a status on the wire, before the
-	// budget of elements in all can trip. It is an ErrTooManyItems and an ErrDecode,
-	// and no ErrTooManyElements: no smaller page avoids the task, so the sync runner
-	// ends the listing on it, without asking again.
+	// decoded, over gRPC at the 65th condition of a status message on the wire,
+	// before the budget of elements in all can trip in it, or after decoding for a
+	// status the agent split in several occurrences of the task's status field.
+	// It is an ErrTooManyItems and an ErrDecode, and no ErrTooManyElements: no
+	// smaller page avoids the task, so the sync runner ends the listing on it,
+	// without asking again. Over gRPC a budget that the tasks ahead of the task
+	// spent, or a split status whose occurrences pass it, trips first, as
+	// ErrTooManyElements, which the runner asks again smaller for.
 	ErrTooManyConditions error = conditionsError{}
 	// ErrCursorTooLong indicates a ListTasks page whose next cursor is longer than
 	// MaxCursorBytes. It is a decode failure too.

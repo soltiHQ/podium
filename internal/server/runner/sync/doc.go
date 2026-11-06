@@ -13,7 +13,10 @@
 //     A page starts at 1000 tasks. One that the proxy refuses as too large, or as holding more elements than it
 //     builds in all, is asked again from the same cursor with half the limit, down to one task. A task with
 //     more than 64 conditions is a bound of the task, not of the page: no smaller page avoids it, so the page is
-//     not asked again and the listing ends at the call that meets it. The runner also bounds what an agent
+//     not asked again and the listing ends at the call that meets it. That holds for conditions in one status
+//     with nothing ahead in the answer spending the budget: over gRPC a status split into occurrences of 64 or
+//     fewer that pass the budget, or a budget spent by the tasks ahead, is refused as elements, before anything
+//     is decoded, and halved like any page over it, up to ten calls. The runner also bounds what an agent
 //     can make a listing cost: a page that holds more tasks than it was asked for, or names a cursor longer
 //     than 4096 bytes, is refused, and a listing that would hold more than 65536 task IDs or 32 MiB of them,
 //     or take more than 1024 calls, refused pages included, stops. Only a complete listing shows a task missing: if

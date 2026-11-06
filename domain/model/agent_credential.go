@@ -19,7 +19,13 @@ const AgentTokenMaxBytes = 1024
 // on every sync and podium presents on its own calls to the agent. Keyed by
 // agent ID: one credential per agent. The first sync of an unknown agent ID
 // enrolls it. It outlives the agent row: deleting an agent leaves its
-// credential, and only a reset replaces one (agent.Service.ResetCredential).
+// credential. An operator's reset issues a new one
+// (agent.Service.ResetCredential). A sync replaces one too, by a derived
+// credential of the current enrollment secret, when the agent was re-provisioned
+// under that secret at its generation, or when the token of a stored credential
+// is the one the secret derives at generation 0; the sweep at the start of each
+// leadership term replaces those stored ones as well
+// (agent.Service.VerifyOrEnrollToken and SweepCredentials).
 //
 // A credential is one of two kinds:
 //   - derived: enrolled while an enrollment secret is set. Podium recomputes
