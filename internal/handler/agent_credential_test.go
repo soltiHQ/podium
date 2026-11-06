@@ -702,3 +702,51 @@ func TestOnlyAdminMayResetOrDeleteAnAgent(t *testing.T) {
 		}
 	}
 }
+
+// Every event names its actor: the display name of the user, or for a user
+// without one the subject, the name the user signs in with. The reset and the
+// delete of an agent record it.
+func TestEventsNameTheActorWithoutADisplayName(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		actor identity.Identity
+		want  string
+	}{
+		{"a display name", identity.Identity{UserID: "user-1", Subject: "operator", Name: "Operator"}, "Operator"},
+		{"no display name", identity.Identity{UserID: "user-1", Subject: "operator"}, "operator"},
+		{"neither a display name nor a subject", identity.Identity{UserID: "user-1"}, "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newAPIFixture(t)
+			ag, err := model.NewAgent("agent-1", "agent-1", "http://10.0.0.5:8085")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = f.store.UpsertAgent(ctx, ag); err != nil {
+				t.Fatal(err)
+			}
+			cred, err := model.NewStoredAgentCredential("agent-1", "chosen-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = f.store.UpsertAgentCredential(ctx, cred); err != nil {
+				t.Fatal(err)
+			}
+			actor := tc.actor
+			actor.Permissions = []enum.Permission{enum.AgentsReset, enum.AgentsDelete}
+
+			if w := f.do(http.MethodPost, "/api/v1/agents/agent-1/credential", "", &actor); w.Code != http.StatusOK {
+				t.Fatalf("reset: %d %s", w.Code, w.Body.String())
+			}
+			if w := f.do(http.MethodDelete, "/api/v1/agents/agent-1", "", &actor); w.Code != http.StatusNoContent {
+				t.Fatalf("delete: %d %s", w.Code, w.Body.String())
+			}
+			for _, kind := range []string{event.AgentCredentialReset, event.AgentRemoved} {
+				if events := recorded(f, kind); len(events) != 1 || events[0].Payload.By != tc.want {
+					t.Fatalf("%s events %+v, want one by %q", kind, events, tc.want)
+				}
+			}
+		})
+	}
+}

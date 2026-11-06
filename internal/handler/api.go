@@ -247,12 +247,22 @@ func (a *API) identity(r *http.Request) *identity.Identity {
 	return id
 }
 
-// actor returns the display name of the authenticated user from the request context.
+// actor names the authenticated user of the request in an event or a log line:
+// the display name, or the subject, the name the user signs in with, for a user
+// who has no display name. Every user has a subject, so every event names its
+// actor; "unknown" stands for a request without either.
 func (a *API) actor(r *http.Request) string {
-	if id := a.identity(r); id != nil {
+	id := a.identity(r)
+	switch {
+	case id == nil:
+		return "unknown"
+	case id.Name != "":
 		return id.Name
+	case id.Subject != "":
+		return id.Subject
+	default:
+		return "unknown"
 	}
-	return "unknown"
 }
 
 // errNotJSON reports a request body that is not declared as application/json.
