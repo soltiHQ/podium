@@ -671,13 +671,14 @@ func generationFloor(now time.Time) uint32 {
 	}
 }
 
-// Delete removes the agent's row and every rollout of the agent in one
-// transaction, so that an agent never loses its rollouts and keeps its row, or
-// the reverse. It returns the row it removed. The credential of the agent stays,
-// and so does its execution history: an agent that still runs registers again at
-// its next sync, with its credential, and without the labels operators set and
-// without rollouts (lifecycle deletion, in contrast, leaves the rollouts).
-// ErrNotFound if the agent has no row, whatever else the store holds of it.
+// Delete removes the agent's row, if it has one, and every rollout of the agent
+// ID in one transaction, so that an agent never loses its rollouts and keeps its
+// row, or the reverse. It returns the row it removed, nil when there was none:
+// lifecycle deletion drops the row and leaves the rollouts, which this drops. The
+// credential of the agent stays, and so does its execution history: an agent that
+// still runs registers again at its next sync, with its credential, and without
+// the labels operators set and without rollouts. ErrNotFound when the store holds
+// neither a row nor a rollout of the ID.
 func (s *Service) Delete(ctx context.Context, id string) (*model.Agent, error) {
 	if id == "" {
 		return nil, storage.ErrInvalidArgument
@@ -685,21 +686,30 @@ func (s *Service) Delete(ctx context.Context, id string) (*model.Agent, error) {
 
 	var removed *model.Agent
 	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+		removed = nil
 		ag, err := tx.GetAgent(ctx, id)
-		if err != nil {
+		switch {
+		case errors.Is(err, storage.ErrNotFound):
+			ag = nil
+		case err != nil:
 			return err
 		}
 		rollouts, err := storage.AllRollouts(ctx, tx, tx.BuildRolloutFilter(storage.RolloutQueryCriteria{AgentID: id}))
 		if err != nil {
 			return err
 		}
+		if ag == nil && len(rollouts) == 0 {
+			return storage.ErrNotFound
+		}
 		for _, ro := range rollouts {
 			if err = tx.DeleteRollout(ctx, ro.ID()); err != nil {
 				return err
 			}
 		}
-		if err = tx.DeleteAgent(ctx, id); err != nil {
-			return err
+		if ag != nil {
+			if err = tx.DeleteAgent(ctx, id); err != nil {
+				return err
+			}
 		}
 		removed = ag
 		return nil

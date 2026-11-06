@@ -422,9 +422,11 @@ func rolloutsOf(t *testing.T, f *apiFixture, agentID string) []string {
 }
 
 // Deleting an agent removes its row and every rollout of the agent, answers 204
-// with a redirect to the agents page, records agent_deleted with the actor, and
-// closes the pooled connection. The rollouts of other agents, the credential and
-// the execution history stay. An agent without a row is 404, and nothing is
+// with a redirect to the agents page, records agent_removed with the actor, which
+// is no issue, closes the agent's open agent_inactive and agent_disconnected
+// issues as a reconnect does, and closes the pooled connection. The rollouts and
+// the issues of other agents, the credential and the execution history stay. A
+// delete that finds neither a row nor a rollout of the ID is 404, and nothing is
 // recorded for it.
 func TestDeleteAgentRemovesRowAndRollouts(t *testing.T) {
 	ctx := context.Background()
@@ -444,6 +446,9 @@ func TestDeleteAgentRemovesRowAndRollouts(t *testing.T) {
 		t.Fatalf("task listing: %d %s", w.Code, w.Body.String())
 	}
 	dialed := fake.dials()
+	f.hub.Record(event.AgentInactive, event.Payload{ID: "agent-1", Name: "agent-1", By: "lifecycle"})
+	f.hub.Record(event.AgentDisconnected, event.Payload{ID: "agent-1", Name: "agent-1", By: "lifecycle"})
+	f.hub.Record(event.AgentInactive, event.Payload{ID: "agent-2", Name: "agent-2", By: "lifecycle"})
 
 	w := f.do(http.MethodDelete, "/api/v1/agents/agent-1", "", admin)
 	if w.Code != http.StatusNoContent || w.Header().Get("HX-Redirect") != "/agents" {
@@ -470,12 +475,21 @@ func TestDeleteAgentRemovesRowAndRollouts(t *testing.T) {
 			t.Fatalf("execution history of %s after the delete: %d records %v, want 1", id, len(records), err)
 		}
 	}
-	events := recorded(f, event.AgentDeleted)
+	events := recorded(f, event.AgentRemoved)
 	if len(events) != 1 || events[0].Payload.ID != "agent-1" || events[0].Payload.By != "admin" {
-		t.Fatalf("events %+v, want one agent_deleted of agent-1 by admin", events)
+		t.Fatalf("events %+v, want one agent_removed of agent-1 by admin", events)
 	}
-	if !hasIssue(f, event.AgentDeleted, "agent-1") {
-		t.Fatalf("issues %+v, want the delete among them: agent_deleted is an issue kind", f.hub.RecentIssues(event.RingSize))
+	if got := recorded(f, event.AgentDeleted); len(got) != 0 {
+		t.Fatalf("the delete recorded %+v: agent_deleted is lifecycle's", got)
+	}
+	if hasIssue(f, event.AgentRemoved, "agent-1") {
+		t.Fatalf("issues %+v, want the delete not among them: agent_removed is no issue kind", f.hub.RecentIssues(event.RingSize))
+	}
+	if hasIssue(f, event.AgentInactive, "agent-1") || hasIssue(f, event.AgentDisconnected, "agent-1") || !hasIssue(f, event.AgentInactive, "agent-2") {
+		t.Fatalf("issues %+v, want those of agent-1 closed and that of agent-2 kept", f.hub.RecentIssues(event.RingSize))
+	}
+	if closed := recorded(f, event.IssueClosed); len(closed) != 1 || closed[0].Payload.ID != "agent-1" || closed[0].Payload.By != "admin" {
+		t.Fatalf("events %+v, want one issue_closed of agent-1 by admin", closed)
 	}
 	holdsNoneOf(t, "the logs", logs.text(), token, resetSecret)
 
@@ -500,8 +514,55 @@ func TestDeleteAgentRemovesRowAndRollouts(t *testing.T) {
 	if w = f.do(http.MethodDelete, "/api/v1/agents/agent-1", "", admin); w.Code != http.StatusNotFound {
 		t.Fatalf("second delete: %d %s, want 404", w.Code, w.Body.String())
 	}
-	if got := recorded(f, event.AgentDeleted); len(got) != 2 {
-		t.Fatalf("events %+v, want one agent_deleted for each of the two deletes that took place", got)
+	if got := recorded(f, event.AgentRemoved); len(got) != 2 {
+		t.Fatalf("events %+v, want one agent_removed for each of the two deletes that took place", got)
+	}
+}
+
+// An agent that lifecycle deleted has no row, and keeps its rollouts. Its delete
+// drops them in one transaction, answers 204 and records agent_removed with the
+// actor, as the delete of an agent with a row does, and leaves the rollouts of
+// other agents. A delete that finds neither a row nor a rollout of the ID answers
+// 404, changes nothing and records nothing.
+func TestDeleteDropsTheRolloutsOfAnAgentWithoutARow(t *testing.T) {
+	ctx := context.Background()
+	f := newAPIFixture(t)
+	admin := f.user(t, "admin", enum.RoleAdminID)
+	for _, pair := range [][2]string{{"spec-a", "agent-1"}, {"spec-b", "agent-1"}, {"spec-a", "agent-2"}} {
+		ro, err := model.NewRollout(pair[0], pair[1], 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = f.store.UpsertRollout(ctx, ro); err != nil {
+			t.Fatal(err)
+		}
+	}
+	kept := []string{model.RolloutID("spec-a", "agent-2")}
+
+	if w := f.do(http.MethodDelete, "/api/v1/agents/agent-1", "", admin); w.Code != http.StatusNoContent {
+		t.Fatalf("delete of the rollouts of an agent without a row: %d %s, want 204", w.Code, w.Body.String())
+	}
+	if got := rolloutsOf(t, f, "agent-1"); len(got) != 0 {
+		t.Fatalf("rollouts of agent-1 after the delete: %v, want none", got)
+	}
+	if got := rolloutsOf(t, f, "agent-2"); !slices.Equal(got, kept) {
+		t.Fatalf("rollouts of agent-2 after the delete of agent-1: %v, want %v", got, kept)
+	}
+	events := recorded(f, event.AgentRemoved)
+	if len(events) != 1 || events[0].Payload.ID != "agent-1" || events[0].Payload.By != "admin" {
+		t.Fatalf("events %+v, want one agent_removed of agent-1 by admin", events)
+	}
+
+	for _, id := range []string{"agent-1", "nobody"} {
+		if w := f.do(http.MethodDelete, "/api/v1/agents/"+id, "", admin); w.Code != http.StatusNotFound {
+			t.Fatalf("delete of %s, which has neither a row nor a rollout: %d %s, want 404", id, w.Code, w.Body.String())
+		}
+	}
+	if got := recorded(f, event.AgentRemoved); len(got) != 1 {
+		t.Fatalf("events %+v, want no agent_removed for a delete that found nothing", got)
+	}
+	if got := rolloutsOf(t, f, "agent-2"); !slices.Equal(got, kept) {
+		t.Fatalf("rollouts of agent-2 after the refused deletes: %v, want %v", got, kept)
 	}
 }
 

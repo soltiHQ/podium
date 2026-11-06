@@ -457,8 +457,8 @@ func holds(t *testing.T, store storage.Storage) []string {
 
 // Deleting an agent removes its row and every rollout of the agent in one
 // transaction, and returns the row it removed. The rollouts of other agents, the
-// credential of the agent and the execution history stay, and an agent without a
-// row is not found, whatever else the store holds of it.
+// credential of the agent and the execution history stay, and a delete that finds
+// neither a row nor a rollout of the ID is not found.
 func TestDeleteRemovesTheRowAndTheRolloutsOfTheAgent(t *testing.T) {
 	ctx := context.Background()
 	store := inmemory.New()
@@ -506,6 +506,40 @@ func TestDeleteRemovesTheRowAndTheRolloutsOfTheAgent(t *testing.T) {
 	}
 	if len(holds(t, store)) != 1 {
 		t.Fatalf("a refused delete changed the rollouts: %v", holds(t, store))
+	}
+}
+
+// An agent that lifecycle deleted has no row and keeps its rollouts: its delete
+// drops them in one transaction and returns no row. The rollouts of other agents
+// and the credential stay, and a second delete, which finds nothing, is not found.
+func TestDeleteDropsTheRolloutsOfAnAgentWithoutARow(t *testing.T) {
+	ctx := context.Background()
+	store := inmemory.New()
+	seedAgentWithRollouts(t, store)
+	if err := store.DeleteAgent(ctx, "agent-1"); err != nil {
+		t.Fatal(err)
+	}
+	counted := &countingTx{Storage: store}
+	svc := New(counted, zerolog.New(io.Discard))
+
+	removed, err := svc.Delete(ctx, "agent-1")
+	if err != nil {
+		t.Fatalf("delete of the rollouts of an agent without a row: %v", err)
+	}
+	if removed != nil {
+		t.Fatalf("Delete returned the row %v, want none", removed)
+	}
+	if counted.txs != 1 {
+		t.Fatalf("the delete took %d transactions, want 1", counted.txs)
+	}
+	if got, want := holds(t, store), []string{model.RolloutID("spec-a", "agent-2")}; len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("rollouts after the delete: %v, want only %v", got, want)
+	}
+	if cred, err := store.GetAgentCredential(ctx, "agent-1"); err != nil || cred.Token() != "chosen-token" {
+		t.Fatalf("credential of agent-1 after the delete: %v, want it kept", err)
+	}
+	if _, err := svc.Delete(ctx, "agent-1"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("second delete: %v, want not found", err)
 	}
 }
 

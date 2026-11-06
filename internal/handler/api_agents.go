@@ -133,11 +133,15 @@ func (a *API) agentPatchLabels(w http.ResponseWriter, r *http.Request, mode http
 	response.NoContent(w, r)
 }
 
-// agentDelete removes an agent's row and every rollout of the agent, in one
-// transaction. Its credential and its execution history stay, so an agent that
-// still runs registers again at its next sync, with no rollouts: reset its
-// credential first to keep it out. The pooled connection to the agent is closed
-// once the delete is committed, and agent_deleted records who deleted it.
+// agentDelete removes an agent's row, if it has one, and every rollout of the
+// agent ID, in one transaction, so it also drops the rollouts that lifecycle
+// deletion leaves with no row; 404 only when there is neither. Its credential and
+// its execution history stay, so an agent that still runs registers again at its
+// next sync, with no rollouts: reset its credential first to keep it out. Once
+// the delete is committed the pooled connection to the agent is closed,
+// agent_removed records who deleted it, which is no issue, and the agent's open
+// agent_inactive and agent_disconnected issues are closed, as a reconnect closes
+// them.
 func (a *API) agentDelete(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	removed, err := a.agentSVC.Delete(r.Context(), id)
 	if err != nil {
@@ -151,8 +155,19 @@ func (a *API) agentDelete(w http.ResponseWriter, r *http.Request, mode httpctx.R
 	}
 
 	a.proxyPool.Forget(id)
-	a.logger.Info().Str("agent_id", id).Str("by", a.actor(r)).Msg("agent deleted")
-	a.hub.Record(event.AgentDeleted, event.Payload{ID: id, Name: removed.Name(), By: a.actor(r)})
+	by := a.actor(r)
+	var name string
+	if removed != nil {
+		name = removed.Name()
+	}
+	a.logger.Info().Str("agent_id", id).Bool("row", removed != nil).Str("by", by).Msg("agent deleted")
+	a.hub.Record(event.AgentRemoved, event.Payload{ID: id, Name: name, By: by})
+	n := a.hub.DeleteIssues(event.AgentInactive, id)
+	n += a.hub.DeleteIssues(event.AgentDisconnected, id)
+	if n > 0 {
+		a.hub.Record(event.IssueClosed, event.Payload{ID: id, Name: name, By: by})
+		a.hub.Notify(event.RefreshDashboard)
+	}
 	a.hub.Notify(event.RefreshAgents)
 	htmx.Redirect(w, routepath.PageAgents)
 	response.NoContent(w, r)

@@ -15,6 +15,7 @@ func TestSubjectOfClassifiesEveryKind(t *testing.T) {
 		"agent_inactive":         SubjectAgent,
 		"agent_disconnected":     SubjectAgent,
 		"agent_deleted":          SubjectAgent,
+		"agent_removed":          SubjectAgent,
 		"agent_credential_reset": SubjectAgent,
 		"spec_created":           SubjectSpec,
 		"spec_updated":           SubjectSpec,

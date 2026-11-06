@@ -67,7 +67,12 @@ const (
 	AgentConnected    = "agent_connected"
 	AgentInactive     = "agent_inactive"
 	AgentDisconnected = "agent_disconnected"
-	AgentDeleted      = "agent_deleted"
+	// AgentDeleted records that lifecycle deleted a silent agent. It is an issue.
+	AgentDeleted = "agent_deleted"
+
+	// AgentRemoved records who deleted an agent through the API. An intended
+	// delete is no problem to dismiss, so it is no issue.
+	AgentRemoved = "agent_removed"
 
 	// AgentCredentialReset records who issued an agent a new credential. The
 	// token is never in the event.
@@ -125,7 +130,7 @@ const (
 // issue can name an agent, a spec or a login subject.
 func SubjectOf(kind string) Subject {
 	switch kind {
-	case AgentConnected, AgentInactive, AgentDisconnected, AgentDeleted, AgentCredentialReset:
+	case AgentConnected, AgentInactive, AgentDisconnected, AgentDeleted, AgentRemoved, AgentCredentialReset:
 		return SubjectAgent
 	case SpecCreated, SpecUpdated, SpecDeployed, SyncFailed:
 		return SubjectSpec
