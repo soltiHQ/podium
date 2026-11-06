@@ -208,20 +208,24 @@ and keeps its two latest snapshots (see "Log compaction" in
 past the upgrade, and drop the older ones; a copy of a database file copies its
 freed pages too, which may still hold some of those bytes.
 
-Changing or removing the secret locks out every agent enrolled under it: each
-sync it makes with the token it has is refused like a wrong token, and logged
-at WARN, bounded by the discovery limiter, with its agent ID, its client IP and
-`agent <id> enrolled under another enrollment secret: it needs the token that
-podium agent-token --generation <g> <id> prints with the current secret`
-(`agent <id> holds a credential derived from an enrollment secret, and no
-enrollment secret is set: it needs the secret it enrolled under` without a
-secret). Podium makes no call to it either: its token lookup fails with the
-same text, which a rollout to it records in its error
-(`TestChangedSecretRefusesDerivedAgentClearly`, in `internal/handler`;
-`TestOutboundUsesDerivedToken`, in `internal/server/runner/sync`). Agents with
-a stored token are not affected: their token keeps working, so a token a former
-secret derived, which an older version stored, can still be derived by
-whoever holds that former secret. To re-provision the fleet under a new secret:
+Changing or removing the secret locks out every agent whose credential derives
+from it: each sync it makes with the token it has is refused like a wrong token,
+and logged at WARN, bounded by the discovery limiter, with its agent ID, its
+client IP and `agent <id> holds a credential derived from another enrollment
+secret than the current one: give it the token that podium agent-token
+--generation <g> <id> prints with the current secret, set the secret it derives
+from again, or reset its credential (POST /api/v1/agents/<id>/credential), which
+issues a token derived under the current secret` (`agent <id> holds a credential
+derived from an enrollment secret, and no enrollment secret is set: set that
+secret again, or reset its credential (POST /api/v1/agents/<id>/credential),
+which issues a stored token` without a secret). Podium makes no call to it
+either: its token lookup fails with the same text, which a rollout to it records
+in its error (`TestChangedSecretRefusesDerivedAgentClearly`, in
+`internal/handler`; `TestOutboundUsesDerivedToken`, in
+`internal/server/runner/sync`). Agents with a stored token are not affected:
+their token keeps working, so a token a former secret derived, which an older
+version stored, can still be derived by whoever holds that former secret. To
+re-provision the fleet under a new secret:
 
 1. Set the new secret on every node and restart them; in raft mode every node
    needs the same secret (see "Settings every replica must share").

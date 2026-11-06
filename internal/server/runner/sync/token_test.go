@@ -36,7 +36,7 @@ func TestOutboundUsesDerivedToken(t *testing.T) {
 		failed string // the start of the rollout error when there is no call
 	}{
 		{"derived under the current secret", tokenSecret, "Bearer " + agentAToken1, ""},
-		{"derived under another secret", otherTokenSecret, "", "agent credential lookup: agent agent-a enrolled under another enrollment secret: it needs the token that podium agent-token --generation 1 agent-a prints with the current secret"},
+		{"derived under another secret", otherTokenSecret, "", "agent credential lookup: agent agent-a holds a credential derived from another enrollment secret than the current one: give it the token that podium agent-token --generation 1 agent-a prints with the current secret, set the secret it derives from again, or reset its credential (POST /api/v1/agents/agent-a/credential), which issues a token derived under the current secret"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()

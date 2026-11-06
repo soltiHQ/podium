@@ -136,8 +136,8 @@ func TestSecretIDLabelIsNoTokenMessage(t *testing.T) {
 // otherSecret and noSecret are the texts of the DerivedCredentialError of
 // agent-1 at generation 0: under another secret, and with no secret set.
 const (
-	otherSecret = "agent agent-1 enrolled under another enrollment secret: it needs the token that podium agent-token --generation 0 agent-1 prints with the current secret"
-	noSecret    = "agent agent-1 holds a credential derived from an enrollment secret, and no enrollment secret is set: it needs the secret it enrolled under"
+	otherSecret = "agent agent-1 holds a credential derived from another enrollment secret than the current one: give it the token that podium agent-token --generation 0 agent-1 prints with the current secret, set the secret it derives from again, or reset its credential (POST /api/v1/agents/agent-1/credential), which issues a token derived under the current secret"
+	noSecret    = "agent agent-1 holds a credential derived from an enrollment secret, and no enrollment secret is set: set that secret again, or reset its credential (POST /api/v1/agents/agent-1/credential), which issues a stored token"
 )
 
 // With an enrollment secret an unknown agent ID enrolls only with the token

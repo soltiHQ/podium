@@ -65,7 +65,11 @@ var (
 // discovery refuses the agent's syncs with it. AgentToken returns it too, so
 // podium makes no call to the agent; errkind classifies it as
 // FailedPrecondition, not as the caller's own failed authentication. Its text
-// names the agent and what it needs, never a token.
+// names the agent and every way back, never a token: setting the secret it
+// derives from again; with a secret set, re-provisioning the agent with the
+// token that `podium agent-token --generation` prints under it; and resetting
+// the credential, which issues a stored token while no secret is set and a
+// derived one under the current secret otherwise.
 type DerivedCredentialError struct {
 	AgentID    string
 	Generation uint32
@@ -74,9 +78,9 @@ type DerivedCredentialError struct {
 
 func (e *DerivedCredentialError) Error() string {
 	if e.NoSecret {
-		return fmt.Sprintf("agent %s holds a credential derived from an enrollment secret, and no enrollment secret is set: it needs the secret it enrolled under", e.AgentID)
+		return fmt.Sprintf("agent %s holds a credential derived from an enrollment secret, and no enrollment secret is set: set that secret again, or reset its credential (POST /api/v1/agents/%s/credential), which issues a stored token", e.AgentID, e.AgentID)
 	}
-	return fmt.Sprintf("agent %s enrolled under another enrollment secret: it needs the token that podium agent-token --generation %d %s prints with the current secret", e.AgentID, e.Generation, e.AgentID)
+	return fmt.Sprintf("agent %s holds a credential derived from another enrollment secret than the current one: give it the token that podium agent-token --generation %d %s prints with the current secret, set the secret it derives from again, or reset its credential (POST /api/v1/agents/%s/credential), which issues a token derived under the current secret", e.AgentID, e.Generation, e.AgentID, e.AgentID)
 }
 
 // Unwrap makes the error an ErrUnauthenticated.

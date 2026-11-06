@@ -360,10 +360,12 @@ a derived credential against the token the secret derives for its generation.
 With the secret set, a stored token that it derives at generation 0 becomes a derived credential in the transaction of
 the check, and a derived credential of another secret that presents the token of the current secret for its generation,
 as an agent re-provisioned under it does, moves to the current secret. Any other sync of a derived credential with no
-secret set, or of another secret than the current one, is refused as an
-`agent.DerivedCredentialError`, an `ErrUnauthenticated` too, with one failure for the limiter and a WARN with the agent ID,
-the client IP and the error's text, which says the agent enrolled under another enrollment secret and which
-`podium agent-token --generation` command gives the token it needs, or that no secret is set
+secret set, or of another secret than the current one, is refused as an `agent.DerivedCredentialError`, an
+`ErrUnauthenticated` too, with one failure for the limiter and a WARN with the agent ID, the client IP and the error's
+text. The text says the credential derives from another enrollment secret, or from one while none is set, and names the
+ways back, never a token: the secret it derives from set again; with a secret set, the token that `podium agent-token
+--generation` prints under it; and a reset of the credential (`POST /api/v1/agents/{id}/credential`), which issues a
+stored token while none is set and a derived one under the current secret otherwise
 (`TestChangedSecretRefusesDerivedAgentClearly`); the agent service's token lookup for the agent's calls fails with the
 same error, so podium makes no call to it. The agent routes that would call it answer as for their other failures:
 `GET /api/v1/agents/{id}/tasks` with 503 and an ERROR line that holds the error, the task detail and cancel with 409

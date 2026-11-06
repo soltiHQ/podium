@@ -720,20 +720,21 @@ func TestRefusedEnrollmentWarns(t *testing.T) {
 	}
 }
 
-// An agent that enrolled under one enrollment secret, synced to a podium that
-// runs with another, is refused like a wrong token (HTTP 401, gRPC
+// An agent whose credential derives from one enrollment secret, synced to a
+// podium that runs with another, is refused like a wrong token (HTTP 401, gRPC
 // Unauthenticated), and logged at WARN with its agent ID and client IP and a
-// message that says it enrolled under another enrollment secret and which
-// podium agent-token command gives the token it needs, never the token. The
-// discovery limiter bounds the lines to rate_attempts per window for the pair.
-// Podium makes no call to the agent either: its token lookup fails with the
-// same text. The credential stays as it was.
+// message that says the credential derives from another enrollment secret and
+// names the ways back, among them the podium agent-token command that gives the
+// token it needs, never the token. The discovery limiter bounds the lines to
+// rate_attempts per window for the pair. Podium makes no call to the agent
+// either: its token lookup fails with the same text. The credential stays as it
+// was.
 func TestChangedSecretRefusesDerivedAgentClearly(t *testing.T) {
 	const (
 		secretA = "0123456789abcdef0123456789abcdef"
 		secretB = "a-different-secret-of-32-bytes-or-more!"
 		tokenA1 = "ee91297d059304dd88e1c5650d195795e3fa9c921c419a61aced53e41a3c0058" // HMAC-SHA256(secretA, "agent-1"), hex
-		warning = "agent agent-1 enrolled under another enrollment secret: it needs the token that podium agent-token --generation 0 agent-1 prints with the current secret"
+		warning = "agent agent-1 holds a credential derived from another enrollment secret than the current one: give it the token that podium agent-token --generation 0 agent-1 prints with the current secret, set the secret it derives from again, or reset its credential (POST /api/v1/agents/agent-1/credential), which issues a token derived under the current secret"
 	)
 	for _, transport := range []struct {
 		name string
