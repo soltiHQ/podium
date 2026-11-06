@@ -131,7 +131,7 @@ func (s *chunkServer) StreamTaskLogs(_ *taskv1.StreamTaskLogsRequest, stream grp
 // A message of the log stream holds at most 1 MiB over gRPC, as a line does over
 // HTTP: a chunk within it is delivered, and one over it ends the stream with the
 // client's error, with nothing of it or after it delivered, though the agent keeps
-// the stream open.
+// the stream open and the call has no deadline.
 func TestGRPCLogStreamCapsAMessageAt1MiB(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -144,7 +144,7 @@ func TestGRPCLogStreamCapsAMessageAt1MiB(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			lines := [][]byte{[]byte("before"), bytes.Repeat([]byte("x"), tc.line), []byte("after")}
 			p := grpcContractProxyOver(t, &chunkServer{lines: lines}, nil)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
 			stream, err := p.StreamTaskLogsForUID(ctx, "task", "uid")
@@ -152,14 +152,18 @@ func TestGRPCLogStreamCapsAMessageAt1MiB(t *testing.T) {
 				t.Fatal(err)
 			}
 			var seqs []uint64
-			for ev := range stream {
-				seqs = append(seqs, ev.GetChunk().GetSeq())
-				if len(seqs) == len(lines) {
-					break
+			timeout := time.After(5 * time.Second)
+		receive:
+			for len(seqs) < len(lines) {
+				select {
+				case ev, open := <-stream:
+					if !open {
+						break receive
+					}
+					seqs = append(seqs, ev.GetChunk().GetSeq())
+				case <-timeout:
+					t.Fatalf("the stream neither ended nor delivered a chunk for 5s, after %v", seqs)
 				}
-			}
-			if ctx.Err() != nil {
-				t.Fatalf("the stream stayed open until its deadline, after %v", seqs)
 			}
 			if !slices.Equal(seqs, tc.want) {
 				t.Fatalf("delivered the chunks %v, want %v", seqs, tc.want)

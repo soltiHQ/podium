@@ -353,6 +353,46 @@ func TestPoolForgetClosesConn(t *testing.T) {
 	}
 }
 
+// Forget ends a log stream open on the connection it closes, as any call in flight
+// on it: the agent keeps the stream open, and the call has no deadline, so the
+// stream ends because the client does.
+func TestPoolForgetEndsALogStreamOnTheConnection(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := grpc.NewServer()
+	taskv1.RegisterTaskServiceServer(agent, &chunkServer{lines: [][]byte{[]byte("first")}})
+	go func() { _ = agent.Serve(lis) }()
+	defer agent.Stop()
+	pool := NewPool(nil, true)
+	defer func() { _ = pool.Close() }()
+	p, err := pool.Get("agent-1", lis.Addr().String(), enum.EndpointGRPC, enum.APIVersionV1, "token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream, err := p.(TaskLogStreamer).StreamTaskLogsForUID(ctx, "task", "uid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev, ok := <-stream; !ok || string(ev.GetChunk().GetLine()) != "first" {
+		t.Fatalf("first event %v, open %v, want the first chunk", ev, ok)
+	}
+
+	pool.Forget("agent-1")
+
+	select {
+	case _, open := <-stream:
+		if open {
+			t.Fatal("the stream delivered an event after Forget")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream stayed open 5s after Forget")
+	}
+}
+
 // Forget has nothing to do for an agent the pool does not know, for one it forgot
 // already, for an HTTP agent or on a pool that is closed.
 func TestPoolForgetIsHarmlessWithoutAConn(t *testing.T) {
