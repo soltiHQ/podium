@@ -10,8 +10,8 @@ import (
 
 // A credential is one of two kinds. A derived one holds its generation and the
 // ID of the enrollment secret it derives from, and no token; a stored one holds
-// the raw token of an agent that enrolled without the secret. Each needs its
-// agent ID, and what its kind holds.
+// a raw token, such as that of an agent that enrolled without the secret. Each
+// needs its agent ID, and what its kind holds.
 func TestAgentCredentialKinds(t *testing.T) {
 	secretID := []byte{1, 2, 3, 4, 5, 6, 7, 8}
 	derived, err := NewDerivedAgentCredential("agent-1", 3, secretID)

@@ -81,9 +81,10 @@ type AgentStore interface {
 // The first sync of an unknown agent ID enrolls one: while an enrollment secret
 // is set, a derived credential, which holds no token, for the token derived from
 // that secret for the ID; otherwise a stored credential, which holds the token
-// the agent presented (trust on first use). Keyed by agent ID — one credential
-// per agent. A stored token is raw (the control plane must present it on
-// outbound calls), so it is never surfaced to API/UI and never logged in clear.
+// the agent presented (trust on first use). Older versions stored every token.
+// Keyed by agent ID — one credential per agent. A stored token is raw (the
+// control plane must present it on outbound calls), so it is never surfaced to
+// API/UI and never logged in clear.
 type AgentCredentialStore interface {
 	// UpsertAgentCredential stores or replaces an agent's credential.
 	//

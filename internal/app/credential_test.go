@@ -26,7 +26,7 @@ import (
 // What the credential sweep logs: the stored credentials left, and the derived
 // ones podium cannot use, under another secret or with none set.
 const (
-	storedCredentialsWarning = "agent credentials: agents that enrolled without the enrollment secret hold stored tokens, kept raw in podium's state and in its backups"
+	storedCredentialsWarning = "agent credentials: stored tokens are left, kept raw in podium's state and in its backups: tokens agents chose while no enrollment secret was set, and tokens an earlier secret derived, which stay valid and which that secret still derives"
 	otherSecretError         = "agent credentials: derived credentials of another enrollment secret than the current one: podium refuses these agents and makes no call to them until each is re-provisioned with the token podium agent-token prints for it under the current secret"
 	noSecretError            = "agent credentials: derived credentials and no enrollment secret is set: podium refuses these agents and makes no call to them until the secret they derive from is set again"
 )
@@ -143,7 +143,7 @@ func TestCredentialSweepLogsItsFindings(t *testing.T) {
 		level, message, field string
 		count                 int
 	}
-	const converted = "agent credentials: stored tokens that the enrollment secret derives are now derived credentials, and podium stores them no more"
+	const converted = "agent credentials: stored tokens that the enrollment secret derives are now derived credentials: no snapshot or log entry written from now on holds them"
 	for _, tc := range []struct {
 		name      string
 		res       agent.CredentialSweep

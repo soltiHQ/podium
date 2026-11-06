@@ -308,8 +308,8 @@ func seedingRunner(cfg config.Config, logger zerolog.Logger, leadership cluster.
 
 // What credentialSweepRunner logs of a sweep (agent.CredentialSweep).
 const (
-	convertedCredentials = "agent credentials: stored tokens that the enrollment secret derives are now derived credentials, and podium stores them no more"
-	storedCredentials    = "agent credentials: agents that enrolled without the enrollment secret hold stored tokens, kept raw in podium's state and in its backups"
+	convertedCredentials = "agent credentials: stored tokens that the enrollment secret derives are now derived credentials: no snapshot or log entry written from now on holds them"
+	storedCredentials    = "agent credentials: stored tokens are left, kept raw in podium's state and in its backups: tokens agents chose while no enrollment secret was set, and tokens an earlier secret derived, which stay valid and which that secret still derives"
 	otherSecretCreds     = "agent credentials: derived credentials of another enrollment secret than the current one: podium refuses these agents and makes no call to them until each is re-provisioned with the token podium agent-token prints for it under the current secret"
 	noSecretCreds        = "agent credentials: derived credentials and no enrollment secret is set: podium refuses these agents and makes no call to them until the secret they derive from is set again"
 )
@@ -336,9 +336,10 @@ func credentialSweepRunner(logger zerolog.Logger, leadership cluster.Leadership,
 
 // logCredentialSweep logs, with its count, each finding of a sweep: an INFO for
 // the stored credentials it converted, a WARN for the stored ones left, whose
-// tokens stay in the state and its backups, and an ERROR for the derived ones
-// podium cannot use, which says whether no secret is set (secretSet false) or
-// they derive from another one. A sweep that found nothing logs nothing.
+// tokens stay in the state and its backups (tokens agents chose without a
+// secret, and tokens a former secret derived), and an ERROR for the derived
+// ones podium cannot use, which says whether no secret is set (secretSet false)
+// or they derive from another one. A sweep that found nothing logs nothing.
 func logCredentialSweep(logger zerolog.Logger, res agent.CredentialSweep, secretSet bool) {
 	if res.Converted > 0 {
 		logger.Info().Int("converted_credentials", res.Converted).Msg(convertedCredentials)

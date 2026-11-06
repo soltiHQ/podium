@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -57,7 +58,7 @@ func TestVerifyOrEnrollTokenCapsOnlyNewTokens(t *testing.T) {
 // hex of HMAC-SHA256 under the secret of the agent ID at generation 0, and of
 // the agent ID, a NUL byte and the generation in decimal at a generation of 1
 // or more. A secret ID is the first 8 bytes of HMAC-SHA256 of
-// "podium-agent-secret-id-v1" under the secret, in hex.
+// "podium:agent-secret-id:v1" under the secret, in hex.
 const (
 	enrollSecretA = "0123456789abcdef0123456789abcdef"
 	enrollSecretB = "a-different-secret-of-32-bytes-or-more!"
@@ -69,8 +70,8 @@ const (
 	tokenA1g1 = "7f6129ad9f0126964aafb88a75a2019467059c1ae9d20b931b465d3aee996fae" // secret A, "agent-1", generation 1
 	tokenB1g1 = "b64fbdc7c60d9020dba30027edf39b4aaf558e9fe5c69dc5a691ef40420c4c11" // secret B, "agent-1", generation 1
 
-	secretIDA = "26d90767da091ed4"
-	secretIDB = "e2245cbd7c9b04d5"
+	secretIDA = "a1185b8a14557a9f"
+	secretIDB = "0c34eab3afd7d28c"
 )
 
 // Generation 0 derives the token that podium agent-token printed before there
@@ -109,6 +110,26 @@ func TestSecretIDNamesTheSecret(t *testing.T) {
 		if got := hex.EncodeToString(SecretID(secret)); got != want {
 			t.Errorf("SecretID(%q) = %s, want %s", secret, got, want)
 		}
+	}
+}
+
+// The label of the secret ID is no message a token is derived from: it is no
+// valid agent ID, the message of a generation-0 token, and holds no NUL byte,
+// which the message of every later generation holds. So a secret ID is no part
+// of any agent's token, whatever IDs agents choose.
+func TestSecretIDLabelIsNoTokenMessage(t *testing.T) {
+	if err := model.ValidateAgentID(secretIDLabel); err == nil {
+		t.Fatalf("the secret ID label %q is a valid agent ID: the secret ID would be the start of that agent's token", secretIDLabel)
+	}
+	if strings.Contains(secretIDLabel, "\x00") {
+		t.Fatalf("the secret ID label %q holds a NUL byte, as the message of a token of generation 1 or more does", secretIDLabel)
+	}
+	token, err := hex.DecodeString(DeriveToken(enrollSecretA, "podium-agent-secret-id-v1", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.HasPrefix(token, SecretID(enrollSecretA)) {
+		t.Fatal("the secret ID is the start of the token of the agent ID podium-agent-secret-id-v1")
 	}
 }
 

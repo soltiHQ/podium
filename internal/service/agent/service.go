@@ -74,8 +74,11 @@ type Option func(*Service)
 // MinEnrollSecretBytes is the shortest enrollment secret podium accepts.
 const MinEnrollSecretBytes = 32
 
-// secretIDLabel is the message whose HMAC under a secret is its ID.
-const secretIDLabel = "podium-agent-secret-id-v1"
+// secretIDLabel is the message whose HMAC under a secret is its ID. It holds a
+// colon, which no agent ID holds (model.ValidateAgentID), and no NUL byte, which
+// the message of every token after generation 0 holds, so it is the message of
+// no token, and a secret ID is no part of any agent's token.
+const secretIDLabel = "podium:agent-secret-id:v1"
 
 // DeriveToken returns the token of agentID at generation while secret is the
 // enrollment secret: the lowercase hex of HMAC-SHA256 under the secret of the
@@ -95,7 +98,7 @@ func DeriveToken(secret, agentID string, generation uint32) string {
 
 // SecretID returns the ID of an enrollment secret, which a derived credential
 // keeps to name the secret it derives from: the first 8 bytes of HMAC-SHA256 of
-// a fixed label under the secret. It tells two secrets apart, and no token
+// secretIDLabel under the secret. It tells two secrets apart, and no token
 // follows from it; like a token, it would confirm a guess of a weak secret.
 func SecretID(secret string) []byte {
 	mac := hmac.New(sha256.New, []byte(secret))
@@ -326,8 +329,9 @@ type CredentialSweep struct {
 	// Converted is the stored credentials it made derived: their token was the
 	// generation-0 token of their agent ID under the enrollment secret.
 	Converted int
-	// Stored is the stored credentials left: agents that enrolled without the
-	// enrollment secret, with a token they chose.
+	// Stored is the stored credentials left: tokens agents chose while no
+	// enrollment secret was set, and tokens an older version stored that the
+	// current secret does not derive, an earlier secret's ones among them.
 	Stored int
 	// Unusable is the derived credentials podium cannot use: all of them while
 	// no secret is set, otherwise those of another secret.

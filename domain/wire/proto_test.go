@@ -204,7 +204,7 @@ func TestAgentCredentialFromProtoKeepsLongTokens(t *testing.T) {
 // kind it was, with every field.
 func TestAgentCredential_ProtoRoundtrip(t *testing.T) {
 	created := nowTruncated()
-	secretID := []byte{0x26, 0xd9, 0x07, 0x67, 0xda, 0x09, 0x1e, 0xd4}
+	secretID := []byte{0xa1, 0x18, 0x5b, 0x8a, 0x14, 0x55, 0x7a, 0x9f}
 	derived, err := model.NewDerivedAgentCredential("a1", 2, secretID)
 	if err != nil {
 		t.Fatal(err)

@@ -27,7 +27,9 @@ const AgentTokenMaxBytes = 1024
 //     credential holds no token, only the generation and the ID of the secret
 //     it derives from;
 //   - stored: enrolled without the secret, with the token the agent chose
-//     (trust on first use). The credential holds that raw token.
+//     (trust on first use), or by an older version, which stored every token,
+//     one an earlier secret derived included. The credential holds that raw
+//     token.
 //
 // A stored token is a raw secret. It is replicated through Raft so any replica
 // can verify inbound discovery and authenticate outbound proxy calls, but it
@@ -67,8 +69,9 @@ func NewDerivedAgentCredential(agentID string, generation uint32, secretID []byt
 }
 
 // NewStoredAgentCredential binds a raw token to an agent that enrolled without
-// the enrollment secret. It also rebuilds stored credentials, so it accepts a
-// token of any length; enrollment applies AgentTokenMaxBytes before it.
+// the enrollment secret. It also rebuilds stored credentials, those of older
+// versions included, so it accepts a token of any length; enrollment applies
+// AgentTokenMaxBytes before it.
 func NewStoredAgentCredential(agentID, token string) (*AgentCredential, error) {
 	if agentID == "" {
 		return nil, domain.ErrEmptyID
