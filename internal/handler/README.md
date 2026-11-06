@@ -154,7 +154,8 @@ new credential keeps the enrollment time.
 No response, event or log other than this answer holds the token. The answer carries `Cache-Control: no-store`; the
 event `agent_credential_reset` holds the agent ID, its name and the actor, no token; no log line holds one, and no read
 returns it. A reset without a secret also keeps its random token in the state, as every stored token is kept, replicated
-and in backups; a derived credential holds no token. A token that was not kept is replaced by another reset.
+in raft mode and in backups; a derived credential holds no token. A token that was not kept is replaced by another
+reset.
 
 Once the reset is committed, the node that served it, the leader in a raft cluster since followers forward the write,
 closes its pooled gRPC connection to the agent (`Pool.Forget`); a call in flight on it fails, a log stream included.
@@ -171,8 +172,8 @@ that lifecycle deleted has no row and keeps its rollouts (see `internal/server/R
 the serving node's pooled gRPC connection to the agent the same way, records `agent_removed` with the actor and the
 agent ID, and closes the agent's open `agent_inactive` and `agent_disconnected` issues, as a reconnect does, recording
 `issue_closed` by the actor when it closed one. `agent_removed` is no issue kind, so the dashboard lists an operator's
-delete in its activity only; lifecycle's deletion records `agent_deleted`, which stays an issue. An agent that still runs registers
-again at its next sync with its credential, as a new agent with no labels and no rollouts
+delete in its activity only; lifecycle's deletion records `agent_deleted`, which stays an issue. An agent that still
+runs registers again at its next sync with its credential, as a new agent with no labels and no rollouts
 (`TestDeletedAgentReturnsWithoutRollouts`). To keep it out, reset its credential first: its old token is then refused,
 and only the new one brings it back.
 

@@ -75,11 +75,14 @@ refused whatever its size, so the sync runner does not ask again for it, and the
 listing ends. That holds for a task whose conditions come in one status on the wire
 with nothing ahead of it in the answer spending the budget. Over gRPC a status split
 into several occurrences of the task's `status` field, each of 64 conditions or
-fewer, and a flood behind tasks that spent the budget, are refused as elements
-(`ErrTooManyElements`) before anything is decoded, and the sync runner halves the
-page: up to ten calls, and ten for a split flood that passes the budget even alone,
-every one refused before decoding. Every call goes through these, the sync runner's
-listing and the REST listing of an agent's tasks as well.
+fewer, is refused as elements (`ErrTooManyElements`) before anything is decoded
+when the occurrences pass the budget, and so is a flood behind tasks that spent the
+budget; the sync runner halves the page: up to ten calls, and ten for a split flood
+that passes the budget even alone, every one refused before decoding. A split
+within the budget is decoded, and refused as too many conditions
+(`ErrTooManyConditions`) when it holds more than 64 in all, and the listing ends
+without halving. Every call goes through these, the sync runner's listing and the
+REST listing of an agent's tasks as well.
 
 | What | Bound | Where it is checked | Error |
 |---|---|---|---|

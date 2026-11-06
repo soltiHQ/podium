@@ -200,9 +200,11 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   into several occurrences of the task's `status` field, each of 64 conditions
   or fewer, which the scan counts one occurrence at a time, and a flood behind
   tasks that spent the budget. The scan refuses either as too many elements,
-  before anything is decoded, and the page is asked again with half the limit as
-  above: up to ten calls, and ten for a split flood that passes the budget even
-  alone, every one refused before decoding. The listing is bounded, whatever the
+  before anything is decoded, once the budget is passed, and the page is asked
+  again with half the limit as above: up to ten calls, and ten for a split flood
+  that passes the budget even alone, every one refused before decoding. A split
+  within the budget is decoded and refused as too many conditions, as below, and
+  the listing ends without halving. The listing is bounded, whatever the
   agent answers. The proxy bounds what a page builds (see "What an answer may
   build" in `internal/proxy/README.md`). What is past a bound is not built: the
   task past the limit, the element past 262144 in all (gRPC) and the condition

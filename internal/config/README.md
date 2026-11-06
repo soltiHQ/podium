@@ -247,10 +247,11 @@ host that runs `podium agent-token` needed
 (`TestResetCredentialIssuesTheLaterOfTheNextGenerationAndTheTime`, in
 `internal/service/agent`).
 
-Removing the secret leaves those agents two ways in: setting the same secret
-again, since without one podium derives no token, or resetting each one's
-credential while no secret is set, which issues it a stored random token that
-lets it back in (see "Resetting a credential" below;
+Removing the secret leaves those agents these ways in: setting the same secret
+again, since without one podium derives no token; setting another secret, and
+re-provisioning or resetting each one under it, as above; or resetting each
+one's credential while no secret is set, which issues it a stored random token
+that lets it back in (see "Resetting a credential" below;
 `TestResetCredentialWithoutSecretStoresARandomToken`, in
 `internal/service/agent`).
 
