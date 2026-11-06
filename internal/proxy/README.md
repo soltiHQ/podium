@@ -225,9 +225,10 @@ still comes from `tls.client`. The pool dials `dns:///host:port`, so a host
 named after a grpc-go resolver scheme (`unix:1`) is still a TCP host.
 
 The bearer token is sent only when `agent_auth.require` is true. The callers
-take it from the agent service (`agent.Service.AgentToken`): the stored token of
-an agent that enrolled without the enrollment secret, or the token derived from
-the secret for one enrolled under it, which no store holds. An agent whose
+take it from the agent service (`agent.Service.AgentToken`): the token of a
+stored credential (an agent that enrolled without the enrollment secret, or one
+an older version enrolled), or the token derived from the secret for an agent
+enrolled under it, which no store holds. An agent whose
 derived credential podium cannot use, with no secret set or of another secret,
 gets no call: the token lookup fails first. The HTTP client does not follow
 redirects: a 3xx answer fails the call as `ErrUnexpectedStatus`.

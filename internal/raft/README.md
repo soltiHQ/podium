@@ -10,8 +10,8 @@ node leads. The settings are described under "Cluster" in
 ## Runbook: a three-node cluster
 
 What an operator does to run a cluster of three nodes, `n1`, `n2` and `n3` at
-`10.0.0.1:7000`, `10.0.0.2:7000` and `10.0.0.3:7000`, from the first start to a
-rolling upgrade. Each step names the section that explains it, and the test
+`10.0.0.1:7000`, `10.0.0.2:7000` and `10.0.0.3:7000`, from the first start to an
+upgrade. Each step names the section that explains it, and the test
 that shows it where one does; "Multi-node tests" lists the tests that run
 these steps on real nodes over loopback with mutual TLS.
 
@@ -295,29 +295,34 @@ every rotation restarts the nodes it touches.
   whose next sync moves its credential to the new secret (see "Enrollment
   secret" in `internal/config/README.md`). Cost: every agent enrolled under
   the old secret is locked out, refused at sync and not called, until it is
-  re-provisioned. Agents with a stored token, which enrolled without the
-  secret, are not affected.
+  re-provisioned. Agents with a stored token are not affected: their token
+  keeps working, so one a former secret derived, which an older version
+  stored, can still be derived by whoever holds that former secret.
 - The state in `data_dir`, in the raft log and the snapshots. Every node holds
   all of it, and podium does not encrypt it. Users hold no secret. Passwords
   are stored as bcrypt hashes, which can be guessed at offline, and refresh
   tokens as SHA3-256 hashes of 32 random bytes; session IDs and user IDs are
   stored as they are. A derived credential, of an agent enrolled under the
   enrollment secret, holds no token: its generation and an ID of the secret,
-  the first 8 bytes of an HMAC under it, from which no token follows (like any
-  token, it would confirm a guess of a weak secret offline). A stored
-  credential, of an agent that enrolled without the secret, holds the agent's
-  token raw, as podium presents it to the agent: its holder syncs as the
-  agent, which also sets the endpoint podium calls for it, and calls the agent
-  as podium does. Raw tokens also stay in what was written before an upgrade
-  to derived credentials: in log entries until log compaction drops them,
-  which keeps the last `trailing_logs` entries, in the two snapshots a node
-  keeps until newer ones replace them, in the freed pages of `raft-log.bolt`
-  until bbolt writes over them, and in older backups. Rotation: reset the
-  passwords (`POST /api/v1/users/{id}/password`), which ends that user's
-  sessions; a stored agent token has no rotation but a new agent ID, with a
-  token derived from the secret. Cost: every user signs in again with a new
-  password, and an agent whose stored token leaked is a new agent, as the old
-  ID's credential stays valid.
+  the first 8 bytes of an HMAC under it of `podium:agent-secret-id:v1`, the
+  message of no token (no agent ID holds a colon, and the message of every
+  later generation holds a NUL byte), so the ID is part of no token and no
+  token follows from it (like any token, it would confirm a guess of a weak
+  secret offline). A stored credential, of an agent that enrolled without the
+  secret or that an older version enrolled, as it stored every token, one a
+  secret derived included, holds the agent's token raw, as podium presents it
+  to the agent: its holder syncs as the agent, which also sets the endpoint
+  podium calls for it, and calls the agent as podium does. Raw tokens also
+  stay in what was written before an upgrade to derived credentials: in log
+  entries until log compaction drops them, which keeps the last
+  `trailing_logs` entries, in the two snapshots a node keeps until newer ones
+  replace them, in the freed pages of `raft-log.bolt` until bbolt writes over
+  them, and in older backups. Rotation: reset the passwords (`POST
+  /api/v1/users/{id}/password`), which ends that user's sessions; a stored
+  agent token has no rotation but a new agent ID, with a token derived from
+  the secret. Cost: every user signs in again with a new password, and an
+  agent whose stored token leaked is a new agent, as the old ID's credential
+  stays valid.
 - The first administrator's password. A generated one is in
   `bootstrap-admin-password` in the `data_dir` of the node that seeded it (mode
   0600), and one set with `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` stays in that
@@ -385,14 +390,15 @@ of this applies.
 ### Rolling upgrade
 
 Upgrade one node at a time, and the next only once the last one follows the
-leader again. Before the first upgrade from an earlier version, read
-"Upgrading a raft node" in `internal/config/README.md`: every node must list
-itself among its peers, needs a private `data_dir`, and runs `raft.tls` or
-`allow_insecure_transport`, and the note says what the configuration check
-logs while the leader runs the earlier version. During the upgrade the built-in
-roles follow whichever version leads, as each leadership term reconciles them
-to the leader's definitions (see "Built-in roles" in
-`internal/bootstrap/README.md`).
+leader again, unless the new version writes a format the old one cannot read,
+as the version with derived agent credentials does (below). Before the first
+upgrade from an earlier version, read "Upgrading a raft node" in
+`internal/config/README.md`: every node must list itself among its peers, needs
+a private `data_dir`, and runs `raft.tls` or `allow_insecure_transport`, and
+the note says what the configuration check logs while the leader runs the
+earlier version. During the upgrade the built-in roles follow whichever version
+leads, as each leadership term reconciles them to the leader's definitions (see
+"Built-in roles" in `internal/bootstrap/README.md`).
 
 An upgrade to the version with derived agent credentials cannot go one node at
 a time: that version writes commands and snapshots in version 4, which earlier
@@ -401,15 +407,23 @@ upgrade them and start them again, in one full stop and start; a node of an
 earlier version would drop every command the others propose and diverge, and
 refuse its own log at its next start (see "Upgrading a raft node" in
 `internal/config/README.md`). Rolling back needs a backup of each `data_dir`
-taken before the upgrade.
+taken before the upgrade. That version reads version 2 no more either: a node
+whose retained snapshots or log still hold version-2 entries, which versions
+before version 3 wrote, is refused at start with `unsupported version 2` or
+`unsupported command version 2`. Run the cluster on the version before the one
+with derived agent credentials, which reads version 2 and writes version 3,
+until each node has taken two snapshots on it and log compaction has dropped
+its version-2 entries (a node keeps the last `trailing_logs` entries behind a
+snapshot, see "Log compaction"), and then upgrade.
 
 Earlier versions ran the transport on plain TCP, and a node on TLS and a node
 on plain TCP cannot reach each other (`TestRaftRefusesPeerWithoutClusterCert`):
 a first node upgraded with `raft.tls` would never follow the leader, and the
 rolling upgrade would stop there. So a cluster moves to TLS in two steps:
 
-1. Upgrade every node, one at a time as above, with
-   `allow_insecure_transport: true`, which keeps plain TCP.
+1. Upgrade every node with `allow_insecure_transport: true`, which keeps plain
+   TCP: one at a time as above, or, to the version with derived agent
+   credentials, all at once, in one full stop and start.
 2. Switch every node to `raft.tls` at once, in one full stop and start: stop
    all three, set `raft.tls` on each and remove `allow_insecure_transport`,
    which configuration loading refuses next to it, then start them again. The
@@ -1047,15 +1061,17 @@ to agents or to the leader; and every other setting, such as the token
 lifetimes. They may differ between nodes without a line. Run every node with
 one configuration.
 
-During a rolling upgrade from a version without the check, each follower of
-the new version whose leader runs the old one logs the WARN once, as the old
-leader answers nothing, and fetches again after 1, 2, 4, 8, 16 and 32 s, then
-every 60 s, from 1 s again at each change of leader; the old leader logs one
-ERROR, `failed to decode incoming command` with `unknown rpc type 240`, for
-each of those attempts of each such follower, until a node of the new version
-leads. A later version that changes the encoding would change every digest, so
-nodes of the two versions would log the ERROR for every group until all run the
-same one.
+During a rolling upgrade from a version without the check to one that has it
+and still writes version 3 (an upgrade to the version with derived agent
+credentials is one full stop and start, see "Rolling upgrade", so no node of an
+earlier version runs next to it), each follower of the new version whose leader
+runs the old one logs the WARN once, as the old leader answers nothing, and
+fetches again after 1, 2, 4, 8, 16 and 32 s, then every 60 s, from 1 s again at
+each change of leader; the old leader logs one ERROR, `failed to decode
+incoming command` with `unknown rpc type 240`, for each of those attempts of
+each such follower, until a node of the new version leads. A later version that
+changes the encoding would change every digest, so nodes of the two versions
+would log the ERROR for every group until all run the same one.
 
 ## Data directory
 

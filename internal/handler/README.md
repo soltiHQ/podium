@@ -292,7 +292,8 @@ the token derived for that ID at generation 0 (`agent.DeriveToken`, printed by `
 credential, which stores no token: any other token is an `ErrEnrollRefused`, an `ErrUnauthenticated` like a wrong one,
 so 401 / `Unauthenticated`, nothing stored, one failure for the limiter, and a WARN with the agent ID and the client IP,
 never the token. A known ID is checked against its credential: a stored token, of an agent that enrolled without the
-secret, as it always was, secret or not; a derived credential against the token the secret derives for its generation.
+secret or that an older version enrolled, as it always was, secret or not (one a former secret derived keeps working);
+a derived credential against the token the secret derives for its generation.
 With the secret set, a stored token that it derives at generation 0 becomes a derived credential in the transaction of
 the check, and a derived credential of another secret that presents the token of the current secret for its generation,
 as an agent re-provisioned under it does, moves to the current secret. Any other sync of a derived credential with no

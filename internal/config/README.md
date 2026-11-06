@@ -164,30 +164,36 @@ the 400 above. In raft mode each replica reads its own environment: give every
 replica the same secret.
 
 The secret is the root of every credential enrolled under it. Such an agent
-gets a derived credential, which stores no token: only its generation and an
-ID of the secret, the first 8 bytes of HMAC-SHA256 of a fixed label under the
-secret, which tells two secrets apart and from which no token follows (like any
-token, it would confirm a guess of a weak secret offline). Podium derives
-the token again from the secret, the agent ID and the generation to check each
-sync and to call the agent, so with the secret set no file in the data
-directory holds the token of an agent enrolled under it, after a snapshot too
-(`TestDerivedCredentialStoresNoToken`, in `internal/storage/durable` and
-`internal/raft`). An agent that enrolled without the secret has a stored
-credential, which holds the token it chose; a stored token is compared as it
-always was, whether a secret is set or not. A stored token that is the
-generation-0 token of its agent ID under the secret, as `podium agent-token`
-printed it for agents provisioned before this version, becomes a derived
-credential: at the agent's next sync, in the transaction that checks it, and at
-each start of standalone and each leadership term of a raft node, for every
-such credential (`TestLegacyRowsConvertedAtStart`, in `internal/app`, shows a
-standalone start). That
-start then logs, at WARN, how many stored credentials are left, `agent
-credentials: agents that enrolled without the enrollment secret hold stored
-tokens, kept raw in podium's state and in its backups` with
-`stored_credentials`, and, at ERROR with `unusable_credentials`, how many
-derived credentials it cannot use, because no secret is set or they derive
-from another one. With `agent_auth.require: false` podium neither converts nor
-counts anything.
+gets a derived credential, which stores no token: only its generation and an ID
+of the secret, the first 8 bytes of HMAC-SHA256 of `podium:agent-secret-id:v1`
+under the secret. That label holds a colon, which no agent ID holds, and no NUL
+byte, which the message of every token after generation 0 holds, so the ID is
+part of no agent's token. It tells two secrets apart and no token follows from
+it, though, like any token, it would confirm a guess of a weak secret offline.
+Podium derives the token again from the secret, the agent ID and the generation
+to check each sync and to call the agent, so with the secret set no file in the
+data directory holds the token of an agent enrolled under it, after a snapshot
+too (`TestDerivedCredentialStoresNoToken`, in `internal/storage/durable` and
+`internal/raft`). An agent that enrolls without the secret gets a stored
+credential, which holds the token it chose, and every credential an older
+version enrolled is a stored one too, as it stored every token, one derived
+from a secret included. A stored token is compared as it always was, whether a
+secret is set or not. A stored token that is the generation-0 token of its
+agent ID under the current secret, as `podium agent-token` printed it for
+agents provisioned before this version, becomes a derived credential: at the
+agent's next sync, in the transaction that checks it, and at each start of
+standalone and each leadership term of a raft node, for every such credential
+(`TestLegacyRowsConvertedAtStart`, in `internal/app`, shows a standalone
+start). A stored token that an earlier secret derived stays stored: it keeps
+working, and whoever holds that earlier secret can derive it. Each such start
+and term then logs, at WARN with `stored_credentials`, how many stored
+credentials are left, `agent credentials: stored tokens are left, kept raw in
+podium's state and in its backups: tokens agents chose while no enrollment
+secret was set, and tokens an earlier secret derived, which stay valid and
+which that secret still derives`, and, at ERROR with `unusable_credentials`,
+how many derived credentials it cannot use, because no secret is set or they
+derive from another one. With `agent_auth.require: false` podium neither
+converts nor counts anything.
 
 Upgrading leaves the raw tokens already written where they are: in the
 backups taken before the upgrade; in the snapshot and the log entries written
@@ -211,8 +217,9 @@ secret). Podium makes no call to it either: its token lookup fails with the
 same text, which a rollout to it records in its error
 (`TestChangedSecretRefusesDerivedAgentClearly`, in `internal/handler`;
 `TestOutboundUsesDerivedToken`, in `internal/server/runner/sync`). Agents with
-a stored token are not affected.
-To re-provision the fleet under a new secret:
+a stored token are not affected: their token keeps working, so a token a former
+secret derived, which an older version stored, can still be derived by
+whoever holds that former secret. To re-provision the fleet under a new secret:
 
 1. Set the new secret on every node and restart them; in raft mode every node
    needs the same secret (see "Settings every replica must share").
@@ -247,10 +254,10 @@ calls to that agent. The SDK still sends it over TLS only, unless the agent
 opts in with `allow_insecure_token_transport()`. Agents never see the secret,
 only their own token: a leaked token lets nobody enroll another ID.
 
-An agent with a stored token, which enrolled without the secret with a token it
-chose, is checked against that token, so re-provisioning it with a derived
-token locks it out: every sync it makes gets 401, and no API resets a stored
-credential. That includes an agent that lifecycle deleted: deletion drops the
+An agent with a stored token, which it chose or which an older version stored,
+is checked against that token, so re-provisioning it with a token derived from
+the current secret locks it out: every sync it makes gets 401, and no API
+resets a stored credential. That includes an agent that lifecycle deleted: deletion drops the
 agent row but keeps its credential, so the ID stays enrolled. Instead, keep the
 agent's existing token, or, if that token is lost, run the agent under a new
 agent ID and derive the token for that one. For an agent enrolled under the
@@ -534,7 +541,7 @@ backend reads `cluster.raft` and `cluster.discovery`: standalone ignores them,
 valid or not. To set up and run a cluster, follow "Runbook: a three-node
 cluster" in `internal/raft/README.md`: certificates, network, the first start,
 restarts and failover, adding and removing members, the routing of browsers,
-and rolling upgrades. Every node serves reads from its own store, which can
+and upgrades. Every node serves reads from its own store, which can
 lag the leader's: "Reads on a follower" there says what a lagging, cut-off or
 joining node serves, revocations included.
 
@@ -799,8 +806,8 @@ reuses the node's host name or IP; then also replace the CA behind
 `tls.client.ca_file` and the CA that agents trust for the server. A compromised
 host holds more than its raft key: its other keys, `auth.jwt_secret`,
 `agent_auth.enroll_secret`, which derives the token of every agent enrolled
-under it, and in `data_dir` the raw tokens of the agents that enrolled without
-it, and the password hashes. "A compromised node" in `internal/raft/README.md` lists
+under it, and in `data_dir` the raw tokens of the stored credentials, and the
+password hashes. "A compromised node" in `internal/raft/README.md` lists
 everything podium keeps on a node, with each rotation and its cost; see also
 "Transport security" there.
 
@@ -868,10 +875,12 @@ node:
   alone, or `raft.allow_insecure_transport: true`, which keeps plain TCP as
   before. A node on TLS and a node on plain TCP cannot reach each other, so a
   cluster works only while a majority of its nodes runs the same transport,
-  and a rolling upgrade keeps plain TCP: upgrade every node, one at a time,
-  with `allow_insecure_transport: true`, then switch all nodes to `raft.tls`
-  at once, in one full stop and start, during which the cluster takes no write
-  (see "Rolling upgrade" in the runbook of `internal/raft/README.md`).
+  and an upgrade keeps plain TCP: upgrade every node with
+  `allow_insecure_transport: true`, one at a time to a version that still
+  writes version 3, or all at once to one that writes version 4 (the last
+  paragraph of this section), then switch all nodes to `raft.tls` at once, in
+  one full stop and start, during which the cluster takes no write (see
+  "Rolling upgrade" in the runbook of `internal/raft/README.md`).
 - `chmod -R go-rwx` on `data_dir`. A node refuses a `data_dir` or `snapshots`
   directory that is still open to the group or others; it makes the snapshots
   in it private by itself at its next start.
@@ -883,13 +892,15 @@ two new permissions to keep counting as an administrator.
 
 This version's nodes check their settings against the leader's (see "Settings
 every replica must share" above), which a node of an earlier version cannot
-answer. During a rolling upgrade, each upgraded follower of a leader that still
-runs the earlier version logs one WARN, `configuration check: cannot fetch the
-leader's configuration digests`, and fetches again 1, 2, 4, 8, 16 and 32 s
-after each failure, then every 60 s, from 1 s again at each change of leader.
-The old leader logs one ERROR, `failed to decode incoming command` with
-`unknown rpc type 240`, for each of those attempts of each such follower. Both
-stop once a node of this version leads.
+answer. During a rolling upgrade to a version that has the check and still
+writes version 3 (an upgrade to one that writes version 4 is one full stop and
+start, below, after which no node of an earlier version runs), each upgraded
+follower of a leader that still runs the earlier version logs one WARN,
+`configuration check: cannot fetch the leader's configuration digests`, and
+fetches again 1, 2, 4, 8, 16 and 32 s after each failure, then every 60 s, from
+1 s again at each change of leader. The old leader logs one ERROR, `failed to
+decode incoming command` with `unknown rpc type 240`, for each of those
+attempts of each such follower. Both stop once a node of this version leads.
 
 Versions from the one with derived agent credentials (see "Enrollment secret"
 above) on write the raft log and the snapshots in version 4 of the command and
@@ -901,7 +912,9 @@ each command, logs `raft: committed command is not decodable and was dropped
 on this replica (corrupted entry or version skew)` and diverges, and started
 again it refuses its own log with `unsupported command version 4`. Rolling
 back needs a backup of `data_dir` taken before the upgrade, for the same
-reason.
+reason. A node whose snapshots or log still hold version-2 entries is refused
+at start too; "Rolling upgrade" in the runbook of `internal/raft/README.md`
+says what to run first.
 
 ## Observed run history
 
