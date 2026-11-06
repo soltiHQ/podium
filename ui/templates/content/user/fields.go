@@ -40,3 +40,9 @@ func editSelects(u restv1.User) []modal.AsyncSelect {
 		},
 	}
 }
+
+// editPrecondition makes the edit form send the ETag the user was rendered
+// with, and offer a reload of the user's page when the server answers 412.
+func editPrecondition(u restv1.User, etag string) modal.Precondition {
+	return modal.Precondition{IfMatch: etag, ReloadHref: routepath.PageUserInfoByID(u.ID)}
+}

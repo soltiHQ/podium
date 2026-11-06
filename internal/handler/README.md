@@ -76,9 +76,27 @@ cross-origin browser mutations with 403 (see `internal/config`, "Browser session
 `PUT /api/v1/users/{id}` is a patch applied inside the transaction. A non-empty `subject`, `name` or `email` and a
 present `role_ids` or `permissions` list (`[]` clears it) replace the stored value; everything else stays as the
 transaction reads it. Fields the request does not set keep a change committed meanwhile, and `disabled` always does
-(see disable and enable). A present `role_ids` or `permissions` list overwrites the stored set, and the UI form for
-editing another user always sends both, so a stale form can still revert a concurrent role or permission change
-(known residual).
+(see disable and enable). A present `role_ids` or `permissions` list overwrites the stored set, so of two edits of one
+user the later one's lists win, unless it names with `If-Match` the version it is based on (below).
+
+`GET /api/v1/users/{id}` answers `ETag: "<tag>"`, and the UI edit form carries the same tag. The tag is the lowercase
+hex of the first 16 bytes of SHA-256 over every stored field of the user: ID, subject, email, name, disabled, role IDs,
+permissions, creation time and update time, with strings and lists length prefixed. It is computed, never stored. It
+does not rest on the update time alone, which two changes may share when they read the same clock and which a writer
+may set, so it changes whenever any stored field does, whichever write made the change: update, disable or enable. A
+write that stores what is already stored leaves it as it was. A change to the permissions of a role is not a change of
+the user and leaves it too.
+
+`PUT` takes the tag as `If-Match`, read the way Deploy reads it (see Specs): RFC 9110 lists over every `If-Match`
+header, strong tags with or without their quotes; a weak tag never matches, and a blank header names no tag. The
+update transaction compares the list with the user it reads, after the target ceiling (a caller who may not manage the
+user gets 403 whatever the tag) and before the patch is applied. When none of the tags names the stored user, nothing is
+written and the answer is 412 `User changed since it was read; reload and retry.`; a user deleted meanwhile is still
+404. Without `If-Match`, or with `*` anywhere in it, the patch is applied to the stored user as it is, as before: API
+clients that never read before they write keep working, and of two such edits the later one's role and permission
+lists win. A client that sends those lists should send the tag. Only the update takes `If-Match`; disable, enable,
+delete and the password route do not. The UI edit form always sends the tag of the user it shows, so a form that went
+stale is refused instead of reverting a concurrent role or permission change (see `ui/README.md`).
 
 ### Sessions `/api/v1/session`
 | Method | Path                          | Permission  |

@@ -90,6 +90,16 @@ completes moves from update to install when the uninstall completes, which
 changes the token: one 412. Deploy runs unchecked, without `If-Match`, in two
 cases only: without AgentsGet (no panel) and before the panel has loaded once.
 
+The user edit dialog, with or without the role and permission selects, sends
+the ETag of the user it was rendered from as `If-Match` (see
+`internal/handler`, "Users"). An open dialog is not replaced by a background
+refresh, so it keeps the tag of the user it shows. A user that changed in the
+meantime (another edit, a disable or an enable) is refused with 412 `User
+changed since it was read; reload and retry.` and nothing is written: the
+message stays in the dialog, with a Reload link to the user's page, which
+loads the current user and its tag. Reloading discards what was typed. The
+create dialog sends no `If-Match`.
+
 The task list passes exact slot filters to the agent before pagination and uses
 opaque continuation cursors. Run history is bounded by the agent's history
 retention. Logs are live streams, not a durable log archive. Log stream URLs

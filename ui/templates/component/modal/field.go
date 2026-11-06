@@ -48,6 +48,18 @@ type AsyncSelect struct {
 	LabelKey string   // object field for display label (empty = same as value)
 }
 
+// Precondition makes a form send the version of the record it shows, so that
+// the server can refuse a save over a newer one. The zero value sends nothing.
+type Precondition struct {
+	// IfMatch is the entity tag of the record, quotes included, as its ETag
+	// header carries it. The form sends it as If-Match. It is data and is
+	// emitted as a string literal.
+	IfMatch string
+	// ReloadHref is the page that the Reload link opens, shown when the server
+	// answers 412 (the record changed). Without it the form offers no link.
+	ReloadHref string
+}
+
 // disabledAttrs returns templ.Attributes for a disabled input.
 func disabledAttrs() templ.Attributes {
 	return templ.Attributes{"disabled": "true"}
@@ -88,6 +100,7 @@ func editFormData(fields []Field, selects []AsyncSelect) string {
 	parts = append(parts, "loading: true")
 	parts = append(parts, "submitting: false")
 	parts = append(parts, `error: ""`)
+	parts = append(parts, "stale: false")
 	return "{ " + strings.Join(parts, ", ") + " }"
 }
 
@@ -173,8 +186,18 @@ func passwordSubmitExpr(action string) string {
 	)
 }
 
-// formSubmitExpr builds the Alpine submit expression with a configurable HTTP method.
-func formSubmitExpr(method, action string, fields []Field, selects []AsyncSelect) string {
+// ifMatchHeader returns the entry of the request headers that sends ifMatch, an
+// entity tag, as If-Match, or nothing when the form has none.
+func ifMatchHeader(ifMatch string) string {
+	if ifMatch == "" {
+		return ""
+	}
+	return "\n\t\t\t\t'If-Match': " + jsexpr.String(ifMatch) + ","
+}
+
+// formSubmitExpr builds the Alpine submit expression with a configurable HTTP
+// method. A non-empty ifMatch is sent as If-Match, and a 412 answer sets stale.
+func formSubmitExpr(method, action string, fields []Field, selects []AsyncSelect, ifMatch string) string {
 	ids := editableFieldIDs(fields)
 	pairs := make([]string, 0, len(ids)+len(selects))
 	for _, id := range ids {
@@ -187,10 +210,11 @@ func formSubmitExpr(method, action string, fields []Field, selects []AsyncSelect
 
 	return fmt.Sprintf(
 		`error = "";
+		stale = false;
 		submitting = true;
 		fetch(%s, {
 			method: %s,
-			headers: {
+			headers: {%s
 				'Content-Type': 'application/json',
                 'Accept': 'application/json',
 				'HX-Request': 'true'
@@ -205,12 +229,13 @@ func formSubmitExpr(method, action string, fields []Field, selects []AsyncSelect
 				show = false;
 				htmx.trigger(document.body, 'user_update');
 			} else {
+				stale = r.status === 412;
 				try { const d = await r.json(); error = d.message || "Request failed"; }
 				catch { error = "Request failed"; }
 			}
 		}).catch(() => {
 			error = "Network error";
 		}).finally(() => submitting = false)`,
-		jsexpr.String(action), jsexpr.String(method), jsonObj,
+		jsexpr.String(action), jsexpr.String(method), ifMatchHeader(ifMatch), jsonObj,
 	)
 }
