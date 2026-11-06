@@ -93,13 +93,15 @@ type taskRunResource struct {
 }
 
 // runItems is the runs of a ListTaskRuns page, at most limit of them: the page size
-// the request named.
+// the request named. A run is refused whose phase is over MaxRunPhaseBytes.
 type runItems struct {
 	limit int
 	list  []taskRunResource
 }
 
 func (r *runItems) UnmarshalJSON(data []byte) (err error) {
-	r.list, err = decodeList[taskRunResource](data, "runs", r.list, r.limit, func() error { return tooManyItems(r.limit) }, nil)
+	r.list, err = decodeList(data, "runs", r.list, r.limit,
+		func() error { return tooManyItems(r.limit) },
+		func(run *taskRunResource) error { return checkRunPhase(run.Phase) })
 	return err
 }

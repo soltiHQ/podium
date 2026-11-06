@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,6 +87,47 @@ func TestExpiredRunPagesHaveTransportIndependentSentinel(t *testing.T) {
 			_, err := p.ListTaskRunsPage(context.Background(), "task", TaskRunQuery{Limit: 1, Cursor: "old"})
 			if !errors.Is(err, ErrRunSnapshotExpired) || !errors.Is(err, ErrListTaskRuns) {
 				t.Fatalf("expiry lost %v", err)
+			}
+		})
+	}
+}
+
+// A run of an HTTP page may name a phase of MaxRunPhaseBytes, far longer than any
+// phase the SDK names. A page that names a longer one is refused as one that could
+// not be decoded, and the error holds no phase: it can be as long as the page.
+func TestHTTPRunPageRefusesALongPhase(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		phase string
+		ok    bool
+	}{
+		{"a phase of the longest length", strings.Repeat("p", MaxRunPhaseBytes), true},
+		{"a phase one byte longer", strings.Repeat("p", MaxRunPhaseBytes+1), false},
+		{"a phase of 1 MiB", strings.Repeat("p", 1<<20), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"taskUid": "uid", "resourceVersion": "rv"}, "runs": []any{
+					map[string]any{"generation": 1, "attempt": 1, "phase": "succeeded"},
+					map[string]any{"generation": 1, "attempt": 2, "phase": tc.phase},
+				}})
+			}))
+			defer server.Close()
+			p := &httpProxyV1{endpoint: server.URL, client: server.Client()}
+
+			page, err := p.ListTaskRunsPage(context.Background(), "task", TaskRunQuery{Limit: 10})
+
+			if tc.ok {
+				if err != nil || len(page.Runs) != 2 || page.Runs[1].Status != tc.phase {
+					t.Fatalf("ListTaskRunsPage = %+v, %v, want both runs", page, err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrListTaskRuns) || !errors.Is(err, ErrDecode) {
+				t.Fatalf("ListTaskRunsPage = %.200v, want a list task runs decode error", err)
+			}
+			if len(err.Error()) > 1<<10 {
+				t.Fatalf("the error is %d bytes long: does it hold the phase?", len(err.Error()))
 			}
 		})
 	}

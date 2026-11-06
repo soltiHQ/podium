@@ -27,6 +27,12 @@ const (
 	// that names a longer one is refused.
 	MaxCursorBytes = 4096
 
+	// MaxRunPhaseBytes is the longest phase a run of a ListTaskRuns page may name
+	// over HTTP, where the phase is a string the agent chooses; the SDK names a word
+	// of a few letters. A page that names a longer one is refused, as one that
+	// could not be decoded. Over gRPC the phase is an enum.
+	MaxRunPhaseBytes = 64
+
 	// maxTaskPage is the most tasks a page holds, and the largest limit a request
 	// may name.
 	maxTaskPage = 1000
@@ -150,6 +156,15 @@ func checkCursor(cursor string) error {
 func checkTaskID(id string) error {
 	if len(id) > MaxTaskIDBytes {
 		return fmt.Errorf("task ID of %d bytes, over %d", len(id), MaxTaskIDBytes)
+	}
+	return nil
+}
+
+// checkRunPhase refuses a run phase over MaxRunPhaseBytes. The phase is not in the
+// error: it can be as long as the page.
+func checkRunPhase(phase string) error {
+	if len(phase) > MaxRunPhaseBytes {
+		return fmt.Errorf("run phase of %d bytes, over %d", len(phase), MaxRunPhaseBytes)
 	}
 	return nil
 }

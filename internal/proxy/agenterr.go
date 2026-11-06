@@ -58,14 +58,15 @@ const agentTextMarker = "…"
 // CapAgentText returns the text of an agent's error cut to MaxAgentTextBytes on a
 // UTF-8 boundary and ended with a marker where it was cut; a text within the limit
 // is returned as it is. An agent may answer with as much text as a message or a
-// header list holds. AgentError reads as the cut text, and the sync runner cuts the
+// header list holds. AgentError reads as the cut text, the sync runner cuts the
 // message it stores in a rollout and records in an event, which holds words of its
-// own besides the agent's. It cuts nothing else an agent produces: the archive of
-// history keeps the error an agent reports for a run in a record under a bound of
-// its own, ExecutionErrorMaxBytes (32 KiB), and refuses a record over it instead of
-// cutting it. The cut keeps whole runes of a valid text; it steps back at most
-// three bytes to find a boundary, so bytes that are no UTF-8 are cut just below the
-// limit.
+// own besides the agent's, and the history service cuts the quoted status it names
+// in the error for a run of a status it does not know, which its runner logs. It
+// cuts nothing else an agent produces: the archive of history keeps the error an
+// agent reports for a run in a record under a bound of its own,
+// ExecutionErrorMaxBytes (32 KiB), and refuses a record over it instead of cutting
+// it. The cut keeps whole runes of a valid text; it steps back at most three bytes
+// to find a boundary, so bytes that are no UTF-8 are cut just below the limit.
 func CapAgentText(s string) string {
 	if len(s) <= MaxAgentTextBytes {
 		return s

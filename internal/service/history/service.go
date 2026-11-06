@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -238,7 +239,9 @@ func (s *Service) Capture(ctx context.Context, req CaptureRequest, source proxy.
 					lastGeneration, lastAttempt = run.Generation, attempt
 					continue
 				}
-				return result, fmt.Errorf("history: unknown source run status %q", run.Status)
+				// The status is the agent's to choose: the runner logs this error,
+				// so it holds at most the cut the proxy makes of an agent's text.
+				return result, fmt.Errorf("history: unknown source run status %s", proxy.CapAgentText(strconv.Quote(run.Status)))
 			}
 			if !run.FinishedAtPresent {
 				return result, fmt.Errorf("history: terminal attempt has no finish timestamp")
