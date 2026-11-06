@@ -15,6 +15,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/snapshot"
 	bolt "go.etcd.io/bbolt"
+	"google.golang.org/protobuf/proto"
 )
 
 // singleBlobFixture is a database file of the single-blob layout, one bucket that
@@ -68,12 +69,34 @@ func singleBlob(t *testing.T, dir string) []byte {
 	return blob
 }
 
+// atCurrentVersion is the version-3 snapshot blob, as the fixture holds it, with
+// the current version in its header: what the migration of the fixture writes.
+func atCurrentVersion(t *testing.T, blob []byte) []byte {
+	t.Helper()
+	var msg raftv1.Snapshot
+	if err := proto.Unmarshal(blob, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.GetHeader().GetVersion() != 3 {
+		t.Fatalf("the fixture's snapshot is version %d, want 3", msg.GetHeader().GetVersion())
+	}
+	msg.Header.Version = snapshot.Version
+	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(&msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
 // A single-blob file opens with the state it holds, now in the log layout: the
-// snapshot at index 0 and an empty log. A write and a restart then keep it.
+// snapshot at index 0, in the current version, and an empty log. A write and a
+// restart then keep it. The fixture's snapshot is version 3: the migrated one
+// is the same snapshot with version 4 in its header, its stored credentials
+// stored still.
 func TestOpenMigratesSingleBlobStore(t *testing.T) {
 	dir := singleBlobStore(t)
-	want := singleBlob(t, dir)
-	content, err := snapshot.Unmarshal(want)
+	legacy := singleBlob(t, dir)
+	content, err := snapshot.Unmarshal(legacy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,6 +104,7 @@ func TestOpenMigratesSingleBlobStore(t *testing.T) {
 		len(content.Verifiers) == 0 || len(content.Sessions) == 0 || len(content.Specs) == 0 || len(content.Rollouts) == 0 || len(content.Executions) == 0 {
 		t.Fatal("the fixture must hold every entity group")
 	}
+	want := atCurrentVersion(t, legacy)
 
 	s, err := Open(dir)
 	if err != nil {
@@ -163,6 +187,7 @@ func TestOpenRejectsCorruptSingleBlobStore(t *testing.T) {
 	}{
 		{"checksum", func(tx *bolt.Tx) error { return tx.Bucket(legacyBucket).Put(checksumKey, []byte("bad checksum")) }},
 		{"header", rewrite(func(msg *raftv1.Snapshot) { msg.Header.Version = 99 })},
+		{"version 2", rewrite(func(msg *raftv1.Snapshot) { msg.Header.Version, msg.Executions = 2, nil })},
 		{"duplicate id", rewrite(func(msg *raftv1.Snapshot) { msg.Agents = append(msg.Agents, msg.Agents[0]) })},
 		{"missing snapshot", func(tx *bolt.Tx) error { return tx.Bucket(legacyBucket).Delete(legacySnapshotKey) }},
 		{"next to the log layout", func(tx *bolt.Tx) error {

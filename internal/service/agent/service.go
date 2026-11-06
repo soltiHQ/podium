@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -8,12 +9,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/transport/errkind"
 )
 
 // ErrUnauthenticated indicates an agent presented a missing or wrong bearer
@@ -30,11 +33,39 @@ var ErrEnrollRefused = fmt.Errorf("%w: not the enrollment token of this agent ID
 // InvalidArgument.
 var ErrTokenTooLong = errors.New("agent: token too long")
 
+// DerivedCredentialError says that podium cannot use the derived credential of
+// an agent: no enrollment secret is set (NoSecret), or the credential derives
+// from another secret than the current one. It is an ErrUnauthenticated, so
+// discovery refuses the agent's syncs with it. AgentToken returns it too, so
+// podium makes no call to the agent; errkind classifies it as
+// FailedPrecondition, not as the caller's own failed authentication. Its text
+// names the agent and what it needs, never a token.
+type DerivedCredentialError struct {
+	AgentID    string
+	Generation uint32
+	NoSecret   bool
+}
+
+func (e *DerivedCredentialError) Error() string {
+	if e.NoSecret {
+		return fmt.Sprintf("agent %s holds a credential derived from an enrollment secret, and no enrollment secret is set: it needs the secret it enrolled under", e.AgentID)
+	}
+	return fmt.Sprintf("agent %s enrolled under another enrollment secret: it needs the token that podium agent-token --generation %d %s prints with the current secret", e.AgentID, e.Generation, e.AgentID)
+}
+
+// Unwrap makes the error an ErrUnauthenticated.
+func (e *DerivedCredentialError) Unwrap() error { return ErrUnauthenticated }
+
+// ErrorKind classifies the error for the transports (errkind).
+func (e *DerivedCredentialError) ErrorKind() errkind.Kind { return errkind.FailedPrecondition }
+
 // Service provides agent management operations.
 type Service struct {
 	logger       zerolog.Logger
 	store        storage.Storage
 	enrollSecret string
+	secretID     []byte // SecretID of enrollSecret, nil without one
+	authDisabled bool
 }
 
 // Option configures a Service.
@@ -43,21 +74,55 @@ type Option func(*Service)
 // MinEnrollSecretBytes is the shortest enrollment secret podium accepts.
 const MinEnrollSecretBytes = 32
 
-// EnrollToken returns the token an unknown agent ID must present to enroll
-// while an enrollment secret is set: the lowercase hex of HMAC-SHA256 of the
-// agent ID under the secret. `podium agent-token` prints it.
-func EnrollToken(secret, agentID string) string {
+// secretIDLabel is the message whose HMAC under a secret is its ID.
+const secretIDLabel = "podium-agent-secret-id-v1"
+
+// DeriveToken returns the token of agentID at generation while secret is the
+// enrollment secret: the lowercase hex of HMAC-SHA256 under the secret of the
+// agent ID at generation 0, and of the agent ID, a NUL byte and the generation
+// in decimal at a generation of 1 or more. Generation 0 is the token an agent
+// ID enrolls with, which podium agent-token printed before there were
+// generations, so those tokens stay valid. `podium agent-token` prints it.
+func DeriveToken(secret, agentID string, generation uint32) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write([]byte(agentID))
+	if generation > 0 {
+		_, _ = mac.Write([]byte{0})
+		_, _ = mac.Write([]byte(strconv.FormatUint(uint64(generation), 10)))
+	}
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// WithEnrollSecret closes enrollment: an unknown agent ID then enrolls only
-// with the token EnrollToken derives from secret for that ID. Agents that are
-// already enrolled are unaffected. An empty secret leaves enrollment to trust
-// on first use.
+// SecretID returns the ID of an enrollment secret, which a derived credential
+// keeps to name the secret it derives from: the first 8 bytes of HMAC-SHA256 of
+// a fixed label under the secret. It tells two secrets apart, and no token
+// follows from it; like a token, it would confirm a guess of a weak secret.
+func SecretID(secret string) []byte {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(secretIDLabel))
+	return mac.Sum(nil)[:8]
+}
+
+// WithEnrollSecret makes secret the enrollment secret: an unknown agent ID then
+// enrolls only with the token DeriveToken derives from secret for that ID at
+// generation 0, and gets a derived credential, which stores no token. Derived
+// credentials need the secret they derive from. An empty secret leaves
+// enrollment to trust on first use, with stored credentials.
 func WithEnrollSecret(secret string) Option {
-	return func(s *Service) { s.enrollSecret = secret }
+	return func(s *Service) {
+		s.enrollSecret = secret
+		s.secretID = nil
+		if secret != "" {
+			s.secretID = SecretID(secret)
+		}
+	}
+}
+
+// WithAuthDisabled tells the service that agent auth is off
+// (agent_auth.require false): podium checks no token and presents none, so
+// AgentToken looks none up and returns "".
+func WithAuthDisabled() Option {
+	return func(s *Service) { s.authDisabled = true }
 }
 
 // EnrollSecretSet reports whether an enrollment secret closes enrollment.
@@ -105,15 +170,29 @@ func (s *Service) Get(ctx context.Context, id string) (*model.Agent, error) {
 // VerifyOrEnrollToken implements bearer auth for an agent: trust on first use,
 // or enrollment by derived token when an enrollment secret is set.
 //
-// First contact (no stored credential) enrolls the presented token, unless it
-// is longer than model.AgentTokenMaxBytes (ErrTokenTooLong). With an
-// enrollment secret, first contact enrolls only the token EnrollToken derives
-// for the agent ID (constant-time compare); any other returns
-// ErrEnrollRefused, an ErrUnauthenticated, and stores nothing. Every later
-// sync must present the stored token (constant-time compare), whatever the
-// length of the stored one and whether a secret is set; a missing or wrong
-// token returns ErrUnauthenticated. The read-check-write runs inside one
-// transaction so two concurrent first-contacts can't both enroll and race.
+// First contact (no credential) refuses a token longer than
+// model.AgentTokenMaxBytes (ErrTokenTooLong). With an enrollment secret, it
+// enrolls only the token DeriveToken derives for the agent ID at generation 0
+// (constant-time compare), as a derived credential, which stores no token; any
+// other returns ErrEnrollRefused, an ErrUnauthenticated, and stores nothing.
+// Without a secret, it enrolls the presented token as a stored credential.
+//
+// A later sync is checked against the credential:
+//   - a stored one is compared with the presented token (constant-time),
+//     whatever the length of the stored one and whether a secret is set. With
+//     the secret set, a stored token that DeriveToken derives for the agent ID
+//     at generation 0 becomes a derived credential;
+//   - a derived one needs the secret: the presented token must be the one
+//     DeriveToken derives for its generation (constant-time). One of another
+//     secret, which the agent got when it was re-provisioned under the current
+//     secret, moves the credential to the current secret, at the same
+//     generation. Without a secret, or with the token of another secret, the
+//     sync is refused with a DerivedCredentialError.
+//
+// A missing or wrong token returns ErrUnauthenticated. The read-check-write
+// runs inside one transaction so two concurrent first-contacts can't both
+// enroll and race, and a credential that changes kind or secret changes in the
+// transaction that checks it.
 func (s *Service) VerifyOrEnrollToken(ctx context.Context, agentID, presented string) error {
 	if agentID == "" {
 		return storage.ErrInvalidArgument
@@ -125,35 +204,103 @@ func (s *Service) VerifyOrEnrollToken(ctx context.Context, agentID, presented st
 	return s.store.WithTx(ctx, func(tx storage.Storage) error {
 		existing, err := tx.GetAgentCredential(ctx, agentID)
 		switch {
+		case err == nil && existing.Derived():
+			return s.verifyDerived(ctx, tx, existing, presented)
 		case err == nil:
-			if subtle.ConstantTimeCompare([]byte(existing.Token()), []byte(presented)) != 1 {
-				return ErrUnauthenticated
-			}
-			return nil
+			return s.verifyStored(ctx, tx, existing, presented)
 		case errors.Is(err, storage.ErrNotFound):
-			if len(presented) > model.AgentTokenMaxBytes {
-				return ErrTokenTooLong
-			}
-			if s.enrollSecret != "" && !hmac.Equal([]byte(presented), []byte(EnrollToken(s.enrollSecret, agentID))) {
-				return ErrEnrollRefused
-			}
-			cred, err := model.NewAgentCredential(agentID, presented)
-			if err != nil {
-				return err
-			}
-			return tx.UpsertAgentCredential(ctx, cred)
+			return s.enroll(ctx, tx, agentID, presented)
 		default:
 			return err
 		}
 	})
 }
 
-// AgentToken returns the bearer token enrolled for this agent, or "" if the
-// agent is not enrolled. A missing credential is not an error. The proxy pool
-// presents the token only when agent auth is required.
+// enroll enrolls an agent ID that has no credential, as VerifyOrEnrollToken says.
+func (s *Service) enroll(ctx context.Context, tx storage.Storage, agentID, presented string) error {
+	if len(presented) > model.AgentTokenMaxBytes {
+		return ErrTokenTooLong
+	}
+	if s.enrollSecret == "" {
+		cred, err := model.NewStoredAgentCredential(agentID, presented)
+		if err != nil {
+			return err
+		}
+		return tx.UpsertAgentCredential(ctx, cred)
+	}
+	if !hmac.Equal([]byte(presented), []byte(DeriveToken(s.enrollSecret, agentID, 0))) {
+		return ErrEnrollRefused
+	}
+	cred, err := model.NewDerivedAgentCredential(agentID, 0, s.secretID)
+	if err != nil {
+		return err
+	}
+	return tx.UpsertAgentCredential(ctx, cred)
+}
+
+// verifyStored checks presented against a stored credential, and with the secret
+// set turns a stored token that the secret derives at generation 0 into a derived
+// credential.
+func (s *Service) verifyStored(ctx context.Context, tx storage.Storage, existing *model.AgentCredential, presented string) error {
+	if subtle.ConstantTimeCompare([]byte(existing.Token()), []byte(presented)) != 1 {
+		return ErrUnauthenticated
+	}
+	if !s.derivesAtZero(existing) {
+		return nil
+	}
+	return s.rederive(ctx, tx, existing, 0)
+}
+
+// verifyDerived checks presented against a derived credential, and moves one that
+// the token of the current secret re-provisioned to that secret.
+func (s *Service) verifyDerived(ctx context.Context, tx storage.Storage, existing *model.AgentCredential, presented string) error {
+	if s.enrollSecret == "" {
+		return &DerivedCredentialError{AgentID: existing.AgentID(), Generation: existing.Generation(), NoSecret: true}
+	}
+	current := bytes.Equal(existing.SecretID(), s.secretID)
+	if !hmac.Equal([]byte(presented), []byte(DeriveToken(s.enrollSecret, existing.AgentID(), existing.Generation()))) {
+		if !current {
+			return &DerivedCredentialError{AgentID: existing.AgentID(), Generation: existing.Generation()}
+		}
+		return ErrUnauthenticated
+	}
+	if current {
+		return nil
+	}
+	return s.rederive(ctx, tx, existing, existing.Generation())
+}
+
+// derivesAtZero reports whether c is a stored credential whose token the
+// enrollment secret derives for its agent ID at generation 0.
+func (s *Service) derivesAtZero(c *model.AgentCredential) bool {
+	return s.enrollSecret != "" && !c.Derived() &&
+		hmac.Equal([]byte(c.Token()), []byte(DeriveToken(s.enrollSecret, c.AgentID(), 0)))
+}
+
+// rederive replaces the credential c with a derived one of the current secret at
+// generation, which keeps c's enrollment time.
+func (s *Service) rederive(ctx context.Context, tx storage.Storage, c *model.AgentCredential, generation uint32) error {
+	cred, err := model.NewDerivedAgentCredential(c.AgentID(), generation, s.secretID)
+	if err != nil {
+		return err
+	}
+	cred.SetCreatedAt(c.CreatedAt())
+	return tx.UpsertAgentCredential(ctx, cred)
+}
+
+// AgentToken returns the bearer token podium presents to this agent: the token
+// of a stored credential, the token DeriveToken derives for the generation of a
+// derived one, or "" if the agent is not enrolled. A missing credential is not
+// an error. A derived credential with no secret set, or of another secret,
+// returns a DerivedCredentialError, so the caller makes no call. It writes
+// nothing. With agent auth disabled it returns "" at once: podium presents no
+// token.
 func (s *Service) AgentToken(ctx context.Context, agentID string) (string, error) {
 	if agentID == "" {
 		return "", storage.ErrInvalidArgument
+	}
+	if s.authDisabled {
+		return "", nil
 	}
 	c, err := s.store.GetAgentCredential(ctx, agentID)
 	if err != nil {
@@ -162,7 +309,88 @@ func (s *Service) AgentToken(ctx context.Context, agentID string) (string, error
 		}
 		return "", err
 	}
-	return c.Token(), nil
+	if !c.Derived() {
+		return c.Token(), nil
+	}
+	if s.enrollSecret == "" {
+		return "", &DerivedCredentialError{AgentID: agentID, Generation: c.Generation(), NoSecret: true}
+	}
+	if !bytes.Equal(c.SecretID(), s.secretID) {
+		return "", &DerivedCredentialError{AgentID: agentID, Generation: c.Generation()}
+	}
+	return DeriveToken(s.enrollSecret, agentID, c.Generation()), nil
+}
+
+// CredentialSweep is what SweepCredentials found.
+type CredentialSweep struct {
+	// Converted is the stored credentials it made derived: their token was the
+	// generation-0 token of their agent ID under the enrollment secret.
+	Converted int
+	// Stored is the stored credentials left: agents that enrolled without the
+	// enrollment secret, with a token they chose.
+	Stored int
+	// Unusable is the derived credentials podium cannot use: all of them while
+	// no secret is set, otherwise those of another secret.
+	Unusable int
+}
+
+// SweepCredentials converts every stored credential whose token the enrollment
+// secret derives for its agent ID at generation 0 into a derived credential,
+// which keeps its enrollment time, and counts what is left (CredentialSweep).
+// It lists the credentials, then converts in one transaction each one that is
+// still such a stored credential when the transaction reads it again; one that
+// a sync converted or changed in between is left as it is. Without a secret it
+// converts nothing, and a sweep with nothing to convert writes nothing.
+func (s *Service) SweepCredentials(ctx context.Context) (CredentialSweep, error) {
+	creds, err := storage.CollectPages(ctx, func(o storage.ListOptions) (*storage.AgentCredentialListResult, error) {
+		return s.store.ListAgentCredentials(ctx, o)
+	})
+	if err != nil {
+		return CredentialSweep{}, err
+	}
+	var (
+		res       CredentialSweep
+		derivable []string
+	)
+	for _, c := range creds {
+		switch {
+		case c.Derived():
+			if s.enrollSecret == "" || !bytes.Equal(c.SecretID(), s.secretID) {
+				res.Unusable++
+			}
+		case s.derivesAtZero(c):
+			derivable = append(derivable, c.AgentID())
+		default:
+			res.Stored++
+		}
+	}
+	if len(derivable) == 0 {
+		return res, nil
+	}
+	err = s.store.WithTx(ctx, func(tx storage.Storage) error {
+		res.Converted = 0
+		for _, id := range derivable {
+			c, err := tx.GetAgentCredential(ctx, id)
+			if errors.Is(err, storage.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if !s.derivesAtZero(c) {
+				continue
+			}
+			if err := s.rederive(ctx, tx, c, 0); err != nil {
+				return err
+			}
+			res.Converted++
+		}
+		return nil
+	})
+	if err != nil {
+		return CredentialSweep{}, err
+	}
+	return res, nil
 }
 
 // Upsert an agent. The row keeps its creation time, the labels that the control

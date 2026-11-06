@@ -64,6 +64,16 @@ func (t *Tx) GetAgentCredential(ctx context.Context, agentID string) (*model.Age
 	return t.agentCreds.get(ctx, agentID, t.base.GetAgentCredential)
 }
 
+func (t *Tx) ListAgentCredentials(ctx context.Context, opts storage.ListOptions) (*storage.AgentCredentialListResult, error) {
+	return list(opts, func() ([]*model.AgentCredential, error) {
+		return scan(&t.agentCreds, nil, func() ([]*model.AgentCredential, error) {
+			return storage.CollectPages(ctx, func(o storage.ListOptions) (*storage.AgentCredentialListResult, error) {
+				return t.base.ListAgentCredentials(ctx, o)
+			})
+		})
+	})
+}
+
 func (t *Tx) DeleteAgentCredential(ctx context.Context, agentID string) error {
 	if err := t.agentCreds.remove(ctx, agentID, t.base.GetAgentCredential); err != nil {
 		return err

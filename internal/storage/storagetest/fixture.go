@@ -62,7 +62,9 @@ type Fixture struct {
 // AgentID is the ID of the i-th agent.
 func AgentID(i int) string { return fmt.Sprintf("agent-%05d", i) }
 
-// AgentToken is the bearer token enrolled for the i-th agent.
+// AgentToken is the bearer token the i-th agent enrolled with. The fixture
+// enrolls without an enrollment secret, podium's default, so each agent's
+// credential is a stored one, which holds the token.
 func AgentToken(i int) string { return fmt.Sprintf("tok-%060d", i) }
 
 // SpecID is the ID of the j-th spec.
@@ -188,7 +190,7 @@ func seedAgent(ctx context.Context, tx storage.Storage, i int) error {
 		return err
 	}
 
-	cred, err := model.NewAgentCredential(a.ID(), AgentToken(i))
+	cred, err := model.NewStoredAgentCredential(a.ID(), AgentToken(i))
 	if err != nil {
 		return err
 	}

@@ -200,3 +200,88 @@ func TestNewRejectsLegacySnapshotBeforeTransportAndWritableOpen(t *testing.T) {
 		t.Fatal("writable log store initialized before compatibility check")
 	}
 }
+
+// The preflight reads what this version reads: commands and snapshots of
+// versions 3 and 4 pass, a derived credential among them, and version 2 stops
+// the start with the version error before raft replays anything.
+func TestPreflightKnowsVersion4(t *testing.T) {
+	generation := uint32(0)
+	derived := &raftv1.Op{Op: &raftv1.Op_AgentCredentialUpsert{AgentCredentialUpsert: &raftv1.AgentCredentialMsg{
+		AgentId: "a1", Generation: &generation, SecretId: []byte{1, 2, 3, 4, 5, 6, 7, 8}, CreatedAtNs: 1, UpdatedAtNs: 1,
+	}}}
+	current, err := overlay.EncodeCommand([]*raftv1.Op{derived})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relabel := func(version byte) []byte {
+		data, err := overlay.EncodeCommand([]*raftv1.Op{{Op: &raftv1.Op_AgentDelete{AgentDelete: "a1"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		data[len(overlay.CommandMagic)] = version
+		return data
+	}
+	logs := hraft.NewInmemStore()
+	if err := logs.StoreLogs([]*hraft.Log{{Index: 1, Type: hraft.LogCommand, Data: relabel(3)}, {Index: 2, Type: hraft.LogCommand, Data: current}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := preflightLogs(logs); err != nil {
+		t.Fatalf("a log of version-3 and version-4 commands: %v", err)
+	}
+	old := hraft.NewInmemStore()
+	if err := old.StoreLog(&hraft.Log{Index: 1, Type: hraft.LogCommand, Data: relabel(2)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := preflightLogs(old); err == nil || !strings.Contains(err.Error(), "unsupported command version 2") {
+		t.Fatalf("a version-2 command: %v, want the version error", err)
+	}
+
+	cred, err := model.NewDerivedAgentCredential("a1", 0, []byte{1, 2, 3, 4, 5, 6, 7, 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withDerived, err := snapshot.Marshal(inmemory.SnapshotContent{AgentCreds: []*model.AgentCredential{cred}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		data []byte
+		want string // "" for a pass
+	}{
+		{"version 4 with a derived credential", withDerived, ""},
+		{"version 3", mustSnapshot(t, 3), ""},
+		{"version 2", mustSnapshot(t, 2), "unsupported version 2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := hraft.NewInmemSnapshotStore()
+			sink, err := store.Create(1, 1, 1, hraft.Configuration{}, 0, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := sink.Write(tc.data); err != nil {
+				t.Fatal(err)
+			}
+			if err := sink.Close(); err != nil {
+				t.Fatal(err)
+			}
+			err = preflightSnapshots(store)
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatal(err)
+			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+				t.Fatalf("preflight: %v, want an error naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// mustSnapshot is the snapshot of an empty state with version in its header.
+func mustSnapshot(t *testing.T, version uint32) []byte {
+	t.Helper()
+	data, err := proto.Marshal(&raftv1.Snapshot{Header: &raftv1.SnapshotHeader{Magic: snapshot.Magic, Version: version}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}

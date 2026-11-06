@@ -293,7 +293,7 @@ func TestDeletionKeepsRolloutsAndCredential(t *testing.T) {
 	if err = f.store.UpsertRollout(ctx, ro); err != nil {
 		t.Fatal(err)
 	}
-	cred, err := model.NewAgentCredential("a", "stored-token")
+	cred, err := model.NewStoredAgentCredential("a", "stored-token")
 	if err != nil {
 		t.Fatal(err)
 	}

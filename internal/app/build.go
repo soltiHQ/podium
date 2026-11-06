@@ -68,18 +68,23 @@ type services struct {
 }
 
 // initServices constructs the domain services. agentAuth gives the agent
-// service the enrollment secret that closes discovery to unknown agent IDs.
+// service the enrollment secret that closes discovery to unknown agent IDs and
+// that derived credentials derive from, and tells it when agent auth is off.
 func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history.Config, agentAuth config.AgentAuthConfig, logger zerolog.Logger) (services, error) {
 	historySVC, err := history.New(store, historyCfg)
 	if err != nil {
 		return services{}, err
+	}
+	agentOpts := []agent.Option{agent.WithEnrollSecret(agentAuth.EnrollSecret)}
+	if !agentAuth.Require {
+		agentOpts = append(agentOpts, agent.WithAuthDisabled())
 	}
 	return services{
 		history:    historySVC,
 		access:     access.New(authModel, store, logger),
 		credential: credential.New(store, logger),
 		session:    session.New(store, logger),
-		agent:      agent.New(store, logger, agent.WithEnrollSecret(agentAuth.EnrollSecret)),
+		agent:      agent.New(store, logger, agentOpts...),
 		spec:       spec.New(store, logger),
 		role:       role.New(store, logger),
 		user:       user.New(store, logger),
@@ -299,6 +304,55 @@ func seedingRunner(cfg config.Config, logger zerolog.Logger, leadership cluster.
 	return base.NewTermTask("bootstrap", leadership, logger, func(ctx context.Context) error {
 		return bootstrap.Run(ctx, logger, opts, svc.role, svc.user, svc.credential)
 	})
+}
+
+// What credentialSweepRunner logs of a sweep (agent.CredentialSweep).
+const (
+	convertedCredentials = "agent credentials: stored tokens that the enrollment secret derives are now derived credentials, and podium stores them no more"
+	storedCredentials    = "agent credentials: agents that enrolled without the enrollment secret hold stored tokens, kept raw in podium's state and in its backups"
+	otherSecretCreds     = "agent credentials: derived credentials of another enrollment secret than the current one: podium refuses these agents and makes no call to them until each is re-provisioned with the token podium agent-token prints for it under the current secret"
+	noSecretCreds        = "agent credentials: derived credentials and no enrollment secret is set: podium refuses these agents and makes no call to them until the secret they derive from is set again"
+)
+
+// credentialSweepRunner is the runner that sweeps the agent credentials
+// (agent.Service.SweepCredentials) at the start of each leadership term of this
+// replica, through Leadership.WhenLeader: once at start in standalone, which
+// always leads, and once per term on a raft leader, a leader write like any
+// other. It converts the stored credentials whose token the enrollment secret
+// derives at generation 0, and logs what it found (logCredentialSweep). A
+// failure is retried while the term lasts (see [base.NewTermTask]). New runs it
+// only while agent auth is required: with agent_auth.require false podium checks
+// no token and presents none.
+func credentialSweepRunner(logger zerolog.Logger, leadership cluster.Leadership, agents *agent.Service) *base.Runner {
+	return base.NewTermTask("agent-credentials", leadership, logger, func(ctx context.Context) error {
+		res, err := agents.SweepCredentials(ctx)
+		if err != nil {
+			return err
+		}
+		logCredentialSweep(logger, res, agents.EnrollSecretSet())
+		return nil
+	})
+}
+
+// logCredentialSweep logs, with its count, each finding of a sweep: an INFO for
+// the stored credentials it converted, a WARN for the stored ones left, whose
+// tokens stay in the state and its backups, and an ERROR for the derived ones
+// podium cannot use, which says whether no secret is set (secretSet false) or
+// they derive from another one. A sweep that found nothing logs nothing.
+func logCredentialSweep(logger zerolog.Logger, res agent.CredentialSweep, secretSet bool) {
+	if res.Converted > 0 {
+		logger.Info().Int("converted_credentials", res.Converted).Msg(convertedCredentials)
+	}
+	if res.Stored > 0 {
+		logger.Warn().Int("stored_credentials", res.Stored).Msg(storedCredentials)
+	}
+	if res.Unusable > 0 {
+		msg := otherSecretCreds
+		if !secretSet {
+			msg = noSecretCreds
+		}
+		logger.Error().Int("unusable_credentials", res.Unusable).Msg(msg)
+	}
 }
 
 // buildMainHandler wires the UI and API listener. resolver gives client IPs to

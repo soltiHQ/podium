@@ -46,6 +46,12 @@ func (s *Store) GetAgentCredential(ctx context.Context, agentID string) (*model.
 	return s.state.GetAgentCredential(ctx, agentID)
 }
 
+func (s *Store) ListAgentCredentials(ctx context.Context, opts storage.ListOptions) (*storage.AgentCredentialListResult, error) {
+	s.gate.RLock()
+	defer s.gate.RUnlock()
+	return s.state.ListAgentCredentials(ctx, opts)
+}
+
 func (s *Store) DeleteAgentCredential(ctx context.Context, agentID string) error {
 	s.gate.Lock()
 	defer s.gate.Unlock()

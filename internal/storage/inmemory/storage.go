@@ -98,6 +98,10 @@ func (s *state) GetAgentCredential(ctx context.Context, agentID string) (*model.
 	return s.agentCreds.Get(ctx, agentID)
 }
 
+func (s *state) ListAgentCredentials(ctx context.Context, opts storage.ListOptions) (*storage.AgentCredentialListResult, error) {
+	return s.agentCreds.List(ctx, nil, opts)
+}
+
 func (s *state) DeleteAgentCredential(ctx context.Context, agentID string) error {
 	return s.agentCreds.Delete(ctx, agentID)
 }

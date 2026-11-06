@@ -70,7 +70,7 @@ type Pool struct {
 // engaged for https:// endpoints) and gRPC dials insecurely — preserving the
 // pre-TLS behavior.
 //
-// requireAuth mirrors agent_auth.require: when false, no stored token is sent.
+// requireAuth mirrors agent_auth.require: when false, no token is sent.
 func NewPool(clientTLS *tls.Config, requireAuth bool) *Pool {
 	httpTLS := clientTLS
 	if httpTLS == nil {

@@ -11,9 +11,9 @@ import (
 const (
 	// CommandMagic starts every SOLTI-CMD command, before its version byte.
 	CommandMagic = "SOLTI-CMD"
-	// CommandVersion is the version EncodeCommand writes. DecodeCommand also reads
-	// version 2, which has no execution archive operations.
-	CommandVersion byte = 3
+	// CommandVersion is the version EncodeCommand writes, which carries derived
+	// agent credentials. DecodeCommand also reads version 3, which has none.
+	CommandVersion byte = 4
 )
 
 // EncodeCommand frames ops as a SOLTI-CMD command: a format guard before the
@@ -32,14 +32,16 @@ func EncodeCommand(ops []*raftv1.Op) ([]byte, error) {
 	return data, nil
 }
 
-// DecodeCommand returns the command EncodeCommand framed, or one of version 2. It
+// DecodeCommand returns the command EncodeCommand framed, or one of version 3. It
 // refuses a headerless legacy command, another version, an unknown or missing
-// operation, unknown fields, and an archive operation in a version 2 command.
+// operation, unknown fields, and a derived agent credential in a version 3
+// command.
 func DecodeCommand(data []byte) (*raftv1.Command, error) {
 	if len(data) < len(CommandMagic)+1 || !bytes.HasPrefix(data, []byte(CommandMagic)) {
 		return nil, fmt.Errorf("unsupported legacy command format; back up the data directory and migrate offline with a compatible Podium version")
 	}
-	if version := data[len(CommandMagic)]; version != CommandVersion && version != 2 {
+	version := data[len(CommandMagic)]
+	if version != CommandVersion && version != 3 {
 		return nil, fmt.Errorf("unsupported command version %d (want %d); use a compatible Podium version or migrate the backed-up data directory offline", version, CommandVersion)
 	}
 	var cmd raftv1.Command
@@ -50,11 +52,8 @@ func DecodeCommand(data []byte) (*raftv1.Command, error) {
 		if op == nil || op.GetOp() == nil || len(op.ProtoReflect().GetUnknown()) != 0 {
 			return nil, fmt.Errorf("unknown or missing command operation; use a compatible Podium version")
 		}
-		if data[len(CommandMagic)] == 2 {
-			switch op.GetOp().(type) {
-			case *raftv1.Op_ExecutionUpsert, *raftv1.Op_ExecutionDelete:
-				return nil, fmt.Errorf("execution archive operation requires command version 3")
-			}
+		if c := op.GetAgentCredentialUpsert(); version == 3 && c != nil && (c.Generation != nil || len(c.GetSecretId()) != 0) {
+			return nil, fmt.Errorf("derived agent credential requires command version 4")
 		}
 	}
 	if len(cmd.ProtoReflect().GetUnknown()) != 0 {

@@ -28,7 +28,7 @@ func TestSyncOverRolloutsOfADeletedAgent(t *testing.T) {
 			r, s, _ := newFakeRunner(t, fp)
 			pending := seedRollout(t, s, "sp-pending", "agent-a", enum.RolloutIntentInstall, "")
 			synced := seedRollout(t, s, "sp-synced", "agent-a", enum.RolloutIntentNoop, "task-synced")
-			cred, err := model.NewAgentCredential("agent-a", "stored-token")
+			cred, err := model.NewStoredAgentCredential("agent-a", "stored-token")
 			if err != nil {
 				t.Fatal(err)
 			}

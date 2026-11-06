@@ -19,6 +19,8 @@ import (
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/server/runner/base"
+	"github.com/soltiHQ/control-plane/internal/service"
+	agentsvc "github.com/soltiHQ/control-plane/internal/service/agent"
 	historysvc "github.com/soltiHQ/control-plane/internal/service/history"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
@@ -29,11 +31,18 @@ type proxyGetter interface {
 	Get(agentID, endpoint string, epType enum.EndpointType, apiVersion enum.APIVersion, token string) (proxy.AgentProxy, error)
 }
 
+// tokenSource gives the token the runner presents to an agent: the agent
+// service's AgentToken, which derives it for a derived credential.
+type tokenSource interface {
+	AgentToken(ctx context.Context, agentID string) (string, error)
+}
+
 // Runner periodically reconciles Rollout records against live state on agents.
 type Runner struct {
 	*base.Runner
 
 	pool    proxyGetter
+	tokens  tokenSource
 	hub     *event.Hub
 	history *historysvc.Service
 
@@ -61,13 +70,17 @@ type agentBackoff struct {
 	uptime int64
 }
 
-// New creates a sync runner.
-func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.Pool, hub *event.Hub, history *historysvc.Service, leadership cluster.Leadership) (*Runner, error) {
+// New creates a sync runner. It presents to each agent the token agents gives
+// for it (agent.Service.AgentToken).
+func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.Pool, agents *agentsvc.Service, hub *event.Hub, history *historysvc.Service, leadership cluster.Leadership) (*Runner, error) {
 	if store == nil {
 		return nil, fmt.Errorf("sync: %w", storage.ErrNilStore)
 	}
 	if pool == nil {
 		return nil, fmt.Errorf("sync: %w", proxy.ErrNilPool)
+	}
+	if agents == nil {
+		return nil, fmt.Errorf("sync: %w", service.ErrNilService)
 	}
 	if hub == nil {
 		return nil, fmt.Errorf("sync: %w", event.ErrNilHub)
@@ -84,6 +97,7 @@ func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.P
 		logger:  logger.With().Str("runner", cfg.Name).Logger(),
 		store:   store,
 		pool:    pool,
+		tokens:  agents,
 		cfg:     cfg,
 		hub:     hub,
 		history: history,
@@ -541,17 +555,12 @@ func (r *Runner) getProxy(ctx context.Context, ss *model.Rollout) (proxy.AgentPr
 	return ap, true
 }
 
-// Missing credentials mean auth is disabled or the agent is not enrolled.
-// Storage failures must not silently turn authenticated calls into anonymous ones.
+// agentToken is the token presented to the agent, "" for an agent that is not
+// enrolled. A failure, of the store or of a derived credential podium cannot
+// use, makes no call: storage failures must not silently turn authenticated
+// calls into anonymous ones.
 func (r *Runner) agentToken(ctx context.Context, agentID string) (string, error) {
-	c, err := r.store.GetAgentCredential(ctx, agentID)
-	if errors.Is(err, storage.ErrNotFound) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return c.Token(), nil
+	return r.tokens.AgentToken(ctx, agentID)
 }
 
 // finalizeDeletedSpecs removes any spec with DeletionRequested=true whose last rollout has drained.

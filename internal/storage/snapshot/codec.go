@@ -17,8 +17,10 @@ import (
 )
 
 const (
-	Magic   = "SOLTI-SNAP"
-	Version = uint32(3)
+	Magic = "SOLTI-SNAP"
+	// Version is the version Marshal writes, which carries derived agent
+	// credentials. Unmarshal also reads version 3, which has none.
+	Version = uint32(4)
 )
 
 // Marshal encodes a complete snapshot with deterministic entity/map ordering.
@@ -111,8 +113,15 @@ func Unmarshal(data []byte) (inmemory.SnapshotContent, error) {
 	if hdr.GetMagic() != Magic {
 		return content, fmt.Errorf("storage snapshot: bad magic %q (want %q)", hdr.GetMagic(), Magic)
 	}
-	if hdr.GetVersion() != Version && hdr.GetVersion() != 2 {
+	if hdr.GetVersion() != Version && hdr.GetVersion() != 3 {
 		return content, fmt.Errorf("storage snapshot: unsupported version %d (want %d)", hdr.GetVersion(), Version)
+	}
+	if hdr.GetVersion() == 3 {
+		for _, m := range snap.GetAgentCredentials() {
+			if m.Generation != nil || len(m.GetSecretId()) != 0 {
+				return content, fmt.Errorf("storage snapshot: version 3 cannot contain derived agent credentials")
+			}
+		}
 	}
 
 	for _, m := range snap.GetAgents() {
@@ -179,9 +188,6 @@ func Unmarshal(data []byte) (inmemory.SnapshotContent, error) {
 		content.Rollouts = append(content.Rollouts, ro)
 	}
 
-	if hdr.GetVersion() == 2 && len(snap.GetExecutions()) != 0 {
-		return content, fmt.Errorf("storage snapshot: version 2 cannot contain execution records")
-	}
 	for _, m := range snap.GetExecutions() {
 		e, err := wire.ExecutionFromProto(m)
 		if err != nil {
@@ -289,7 +295,7 @@ func validateHeader(data []byte) error {
 			if header.GetMagic() != Magic {
 				return fmt.Errorf("storage snapshot: bad magic %q (want %q)", header.GetMagic(), Magic)
 			}
-			if header.GetVersion() != Version && header.GetVersion() != 2 {
+			if header.GetVersion() != Version && header.GetVersion() != 3 {
 				return fmt.Errorf("storage snapshot: unsupported version %d (want %d); restore a compatible backup or migrate offline", header.GetVersion(), Version)
 			}
 			found = true

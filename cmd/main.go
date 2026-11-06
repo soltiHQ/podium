@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -72,23 +75,29 @@ func exitCode(runErr, shutdownErr error) int {
 }
 
 // agentTokenUsage is the usage of "podium agent-token".
-const agentTokenUsage = "usage: podium agent-token [--] <agent-id>"
+const agentTokenUsage = "usage: podium agent-token [--generation N] [--] <agent-id>"
 
-// agentToken runs "podium agent-token [--] <agent-id>": it prints the token that
-// agent ID enrolls with while the enrollment secret is set, and a newline, and
-// returns the exit code. It reads the secret from config.EnrollSecretEnv only
-// and applies the checks of the server: the secret has at least
-// agent.MinEnrollSecretBytes bytes and the ID passes model.ValidateAgentID. A
-// failure prints one line to stderr, never the secret, and nothing to stdout.
-// A bare -h or --help prints the usage to stdout. "--" ends the options, for an
-// agent ID that starts with "-".
+// agentToken runs "podium agent-token [--generation N] [--] <agent-id>": it
+// prints the token of that agent ID at generation N, 0 by default, derived from
+// the enrollment secret (agent.DeriveToken), and a newline, and returns the exit
+// code. Generation 0 is the token the agent ID enrolls with; a derived
+// credential names the generation of its token. It reads the secret from
+// config.EnrollSecretEnv only and applies the checks of the server: the secret
+// has at least agent.MinEnrollSecretBytes bytes and the ID passes
+// model.ValidateAgentID. A failure prints one line to stderr, never the secret,
+// and nothing to stdout. A bare -h or --help prints the usage to stdout.
+// --generation N, or --generation=N, comes before the agent ID, N a whole
+// number from 0 to 4294967295. "--" ends the options, for an agent ID that
+// starts with "-".
 func agentToken(args []string, stdout, stderr io.Writer) int {
-	switch {
-	case len(args) > 0 && args[0] == "--":
-		args = args[1:]
-	case len(args) == 1 && (args[0] == "-h" || args[0] == "--help"):
-		_, _ = fmt.Fprintf(stdout, "%s\nPrints the token <agent-id> enrolls with, derived from %s.\n", agentTokenUsage, config.EnrollSecretEnv)
+	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
+		_, _ = fmt.Fprintf(stdout, "%s\nPrints the token of <agent-id> at generation N (default 0, the token it enrolls with), derived from %s.\n", agentTokenUsage, config.EnrollSecretEnv)
 		return 0
+	}
+	generation, args, err := agentTokenOptions(args)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "podium: %v; %s\n", err, agentTokenUsage)
+		return 2
 	}
 	if len(args) != 1 {
 		_, _ = fmt.Fprintln(stderr, agentTokenUsage)
@@ -108,9 +117,38 @@ func agentToken(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "podium: %s must have at least %d bytes\n", config.EnrollSecretEnv, agent.MinEnrollSecretBytes)
 		return 1
 	}
-	if _, err := fmt.Fprintln(stdout, agent.EnrollToken(secret, id)); err != nil {
+	if _, err := fmt.Fprintln(stdout, agent.DeriveToken(secret, id, generation)); err != nil {
 		_, _ = fmt.Fprintf(stderr, "podium: write the token: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// agentTokenOptions reads the options of "podium agent-token" off the front of
+// args: --generation N or --generation=N, and "--", which ends them. It returns
+// the generation, 0 when none is given, and the arguments after the options.
+func agentTokenOptions(args []string) (uint32, []string, error) {
+	var generation uint32
+	for len(args) > 0 {
+		var value string
+		switch arg := args[0]; {
+		case arg == "--":
+			return generation, args[1:], nil
+		case arg == "--generation":
+			if len(args) < 2 {
+				return 0, nil, errors.New("--generation needs a value")
+			}
+			value, args = args[1], args[2:]
+		case strings.HasPrefix(arg, "--generation="):
+			value, args = strings.TrimPrefix(arg, "--generation="), args[1:]
+		default:
+			return generation, args, nil
+		}
+		n, err := strconv.ParseUint(value, 10, 32)
+		if err != nil {
+			return 0, nil, fmt.Errorf("--generation %q is not a whole number from 0 to 4294967295", value)
+		}
+		generation = uint32(n)
+	}
+	return generation, args, nil
 }

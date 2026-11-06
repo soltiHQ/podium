@@ -11,6 +11,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
+	agentsvc "github.com/soltiHQ/control-plane/internal/service/agent"
 	historysvc "github.com/soltiHQ/control-plane/internal/service/history"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
@@ -56,7 +57,7 @@ func TestTakingLeadershipRereadsHistoryWrittenMeanwhile(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Close() })
 	hub := event.NewHub(zerolog.New(io.Discard))
 	t.Cleanup(hub.Close)
-	r, err := New(Config{}, zerolog.Nop(), s, pool, hub, svc, brief{})
+	r, err := New(Config{}, zerolog.Nop(), s, pool, agentsvc.New(s, zerolog.Nop()), hub, svc, brief{})
 	if err != nil {
 		t.Fatal(err)
 	}

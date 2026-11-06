@@ -394,10 +394,12 @@ func throttledSync(ctx context.Context) error {
 // it returns auth.ErrRateLimited while the failures plus the checks in flight
 // of the pair reach the limit. A missing or wrong token
 // (agent.ErrUnauthenticated, which includes agent.ErrEnrollRefused, a
-// first-contact token other than the one derived from the enrollment secret)
-// becomes a failure. A missing token and a refused enrollment each log a WARN,
-// never the token, at most rate_attempts per window for the pair; every other
-// outcome, a panic included, releases the attempt.
+// first-contact token other than the one derived from the enrollment secret,
+// and agent.DerivedCredentialError, a derived credential of another
+// enrollment secret or with none set) becomes a failure. A missing token, a
+// refused enrollment and a DerivedCredentialError each log a WARN, never the
+// token, at most rate_attempts per window for the pair; every other outcome, a
+// panic included, releases the attempt.
 func verifyAgentToken(ctx context.Context, logger zerolog.Logger, svc *agent.Service, limiter *ratelimit.Limiter, clientIP, agentID, token string) error {
 	if len(token) > model.AgentTokenMaxBytes {
 		return agent.ErrTokenTooLong
@@ -421,9 +423,14 @@ func verifyAgentToken(ctx context.Context, logger zerolog.Logger, svc *agent.Ser
 		logger.Warn().Str("agent_id", agentID).Msg(msg)
 	}
 	err = svc.VerifyOrEnrollToken(ctx, agentID, token)
-	if errors.Is(err, agent.ErrEnrollRefused) {
+	var derived *agent.DerivedCredentialError
+	switch {
+	case errors.Is(err, agent.ErrEnrollRefused):
 		logger.Warn().Str("agent_id", agentID).Str("client_ip", clientIP).
 			Msg("enrollment refused: an unknown agent ID presented a token that is not the one derived for it from the enrollment secret; give the agent the token podium agent-token prints for its ID")
+	case errors.As(err, &derived):
+		// The text names the agent and the token it needs, never a token.
+		logger.Warn().Str("agent_id", agentID).Str("client_ip", clientIP).Msg(derived.Error())
 	}
 	if errors.Is(err, agent.ErrUnauthenticated) {
 		attempt.Fail(time.Now())

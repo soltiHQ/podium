@@ -199,6 +199,64 @@ func TestAgentCredentialFromProtoKeepsLongTokens(t *testing.T) {
 	}
 }
 
+// A derived credential travels as its generation and secret ID, without a
+// token, and a stored one as its token, without either: each comes back as the
+// kind it was, with every field.
+func TestAgentCredential_ProtoRoundtrip(t *testing.T) {
+	created := nowTruncated()
+	secretID := []byte{0x26, 0xd9, 0x07, 0x67, 0xda, 0x09, 0x1e, 0xd4}
+	derived, err := model.NewDerivedAgentCredential("a1", 2, secretID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := model.NewStoredAgentCredential("a2", "raw-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []*model.AgentCredential{derived, stored} {
+		c.SetCreatedAt(created)
+		c.SetUpdatedAt(created.Add(time.Second))
+		msg := wire.AgentCredentialToProto(c)
+		switch {
+		case c.Derived() && (msg.Generation == nil || msg.GetGeneration() != 2 || !bytes.Equal(msg.GetSecretId(), secretID) || msg.GetToken() != ""):
+			t.Fatalf("derived credential on the wire: generation %v, secret ID %x, %d-byte token; want 2, %x and no token", msg.Generation, msg.GetSecretId(), len(msg.GetToken()), secretID)
+		case !c.Derived() && (msg.Generation != nil || len(msg.GetSecretId()) != 0 || msg.GetToken() != "raw-token"):
+			t.Fatalf("stored credential on the wire: generation %v, secret ID %x, token %q; want neither and the token", msg.Generation, msg.GetSecretId(), msg.GetToken())
+		}
+		back, err := wire.AgentCredentialFromProto(msg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if back.AgentID() != c.AgentID() || back.Derived() != c.Derived() || back.Generation() != c.Generation() ||
+			!bytes.Equal(back.SecretID(), c.SecretID()) || back.Token() != c.Token() ||
+			!back.CreatedAt().Equal(c.CreatedAt()) || !back.UpdatedAt().Equal(c.UpdatedAt()) {
+			t.Fatalf("credential %s changed on the round trip", c.AgentID())
+		}
+	}
+}
+
+// A message that is neither kind, or both, is refused: a generation with a token
+// or without a secret ID, a secret ID without a generation, and neither a
+// generation nor a token.
+func TestAgentCredentialFromProtoRefusesMixedKinds(t *testing.T) {
+	zero := uint32(0)
+	for _, tc := range []struct {
+		name string
+		msg  *raftv1.AgentCredentialMsg
+	}{
+		{"generation and token", &raftv1.AgentCredentialMsg{AgentId: "a1", Token: "raw-token", Generation: &zero, SecretId: []byte{1}, CreatedAtNs: 1}},
+		{"generation without a secret ID", &raftv1.AgentCredentialMsg{AgentId: "a1", Generation: &zero, CreatedAtNs: 1}},
+		{"secret ID without a generation", &raftv1.AgentCredentialMsg{AgentId: "a1", Token: "raw-token", SecretId: []byte{1}, CreatedAtNs: 1}},
+		{"neither generation nor token", &raftv1.AgentCredentialMsg{AgentId: "a1", CreatedAtNs: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if c, err := wire.AgentCredentialFromProto(tc.msg); err == nil {
+				t.Fatalf("decoded to a credential, derived %v, want an error", c.Derived())
+			}
+		})
+	}
+}
+
 // TestCommand_ProtoRoundtrip — a multi-op Command marshals + unmarshals
 // without losing op semantics. Belt-and-braces check on the oneof wiring.
 func TestCommand_ProtoRoundtrip(t *testing.T) {

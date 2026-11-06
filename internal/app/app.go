@@ -184,14 +184,14 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	syncRunner, err := syncrunner.New(cfg.Sync, logger, store, proxyPool, eventHub, svc.history, leadership)
+	syncRunner, err := syncrunner.New(cfg.Sync, logger, store, proxyPool, svc.agent, eventHub, svc.history, leadership)
 	if err != nil {
 		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
 
-	historyRunner, err := historyrunner.New(cfg.History.Collector, logger, store, proxyPool, svc.history, leadership)
+	historyRunner, err := historyrunner.New(cfg.History.Collector, logger, store, proxyPool, svc.agent, svc.history, leadership)
 	if err != nil {
 		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
@@ -235,6 +235,9 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 	}
 
 	runners := []server.Runner{httpRunner, httpDiscoveryRunner, grpcRunner, lifecycleRunner, syncRunner, historyRunner}
+	if cfg.AgentAuth.Require {
+		runners = append(runners, credentialSweepRunner(logger, leadership, svc.agent))
+	}
 	if raftMode {
 		runners = append(runners, seedingRunner(cfg, logger, leadership, svc))
 		// While another node leads, the check compares this node's digests with

@@ -13,6 +13,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/cluster/standalone"
 	"github.com/soltiHQ/control-plane/internal/proxy"
+	agentsvc "github.com/soltiHQ/control-plane/internal/service/agent"
 	historysvc "github.com/soltiHQ/control-plane/internal/service/history"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
@@ -27,7 +28,7 @@ func newRunner(t *testing.T, cfg Config) (*Runner, *inmemory.Store) {
 	}
 	pool := proxy.NewPool(nil, true)
 	t.Cleanup(func() { _ = pool.Close() })
-	r, err := New(cfg, zerolog.Nop(), s, pool, svc, standalone.NewLeadership())
+	r, err := New(cfg, zerolog.Nop(), s, pool, agentsvc.New(s, zerolog.Nop()), svc, standalone.NewLeadership())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +301,7 @@ func TestTakingLeadershipRereadsHistoryWrittenMeanwhile(t *testing.T) {
 	}
 	pool := proxy.NewPool(nil, true)
 	t.Cleanup(func() { _ = pool.Close() })
-	r, err := New(Config{}, zerolog.Nop(), s, pool, svc, brief{})
+	r, err := New(Config{}, zerolog.Nop(), s, pool, agentsvc.New(s, zerolog.Nop()), svc, brief{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,5 +310,60 @@ func TestTakingLeadershipRereadsHistoryWrittenMeanwhile(t *testing.T) {
 	}
 	if n, err := svc.Prune(ctx); err != nil || n != 2 {
 		t.Fatalf("after the runner took leadership the service removed %d rows, want the 2 over its limit: %v", n, err)
+	}
+}
+
+// The collector presents the token podium recomputes for a derived credential,
+// which stores none, and calls no agent whose credential derives from another
+// enrollment secret.
+func TestCollectorPresentsTheDerivedToken(t *testing.T) {
+	const (
+		secret = "0123456789abcdef0123456789abcdef"
+		// HMAC-SHA256 of "agent-a", a NUL byte and "1" under secret, as lowercase
+		// hex (openssl dgst -sha256 -hmac).
+		token = "0798a24179a424ee55aad934c6bc3ddc684517034d842088a2629219ad29fbcf"
+	)
+	for _, tc := range []struct {
+		name, secret, want string // want: the Authorization the agent receives, "" for no call
+	}{
+		{"derived under the current secret", secret, "Bearer " + token},
+		{"derived under another secret", "a-different-secret-of-32-bytes-or-more!", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := make(chan string, 16)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got <- r.Header.Get("Authorization")
+				agentHandler(w, r)
+			}))
+			defer server.Close()
+			r, s := newRunner(t, Config{})
+			r.tokens = agentsvc.New(s, zerolog.Nop(), agentsvc.WithEnrollSecret(tc.secret))
+			seedAgent(t, s, "agent-a", server.URL, time.Now())
+			seedRollout(t, s, "agent-a", "spec")
+			cred, err := model.NewDerivedAgentCredential("agent-a", 1, agentsvc.SecretID(secret))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.UpsertAgentCredential(context.Background(), cred); err != nil {
+				t.Fatal(err)
+			}
+
+			r.tick(context.Background())
+
+			if tc.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("the agent of another secret got %d calls, want none", len(got))
+				}
+				return
+			}
+			if len(got) == 0 {
+				t.Fatal("the agent got no call")
+			}
+			for len(got) > 0 {
+				if auth := <-got; auth != tc.want {
+					t.Fatalf("the agent received authorization %q, want %q", auth, tc.want)
+				}
+			}
+		})
 	}
 }

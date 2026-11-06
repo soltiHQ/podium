@@ -720,6 +720,113 @@ func TestRefusedEnrollmentWarns(t *testing.T) {
 	}
 }
 
+// An agent that enrolled under one enrollment secret, synced to a podium that
+// runs with another, is refused like a wrong token (HTTP 401, gRPC
+// Unauthenticated), and logged at WARN with its agent ID and client IP and a
+// message that says it enrolled under another enrollment secret and which
+// podium agent-token command gives the token it needs, never the token. The
+// discovery limiter bounds the lines to rate_attempts per window for the pair.
+// Podium makes no call to the agent either: its token lookup fails with the
+// same text. The credential stays as it was.
+func TestChangedSecretRefusesDerivedAgentClearly(t *testing.T) {
+	const (
+		secretA = "0123456789abcdef0123456789abcdef"
+		secretB = "a-different-secret-of-32-bytes-or-more!"
+		tokenA1 = "ee91297d059304dd88e1c5650d195795e3fa9c921c419a61aced53e41a3c0058" // HMAC-SHA256(secretA, "agent-1"), hex
+		warning = "agent agent-1 enrolled under another enrollment secret: it needs the token that podium agent-token --generation 0 agent-1 prints with the current secret"
+	)
+	for _, transport := range []struct {
+		name string
+		ip   string
+		sync func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func(token string) syncOutcome
+	}{
+		{"http", "192.0.2.1", func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func(string) syncOutcome {
+			h := NewHTTPDiscovery(logger, svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
+			body := `{"id":"agent-1","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`
+			return func(token string) syncOutcome {
+				switch code := syncHTTP(h, body, token).Code; code {
+				case http.StatusOK:
+					return synced
+				case http.StatusUnauthorized:
+					return unauthenticated
+				case http.StatusTooManyRequests:
+					return refused
+				default:
+					return syncOutcome(fmt.Sprintf("HTTP %d", code))
+				}
+			}
+		}},
+		{"grpc", "203.0.113.9", func(logger zerolog.Logger, svc *agent.Service, hub *event.Hub) func(string) syncOutcome {
+			g := NewGRPCDiscovery(logger, svc, hub, discoveryLimiter(), NewSyncBuckets(), nil, true)
+			return func(token string) syncOutcome {
+				ctx := peer.NewContext(context.Background(), &peer.Peer{Addr: &net.TCPAddr{IP: net.ParseIP("203.0.113.9"), Port: 40000}})
+				ctx = metadata.NewIncomingContext(ctx, metadata.Pairs("authorization", "Bearer "+token))
+				_, err := g.Sync(ctx, &discoverv1.SyncRequest{Id: "agent-1", Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1})
+				switch grpcstatus.Code(err) {
+				case codes.OK:
+					return synced
+				case codes.Unauthenticated:
+					return unauthenticated
+				case codes.ResourceExhausted:
+					return refused
+				default:
+					return syncOutcome(err.Error())
+				}
+			}
+		}},
+	} {
+		t.Run(transport.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := inmemory.New()
+			if err := agent.New(store, zerolog.Nop(), agent.WithEnrollSecret(secretA)).VerifyOrEnrollToken(ctx, "agent-1", tokenA1); err != nil {
+				t.Fatalf("enroll agent-1 under secret A: %v", err)
+			}
+			var logs bytes.Buffer
+			svc := agent.New(store, zerolog.Nop(), agent.WithEnrollSecret(secretB))
+			hub := event.NewHub(zerolog.Nop())
+			defer hub.Close()
+			sync := transport.sync(zerolog.New(&logs), svc, hub)
+
+			for i := range 8 {
+				if got := sync(tokenA1); got != unauthenticated && got != refused {
+					t.Fatalf("agent-1 with its token of secret A, attempt %d: %s, want refused", i+1, got)
+				}
+			}
+			if strings.Contains(logs.String(), tokenA1) {
+				t.Fatalf("the log holds the agent's token:\n%s", logs.String())
+			}
+			warnings := 0
+			for _, line := range bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte("\n")) {
+				var entry struct {
+					Level    string `json:"level"`
+					AgentID  string `json:"agent_id"`
+					ClientIP string `json:"client_ip"`
+					Message  string `json:"message"`
+				}
+				if json.Unmarshal(line, &entry) != nil || entry.Message != warning {
+					continue
+				}
+				if entry.Level != "warn" || entry.AgentID != "agent-1" || entry.ClientIP != transport.ip {
+					t.Fatalf("the refusal logged as %+v, want WARN for agent-1 from %s", entry, transport.ip)
+				}
+				warnings++
+			}
+			if warnings != 5 {
+				t.Fatalf("%d WARN lines for eight refused syncs, want 5 (rate_attempts):\n%s", warnings, logs.String())
+			}
+
+			token, err := svc.AgentToken(ctx, "agent-1")
+			if token != "" || err == nil || err.Error() != warning {
+				t.Fatalf("token lookup for a call to agent-1: %q %v, want no token and the error %q", token, err, warning)
+			}
+			cred, err := store.GetAgentCredential(ctx, "agent-1")
+			if err != nil || !cred.Derived() || !bytes.Equal(cred.SecretID(), agent.SecretID(secretA)) {
+				t.Fatalf("credential of agent-1 after the refusals: %v, want it derived under secret A still", err)
+			}
+		})
+	}
+}
+
 // With an enrollment secret an unknown agent ID enrolls only with the token
 // derived from it for that ID. Any other token is refused (HTTP 401, gRPC
 // Unauthenticated) and stores nothing, and each refusal counts as a failure of
@@ -862,7 +969,7 @@ func TestDeletedAgentSyncsAgainWithItsStoredToken(t *testing.T) {
 			svc := agent.New(store, zerolog.Nop(), agent.WithEnrollSecret(secret))
 			hub := event.NewHub(zerolog.Nop())
 			defer hub.Close()
-			cred, err := model.NewAgentCredential("agent-1", stored)
+			cred, err := model.NewStoredAgentCredential("agent-1", stored)
 			if err != nil {
 				t.Fatal(err)
 			}

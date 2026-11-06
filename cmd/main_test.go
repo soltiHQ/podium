@@ -113,7 +113,7 @@ func TestAgentTokenCommandHelp(t *testing.T) {
 			if code != 0 || stderr != "" {
 				t.Fatalf("exit %d, stderr %q; want exit 0 and no stderr", code, stderr)
 			}
-			if !strings.HasPrefix(stdout, "usage: podium agent-token [--] <agent-id>\n") {
+			if !strings.HasPrefix(stdout, "usage: podium agent-token [--generation N] [--] <agent-id>\n") {
 				t.Fatalf("stdout %q, want the usage", stdout)
 			}
 		})
@@ -145,6 +145,51 @@ func TestAgentTokenCommandAcceptsDoubleDash(t *testing.T) {
 		if code, stdout, stderr := runAgentToken(t, enrollSecret, false, args...); code != 2 || stdout != "" || strings.Count(stderr, "\n") != 1 {
 			t.Fatalf("args %q: exit %d, stdout %q, stderr %q; want the usage error", args, code, stdout, stderr)
 		}
+	}
+}
+
+// "--generation N" before the agent ID prints the token of that generation,
+// which a credential reset moves an agent to; without it, or with 0, the token
+// is the one podium agent-token printed before generations existed, the token
+// an agent enrolls with. "--generation=N" is the same. A generation that is not
+// a whole number from 0 to 4294967295, or one with no value, is a usage error:
+// exit 2, one line on stderr, no token.
+func TestAgentTokenCLIGeneration(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no generation", []string{"agent-1"}, "ee91297d059304dd88e1c5650d195795e3fa9c921c419a61aced53e41a3c0058"},
+		{"generation 0", []string{"--generation", "0", "agent-1"}, "ee91297d059304dd88e1c5650d195795e3fa9c921c419a61aced53e41a3c0058"},
+		{"generation 1", []string{"--generation", "1", "agent-1"}, "7f6129ad9f0126964aafb88a75a2019467059c1ae9d20b931b465d3aee996fae"},
+		{"generation=2", []string{"--generation=2", "agent-1"}, "089a433310152c9aa06043ed2151343c55f47fa0da583cfcbd14d149070e51e0"},
+		{"generation 4294967295", []string{"--generation", "4294967295", "agent-1"}, "d7c3f7836e2a72c6dcd036fc0649a2ec86367eb8991fa1b3185e55e7eb0106e0"},
+		{"generation then --", []string{"--generation", "1", "--", "agent-1"}, "7f6129ad9f0126964aafb88a75a2019467059c1ae9d20b931b465d3aee996fae"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := runAgentToken(t, enrollSecret, false, tc.args...)
+			if code != 0 || stdout != tc.want+"\n" || stderr != "" {
+				t.Fatalf("exit %d, stdout %q, stderr %q; want exit 0 and stdout %q", code, stdout, stderr, tc.want+"\n")
+			}
+		})
+	}
+	for _, args := range [][]string{
+		{"--generation"},
+		{"--generation", "agent-1"},
+		{"--generation=", "agent-1"},
+		{"--generation", "-1", "agent-1"},
+		{"--generation", "4294967296", "agent-1"},
+		{"--generation", "1.5", "agent-1"},
+		{"--generation", "0x1", "agent-1"},
+		{"agent-1", "--generation", "1"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			code, stdout, stderr := runAgentToken(t, enrollSecret, false, args...)
+			if code != 2 || stdout != "" || !strings.HasSuffix(stderr, "\n") || strings.Count(stderr, "\n") != 1 {
+				t.Fatalf("exit %d, stdout %q, stderr %q; want exit 2, no stdout and one line on stderr", code, stdout, stderr)
+			}
+		})
 	}
 }
 
