@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -379,6 +380,45 @@ func TestUnknownSoltiEnv(t *testing.T) {
 				t.Fatalf("log = %q suggests a name that is not near", out)
 			}
 		})
+	}
+}
+
+// A variable that overrides a setting the file sets is logged once at INFO, by
+// the logger Load takes, with the setting's key and the variable and neither
+// value; a variable of a setting the file does not set is not logged.
+func TestEnvOverrideOfAFileSettingIsLogged(t *testing.T) {
+	writeConfig(t, "ops:\n  addr: 127.0.0.1:18081\n")
+	t.Setenv("SOLTI_OPS_ADDR", "127.0.0.1:28081")
+	t.Setenv("SOLTI_HTTP_ADDR", "127.0.0.1:38080") // the file does not set http.addr
+	var logs bytes.Buffer
+	cfg, err := Load("", zerolog.New(&logs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Ops.Addr != "127.0.0.1:28081" {
+		t.Fatalf("ops.addr = %q, want the variable's value", cfg.Ops.Addr)
+	}
+	var overrides []map[string]any
+	for _, raw := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if raw == "" {
+			continue
+		}
+		var line map[string]any
+		if err := json.Unmarshal([]byte(raw), &line); err != nil {
+			t.Fatalf("a log line that is no JSON: %q", raw)
+		}
+		if _, ok := line["key"]; ok {
+			overrides = append(overrides, line)
+		}
+	}
+	if len(overrides) != 1 || overrides[0]["level"] != "info" || overrides[0]["key"] != "ops.addr" ||
+		overrides[0]["variable"] != "SOLTI_OPS_ADDR" || overrides[0]["message"] == "" {
+		t.Fatalf("lines with a key: %v, want one INFO line with key ops.addr and variable SOLTI_OPS_ADDR", overrides)
+	}
+	for _, value := range []string{"18081", "28081", "38080", strings.Repeat("x", 32)} {
+		if strings.Contains(logs.String(), value) {
+			t.Fatalf("the log shows a value (%s):\n%s", value, logs.String())
+		}
 	}
 }
 

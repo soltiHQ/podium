@@ -117,6 +117,13 @@ A value is read as follows:
 A value that does not parse fails loading with the variable's name and what was
 expected, never the value, which may be a secret.
 
+The environment wins over the file. For each setting that the file sets and a
+variable also sets, loading logs one INFO line through the bootstrap logger,
+`an environment variable overrides a setting of the configuration file`, with
+`key` the setting's key (`ops.addr`) and `variable` the variable
+(`SOLTI_OPS_ADDR`), never either value. A variable of a setting that the file
+does not set logs nothing (`TestEnvOverrideOfAFileSettingIsLogged`).
+
 A `SOLTI_` variable that is not a setting is handled by where its name falls:
 
 - Under a section's prefix (`SOLTI_HTTP_`, `SOLTI_HTTP_DISCOVERY_`,
@@ -165,7 +172,8 @@ The settings apply once the configuration is loaded. Before that podium logs
 JSON on stdout at `info`: the first line of a run (`podium starting`, with
 `version`, `commit`, `modified`, `go_version` and `platform`, and `built` when
 the binary carries the commit time), and what loading reports, such as the
-warning about a `SOLTI_` variable that is not a setting. After it, every line
+warning about a `SOLTI_` variable that is not a setting and the line of each
+variable that overrides a setting of the file. After it, every line
 podium writes, the raft library's included (see `internal/raft`, "Logging"),
 follows `log.level` and `log.format`; a library that logs through its own
 default logger, which podium does not route, such as grpc-go's `grpclog` or the
@@ -187,7 +195,14 @@ they do tell is the node's health, whether it leads, its build and its metrics,
 which on a raft node include its raft state, term, indexes and peer count. Keep
 it on an internal network: the default binds loopback only, and a container that
 is probed from outside binds `0.0.0.0:8081` and publishes the port to the
-orchestrator alone. Every route answers GET and HEAD, as one line of text (`ok`,
+orchestrator alone. podium's image sets `SOLTI_OPS_ADDR=:8081` and
+`SOLTI_CLUSTER_STANDALONE_DATA_DIR=/var/lib/podium` in its environment, which
+override the `ops.addr` and `cluster.standalone.data_dir` of a file passed with
+`--config`: set the variables to change them (`-e SOLTI_OPS_ADDR=127.0.0.1:8081`,
+or empty to turn the listener off; `-e SOLTI_CLUSTER_STANDALONE_DATA_DIR=...`).
+Under host networking `:8081` binds every interface of the host. Loading logs
+each such override at INFO (see "Environment variables"). Every route answers
+GET and HEAD, as one line of text (`ok`,
 or the reason) except `/version` and `/metrics`:
 
 | Route | Answers |

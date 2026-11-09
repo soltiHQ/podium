@@ -22,6 +22,19 @@ func applyEnv(cfg *Config) error {
 	return settings.ApplyEnv(envPrefix, cfg, os.LookupEnv)
 }
 
+// logOverrides logs one INFO line for each setting that the file sets, as
+// fileKeys holds them, and whose variable lookup finds: the environment wins,
+// which an operator who reads only the file would not see. The line names the
+// key and the variable, never either value, which may be a secret.
+func logOverrides(cfg *Config, fileKeys map[string]bool, lookup func(string) (string, bool), log zerolog.Logger) {
+	for _, s := range settings.Walk(envPrefix, cfg) {
+		if _, set := lookup(s.Env); set && fileKeys[s.Key()] {
+			log.Info().Str("key", s.Key()).Str("variable", s.Env).
+				Msg("an environment variable overrides a setting of the configuration file")
+		}
+	}
+}
+
 // checkEnv looks at the SOLTI_ variables of environ that name no setting. One
 // that falls under the prefix of a section (SOLTI_HTTP_ for http) is a mistyped
 // setting and fails loading, with the closest setting name when one is within

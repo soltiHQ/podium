@@ -265,17 +265,21 @@ func (c Config) Validate() error {
 
 // Load reads configuration in priority order: defaults → YAML file → ENV.
 // The YAML file is path, or CONFIG_PATH when path is empty; the command line is
-// the caller's. Warnings of the load go to log. Refuses to return a Config that
-// fails [Config.Validate].
+// the caller's. Warnings of the load go to log, and so does one INFO line for
+// each setting of the file that a variable overrides. Refuses to return a Config
+// that fails [Config.Validate].
 func Load(path string, log zerolog.Logger) (Config, error) {
 	cfg := Default()
 	if path == "" {
 		path = os.Getenv("CONFIG_PATH")
 	}
+	var fileKeys map[string]bool
 	if path != "" {
-		if err := loadYAML(path, &cfg); err != nil {
+		keys, err := loadYAML(path, &cfg)
+		if err != nil {
 			return Config{}, fmt.Errorf("config: %w", err)
 		}
+		fileKeys = keys
 	}
 	if err := checkEnv(&cfg, os.Environ(), log); err != nil {
 		return Config{}, fmt.Errorf("config: %w", err)
@@ -283,35 +287,36 @@ func Load(path string, log zerolog.Logger) (Config, error) {
 	if err := applyEnv(&cfg); err != nil {
 		return Config{}, fmt.Errorf("config: env: %w", err)
 	}
+	logOverrides(&cfg, fileKeys, os.LookupEnv, log)
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("config: %w", err)
 	}
 	return cfg, nil
 }
 
-// loadYAML reads path into dst. A key that is not a setting, or that only the
-// environment may carry, fails with its line, and so does a setting without a
-// value; so does a file without a setting, and a second document that holds
-// anything.
-func loadYAML(path string, dst *Config) error {
+// loadYAML reads path into dst, and returns the keys of the settings the file
+// sets. A key that is not a setting, or that only the environment may carry,
+// fails with its line, and so does a setting without a value; so does a file
+// without a setting, and a second document that holds anything.
+func loadYAML(path string, dst *Config) (map[string]bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
+		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	var doc yaml.Node
 	if err = yaml.Unmarshal(data, &doc); err != nil {
-		return fmt.Errorf("decode %s: %w", path, err)
+		return nil, fmt.Errorf("decode %s: %w", path, err)
 	}
 	if len(doc.Content) == 0 || isEmpty(doc.Content[0]) {
-		return fmt.Errorf("%s holds no settings", path)
+		return nil, fmt.Errorf("%s holds no settings", path)
 	}
 	if err = settings.CheckYAML(path, envPrefix, doc.Content[0], dst); err != nil {
-		return err
+		return nil, err
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err = dec.Decode(dst); err != nil {
-		return fmt.Errorf("decode %s: %w", path, err)
+		return nil, fmt.Errorf("decode %s: %w", path, err)
 	}
 	// Unmarshal and Decode each read the first document only, so the keys of a
 	// later one would go unread: one that holds anything fails, and an empty one
@@ -320,11 +325,11 @@ func loadYAML(path string, dst *Config) error {
 		var next yaml.Node
 		switch err = dec.Decode(&next); {
 		case errors.Is(err, io.EOF):
-			return nil
+			return settings.Keys(doc.Content[0]), nil
 		case err != nil:
-			return fmt.Errorf("decode %s: %w", path, err)
+			return nil, fmt.Errorf("decode %s: %w", path, err)
 		case len(next.Content) > 0 && !isEmpty(next.Content[0]):
-			return fmt.Errorf("%s:%d: a second YAML document; podium reads one document", path, next.Line)
+			return nil, fmt.Errorf("%s:%d: a second YAML document; podium reads one document", path, next.Line)
 		}
 	}
 }

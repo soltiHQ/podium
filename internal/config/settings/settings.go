@@ -285,6 +285,25 @@ func checkNode(file string, n *yaml.Node, t reflect.Type, prefix string, path []
 	return nil
 }
 
+// Keys returns the dotted path of each value the mapping node holds, its nested
+// mappings walked: of a node that CheckYAML passed, the keys of the settings it
+// sets.
+func Keys(node *yaml.Node) map[string]bool {
+	out := make(map[string]bool)
+	keys(node, nil, out)
+	return out
+}
+
+func keys(n *yaml.Node, path []string, out map[string]bool) {
+	if n.Kind != yaml.MappingNode {
+		out[strings.Join(path, ".")] = true
+		return
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		keys(n.Content[i+1], append(append([]string(nil), path...), n.Content[i].Value), out)
+	}
+}
+
 // emptyValue says what to write for an empty value of a setting of type t.
 func emptyValue(t reflect.Type) string {
 	switch t.Kind() {

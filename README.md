@@ -116,6 +116,18 @@ as a copy of it. A bind mount must be a directory that uid 65532 owns, with mode
 0700\. Every setting can go in the container's environment; a configuration file
 passed with `--config` must be readable by uid 65532.
 
+In the image, `SOLTI_OPS_ADDR` (`:8081`) and `SOLTI_CLUSTER_STANDALONE_DATA_DIR`
+(`/var/lib/podium`) come from the image's environment, and the environment wins
+over a file: the `ops.addr` and `cluster.standalone.data_dir` of a configuration
+file have no effect there. Set the variables to change them:
+`-e SOLTI_OPS_ADDR=127.0.0.1:8081`, or `-e SOLTI_OPS_ADDR=` (empty) to turn the
+ops listener off, and `-e SOLTI_CLUSTER_STANDALONE_DATA_DIR=...`, which must name
+a directory that uid 65532 owns, with mode 0700: in the image only
+`/var/lib/podium` is one. Under host networking (`--network host`, or Kubernetes
+`hostNetwork`), `:8081` binds every interface of the host. podium logs one INFO
+line for each setting of the file that a variable overrides, with the setting's
+key and the variable.
+
 ### Data directory
 
 podium keeps all its state in its data directory: `cluster.standalone.data_dir`
@@ -141,7 +153,9 @@ memory instead, and loses it at exit.
 ## Configure
 
 podium reads its settings from its defaults, then a YAML file, then the
-environment, which wins. The file is `--config PATH`, or `CONFIG_PATH` when that
+environment, which wins: each setting of the file that a variable overrides is
+logged once at INFO, with its key and the variable, never a value. The file is
+`--config PATH`, or `CONFIG_PATH` when that
 is empty; without either, podium runs on its defaults and the environment. The
 variable of a setting is `SOLTI_` and its YAML path in upper case, joined by
 `_`: `http.addr` is `SOLTI_HTTP_ADDR`, `cluster.raft.tls.ca_file` is
@@ -222,7 +236,7 @@ prints the usage to stderr and exits 2. A configuration that fails to load exits
 | Port | Setting | Default | Serves |
 | -- | -- | -- | -- |
 | 8080 | `http.addr` | `:8080` | The web UI and the REST API. |
-| 8081 | `ops.addr` | `127.0.0.1:8081`, in the image `:8081` | Probes, `/version` and `/metrics`: plain HTTP, without authentication. |
+| 8081 | `ops.addr` | `127.0.0.1:8081`, in the image `:8081` | Probes, `/version` and `/metrics`: plain HTTP, without authentication. In the image `SOLTI_OPS_ADDR=:8081` overrides a file's `ops.addr`: see [Container image](#container-image). |
 | 8082 | `http_discovery.addr` | `:8082` | Agents' HTTP discovery, `POST /api/v1/discovery/sync`. |
 | 50051 | `grpc.addr` | `:50051` | Agents' gRPC discovery, `solti.discover.v1.DiscoverService`, and `grpc.health.v1.Health`. |
 | raft | `cluster.raft.bind_addr` | none: required in raft mode, 7000 in the examples | The raft transport between the nodes: mutual TLS 1.3, or plain TCP with `cluster.raft.allow_insecure_transport`. |
