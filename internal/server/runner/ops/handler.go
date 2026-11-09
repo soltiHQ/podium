@@ -7,16 +7,14 @@ import (
 	"github.com/soltiHQ/control-plane/internal/buildinfo"
 )
 
-// notLeader is what /leaderz says of a node that serves but does not lead.
-const notLeader = "not leader"
-
 // Probes are what the ops routes report on.
 type Probes struct {
 	// Ready returns "" while the node is ready, and otherwise the one-line
 	// reason it is not.
 	Ready func() string
-	// Leader reports whether the node is the leader; a standalone node always is.
-	Leader func() bool
+	// Leader returns "" while the node is the leader that /leaderz routes to, and
+	// otherwise the one-line reason it is not.
+	Leader func() string
 	// Version is what /version reports.
 	Version buildinfo.Info
 }
@@ -45,14 +43,11 @@ func NewHandler(p Probes) *Handler {
 		writeLine(w, http.StatusOK, "ok")
 	})
 	h.mux.HandleFunc("GET /leaderz", func(w http.ResponseWriter, _ *http.Request) {
-		switch reason := p.Ready(); {
-		case reason != "":
+		if reason := p.Leader(); reason != "" {
 			writeLine(w, http.StatusServiceUnavailable, reason)
-		case !p.Leader():
-			writeLine(w, http.StatusServiceUnavailable, notLeader)
-		default:
-			writeLine(w, http.StatusOK, "ok")
+			return
 		}
+		writeLine(w, http.StatusOK, "ok")
 	})
 	body, err := json.Marshal(p.Version)
 	if err != nil {

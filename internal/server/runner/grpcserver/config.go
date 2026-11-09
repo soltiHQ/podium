@@ -16,6 +16,11 @@ type Config struct {
 	Name    string `yaml:"name"`
 	Addr    string `yaml:"addr"`
 	Network string `yaml:"network"`
+
+	// OnShutdown runs once as Stop begins, before the graceful stop that waits for
+	// the streams in flight: a service that holds a stream open is told by it to
+	// end it.
+	OnShutdown func() `yaml:"-"`
 }
 
 func (c Config) withDefaults() Config {

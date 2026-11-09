@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -80,6 +82,19 @@ func startApp(t *testing.T, configure func(*config.Config), before func(*App)) *
 		}
 	})
 	return r
+}
+
+// wait returns what Run returned, and fails the test when Run does not return
+// within 20s.
+func (r *runningApp) wait(t *testing.T) error {
+	t.Helper()
+	select {
+	case <-r.done:
+		return r.err
+	case <-time.After(20 * time.Second):
+		t.Fatal("Run did not return within 20s")
+		return nil
+	}
 }
 
 // gateDelay replaces the shutdown delay of a, which a test would otherwise wait
@@ -203,9 +218,8 @@ func TestReadinessFollowsStoreAndShutdown(t *testing.T) {
 	default:
 	}
 	release()
-	<-r.done
-	if !errors.Is(r.err, context.Canceled) {
-		t.Fatalf("Run: %v, want context.Canceled", r.err)
+	if err := r.wait(t); err != context.Canceled {
+		t.Fatalf("Run: %v, want exactly context.Canceled", err)
 	}
 	if _, _, err := get(ops(), "/livez", nil); err == nil {
 		t.Fatal("the ops listener answered after Run returned")
@@ -249,6 +263,11 @@ func TestLeaderProbeOnRaft(t *testing.T) {
 	nodes := clusterNodes(t, "n1", "n2", "n3")
 	for _, n := range nodes {
 		n.start(t)
+	}
+	for _, n := range nodes {
+		if n.app.ready.leader == nil || n.app.ready.failure != nil {
+			t.Fatalf("%s: readiness hooks leader set %v, failure set %v; a raft node needs a leader and has no store that fails", n.id, n.app.ready.leader != nil, n.app.ready.failure != nil)
+		}
 	}
 	for _, n := range nodes {
 		waitFor(t, 10*time.Second, n.id+" binds its ops listener", func() bool { return n.app.ops.Addr() != "" })
@@ -401,7 +420,7 @@ func TestShutdownDelayIsWaitedOut(t *testing.T) {
 	waitFor(t, 10*time.Second, "the app is ready", func() bool { return r.app.ready.reason() == "" })
 	begin := time.Now()
 	r.cancel()
-	<-r.done
+	_ = r.wait(t)
 	if took := time.Since(begin); took < delay {
 		t.Fatalf("Run returned %v after the signal, before the shutdown delay of %v", took, delay)
 	}
@@ -515,11 +534,149 @@ func TestInFlightRequestFinishesAtShutdown(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the request in flight did not finish within 10s of its release")
 	}
-	<-r.done
-	if !errors.Is(r.err, context.Canceled) {
-		t.Fatalf("Run: %v, want context.Canceled", r.err)
+	if err := r.wait(t); err != context.Canceled {
+		t.Fatalf("Run: %v, want exactly context.Canceled", err)
 	}
 	if _, _, err := get(ui(), "/login", nil); err == nil {
 		t.Fatal("the UI listener answered after Run returned")
+	}
+}
+
+// A client that holds a gRPC health Watch open does not hold the shutdown: the
+// stream ends as the gRPC listener starts to stop, and Run returns exactly
+// context.Canceled, as exitCode checks it, well within the shutdown timeout.
+func TestHealthWatchDoesNotHoldShutdown(t *testing.T) {
+	r := startApp(t, nil, nil)
+	waitFor(t, 10*time.Second, "the listeners bind", func() bool { return r.app.grpc.Addr() != "" })
+	waitFor(t, 10*time.Second, "the app is ready", func() bool { return r.app.ready.reason() == "" })
+	conn, err := grpc.NewClient(r.app.grpc.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stream, err := healthpb.NewHealthClient(conn).Watch(ctx, &healthpb.HealthCheckRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, err := stream.Recv(); err != nil || resp.GetStatus() != healthpb.HealthCheckResponse_SERVING {
+		t.Fatalf("first Watch message: %v, %v; want SERVING", resp, err)
+	}
+	begin := time.Now()
+	r.cancel()
+	if err := r.wait(t); err != context.Canceled {
+		t.Fatalf("Run: %v, want exactly context.Canceled", err)
+	}
+	if took := time.Since(begin); took > 5*time.Second {
+		t.Fatalf("Run took %v to return with a health Watch open, want far below shutdown_timeout", took)
+	}
+}
+
+// A runner that exits on its own, here the ops listener that cannot bind, turns
+// readiness and the gRPC health service to "shutting down" as well.
+func TestRunnerExitFlipsReadiness(t *testing.T) {
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = taken.Close() }()
+	r := startApp(t, func(c *config.Config) { c.Ops.Addr = taken.Addr().String() }, nil)
+	if err := r.wait(t); err == nil || err == context.Canceled {
+		t.Fatalf("Run: %v, want the error of the listener that could not bind", err)
+	}
+	if got := r.app.ready.reason(); got != reasonShuttingDown {
+		t.Fatalf("readiness after the runner exited: %q, want %q", got, reasonShuttingDown)
+	}
+	resp, err := r.app.grpcHealth.Check(context.Background(), &healthpb.HealthCheckRequest{})
+	if err != nil || resp.GetStatus() != healthpb.HealthCheckResponse_NOT_SERVING {
+		t.Fatalf("gRPC health after the runner exited: %v, %v; want NOT_SERVING", resp, err)
+	}
+}
+
+// The status of the health service follows the last readiness that was read, even
+// when stale syncs race the shutdown: once the node shuts down it stays
+// NOT_SERVING.
+func TestHealthSyncDoesNotLoseTheShutdown(t *testing.T) {
+	for range 200 {
+		ready := &readiness{}
+		ready.bound.Store(true)
+		g := newGRPCHealth(ready)
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for range 50 {
+					g.sync()
+				}
+			}()
+		}
+		ready.shuttingDown.Store(true)
+		g.sync()
+		wg.Wait()
+		resp, err := g.Server.Check(context.Background(), &healthpb.HealthCheckRequest{})
+		if err != nil || resp.GetStatus() != healthpb.HealthCheckResponse_NOT_SERVING {
+			t.Fatalf("status after the shutdown: %v, %v; want NOT_SERVING", resp, err)
+		}
+	}
+}
+
+// New wires the readiness to the store it built: a durable store has the failure
+// hook and no leader hook, an in-memory one has neither.
+func TestReadinessHooksFollowTheBackend(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ephemeral bool
+		failure   bool
+	}{{"durable", false, true}, {"in memory", true, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Cluster.Standalone.Ephemeral = tc.ephemeral
+			cfg.Cluster.Standalone.DataDir = filepath.Join(t.TempDir(), "state")
+			cfg.Auth.JWTSecret = strings.Repeat("ops-listener-test-secret", 2)
+			a, err := New(context.Background(), cfg, zerolog.Nop(), WithPasswordCost(bcrypt.MinCost))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = a.Shutdown(context.Background()) }()
+			if (a.ready.failure != nil) != tc.failure || a.ready.leader != nil {
+				t.Fatalf("hooks: failure set %v, leader set %v; want failure set %v and no leader hook", a.ready.failure != nil, a.ready.leader != nil, tc.failure)
+			}
+		})
+	}
+}
+
+// /leaderz of a raft node is the leader once start-up has finished, whatever the
+// store does and also during the shutdown; of a standalone node, while it is ready.
+func TestLeaderReason(t *testing.T) {
+	leads := func() bool { return true }
+	follows := func() bool { return false }
+	raft := func(bound, going bool, amLeader func() bool) string {
+		r := &readiness{leader: func() string { return "n1" }, failure: func() error { return errors.New("failed") }}
+		r.bound.Store(bound)
+		r.shuttingDown.Store(going)
+		return r.leaderReason(amLeader)
+	}
+	if got := raft(true, false, leads); got != "" {
+		t.Fatalf("raft leader: %q, want none", got)
+	}
+	if got := raft(true, true, leads); got != "" {
+		t.Fatalf("raft leader during the shutdown delay: %q, want none", got)
+	}
+	if got := raft(true, false, follows); got != reasonNotLeader {
+		t.Fatalf("raft follower: %q, want %q", got, reasonNotLeader)
+	}
+	if got := raft(false, false, leads); got != reasonStarting {
+		t.Fatalf("raft leader still starting: %q, want %q", got, reasonStarting)
+	}
+	standalone := &readiness{}
+	standalone.bound.Store(true)
+	if got := standalone.leaderReason(leads); got != "" {
+		t.Fatalf("ready standalone: %q, want none", got)
+	}
+	standalone.shuttingDown.Store(true)
+	if got := standalone.leaderReason(leads); got != reasonShuttingDown {
+		t.Fatalf("standalone shutting down: %q, want %q", got, reasonShuttingDown)
 	}
 }

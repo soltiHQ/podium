@@ -375,15 +375,16 @@ therefore be leader-sticky: the balancer sends browsers to the leader, or
 retries a request that gets `X-Leader` at the node it names, and follows the
 leadership when it moves. The ops listener (`ops.addr`, default
 `127.0.0.1:8081`, see "Ops listener" in `internal/config/README.md`) offers the
-leader probe: `GET /leaderz` answers 200 on the leader and 503 on every other
-node, without credentials (`TestLeaderProbeOnRaft`), so a balancer that health
+leader probe: `GET /leaderz` answers 200 on the leader once its start-up has
+finished, also while it waits out `server.shutdown_delay` and still serves, and
+503 on every other node, without credentials (`TestLeaderProbeOnRaft`), so a balancer that health
 checks `/leaderz` sends browsers to the leader and follows the leadership when it
 moves; the listener must be reachable from the balancer, which the loopback
 default is not. `GET /api/v1/cluster` still needs `cluster:get`
 (`TestClusterRoutesNeedPermission`). `/readyz` on a raft node is 503 `no raft
 leader` while the node knows no leader. Without such a probe, or a router that
-retries at `X-Leader`, keep `auth.rotate_refresh` off, as it is by default. A refresh on a leader that
-loses its leadership as the rotation commits answers 503, with `X-Leader` when
+retries at `X-Leader`, keep `auth.rotate_refresh` off, as it is by default. A
+refresh on a leader that loses its leadership as the rotation commits answers 503, with `X-Leader` when
 the node knows the new leader by then, and `Auth` logs a WARN that its outcome
 is unknown (see "Follower writes"): the rotation may have taken effect. A retry
 at the leader the header names refreshes the browser when the rotation did not

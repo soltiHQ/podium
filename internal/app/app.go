@@ -103,7 +103,8 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		opt(&o)
 	}
 	raftMode := cfg.Cluster.Backend == cluster.BackendRaft
-	clusterOpts := []clusterOption{withHubOptions(hubOptions(cfg)...)}
+	var hooks probeHooks
+	clusterOpts := []clusterOption{withHubOptions(hubOptions(cfg)...), withProbes(&hooks)}
 	// A raft node digests the settings that every replica must share, answers
 	// its peers' configuration requests with the digests, and checks them
 	// against its leader's (raftpkg.Admin.ConfigCheck). Standalone does neither.
@@ -241,12 +242,20 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		return nil, err
 	}
 
+	// What /readyz and the gRPC health service report; the health service is
+	// registered on the gRPC listener below, without auth like the ops routes.
+	ready := newReadiness(hooks)
+	grpcHealth := newGRPCHealth(ready)
+
 	mainHandler, logHub := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership, resolver, clientTLS)
 	httpCfg := cfg.HTTP
 	httpCfg.TLSConfig = uiServerTLS
 	// The streams end as the UI listener starts to shut down, so that one that
-	// stays open cannot hold the requests in flight until the timeout.
+	// stays open cannot hold the requests in flight until the timeout. A listener
+	// that stops without a signal, because a runner exited, is not ready either.
 	httpCfg.OnShutdown = func() {
+		ready.shuttingDown.Store(true)
+		grpcHealth.sync()
 		eventHub.Close()
 		logHub.Close()
 	}
@@ -275,13 +284,11 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		return nil, err
 	}
 
-	// The gRPC health service answers without auth, like the ops routes, on the
-	// gRPC listener. It reports what /readyz does.
-	ready := newReadiness(store, leadership)
-	grpcHealth := newGRPCHealth(ready)
 	healthpb.RegisterHealthServer(grpcSrv, grpcHealth)
 
-	grpcRunner, err := grpcserver.New(cfg.GRPC, logger, grpcSrv)
+	grpcCfg := cfg.GRPC
+	grpcCfg.OnShutdown = grpcHealth.end
+	grpcRunner, err := grpcserver.New(grpcCfg, logger, grpcSrv)
 	if err != nil {
 		logHub.Close()
 		_ = proxyPool.Close()
@@ -291,7 +298,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 
 	opsHandler := ops.NewHandler(ops.Probes{
 		Ready:   ready.reason,
-		Leader:  leadership.AmLeader,
+		Leader:  func() string { return ready.leaderReason(leadership.AmLeader) },
 		Version: buildinfo.Read(),
 	})
 	listeners := []listener{httpRunner, httpDiscoveryRunner, grpcRunner}
@@ -354,14 +361,23 @@ type listener interface {
 // Run starts the server runners and blocks until ctx is cancelled or a runner
 // exits unexpectedly. Returns the first error encountered, if any.
 //
+// The values of ctx reach the runners; its cancellation and deadline do not, the
+// shutdown below stops them.
+//
 // The cancellation of ctx starts a graceful shutdown: readiness and the gRPC
 // health service turn to "shutting down" at once, Run waits server.shutdown_delay
 // for the load balancers to notice, and only then do the listeners stop
 // accepting. The requests in flight finish within server.shutdown_timeout, and
 // the streams end as the UI listener starts to shut down.
 func (a *App) Run(ctx context.Context) error {
-	runCtx, stop := context.WithCancel(context.Background())
+	runCtx, stop := context.WithCancel(context.WithoutCancel(ctx))
 	defer stop()
+	// However Run ends, the node is not ready: a runner that exited on its own
+	// ends it without the signal.
+	defer func() {
+		a.ready.shuttingDown.Store(true)
+		a.grpcHealth.sync()
+	}()
 	go a.awaitBound(runCtx)
 	go a.grpcHealth.run(runCtx)
 	go a.drain(ctx, runCtx, stop)

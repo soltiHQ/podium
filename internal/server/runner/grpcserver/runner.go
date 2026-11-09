@@ -110,6 +110,9 @@ func (r *Runner) Stop(ctx context.Context) error {
 		Str("runner", r.cfg.Name).
 		Msg("grpc server shutdown requested")
 
+	if r.cfg.OnShutdown != nil {
+		r.cfg.OnShutdown()
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

@@ -98,7 +98,9 @@ panics, also makes the store unavailable: memory then no longer matches the
 disk, and the failure names the log entry. After any of these, reads and writes
 return `storage.ErrUnavailable` with the reason, and the store passes the
 reason once, as it fails, to the handler of `WithFailureHandler`; Podium logs it
-at ERROR. Successful writes survive a process restart without a shutdown save.
+at ERROR. `Failure()` returns that reason, and nil while the store serves (and
+after `Close`); Podium's `/readyz` and gRPC health report 503 `storage failed` and
+`NOT_SERVING` while it is not nil (`TestFailureNamesWhyTheStoreStopped`). Successful writes survive a process restart without a shutdown save.
 Close waits for an active transaction or snapshot. A database file lock
 excludes a concurrent second process; opening uses a 250ms lock timeout (plus
 normal scheduling overhead). The application closes the database on shutdown

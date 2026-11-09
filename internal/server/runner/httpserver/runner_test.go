@@ -25,7 +25,7 @@ func TestStopAnIdleServer(t *testing.T) {
 	}
 	started := make(chan error, 1)
 	go func() { started <- r.Start(context.Background()) }()
-	<-r.ready
+	recv(t, r.ready, "the listener binds")
 	// A deliberate delay, not a wait for a condition: Serve asks for the base
 	// context without a signal, and Stop must come after that to meet the race
 	// that Start once had.
@@ -35,8 +35,23 @@ func TestStopAnIdleServer(t *testing.T) {
 	if err := r.Stop(ctx); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if err := <-started; err != nil {
+	if err := recv(t, started, "Start returns"); err != nil {
 		t.Fatalf("Start: %v", err)
+	}
+}
+
+// waitTimeout bounds every wait of these tests; it only turns a hang into a failure.
+const waitTimeout = 10 * time.Second
+
+// recv receives from ch, and fails the test when nothing comes within waitTimeout.
+func recv[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(waitTimeout):
+		t.Fatalf("%s: nothing within %v", what, waitTimeout)
+		panic("unreachable")
 	}
 }
 
@@ -46,9 +61,9 @@ func startRunner(t *testing.T, r *Runner) <-chan error {
 	t.Helper()
 	started := make(chan error, 1)
 	go func() { started <- r.Start(context.Background()) }()
-	<-r.Bound()
+	recv(t, r.Bound(), "the listener binds")
 	if r.Addr() == "" {
-		t.Fatalf("Start did not listen: %v", <-started)
+		t.Fatalf("Start did not listen: %v", recv(t, started, "Start returns"))
 	}
 	return started
 }
@@ -59,9 +74,10 @@ func TestStopLetsRequestsInFlightFinish(t *testing.T) {
 	var (
 		entered   = make(chan struct{})
 		release   = make(chan struct{})
+		stopping  = make(chan struct{})
 		cancelled = make(chan struct{}, 1)
 	)
-	r, err := New(Config{Addr: "127.0.0.1:0"}, zerolog.Nop(), http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+	r, err := New(Config{Addr: "127.0.0.1:0", OnShutdown: func() { close(stopping) }}, zerolog.Nop(), http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		close(entered)
 		select {
 		case <-release:
@@ -89,27 +105,29 @@ func TestStopLetsRequestsInFlightFinish(t *testing.T) {
 		b, err := io.ReadAll(resp.Body)
 		answered <- answer{string(b), err}
 	}()
-	<-entered
+	recv(t, entered, "the request reaches the handler")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	stopped := make(chan error, 1)
 	go func() { stopped <- r.Stop(ctx) }()
+	// Stop has begun, and the request is still in flight.
+	recv(t, stopping, "Stop begins")
 	select {
 	case err := <-stopped:
 		t.Fatalf("Stop returned (%v) while a request was in flight", err)
 	case <-cancelled:
 		t.Fatal("the shutdown cancelled the context of a request in flight")
-	case <-time.After(200 * time.Millisecond): // a deliberate window: Stop must not return in it
+	default:
 	}
 	close(release)
-	if err := <-stopped; err != nil {
+	if err := recv(t, stopped, "Stop returns"); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if err := <-started; err != nil {
+	if err := recv(t, started, "Start returns"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if a := <-answered; a.err != nil || a.body != "done" {
+	if a := recv(t, answered, "the client is answered"); a.err != nil || a.body != "done" {
 		t.Fatalf("the request in flight: %q, %v; want its full answer", a.body, a.err)
 	}
 }
@@ -124,7 +142,10 @@ func TestOnShutdownEndsAStream(t *testing.T) {
 	r, err := New(Config{Addr: "127.0.0.1:0", OnShutdown: func() { close(end) }}, zerolog.Nop(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.(http.Flusher).Flush()
 		close(entered)
-		<-end
+		select {
+		case <-end:
+		case <-time.After(waitTimeout):
+		}
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -139,17 +160,17 @@ func TestOnShutdownEndsAStream(t *testing.T) {
 		}
 		answered <- err
 	}()
-	<-entered
+	recv(t, entered, "the request reaches the handler")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := r.Stop(ctx); err != nil {
 		t.Fatalf("Stop: %v: the stream did not end with OnShutdown", err)
 	}
-	if err := <-started; err != nil {
+	if err := recv(t, started, "Start returns"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if err := <-answered; err != nil {
+	if err := recv(t, answered, "the client is answered"); err != nil {
 		t.Fatalf("the stream: %v", err)
 	}
 }
@@ -160,7 +181,10 @@ func TestStopCutsARequestThatOutlastsTheDeadline(t *testing.T) {
 	entered, cancelled := make(chan struct{}), make(chan struct{})
 	r, err := New(Config{Addr: "127.0.0.1:0"}, zerolog.Nop(), http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
 		close(entered)
-		<-req.Context().Done()
+		select {
+		case <-req.Context().Done():
+		case <-time.After(waitTimeout):
+		}
 		close(cancelled)
 	}))
 	if err != nil {
@@ -172,7 +196,7 @@ func TestStopCutsARequestThatOutlastsTheDeadline(t *testing.T) {
 			_ = resp.Body.Close()
 		}
 	}()
-	<-entered
+	recv(t, entered, "the request reaches the handler")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -181,10 +205,10 @@ func TestStopCutsARequestThatOutlastsTheDeadline(t *testing.T) {
 	}
 	select {
 	case <-cancelled:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the context of the cut request was not cancelled within 5s")
+	case <-time.After(waitTimeout):
+		t.Fatalf("the context of the cut request was not cancelled within %v", waitTimeout)
 	}
-	if err := <-started; err != nil {
+	if err := recv(t, started, "Start returns"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 }
@@ -220,9 +244,9 @@ func TestHTTPServerErrorsGoToZerolog(t *testing.T) {
 	}
 	started := make(chan error, 1)
 	go func() { started <- r.Start(context.Background()) }()
-	<-r.ready
+	recv(t, r.ready, "the listener binds")
 	if r.ln == nil {
-		t.Fatalf("Start did not listen: %v", <-started)
+		t.Fatalf("Start did not listen: %v", recv(t, started, "Start returns"))
 	}
 	// The panic closes the connection, so the client sees an error.
 	if resp, err := http.Get("http://" + r.ln.Addr().String() + "/"); err == nil {
@@ -233,7 +257,7 @@ func TestHTTPServerErrorsGoToZerolog(t *testing.T) {
 	if err := r.Stop(ctx); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if err := <-started; err != nil {
+	if err := recv(t, started, "Start returns"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 

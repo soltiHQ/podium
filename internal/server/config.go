@@ -14,7 +14,8 @@ type Config struct {
 	// ShutdownDelay is how long podium waits between the first shutdown signal,
 	// which turns readiness off, and stopping its listeners: the time a load
 	// balancer needs to stop sending requests. Zero, the default, waits not at
-	// all. It is not part of ShutdownTimeout.
+	// all. It is not part of ShutdownTimeout. Package server does not read it:
+	// the app applies it before it stops the server (see app.App.Run).
 	ShutdownDelay time.Duration `yaml:"shutdown_delay"`
 
 	// ShutdownTimeout is the maximum time allowed for a graceful shutdown: the

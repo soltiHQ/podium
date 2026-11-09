@@ -107,6 +107,8 @@ type clusterOptions struct {
 	// raft node answers its peers' configuration requests with and checks
 	// against its leader's; nil leaves a raft node without either.
 	digests *cluster.Digests
+	// probes, when set, is filled with the hooks of the backend that is built.
+	probes *probeHooks
 }
 
 // clusterOption is an option of buildCluster.
@@ -165,6 +167,9 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger, opts ...clusterOpti
 				Msgf("standalone durable storage migrated %s from single-blob to format 2: older versions refuse the migrated file, so rolling back needs a copy made before this start", durable.FileName)
 		}
 		logger.Info().Str("data_dir", cfg.Standalone.DataDir).Msg("standalone durable storage restored")
+		if o.probes != nil {
+			o.probes.failure = store.Failure
+		}
 		return store, standalone.NewLeadership(), hub, func() {
 			if err := store.Close(); err != nil {
 				logger.Error().Err(err).Msg("close standalone storage")
@@ -180,6 +185,9 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger, opts ...clusterOpti
 		p, err := raftpkg.New(node, inner, hub, disco, logger)
 		if err != nil {
 			return nil, nil, nil, nil, nil, err
+		}
+		if o.probes != nil {
+			o.probes.leader = p.Leadership().CurrentLeader
 		}
 		return p.Store(), p.Leadership(), hub, func() { _ = p.Shutdown() }, p.Admin(), nil
 	default:

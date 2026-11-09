@@ -155,8 +155,8 @@ text (`ok`, or the reason) except `/version`:
 | --- | --- |
 | `/livez` | 200 `ok` while the process serves. |
 | `/readyz` | 200 `ok` when the node is ready, and otherwise 503 with the reason, one of `starting`, `storage failed`, `no raft leader`, `shutting down`. |
-| `/leaderz` | 200 on the raft leader and on a ready standalone node; otherwise 503, with `not leader` or the reason the node is not ready. |
-| `/version` | The build information as JSON: `version`, `commit`, `modified`, `build_time`, `go_version`, `platform`. |
+| `/leaderz` | 200 on the raft leader once start-up has finished, whatever the store does and also during the shutdown delay, while the node still serves; on a standalone node, 200 while it is ready. Otherwise 503, with `starting`, `not leader`, or, on a standalone node, the reason it is not ready. |
+| `/version` | The build information as JSON: `version`, `modified`, `go_version` and `platform` always, `commit` when the binary carries a VCS revision, `build_time` (the commit time, RFC 3339; the start-up log line calls it `built`) when it carries one. |
 
 A node is ready when start-up has finished (every listener, the ops listener
 included, is bound, and the store is open), the store serves, and the shutdown
@@ -170,7 +170,8 @@ is for the operator to look at. An in-memory standalone store cannot fail.
 The gRPC listener serves `grpc.health.v1.Health` without authentication: the
 overall service (`""`) and `solti.discover.v1.DiscoverService` are `SERVING`
 while `/readyz` answers 200, and `NOT_SERVING` while it does not. A `Check` reads
-the state anew; a client that `Watch`es sees a change within a second.
+the state anew; a client that `Watch`es sees a change within a second, and its
+stream ends when the gRPC listener starts to stop.
 
 Tests: `TestReadinessFollowsStoreAndShutdown`, `TestReadinessReasonOrder`,
 `TestLeaderProbeOnRaft`, `TestOpsEndpointsNeedNoAuth`,
@@ -184,14 +185,20 @@ The first SIGINT or SIGTERM starts a graceful shutdown, in this order:
    `NOT_SERVING`, at once. Every listener still serves.
 2. podium waits `server.shutdown_delay` (env `SOLTI_SERVER_SHUTDOWN_DELAY`,
    default `0s`, so no wait): the time a load balancer needs to see the 503 and
-   stop sending requests. Behind a load balancer or in Kubernetes set `5s`.
+   stop sending requests. Behind a load balancer or in Kubernetes set `5s`. In
+   Kubernetes, a raft deployment that finds its peers through a headless Service
+   (`cluster.discovery.driver: dns`) and probes `/readyz` as the `readinessProbe` starts
+   only if that Service sets `publishNotReadyAddresses: true`: a node is ready
+   only once it knows a leader, which needs the other nodes to resolve it, and
+   without that setting the Service lists none of them until they are ready.
 3. The listeners stop accepting. The requests in flight finish, within
    `server.shutdown_timeout` (default 15s): a request is no longer cut by the
    shutdown. The event stream and the task log streams end as the UI listener
    starts to stop, so a stream that stays open does not hold the others until the
    timeout. A request still running at the timeout is cut. The gRPC listener
-   stops with `GracefulStop` within the same timeout; a client that holds a
-   health `Watch` open keeps it from finishing sooner, until the timeout.
+   stops with `GracefulStop` within the same timeout; the health `Watch`
+   streams end as it starts, so a client that holds one does not delay it
+   (`TestHealthWatchDoesNotHoldShutdown`).
 4. The rest is as before: the log hub, the proxy pool, the event hub and the
    store or raft node close, bounded by 30s, which is not configurable.
 
@@ -199,7 +206,9 @@ The delay is not part of `server.shutdown_timeout`, so a termination grace perio
 must cover both, and the 30s of step 4. A **second** SIGINT or SIGTERM, while the
 shutdown runs, ends the process at once with status 1, after a WARN line, and
 cleans nothing up. A runner that exits on its own, such as a listener that cannot
-bind, stops the others without the delay and exits 1. The ops listener stops with
+bind, stops the others without the delay, turns readiness and the gRPC health
+service to "shutting down" as they stop (`TestRunnerExitFlipsReadiness`), and
+exits 1. The ops listener stops with
 the others, so after step 2 its probes get a refused connection.
 
 Tests: `TestInFlightRequestFinishesAtShutdown`, `TestStopLetsRequestsInFlightFinish`,

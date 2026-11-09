@@ -12,10 +12,12 @@ import (
 	"github.com/soltiHQ/control-plane/internal/buildinfo"
 )
 
-func probe(ready string, leader bool) *Handler {
+// probe is a handler whose readiness is ready ("" for ready) and whose /leaderz
+// reason is leader ("" for the leader).
+func probe(ready, leader string) *Handler {
 	return NewHandler(Probes{
 		Ready:  func() string { return ready },
-		Leader: func() bool { return leader },
+		Leader: func() string { return leader },
 		Version: buildinfo.Info{
 			Version: "v1.2.3", Commit: "0123456789abcdef", GoVersion: "go1.27.3", Platform: "linux/amd64",
 			BuildTime: time.Date(2026, 11, 5, 11, 35, 33, 0, time.UTC),
@@ -56,20 +58,20 @@ func get(t *testing.T, h http.Handler, method, path string) reply {
 // probes; any other method is refused, and an unknown path is not found.
 func TestRoutesAnswerGetAndHead(t *testing.T) {
 	for _, tc := range []struct {
-		name, ready, path string
-		leader            bool
-		status            int
-		body              string
+		name, ready, leader, path string
+		status                    int
+		body                      string
 	}{
-		{"live", "starting", "/livez", false, 200, "ok\n"},
-		{"ready", "", "/readyz", false, 200, "ok\n"},
-		{"starting", "starting", "/readyz", true, 503, "starting\n"},
-		{"storage", "storage failed", "/readyz", true, 503, "storage failed\n"},
-		{"no leader", "no raft leader", "/readyz", false, 503, "no raft leader\n"},
-		{"shutting down", "shutting down", "/readyz", true, 503, "shutting down\n"},
-		{"leader", "", "/leaderz", true, 200, "ok\n"},
-		{"follower", "", "/leaderz", false, 503, "not leader\n"},
-		{"leader that is not ready", "shutting down", "/leaderz", true, 503, "shutting down\n"},
+		{"live", "starting", "starting", "/livez", 200, "ok\n"},
+		{"ready", "", "not leader", "/readyz", 200, "ok\n"},
+		{"starting", "starting", "", "/readyz", 503, "starting\n"},
+		{"storage", "storage failed", "", "/readyz", 503, "storage failed\n"},
+		{"no leader", "no raft leader", "not leader", "/readyz", 503, "no raft leader\n"},
+		{"shutting down", "shutting down", "", "/readyz", 503, "shutting down\n"},
+		{"leader", "", "", "/leaderz", 200, "ok\n"},
+		{"follower", "", "not leader", "/leaderz", 503, "not leader\n"},
+		{"leader during the shutdown delay", "shutting down", "", "/leaderz", 200, "ok\n"},
+		{"not leader while starting", "starting", "starting", "/leaderz", 503, "starting\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := probe(tc.ready, tc.leader)
@@ -86,7 +88,7 @@ func TestRoutesAnswerGetAndHead(t *testing.T) {
 			}
 		})
 	}
-	h := probe("", true)
+	h := probe("", "")
 	if w := get(t, h, http.MethodPost, "/livez"); w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /livez: %d, want 405", w.Code)
 	}
@@ -97,7 +99,7 @@ func TestRoutesAnswerGetAndHead(t *testing.T) {
 
 // /version is the build information as JSON, whatever the readiness.
 func TestVersionIsBuildInfoJSON(t *testing.T) {
-	w := get(t, probe("starting", false), http.MethodGet, "/version")
+	w := get(t, probe("starting", "starting"), http.MethodGet, "/version")
 	if w.Code != http.StatusOK || w.Header.Get("Content-Type") != "application/json" {
 		t.Fatalf("GET /version: %d %q", w.Code, w.Header.Get("Content-Type"))
 	}
@@ -119,7 +121,7 @@ func TestVersionIsBuildInfoJSON(t *testing.T) {
 
 // Handle adds a route to the listener: what the metrics route is registered with.
 func TestHandleAddsARoute(t *testing.T) {
-	h := probe("", true)
+	h := probe("", "")
 	h.Handle("GET /metrics", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("metrics"))
 	}))
