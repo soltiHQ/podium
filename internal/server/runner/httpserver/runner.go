@@ -93,9 +93,10 @@ func (r *Runner) Start(_ context.Context) error {
 	}
 	r.ln = ln
 
-	// Stop cancels the base context of every connection. It is made here, before
-	// ready closes, so that Stop, which waits for ready, sees its cancel: Serve
-	// would ask for it only later, on this goroutine.
+	// Stop cancels the base context of every connection when the requests in
+	// flight outlast its deadline. It is made here, before ready closes, so that
+	// Stop, which waits for ready, sees its cancel: Serve would ask for it only
+	// later, on this goroutine.
 	baseCtx, cancel := context.WithCancel(context.Background())
 	r.cancelCtx = cancel
 
@@ -113,6 +114,9 @@ func (r *Runner) Start(_ context.Context) error {
 
 		BaseContext: func(net.Listener) context.Context { return baseCtx },
 		ConnContext: r.cfg.ConnContext,
+	}
+	if r.cfg.OnShutdown != nil {
+		r.srv.RegisterOnShutdown(r.cfg.OnShutdown)
 	}
 	close(r.ready)
 
@@ -135,7 +139,10 @@ func (r *Runner) Start(_ context.Context) error {
 	return err
 }
 
-// Stop gracefully shuts down the server within the ctx deadline.
+// Stop shuts the server down within the ctx deadline: the listener closes at
+// once, the requests in flight finish, and idle connections close. A request
+// that is still running when ctx ends is cut: its context is cancelled and its
+// connection closed.
 func (r *Runner) Stop(ctx context.Context) error {
 	if !r.started.Load() {
 		return nil
@@ -157,10 +164,13 @@ func (r *Runner) Stop(ctx context.Context) error {
 		Msg("http server shutdown requested")
 
 	if r.cancelCtx != nil {
-		r.cancelCtx()
+		defer r.cancelCtx()
 	}
 
 	if err := srv.Shutdown(ctx); err != nil {
+		if r.cancelCtx != nil {
+			r.cancelCtx()
+		}
 		_ = srv.Close()
 		r.logger.Warn().
 			Err(err).

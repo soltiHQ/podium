@@ -39,6 +39,11 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   bootstrap and config-check, which compares the settings every replica must
   share with the leader's, see "Configuration drift" in
   `internal/raft/README.md`).
+- Cancelling the `ctx` of `Run` starts a graceful shutdown: `/readyz` and the gRPC
+  health service report "shutting down" at once, `Run` waits
+  `server.shutdown_delay`, and only then do the listeners stop accepting (see
+  "Shutdown" in `internal/config/README.md`). The event hub and the log hub close
+  as the UI listener starts to stop, which ends their streams.
 - `Shutdown` closes resources in reverse acquisition order: log hub → proxy
   pool → event hub → in raft mode the gRPC sync forwarder, then the lookups of
   the raft hosts' names that the client IP resolver trusts, then the Raft node.
@@ -96,7 +101,7 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   main()
    │
    │ cfg := config.Load()
-   │ ctx := signal.NotifyContext(SIGINT, SIGTERM)
+   │ ctx := notifyShutdown()         ← first SIGINT/SIGTERM cancels it; a second exits 1 at once
    │ a, _ := app.New(ctx, cfg, logger)
    │ defer a.Shutdown()
    │
@@ -104,7 +109,10 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   a.Run(ctx)
         │
         ▼
-  server.Server.Run(ctx)          ← spawns each Runner, watches for signal or runner exit
+  readiness off, wait shutdown_delay when ctx is done (drain)
+        │
+        ▼
+  server.Server.Run(runCtx)       ← spawns each Runner, watches for signal or runner exit
         │
    ┌────┴─────────────────┐
    │ ctx.Done()           │ runner exited

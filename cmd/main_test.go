@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -432,5 +434,62 @@ func TestFirstLogLineNamesTheBuild(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("first line %s lacks %s", out.String(), want)
 		}
+	}
+}
+
+// lockedBuffer is a bytes.Buffer that the test reads while a child process writes.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// The first SIGTERM cancels the context, which starts the graceful shutdown, and
+// exits nothing; a second ends the process at once with status 1 and a WARN. The
+// signals are real: the test sends them to itself.
+func TestSecondSignalExitsAtOnce(t *testing.T) {
+	logs := &lockedBuffer{}
+	exited := make(chan int, 1)
+	ctx, stop := notifyShutdown(zerolog.New(logs), func(code int) { exited <- code })
+	defer stop()
+
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first signal did not cancel the context within 10s")
+	}
+	select {
+	case code := <-exited:
+		t.Fatalf("the first signal exited with status %d, want the graceful shutdown", code)
+	default:
+	}
+
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-exited:
+		if code != 1 {
+			t.Fatalf("the second signal exited with status %d, want 1", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the second signal did not end the process within 10s:\n%s", logs.String())
+	}
+	if out := logs.String(); !strings.Contains(out, `"level":"warn"`) || !strings.Contains(out, "second signal") {
+		t.Fatalf("no WARN line about the second signal:\n%s", out)
 	}
 }

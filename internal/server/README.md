@@ -6,7 +6,7 @@ Unified lifecycle management for all runtime components of the control plane.
 server/
 ├── runner.go       Runner interface (Name / Start / Stop)
 ├── server.go       Server orchestrator: starts, monitors, shuts down runners
-├── config.go       ShutdownTimeout configuration
+├── config.go       ShutdownDelay and ShutdownTimeout configuration
 ├── error.go        RunnerError, RunnerExitedError, sentinel errors
 │
 └── runner/
@@ -43,16 +43,20 @@ type Runner interface {
         │    • runner exited        → unexpected exit or fatal error
         │
         ▼
-  Shutdown(background ctx + timeout)
+  Shutdown(background ctx + shutdown_timeout)
         │
    ┌────┴────────────────────────┐
-   │  for i := len-1 .. 0       │  ← reverse order (LIFO)
+   │  for each runner            │  ← all at once, no order
    │    go runner.Stop(ctx)      │
    └────┬────────────────────────┘
         │
         ▼
   wg.Wait() → errors.Join(errs...)
 ```
+
+The signal that reaches `Run` is the end of a longer sequence that `app.App.Run`
+drives: it turns readiness off and waits `server.shutdown_delay` before it lets
+`Run` see the cancellation (see "Shutdown" in `internal/config/README.md`).
 
 ## Runner implementations
 
@@ -67,10 +71,15 @@ type Runner interface {
 Both follow the same pattern:
 1. `New` validates config and handler/server
 2. `Start` binds a TCP listener, serves, blocks
-3. `Stop` attempts graceful shutdown, falls back to hard close on timeout
+3. `Stop` shuts down gracefully, falls back to hard close on timeout. For
+   `httpserver` that means the listener closes, the requests in flight finish,
+   and the ones still running at the deadline are cut (their context is
+   cancelled and the connection closed); `Config.OnShutdown` runs as `Stop`
+   starts, and is how a stream is told to end. For `grpcserver` it is
+   `GracefulStop`, then `Stop`.
 4. `ready` channel synchronises Stop with listener binding; `Bound()` is that
    channel, and `Addr()` the bound address, `""` before it is bound or when
-   the bind failed
+   the bind failed.
 
 ### Tick runners (lifecycle, sync)
 Both follow the same pattern:

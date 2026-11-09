@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -38,47 +40,152 @@ func TestStopAnIdleServer(t *testing.T) {
 	}
 }
 
-// Stop cancels the context of a request in flight, which ends a handler that
-// waits for it, as a stream does, so that the shutdown is graceful.
-func TestStopCancelsTheContextOfRequestsInFlight(t *testing.T) {
-	entered := make(chan struct{})
-	r, err := New(Config{Addr: "127.0.0.1:0"}, zerolog.Nop(), http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
+// startRunner starts r and returns the channel of Start's result, once the
+// listener is bound.
+func startRunner(t *testing.T, r *Runner) <-chan error {
+	t.Helper()
+	started := make(chan error, 1)
+	go func() { started <- r.Start(context.Background()) }()
+	<-r.Bound()
+	if r.Addr() == "" {
+		t.Fatalf("Start did not listen: %v", <-started)
+	}
+	return started
+}
+
+// Stop lets a request in flight finish before it returns, and the request is
+// answered in full: its context is not cancelled by the shutdown.
+func TestStopLetsRequestsInFlightFinish(t *testing.T) {
+	var (
+		entered   = make(chan struct{})
+		release   = make(chan struct{})
+		cancelled = make(chan struct{}, 1)
+	)
+	r, err := New(Config{Addr: "127.0.0.1:0"}, zerolog.Nop(), http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		close(entered)
-		<-req.Context().Done()
+		select {
+		case <-release:
+			_, _ = w.Write([]byte("done"))
+		case <-req.Context().Done():
+			cancelled <- struct{}{}
+		}
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	started := make(chan error, 1)
-	go func() { started <- r.Start(context.Background()) }()
-	<-r.ready
-	if r.ln == nil {
-		t.Fatalf("Start did not listen: %v", <-started)
+	started := startRunner(t, r)
+	type answer struct {
+		body string
+		err  error
 	}
+	answered := make(chan answer, 1)
+	go func() {
+		resp, err := http.Get("http://" + r.Addr() + "/")
+		if err != nil {
+			answered <- answer{err: err}
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		b, err := io.ReadAll(resp.Body)
+		answered <- answer{string(b), err}
+	}()
+	<-entered
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stopped := make(chan error, 1)
+	go func() { stopped <- r.Stop(ctx) }()
+	select {
+	case err := <-stopped:
+		t.Fatalf("Stop returned (%v) while a request was in flight", err)
+	case <-cancelled:
+		t.Fatal("the shutdown cancelled the context of a request in flight")
+	case <-time.After(200 * time.Millisecond): // a deliberate window: Stop must not return in it
+	}
+	close(release)
+	if err := <-stopped; err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := <-started; err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if a := <-answered; a.err != nil || a.body != "done" {
+		t.Fatalf("the request in flight: %q, %v; want its full answer", a.body, a.err)
+	}
+}
+
+// OnShutdown runs as Stop begins, and a handler it tells to end, as a stream is,
+// does not hold Stop until its deadline.
+func TestOnShutdownEndsAStream(t *testing.T) {
+	var (
+		entered = make(chan struct{})
+		end     = make(chan struct{})
+	)
+	r, err := New(Config{Addr: "127.0.0.1:0", OnShutdown: func() { close(end) }}, zerolog.Nop(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.(http.Flusher).Flush()
+		close(entered)
+		<-end
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := startRunner(t, r)
 	answered := make(chan error, 1)
 	go func() {
-		resp, err := http.Get("http://" + r.ln.Addr().String() + "/")
+		resp, err := http.Get("http://" + r.Addr() + "/")
 		if err == nil {
+			_, err = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
 		}
 		answered <- err
 	}()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the request did not reach the handler within 5s")
-	}
+	<-entered
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := r.Stop(ctx); err != nil {
-		t.Fatalf("Stop: %v: the handler did not end with the context of its request", err)
+		t.Fatalf("Stop: %v: the stream did not end with OnShutdown", err)
 	}
 	if err := <-started; err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if err := <-answered; err != nil {
-		t.Fatalf("the request in flight: %v", err)
+		t.Fatalf("the stream: %v", err)
+	}
+}
+
+// A request still running when Stop's deadline passes is cut: its context is
+// cancelled, and Stop reports the timeout.
+func TestStopCutsARequestThatOutlastsTheDeadline(t *testing.T) {
+	entered, cancelled := make(chan struct{}), make(chan struct{})
+	r, err := New(Config{Addr: "127.0.0.1:0"}, zerolog.Nop(), http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
+		close(entered)
+		<-req.Context().Done()
+		close(cancelled)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := startRunner(t, r)
+	go func() {
+		if resp, err := http.Get("http://" + r.Addr() + "/"); err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+	<-entered
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := r.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Stop: %v, want the deadline", err)
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the context of the cut request was not cancelled within 5s")
+	}
+	if err := <-started; err != nil {
+		t.Fatalf("Start: %v", err)
 	}
 }
 

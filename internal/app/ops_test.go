@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,6 +22,10 @@ import (
 	"google.golang.org/grpc/status"
 
 	discoverv1 "github.com/soltiHQ/control-plane/api/gen/solti/discover/v1"
+	"github.com/soltiHQ/control-plane/domain/enum"
+	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/auth/identity"
+	"github.com/soltiHQ/control-plane/internal/auth/token/jwt"
 	"github.com/soltiHQ/control-plane/internal/buildinfo"
 	"github.com/soltiHQ/control-plane/internal/config"
 )
@@ -76,6 +82,19 @@ func startApp(t *testing.T, configure func(*config.Config), before func(*App)) *
 	return r
 }
 
+// gateDelay replaces the shutdown delay of a, which a test would otherwise wait
+// out, with a wait that ends when the returned function is called.
+func gateDelay(a *App) (release func()) {
+	gate := make(chan struct{})
+	a.sleep = func(ctx context.Context, _ time.Duration) {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+		}
+	}
+	return sync.OnceFunc(func() { close(gate) })
+}
+
 // get returns the status and the body of GET http://addr+path with header, or
 // 0 and the error when the request fails.
 func get(addr, path string, header http.Header) (int, string, error) {
@@ -110,12 +129,52 @@ func opsAnswers(t *testing.T, addr, path string, status int, body string) {
 	})
 }
 
-// A node is not ready while its durable store has failed. The failure is injected
-// at the seam of the readiness; the store's own failure is the durable package's
-// test.
-func TestReadinessFollowsStore(t *testing.T) {
-	var broken atomic.Bool
-	r := startApp(t, nil, func(a *App) {
+// bearerFor stores an enabled user with permissions and a session in the store of
+// a, and returns a bearer token of that session.
+func bearerFor(t *testing.T, a *App, cfg config.Config, userID string, permissions ...enum.Permission) string {
+	t.Helper()
+	ctx := context.Background()
+	user, err := model.NewUser(userID, userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user.Enable()
+	perms := make([]string, 0, len(permissions))
+	for _, p := range permissions {
+		perms = append(perms, string(p))
+	}
+	user.SetPermissions(perms)
+	if err = a.store.UpsertUser(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	session, err := model.NewSession("session-"+userID, userID, "credential", enum.Password, make([]byte, 32), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = a.store.CreateSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	value, err := jwt.NewHSIssuer([]byte(cfg.Auth.JWTSecret), a.authModel.Clock).Issue(ctx, &identity.Identity{
+		UserID: userID, Subject: userID, SessionID: session.ID(), TokenID: "token-" + userID, Issuer: cfg.Auth.Issuer,
+		Audience: []string{cfg.Auth.Audience}, ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+// A node is not ready while its durable store has failed, and not ready once the
+// shutdown starts, which it reports while the UI listener still answers, for the
+// shutdown delay. The failure is injected at the seam of the readiness; the
+// store's own failure is the durable package's test.
+func TestReadinessFollowsStoreAndShutdown(t *testing.T) {
+	var (
+		broken  atomic.Bool
+		release func()
+	)
+	r := startApp(t, func(c *config.Config) { c.Server.ShutdownDelay = time.Hour }, func(a *App) {
+		release = gateDelay(a)
 		a.ready.failure = func() error {
 			if broken.Load() {
 				return errors.New("injected durable failure")
@@ -123,8 +182,8 @@ func TestReadinessFollowsStore(t *testing.T) {
 			return nil
 		}
 	})
-	ops := r.app.ops.Addr
-	waitFor(t, 10*time.Second, "the ops listener binds", func() bool { return ops() != "" })
+	ops, ui := r.app.ops.Addr, r.app.ui.Addr
+	waitFor(t, 10*time.Second, "the listeners bind", func() bool { return ops() != "" && ui() != "" })
 	opsAnswers(t, ops(), "/readyz", 200, "ok")
 
 	broken.Store(true)
@@ -132,6 +191,25 @@ func TestReadinessFollowsStore(t *testing.T) {
 	opsAnswers(t, ops(), "/livez", 200, "ok") // a failed store is not a dead process
 	broken.Store(false)
 	opsAnswers(t, ops(), "/readyz", 200, "ok")
+
+	r.cancel()
+	opsAnswers(t, ops(), "/readyz", 503, "shutting down")
+	if status, _, err := get(ui(), "/login", nil); err != nil || status != http.StatusOK {
+		t.Fatalf("the UI listener during the shutdown delay: %d, %v; want it to answer", status, err)
+	}
+	select {
+	case <-r.done:
+		t.Fatal("Run returned during the shutdown delay")
+	default:
+	}
+	release()
+	<-r.done
+	if !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("Run: %v, want context.Canceled", r.err)
+	}
+	if _, _, err := get(ops(), "/livez", nil); err == nil {
+		t.Fatal("the ops listener answered after Run returned")
+	}
 }
 
 // The reasons of readiness, first that applies: shutting down, then starting, a
@@ -262,10 +340,14 @@ func TestOpsListenerDisabledWhenAddrEmpty(t *testing.T) {
 
 // The gRPC health service reports the overall service and the discovery service
 // as SERVING while the node is ready, and NOT_SERVING when it is not, without
-// authentication: a failed store.
+// authentication: a failed store, and the shutdown, which holds for the delay.
 func TestGRPCHealthFollowsReadiness(t *testing.T) {
-	var broken atomic.Bool
-	r := startApp(t, nil, func(a *App) {
+	var (
+		broken  atomic.Bool
+		release func()
+	)
+	r := startApp(t, func(c *config.Config) { c.Server.ShutdownDelay = time.Hour }, func(a *App) {
+		release = gateDelay(a)
 		a.ready.failure = func() error {
 			if broken.Load() {
 				return errors.New("injected durable failure")
@@ -302,5 +384,142 @@ func TestGRPCHealthFollowsReadiness(t *testing.T) {
 	defer cancel()
 	if _, err = client.Check(ctx, &healthpb.HealthCheckRequest{Service: "unknown.Service"}); status.Code(err) != codes.NotFound {
 		t.Fatalf("an unknown service: %v, want NotFound", err)
+	}
+	r.cancel()
+	expect(healthpb.HealthCheckResponse_NOT_SERVING)
+	release()
+}
+
+// Run waits the configured shutdown delay, on a real timer, between the signal
+// and the end of its listeners.
+func TestShutdownDelayIsWaitedOut(t *testing.T) {
+	const delay = 300 * time.Millisecond
+	r := startApp(t, func(c *config.Config) { c.Server.ShutdownDelay = delay }, nil)
+	if r.app.shutdownDelay != delay {
+		t.Fatalf("the app's delay is %v, want server.shutdown_delay, %v", r.app.shutdownDelay, delay)
+	}
+	waitFor(t, 10*time.Second, "the app is ready", func() bool { return r.app.ready.reason() == "" })
+	begin := time.Now()
+	r.cancel()
+	<-r.done
+	if took := time.Since(begin); took < delay {
+		t.Fatalf("Run returned %v after the signal, before the shutdown delay of %v", took, delay)
+	}
+}
+
+// A request in flight when the shutdown starts finishes with its answer, while
+// the event stream and a task log stream end as the listeners stop accepting. The
+// slow request is a task listing, which waits on a fake agent.
+func TestInFlightRequestFinishesAtShutdown(t *testing.T) {
+	var (
+		slowEntered = make(chan struct{})
+		release     = make(chan struct{})
+		slowOnce    sync.Once
+	)
+	agentHTTP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(req.URL.Path, "/logs") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-req.Context().Done()
+			return
+		}
+		slowOnce.Do(func() { close(slowEntered) })
+		select {
+		case <-release:
+		case <-req.Context().Done():
+			return
+		}
+		_, _ = io.WriteString(w, `{"metadata":{"continue":""},"items":[]}`)
+	}))
+	defer agentHTTP.Close()
+	r := startApp(t, nil, nil)
+	ag, err := model.NewAgentFrom(model.AgentParams{ID: "agent-1", Name: "agent-1", Endpoint: agentHTTP.URL, EndpointType: 2, APIVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = r.app.store.UpsertAgent(context.Background(), ag); err != nil {
+		t.Fatal(err)
+	}
+	token := bearerFor(t, r.app, r.cfg, "viewer", enum.AgentsGet)
+	ui := r.app.ui.Addr
+	waitFor(t, 10*time.Second, "the UI listener binds", func() bool { return ui() != "" })
+	header := http.Header{"Authorization": {"Bearer " + token}, "Accept": {"application/json"}}
+
+	// ends reports when the response of path ends, after its headers arrived.
+	open := func(path string) (ended <-chan error) {
+		req, err := http.NewRequest(http.MethodGet, "http://"+ui()+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header = header.Clone()
+		req.Header.Set("Accept", "text/event-stream")
+		resp, err := (&http.Client{}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s: %d, want 200", path, resp.StatusCode)
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			done <- err
+		}()
+		return done
+	}
+	events := open("/api/v1/events/stream")
+	logs := open("/api/v1/agents/agent-1/tasks/task/logs/stream?task_uid=u1")
+
+	type answer struct {
+		status int
+		err    error
+	}
+	slow := make(chan answer, 1)
+	go func() {
+		status, _, err := get(ui(), "/api/v1/agents/agent-1/tasks?limit=2", header)
+		slow <- answer{status, err}
+	}()
+	select {
+	case <-slowEntered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the slow request did not reach the agent within 10s")
+	}
+
+	r.cancel()
+	for name, ended := range map[string]<-chan error{"event stream": events, "log stream": logs} {
+		select {
+		case err := <-ended:
+			if err != nil {
+				t.Fatalf("the %s ended with %v, want a clean end", name, err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the %s did not end within 10s of the shutdown", name)
+		}
+	}
+	select {
+	case <-r.done:
+		t.Fatalf("Run returned (%v) while a request was in flight", r.err)
+	case a := <-slow:
+		t.Fatalf("the slow request ended (%d, %v) before it was released", a.status, a.err)
+	default:
+	}
+	close(release)
+	select {
+	case a := <-slow:
+		if a.err != nil || a.status != http.StatusOK {
+			t.Fatalf("the request in flight: %d, %v; want 200", a.status, a.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request in flight did not finish within 10s of its release")
+	}
+	<-r.done
+	if !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("Run: %v, want context.Canceled", r.err)
+	}
+	if _, _, err := get(ui(), "/login", nil); err == nil {
+		t.Fatal("the UI listener answered after Run returned")
 	}
 }

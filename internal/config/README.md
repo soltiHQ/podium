@@ -154,12 +154,13 @@ text (`ok`, or the reason) except `/version`:
 | Route | Answers |
 | --- | --- |
 | `/livez` | 200 `ok` while the process serves. |
-| `/readyz` | 200 `ok` when the node is ready, and otherwise 503 with the reason, one of `starting`, `storage failed`, `no raft leader`. |
+| `/readyz` | 200 `ok` when the node is ready, and otherwise 503 with the reason, one of `starting`, `storage failed`, `no raft leader`, `shutting down`. |
 | `/leaderz` | 200 on the raft leader and on a ready standalone node; otherwise 503, with `not leader` or the reason the node is not ready. |
 | `/version` | The build information as JSON: `version`, `commit`, `modified`, `build_time`, `go_version`, `platform`. |
 
 A node is ready when start-up has finished (every listener, the ops listener
-included, is bound, and the store is open) and the store serves. The store serves when a durable standalone store has not failed
+included, is bound, and the store is open), the store serves, and the shutdown
+has not begun. The store serves when a durable standalone store has not failed
 (`storage failed` is the state in which its reads and writes fail until restart,
 which it also logs as an ERROR) and, on raft, when this node knows a leader. The
 reasons apply in that order. `/livez` stays 200 whatever the store does: a
@@ -171,9 +172,39 @@ overall service (`""`) and `solti.discover.v1.DiscoverService` are `SERVING`
 while `/readyz` answers 200, and `NOT_SERVING` while it does not. A `Check` reads
 the state anew; a client that `Watch`es sees a change within a second.
 
-Tests: `TestReadinessFollowsStore`, `TestReadinessReasonOrder`,
+Tests: `TestReadinessFollowsStoreAndShutdown`, `TestReadinessReasonOrder`,
 `TestLeaderProbeOnRaft`, `TestOpsEndpointsNeedNoAuth`,
 `TestOpsListenerDisabledWhenAddrEmpty`, `TestGRPCHealthFollowsReadiness`.
+
+### Shutdown
+
+The first SIGINT or SIGTERM starts a graceful shutdown, in this order:
+
+1. `/readyz` turns to 503 `shutting down` and the gRPC health service to
+   `NOT_SERVING`, at once. Every listener still serves.
+2. podium waits `server.shutdown_delay` (env `SOLTI_SERVER_SHUTDOWN_DELAY`,
+   default `0s`, so no wait): the time a load balancer needs to see the 503 and
+   stop sending requests. Behind a load balancer or in Kubernetes set `5s`.
+3. The listeners stop accepting. The requests in flight finish, within
+   `server.shutdown_timeout` (default 15s): a request is no longer cut by the
+   shutdown. The event stream and the task log streams end as the UI listener
+   starts to stop, so a stream that stays open does not hold the others until the
+   timeout. A request still running at the timeout is cut. The gRPC listener
+   stops with `GracefulStop` within the same timeout; a client that holds a
+   health `Watch` open keeps it from finishing sooner, until the timeout.
+4. The rest is as before: the log hub, the proxy pool, the event hub and the
+   store or raft node close, bounded by 30s, which is not configurable.
+
+The delay is not part of `server.shutdown_timeout`, so a termination grace period
+must cover both, and the 30s of step 4. A **second** SIGINT or SIGTERM, while the
+shutdown runs, ends the process at once with status 1, after a WARN line, and
+cleans nothing up. A runner that exits on its own, such as a listener that cannot
+bind, stops the others without the delay and exits 1. The ops listener stops with
+the others, so after step 2 its probes get a refused connection.
+
+Tests: `TestInFlightRequestFinishesAtShutdown`, `TestStopLetsRequestsInFlightFinish`,
+`TestOnShutdownEndsAStream`, `TestStopCutsARequestThatOutlastsTheDeadline`,
+`TestSecondSignalExitsAtOnce`.
 
 ### Every setting
 
@@ -234,6 +265,7 @@ own default or have no value, as the section on it says.
 | `triggers.agent_tasks_refresh` | `SOLTI_TRIGGERS_AGENT_TASKS_REFRESH` | string | every 60s |
 | `triggers.specs_refresh` | `SOLTI_TRIGGERS_SPECS_REFRESH` | string | every 180s |
 | `triggers.spec_detail_refresh` | `SOLTI_TRIGGERS_SPEC_DETAIL_REFRESH` | string | every 60s |
+| `server.shutdown_delay` | `SOLTI_SERVER_SHUTDOWN_DELAY` | duration | 0s |
 | `server.shutdown_timeout` | `SOLTI_SERVER_SHUTDOWN_TIMEOUT` | duration | 15s |
 | `auth.jwt_secret` | `SOLTI_AUTH_JWT_SECRET` | string | empty |
 | `auth.audience` | `SOLTI_AUTH_AUDIENCE` | string | control-plane |

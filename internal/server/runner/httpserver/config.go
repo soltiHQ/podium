@@ -30,6 +30,12 @@ type Config struct {
 
 	TLSConfig *tls.Config `yaml:"-"`
 
+	// OnShutdown runs once, in its own goroutine, as Stop starts to shut the
+	// server down, with the listener closed and the requests in flight still
+	// served. A handler that holds a request open on purpose, as a stream does,
+	// is told by it to end.
+	OnShutdown func() `yaml:"-"`
+
 	ConnContext func(ctx context.Context, c net.Conn) context.Context `yaml:"-"`
 }
 

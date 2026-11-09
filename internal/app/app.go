@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/x509"
 	"sync"
+	"time"
 
 	"github.com/soltiHQ/control-plane/internal/loghub"
 
@@ -71,10 +72,13 @@ type App struct {
 	proxyPool    *proxy.Pool
 	authModel    *kit.Auth
 
-	server     *server.Server
-	logHub     *loghub.Hub
-	ready      *readiness
-	grpcHealth *grpcHealth
+	server        *server.Server
+	logHub        *loghub.Hub
+	ready         *readiness
+	grpcHealth    *grpcHealth
+	shutdownDelay time.Duration
+	// sleep waits d, or until ctx ends; New sets it, and a test replaces it.
+	sleep func(ctx context.Context, d time.Duration)
 	// listeners are the runners that bind a port: the app is ready once all are
 	// bound. ui and grpc are two of them, which tests dial. ops is the ops runner,
 	// nil when ops.addr is empty; opsHandler, which serves it, takes the handlers
@@ -240,6 +244,12 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 	mainHandler, logHub := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership, resolver, clientTLS)
 	httpCfg := cfg.HTTP
 	httpCfg.TLSConfig = uiServerTLS
+	// The streams end as the UI listener starts to shut down, so that one that
+	// stays open cannot hold the requests in flight until the timeout.
+	httpCfg.OnShutdown = func() {
+		eventHub.Close()
+		logHub.Close()
+	}
 	httpRunner, err := httpserver.New(httpCfg, logger, mainHandler)
 	if err != nil {
 		logHub.Close()
@@ -328,7 +338,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		authModel:    authModel,
 		server:       srv, logHub: logHub, shutdownDone: make(chan struct{}),
 
-		ready: ready, grpcHealth: grpcHealth,
+		ready: ready, grpcHealth: grpcHealth, shutdownDelay: cfg.Server.ShutdownDelay, sleep: sleepCtx,
 		listeners: listeners, ui: httpRunner, grpc: grpcRunner, ops: opsRunner, opsHandler: opsHandler,
 	}, nil
 }
@@ -343,11 +353,18 @@ type listener interface {
 
 // Run starts the server runners and blocks until ctx is cancelled or a runner
 // exits unexpectedly. Returns the first error encountered, if any.
+//
+// The cancellation of ctx starts a graceful shutdown: readiness and the gRPC
+// health service turn to "shutting down" at once, Run waits server.shutdown_delay
+// for the load balancers to notice, and only then do the listeners stop
+// accepting. The requests in flight finish within server.shutdown_timeout, and
+// the streams end as the UI listener starts to shut down.
 func (a *App) Run(ctx context.Context) error {
-	runCtx, stop := context.WithCancel(ctx)
+	runCtx, stop := context.WithCancel(context.Background())
 	defer stop()
 	go a.awaitBound(runCtx)
 	go a.grpcHealth.run(runCtx)
+	go a.drain(ctx, runCtx, stop)
 	return a.server.Run(runCtx)
 }
 
@@ -366,6 +383,37 @@ func (a *App) awaitBound(ctx context.Context) {
 	}
 	a.ready.bound.Store(true)
 	a.grpcHealth.sync()
+}
+
+// drain waits for ctx, the shutdown signal, and then reports "not ready" and
+// waits out the shutdown delay before it calls stop, which stops the listeners.
+// It ends at once when runCtx does, which happens when a runner exits on its own.
+func (a *App) drain(ctx, runCtx context.Context, stop context.CancelFunc) {
+	select {
+	case <-ctx.Done():
+	case <-runCtx.Done():
+		return
+	}
+	a.ready.shuttingDown.Store(true)
+	a.grpcHealth.sync()
+	a.logger.Info().Dur("shutdown_delay", a.shutdownDelay).Msg("shutdown started: not ready, listeners stop after the shutdown delay")
+	if a.shutdownDelay > 0 {
+		a.sleep(runCtx, a.shutdownDelay)
+		if runCtx.Err() != nil {
+			return
+		}
+	}
+	stop()
+}
+
+// sleepCtx waits d, or until ctx ends.
+func sleepCtx(ctx context.Context, d time.Duration) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+	}
 }
 
 // Shutdown releases resources acquired by [New] in reverse order of creation.

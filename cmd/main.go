@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -119,7 +120,7 @@ func serve(configPath string) int {
 	// From here on podium logs as log.level and log.format say.
 	logger := newLogger(cfg.Log, os.Stdout)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := notifyShutdown(logger, os.Exit)
 	defer stop()
 
 	a, err := app.New(ctx, cfg, logger)
@@ -143,6 +144,38 @@ func serve(configPath string) int {
 	}
 	logger.Info().Msg("server stopped")
 	return 0
+}
+
+// notifyShutdown returns a context that the first SIGINT or SIGTERM cancels, which
+// starts the graceful shutdown, and the function that stops listening for signals
+// and cancels it too. A second signal while the shutdown runs ends the process at
+// once with status 1, after a WARN: the supervisor that sends it has lost its
+// patience, and nothing is cleaned up. exit is os.Exit, which tests replace.
+func notifyShutdown(logger zerolog.Logger, exit func(int)) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		for range 2 {
+			select {
+			case sig := <-signals:
+				if ctx.Err() != nil {
+					logger.Warn().Str("signal", sig.String()).Msg("second signal: exiting at once without finishing the shutdown")
+					exit(1)
+				}
+				logger.Info().Str("signal", sig.String()).Msg("signal received: shutting down")
+				cancel()
+			case <-done:
+				return
+			}
+		}
+	}()
+	return ctx, sync.OnceFunc(func() {
+		signal.Stop(signals)
+		close(done)
+		cancel()
+	})
 }
 
 // newLogger builds the logger of a run from the log settings, which
