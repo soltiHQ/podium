@@ -57,6 +57,13 @@ leader. See [Raft cluster](#raft-cluster).
 
 ## Install
 
+Releases and images are published by the release workflow when a tag is pushed,
+and it has not run yet: nothing is published before the first pushed tag, as the
+note in [Release](#release) says. Until then, build a binary with
+`task ci/golang/build` (see [Develop](#develop)), and an image from
+`bin/podium-linux-<arch>` with
+`docker build --platform linux/<arch> -t podium:local .`.
+
 ### Release binary
 
 Each GitHub release carries `podium-linux-amd64`, `podium-linux-arm64`,
@@ -116,13 +123,15 @@ in standalone, `data/podium` under the working directory by default, and
 `cluster.raft.data_dir` in raft mode. It makes a missing directory with mode
 0700, and refuses to start on one that its group or others may access, or that
 is a symlink: volume settings that add group permissions keep podium from
-starting. The files in it are 0600: `podium.db` in standalone; in raft mode the
-raft log and stable store, `raft-log.bolt` and `raft-stable.bolt`, next to a
-`snapshots` directory, 0700. A generated administrator password stays in
-`bootstrap-admin-password`, also 0600, until you delete it. Keep the directory
-across restarts and give each node its own: never share a standalone directory
-between replicas, nor reuse it as a raft `data_dir`. A lock on `podium.db` keeps
-a second process off it. See
+starting. Create the `/var/lib/podium` of the minimal configuration below before
+the first start, mode 0700 and owned by the user that runs podium: podium makes
+a missing directory only where its user may create one. The files in it are
+0600: `podium.db` in standalone; in raft mode the raft log and stable store,
+`raft-log.bolt` and `raft-stable.bolt`, next to a `snapshots` directory, 0700. A
+generated administrator password stays in `bootstrap-admin-password`, also 0600,
+until you delete it. Keep the directory across restarts and give each node its
+own: never share a standalone directory between replicas, nor reuse it as a raft
+`data_dir`. A lock on `podium.db` keeps a second process off it. See
 [Durable standalone storage](internal/storage/durable/README.md) and
 [Raft data directory](internal/config/README.md#raft-data-directory).
 
@@ -154,7 +163,7 @@ its variable and its default.
 | Variable | Needed | What it is |
 | -- | -- | -- |
 | `SOLTI_AUTH_JWT_SECRET` | always | `auth.jwt_secret`: podium refuses to start without one of 32 bytes or more. It signs the access tokens and the device cookies. |
-| `SOLTI_AGENT_AUTH_ENROLL_SECRET` | to close agent enrollment | 32 bytes or more, read from the environment only. Without it, and without client certificates, any host that reaches a discovery listener can enroll a new agent ID, and podium logs a WARN at start: see [Provision agents](#provision-agents). |
+| `SOLTI_AGENT_AUTH_ENROLL_SECRET` | to close agent enrollment | 32 bytes or more, read from the environment only. Without it, and without client certificates, any host that reaches a discovery listener can enroll a new agent ID, and podium logs a WARN at start: see [Provision agents](#provision-agents). Set while `agent_auth.require` is `false`, where it would close nothing, it fails loading. |
 | `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` | optional, first start | The first administrator's password, read from the environment only, 12 characters to 72 bytes; ignored once users exist. |
 
 Generate the two secrets with `openssl rand -hex 32` and keep them: every node
@@ -295,7 +304,9 @@ secret: a leaked token lets nobody enroll another ID. See
   agent networks only. See
   [Agent authentication](internal/config/README.md#agent-authentication).
 - **`agent_auth.require: false`** turns agent tokens off in both directions, and
-  podium logs a WARN at start.
+  podium logs a WARN at start. Configuration loading refuses it while
+  `SOLTI_AGENT_AUTH_ENROLL_SECRET` is set, as in the `podium.env` above: unset
+  the secret first.
 - **A leaked or lost token**: reset the agent's credential with
   `POST /api/v1/agents/{id}/credential`, which needs `agents:reset`, or "Reset
   credential" on the agent's page. The answer holds the new token to give the
@@ -339,10 +350,23 @@ tls:
     key_file:  /etc/solti/tls/server.key
     client_ca_file: /etc/solti/tls/agents-ca.crt   # optional: agents need a client certificate
   client:
-    ca_file:   /etc/solti/tls/agents-ca.crt
-    cert_file: /etc/solti/tls/cp-client.crt        # optional: presented when an agent asks
+    ca_file:   /etc/solti/tls/client-ca.crt        # verifies agents' endpoints; raft: also the nodes' server certificates
+    cert_file: /etc/solti/tls/cp-client.crt        # presented when asked; raft with client_ca_file: required, of the agents' CA
     key_file:  /etc/solti/tls/cp-client.key
 ```
+
+In a raft cluster a follower forwards writes and agents' syncs to the leader,
+over TLS as a client of `tls.client` once `tls.server` is set.
+`tls.client.ca_file` must then also hold the CA of the nodes' server
+certificates, which name each node's raft advertise host as written (without a
+`ca_file` the leader is checked against the system roots): a leader whose
+certificate does not verify gets no write, and the follower answers 502 over
+HTTP and `leader unreachable` over gRPC. With `client_ca_file` set too, the
+leader's discovery listeners ask a forwarding follower for a certificate of the
+agents' CA, so each node's `tls.client.cert_file` and `key_file` must chain to
+that CA: without `tls.client.cert_file`, every sync that reaches a follower
+fails, 502 over HTTP and `leader unreachable` over gRPC, and each node logs a
+WARN at start.
 
 podium reads its certificate files at start only, so a renewed certificate takes
 effect at the next start. Behind a reverse proxy that terminates TLS, list the
@@ -373,12 +397,16 @@ cp -a /var/lib/podium "/var/backups/podium-$(date +%F)"
 
 ### Raft
 
-Each node keeps the whole state in its own `cluster.raft.data_dir`: the raft
-log, the stable store and the snapshots. Rolling back an upgrade needs a backup
-of every node's `data_dir` taken before it, with the nodes stopped. A node whose
-`data_dir` was lost or wiped rejoins as a new node: remove it from the cluster,
-start it with an empty `data_dir` and `cluster.raft.join: true`, and add it
-again, as
+Each node keeps the whole state in its own `cluster.raft.data_dir`: the raft log
+and the stable store, which are bbolt files like `podium.db`, and the snapshots.
+Copy a node's `data_dir` only while that node is stopped: as with `podium.db`, a
+live bbolt file is never copied. Copies of the nodes taken at different times
+are not one consistent point to roll back to. Rolling back an upgrade needs a
+copy of every node's `data_dir` taken before the upgrade
+([Rolling upgrade](internal/raft/README.md#rolling-upgrade)), and no procedure
+to restore a cluster from such copies is documented. A node whose `data_dir` was
+lost or wiped rejoins as a new node: remove it from the cluster, start it with
+an empty `data_dir` and `cluster.raft.join: true`, and add it again, as
 [Adding and removing members](internal/raft/README.md#adding-and-removing-members)
 says.
 
@@ -569,8 +597,14 @@ adding and removing members, a compromised node, browsers and
   for raft alone, never the agents' CA or the CA of `tls.server` or
   `tls.client`. See
   [Raft transport security](internal/config/README.md#raft-transport-security).
-- Set `tls.server` on every node: a follower forwards the writes it gets,
-  logins, cookies and tokens included, to the leader, in plaintext without it.
+- Set `tls.server` on every node, with certificates that name each node's raft
+  advertise host as written, and put their CA in every node's
+  `tls.client.ca_file`: a follower forwards the writes it gets, logins, cookies
+  and tokens included, and the agents' syncs to the leader, in plaintext without
+  `tls.server`, and each node logs a WARN at start that says so. With
+  `tls.server.client_ca_file`, give every node a `tls.client.cert_file` and
+  `key_file` that chain to the agents' CA, or every sync that reaches a follower
+  fails: see [TLS](#tls).
 - Some settings must be the same on every node: `auth.jwt_secret`,
   `auth.cookie_secure`, `auth.issuer`, `auth.audience`, `agent_auth.require`,
   the enrollment secret, `trusted_proxies`, `cors.*` and
@@ -661,7 +695,9 @@ check, and need one changelog label: `feature`, `bug`, `docs`, `deps`,
 
 1. A failed verify or build publishes nothing. A failed smoke check stops the
    run after `ghcr.io/soltihq/podium:vX.Y.Z` was pushed: `:latest` stays where
-   it was, and no GitHub release is made.
+   it was, and no GitHub release is made. A failed release job, after the image
+   job passed, leaves `ghcr.io/soltihq/podium:vX.Y.Z` pushed, and `:latest`
+   moved to it for a tag without a pre-release suffix, with no GitHub release.
 
 The workflow has not run yet: its first run is the first pushed tag, which also
 shows for the first time that a binary built at a tag reports the tag as its
