@@ -99,6 +99,41 @@ func (c AgentAuthConfig) Validate() error {
 	return nil
 }
 
+// ErrInvalidLogLevel indicates a log.level that is none of debug, info, warn and
+// error.
+var ErrInvalidLogLevel = errors.New("log level is not debug, info, warn or error")
+
+// ErrInvalidLogFormat indicates a log.format that is neither json nor text.
+var ErrInvalidLogFormat = errors.New("log format is not json or text")
+
+// LogConfig sets what podium logs and how. It applies once the configuration is
+// loaded; until then, and for what loading itself reports, podium logs JSON at
+// info.
+type LogConfig struct {
+	// Level is the lowest level written: debug, info, warn or error. The raft
+	// library's lines follow it.
+	Level string `yaml:"level"`
+
+	// Format is json, one object per line, or text, one console line per event
+	// without colour. Both go to stdout.
+	Format string `yaml:"format"`
+}
+
+// Validate reports a level or a format that is not one of the values above.
+func (c LogConfig) Validate() error {
+	switch c.Level {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("%w: %q", ErrInvalidLogLevel, c.Level)
+	}
+	switch c.Format {
+	case "json", "text":
+	default:
+		return fmt.Errorf("%w: %q", ErrInvalidLogFormat, c.Format)
+	}
+	return nil
+}
+
 // HistoryConfig separates durable retention from bounded collection.
 type HistoryConfig struct {
 	Archive   history.Config       `yaml:"archive"`
@@ -122,6 +157,7 @@ type Config struct {
 	Streams       middleware.StreamsConfig `yaml:"streams"`
 	TLS           TLSConfig                `yaml:"tls"`
 	AgentAuth     AgentAuthConfig          `yaml:"agent_auth"`
+	Log           LogConfig                `yaml:"log"`
 
 	// TrustedProxies lists the reverse proxies (IP addresses or CIDR prefixes)
 	// whose X-Forwarded-For and X-Forwarded-Proto headers are believed.
@@ -154,6 +190,7 @@ func Default() Config {
 			SubscriberBuffer: 64,
 		},
 		AgentAuth: AgentAuthConfig{Require: true},
+		Log:       LogConfig{Level: "info", Format: "json"},
 	}
 }
 
@@ -201,6 +238,9 @@ func (c Config) Validate() error {
 	if err := c.AgentAuth.Validate(); err != nil {
 		return fmt.Errorf("config.agent_auth: %w", err)
 	}
+	if err := c.Log.Validate(); err != nil {
+		return fmt.Errorf("config.log: %w", err)
+	}
 	if err := c.CORS.Validate(); err != nil {
 		return fmt.Errorf("config.cors: %w", err)
 	}
@@ -221,7 +261,7 @@ func (c Config) Validate() error {
 // the caller's. Warnings of the load go to log. Refuses to return a Config that
 // fails [Config.Validate].
 func Load(path string, log zerolog.Logger) (Config, error) {
-	var cfg = Default()
+	cfg := Default()
 	if path == "" {
 		path = os.Getenv("CONFIG_PATH")
 	}

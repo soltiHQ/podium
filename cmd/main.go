@@ -105,16 +105,19 @@ func printVersion(stdout, stderr io.Writer) int {
 
 // serve runs the server with the config file at configPath ("" for CONFIG_PATH
 // or none) and returns the exit code. Until the config is read it logs through a
-// bootstrap logger: JSON on stdout at info.
+// bootstrap logger: JSON on stdout at info; then it logs as log.level and
+// log.format say.
 func serve(configPath string) int {
-	logger := zerolog.New(os.Stdout).Level(zerolog.InfoLevel).With().Timestamp().Logger()
-	logStart(logger, buildinfo.Read())
+	bootstrap := zerolog.New(os.Stdout).Level(zerolog.InfoLevel).With().Timestamp().Logger()
+	logStart(bootstrap, buildinfo.Read())
 
-	cfg, err := config.Load(configPath, logger)
+	cfg, err := config.Load(configPath, bootstrap)
 	if err != nil {
-		logger.Error().Err(err).Msg("failed to load config")
+		bootstrap.Error().Err(err).Msg("failed to load config")
 		return 1
 	}
+	// From here on podium logs as log.level and log.format say.
+	logger := newLogger(cfg.Log, os.Stdout)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -140,6 +143,20 @@ func serve(configPath string) int {
 	}
 	logger.Info().Msg("server stopped")
 	return 0
+}
+
+// newLogger builds the logger of a run from the log settings, which
+// [config.LogConfig.Validate] has checked: json is zerolog's JSON, text its
+// console writer without colour.
+func newLogger(cfg config.LogConfig, w io.Writer) zerolog.Logger {
+	level, err := zerolog.ParseLevel(cfg.Level)
+	if err != nil {
+		level = zerolog.InfoLevel
+	}
+	if cfg.Format == "text" {
+		w = zerolog.ConsoleWriter{Out: w, NoColor: true, TimeFormat: time.RFC3339}
+	}
+	return zerolog.New(w).Level(level).With().Timestamp().Logger()
 }
 
 // logStart writes the first line of a run: which podium this is.

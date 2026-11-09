@@ -91,7 +91,7 @@ A `SOLTI_` variable that is not a setting is handled by where its name falls:
   `SOLTI_GRPC_`, `SOLTI_SYNC_`, `SOLTI_LIFECYCLE_`, `SOLTI_TRIGGERS_`,
   `SOLTI_SERVER_`, `SOLTI_AUTH_`, `SOLTI_CORS_`, `SOLTI_CLUSTER_`,
   `SOLTI_EVENTS_`, `SOLTI_STREAMS_`, `SOLTI_TLS_`, `SOLTI_AGENT_AUTH_`,
-  `SOLTI_HISTORY_`): it is a mistyped setting, and loading fails with its name
+  `SOLTI_HISTORY_`, `SOLTI_LOG_`): it is a mistyped setting, and loading fails with its name
   and, when a setting's variable is within edit distance 2, that name:
   `unknown environment variable SOLTI_HTTP_ADRR (did you mean SOLTI_HTTP_ADDR?)`.
 - Anywhere else: it is logged once at WARN, with the closest setting's variable
@@ -118,6 +118,25 @@ fails in `http`, `http_discovery`, `sync`, `lifecycle`, `server` and
 `every <n>ms`. The other sections keep the checks described under their own
 headings. An error names the section (`config.http`, `config.cluster`,
 `config.history.archive`, ...).
+
+### Logging
+
+`log.level` is `debug`, `info`, `warn` or `error` (lower case), default `info`:
+a line below it is not written. `log.format` is `json` (the default, one JSON
+object per line) or `text` (zerolog's console writer, one line per event, no
+colour). Both go to stdout. A value that is none of those fails loading as
+`config.log` (`TestLoadRejectsAnInvalidLogSetting`).
+
+The settings apply once the configuration is loaded. Before that podium logs
+JSON on stdout at `info`: the first line of a run (`podium starting`, with
+`version`, `commit`, `modified`, `built`, `go_version` and `platform`), and
+what loading reports, such as the warning about a `SOLTI_` variable that is not
+a setting. After it, every line, the raft library's included (see
+`internal/raft`, "Logging"), follows `log.level` and `log.format`; a failure to
+load is logged by the bootstrap logger and exits 1. Errors that `net/http`
+reports on its own, such as a failed TLS handshake or the panic of a handler,
+are WARN lines with the server's name in `runner`
+(`TestHTTPServerErrorsGoToZerolog`).
 
 ### Every setting
 
@@ -225,6 +244,8 @@ own default or have no value, as the section on it says.
 | `tls.client.key_file` | `SOLTI_TLS_CLIENT_KEY_FILE` | string | empty |
 | `agent_auth.require` | `SOLTI_AGENT_AUTH_REQUIRE` | bool | true |
 | not in a file | `SOLTI_AGENT_AUTH_ENROLL_SECRET` | string | no default |
+| `log.level` | `SOLTI_LOG_LEVEL` | string | info |
+| `log.format` | `SOLTI_LOG_FORMAT` | string | json |
 | `trusted_proxies` | `SOLTI_TRUSTED_PROXIES` | list | empty |
 | not in a file | `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` | string | no default |
 
@@ -768,9 +789,9 @@ sync. The first refused sync of an agent ID logs a WARN with the agent ID, and
 then at most one more a minute for that ID. The access loggers record each
 refused sync at DEBUG, one line for each, in place of the WARN of an HTTP 4xx or
 the ERROR of a failed gRPC call. That is the level of the line and not the number
-of lines: podium sets no minimum log level (`cmd/main.go` builds its logger with
-none), so a DEBUG line is written like any other, and an agent that keeps
-syncing writes one for each refused sync. The HTTP 429 carries `Retry-After` and
+of lines: `log.level` defaults to `info`, which drops those lines, and at
+`debug` a DEBUG line is written like any other, so an agent that keeps syncing
+writes one for each refused sync. The HTTP 429 carries `Retry-After` and
 the gRPC status carries `RetryInfo`, and the loggers take those for a throttle. A
 follower that proxies or forwards a leader's refusal logs it at DEBUG too. A
 sync that fails in another way keeps its level: a wrong token (WARN over HTTP,

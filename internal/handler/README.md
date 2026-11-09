@@ -419,8 +419,8 @@ WARN of the next paragraph can be caused by such a caller too: it names the agen
 The refusal logs one WARN with the agent ID, the first time for an ID and then at most once a minute for it, whichever of
 the two steps refused; the log never holds a token. The access loggers record each refused call at DEBUG, one line each,
 instead of the WARN of a 4xx or the ERROR of a failed gRPC call. That is the level of the lines, not their number:
-podium sets no minimum log level (`cmd/main.go` builds its logger with none), so a DEBUG line is written like any other,
-and an agent that keeps syncing writes one for each refused sync (`TestThrottledSyncsAreLoggedAtDebug` counts them).
+`log.level` defaults to `info`, which drops those lines; at `debug` a DEBUG line is written like any other, and an agent
+that keeps syncing writes one for each refused sync (`TestThrottledSyncsAreLoggedAtDebug` counts them).
 The 429 carries `Retry-After` (`response.TooManyRequests`), the gRPC status carries `RetryInfo` (`status.Throttled`), and
 `Logger` and `UnaryLogger` take either for a throttle, whichever node wrote it, so a follower that forwards a sync logs
 the leader's refusal at DEBUG too (`TestAccessLogOfAForwardedThrottleIsDebug`, `TestUnaryLoggerLogsAThrottleAtDebug`).

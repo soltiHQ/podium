@@ -11,6 +11,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog"
+
+	"github.com/soltiHQ/control-plane/internal/buildinfo"
+	"github.com/soltiHQ/control-plane/internal/config"
 )
 
 func TestExitCodeReflectsRunAndCleanup(t *testing.T) {
@@ -353,5 +358,79 @@ func TestCLIRunsAgentToken(t *testing.T) {
 	stdout.Reset()
 	if code := run([]string{"agent-token"}, &stdout, &stderr, spy.serve); code != 2 {
 		t.Fatalf("agent-token without an ID: exit %d, want 2", code)
+	}
+}
+
+// logEvery writes one line at each level of logger.
+func logEvery(logger zerolog.Logger) {
+	logger.Debug().Msg("a-debug")
+	logger.Info().Msg("a-info")
+	logger.Warn().Msg("a-warn")
+	logger.Error().Msg("a-error")
+}
+
+// log.level is the floor: a line below it is not written, and Debug is written
+// at debug only.
+func TestLogLevelFiltersDebug(t *testing.T) {
+	for _, tc := range []struct {
+		level string
+		want  []string
+	}{
+		{"debug", []string{"a-debug", "a-info", "a-warn", "a-error"}},
+		{"info", []string{"a-info", "a-warn", "a-error"}},
+		{"warn", []string{"a-warn", "a-error"}},
+		{"error", []string{"a-error"}},
+	} {
+		t.Run(tc.level, func(t *testing.T) {
+			var out bytes.Buffer
+			logEvery(newLogger(config.LogConfig{Level: tc.level, Format: "json"}, &out))
+			var got []string
+			for _, name := range []string{"a-debug", "a-info", "a-warn", "a-error"} {
+				if strings.Contains(out.String(), `"message":"`+name+`"`) {
+					got = append(got, name)
+				}
+			}
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Fatalf("level %s wrote %v, want %v\n%s", tc.level, got, tc.want, out.String())
+			}
+		})
+	}
+}
+
+// The text format is zerolog's console writer with no colour, one line per
+// event; json is a JSON object per line.
+func TestTextLogFormat(t *testing.T) {
+	var out bytes.Buffer
+	text := newLogger(config.LogConfig{Level: "info", Format: "text"}, &out)
+	text.Info().Str("k", "v").Msg("hello")
+	line := out.String()
+	if strings.Count(line, "\n") != 1 || !strings.Contains(line, "INF") || !strings.Contains(line, "hello") || !strings.Contains(line, "k=v") {
+		t.Fatalf("text line %q, want one console line with the level, the message and k=v", line)
+	}
+	if strings.Contains(line, "\x1b") || strings.HasPrefix(line, "{") {
+		t.Fatalf("text line %q has colour or is JSON", line)
+	}
+
+	out.Reset()
+	json := newLogger(config.LogConfig{Level: "info", Format: "json"}, &out)
+	json.Info().Msg("hello")
+	if !strings.HasPrefix(out.String(), "{") || !strings.Contains(out.String(), `"message":"hello"`) || !strings.Contains(out.String(), `"time"`) {
+		t.Fatalf("json line %q, want a JSON object with a time", out.String())
+	}
+}
+
+// The first line of a run says which podium it is.
+func TestFirstLogLineNamesTheBuild(t *testing.T) {
+	var out bytes.Buffer
+	info := buildinfo.Info{
+		Version: "v1.2.3", Commit: "0123456789ab", Modified: true,
+		BuildTime: time.Date(2026, 11, 5, 10, 20, 30, 0, time.UTC),
+		GoVersion: "go1.27.3", Platform: "linux/amd64",
+	}
+	logStart(zerolog.New(&out), info)
+	for _, want := range []string{`"level":"info"`, `"version":"v1.2.3"`, `"commit":"0123456789ab"`, `"modified":true`, `"built":"2026-11-05T10:20:30Z"`, `"go_version":"go1.27.3"`, `"platform":"linux/amd64"`} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("first line %s lacks %s", out.String(), want)
+		}
 	}
 }

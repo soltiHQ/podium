@@ -3,12 +3,30 @@ package httpserver
 import (
 	"context"
 	"errors"
+	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync/atomic"
 
 	"github.com/rs/zerolog"
 )
+
+// ErrorLog returns the [http.Server.ErrorLog] of the server called name: each
+// line net/http reports on its own, such as a failed TLS handshake or the panic
+// of a handler, is one WARN line of logger with the field runner. Without it
+// those lines go to Go's text logger on stderr.
+func ErrorLog(logger zerolog.Logger, name string) *log.Logger {
+	return log.New(errorLogWriter{logger: logger.With().Str("runner", name).Logger()}, "", 0)
+}
+
+// errorLogWriter writes each write as a WARN line.
+type errorLogWriter struct{ logger zerolog.Logger }
+
+func (w errorLogWriter) Write(p []byte) (int, error) {
+	w.logger.Warn().Msg(strings.TrimRight(string(p), "\r\n"))
+	return len(p), nil
+}
 
 // Runner is a server.Runner implementation for http.Server.
 type Runner struct {
@@ -74,6 +92,8 @@ func (r *Runner) Start(_ context.Context) error {
 		WriteTimeout:      r.cfg.WriteTimeout,
 		IdleTimeout:       r.cfg.IdleTimeout,
 		MaxHeaderBytes:    r.cfg.MaxHeaderBytes,
+
+		ErrorLog: ErrorLog(r.logger, r.cfg.Name),
 
 		BaseContext: func(net.Listener) context.Context { return baseCtx },
 		ConnContext: r.cfg.ConnContext,

@@ -1423,8 +1423,11 @@ hashicorp/raft, its snapshot store and its network transport log through the
 node's zerolog logger (`logger.go`), in place of the hclog loggers they would
 make on stderr: a node writes nothing to stderr
 (`TestRaftLogsGoThroughTheNodeLogger`). The adapter keeps hashicorp's INFO,
-WARN and ERROR levels and drops its TRACE and DEBUG lines, the elections and
-the replication chatter. Each line carries
+WARN and ERROR levels and follows the level of the logger (`log.level`): its
+TRACE and DEBUG lines, the elections and the replication chatter, are DEBUG
+lines, written at `log.level: debug` and dropped above it, which is the default
+(`TestHCLogFollowsLevel`). `GetLevel` reports that level; `SetLevel` changes
+nothing. Each line carries
 `profile=raft`, the name of the component that logged it as `component` (`raft`,
 `snapshot` or `raft-net`), and the key and value pairs of hashicorp's line as
 fields. A key that zerolog or the adapter writes itself, `time`, `level`,

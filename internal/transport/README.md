@@ -119,7 +119,7 @@ forwards a sync; standalone gRPC discovery uses the peer address, whatever metad
 - Discovery also limits how fast each agent ID syncs: a bucket of 10 syncs, one back per second, shared by HTTP and gRPC, looked at before the token check (a sync that finds it empty is refused without touching the store) and charged after it.
   HTTP answers 429 with `Retry-After: 1` (`response.TooManyRequests`), gRPC `ResourceExhausted` with `RetryInfo` (`status.Throttled`). See `internal/config`, "Rate limiting".
   Such an answer is a throttle: `Logger` and `UnaryLogger` record it at DEBUG, one line per call, where they record any other 4xx at WARN and any other failed call at ERROR.
-  That is the level of the line, not the number of lines: podium's logger has no minimum level, so the line is written. A follower that proxies or forwards the leader's answer
+  That is the level of the line, not the number of lines: `log.level` defaults to `info`, which drops the line; at `debug` it is written. A follower that proxies or forwards the leader's answer
   logs it at DEBUG as well, the header and the detail being the leader's.
 - `middleware.StreamLimit` caps concurrent streams per client IP.
 

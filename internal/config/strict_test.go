@@ -37,7 +37,7 @@ func TestUnknownKeyFailsWithPathAndLine(t *testing.T) {
 		{
 			name: "top level",
 			body: "# settings\nlisten: 1\n",
-			want: `config: %s:2: unknown key "listen" (known: agent_auth, auth, cluster, cors, events, grpc, history, http, http_discovery, lifecycle, server, streams, sync, tls, triggers, trusted_proxies)`,
+			want: `config: %s:2: unknown key "listen" (known: agent_auth, auth, cluster, cors, events, grpc, history, http, http_discovery, lifecycle, log, server, streams, sync, tls, triggers, trusted_proxies)`,
 		},
 		{
 			name: "nested",
@@ -315,6 +315,7 @@ func TestEverySectionValidatedAtLoad(t *testing.T) {
 		{"streams", "SOLTI_STREAMS_SUBSCRIBER_BUFFER", "-1"},
 		{"tls", "SOLTI_TLS_SERVER_CERT_FILE", "/only/a/cert.pem"},
 		{"agent_auth", "SOLTI_AGENT_AUTH_ENROLL_SECRET", "short"},
+		{"log", "SOLTI_LOG_LEVEL", "verbose"},
 		{"trusted_proxies", "SOLTI_TRUSTED_PROXIES", "proxy.example.com"},
 	}
 	cfg := Default()

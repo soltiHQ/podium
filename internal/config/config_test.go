@@ -422,3 +422,56 @@ func TestLoadRaftClusterWithDNS(t *testing.T) {
 		t.Fatalf("discovery = %+v, want %+v", d, want)
 	}
 }
+
+// The log level defaults to info and the format to json; the file and the
+// environment set them, the environment last.
+func TestLoadLogSettings(t *testing.T) {
+	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+	t.Setenv("CONFIG_PATH", "")
+	cfg, err := load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Log.Level != "info" || cfg.Log.Format != "json" {
+		t.Fatalf("default log settings = %+v, want info and json", cfg.Log)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("log:\n  level: warn\n  format: text\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = load(path); err != nil || cfg.Log.Level != "warn" || cfg.Log.Format != "text" {
+		t.Fatalf("from the file: %+v, %v; want warn and text", cfg.Log, err)
+	}
+	t.Setenv("SOLTI_LOG_LEVEL", "debug")
+	t.Setenv("SOLTI_LOG_FORMAT", "json")
+	if cfg, err = load(path); err != nil || cfg.Log.Level != "debug" || cfg.Log.Format != "json" {
+		t.Fatalf("from the environment: %+v, %v; want debug and json over the file", cfg.Log, err)
+	}
+}
+
+// A level or a format that is not one of the four and the two fails loading,
+// whichever way it is set.
+func TestLoadRejectsAnInvalidLogSetting(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, value string
+		want             error
+	}{
+		{"unknown level", "SOLTI_LOG_LEVEL", "verbose", ErrInvalidLogLevel},
+		{"trace is no level", "SOLTI_LOG_LEVEL", "trace", ErrInvalidLogLevel},
+		{"level in capitals", "SOLTI_LOG_LEVEL", "INFO", ErrInvalidLogLevel},
+		{"empty level", "SOLTI_LOG_LEVEL", "", ErrInvalidLogLevel},
+		{"unknown format", "SOLTI_LOG_FORMAT", "xml", ErrInvalidLogFormat},
+		{"empty format", "SOLTI_LOG_FORMAT", "", ErrInvalidLogFormat},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+			t.Setenv("CONFIG_PATH", "")
+			t.Setenv(tc.env, tc.value)
+			_, err := load("")
+			if !errors.Is(err, tc.want) || !strings.Contains(err.Error(), "config.log") {
+				t.Fatalf("load = %v, want %v under config.log", err, tc.want)
+			}
+		})
+	}
+}
