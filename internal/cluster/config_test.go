@@ -155,9 +155,11 @@ func TestRaftCompactionConfig(t *testing.T) {
 // least, and the election timeout no shorter than the heartbeat timeout, a
 // default included. One row per rule, each from YAML or the environment. A
 // negative value keeps the default, as 0 does, which the node is given as 0. A
-// value over 9223372036854, the most milliseconds a time.Duration holds, is
-// refused as too large: in a Duration it would wrap, to a value under 5 ms or to
-// one that passes the other rules.
+// value over 4611686018427 is refused as too large: hashicorp/raft's heartbeat
+// and election timers wait a random time of up to twice the timeout, in a
+// time.Duration, which holds no more, and past it the wait wraps negative and
+// fires at once. Over 9223372036854 the node's own conversion to a Duration
+// wraps already, to a value under 5 ms or to one that passes the other rules.
 func TestRaftTimeoutsConfig(t *testing.T) {
 	for _, tc := range []struct {
 		name, yaml string
@@ -175,9 +177,9 @@ func TestRaftTimeoutsConfig(t *testing.T) {
 		{name: "a heartbeat timeout under the minimum", env: map[string]string{"SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS": "4"}, says: "raft.heartbeat_timeout_ms"},
 		{name: "an election timeout under the heartbeat timeout", yaml: "raft:\n  election_timeout_ms: 100\n  heartbeat_timeout_ms: 200\n", says: "raft.election_timeout_ms"},
 		{name: "a heartbeat timeout over the default election timeout", env: map[string]string{"SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS": "2000"}, says: "raft.heartbeat_timeout_ms"},
-		{name: "both at the largest value", yaml: "raft:\n  election_timeout_ms: 9223372036854\n  heartbeat_timeout_ms: 9223372036854\n", valid: true},
-		{name: "an election timeout over the largest value", yaml: "raft:\n  election_timeout_ms: 9223372036855\n", says: "raft.election_timeout_ms 9223372036855 is too large: the largest a node accepts is 9223372036854"},
-		{name: "a heartbeat timeout over the largest value", env: map[string]string{"SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS": "9223372036855"}, says: "raft.heartbeat_timeout_ms 9223372036855 is too large: the largest a node accepts is 9223372036854"},
+		{name: "both at the largest value", yaml: "raft:\n  election_timeout_ms: 4611686018427\n  heartbeat_timeout_ms: 4611686018427\n", valid: true},
+		{name: "an election timeout over the largest value", yaml: "raft:\n  election_timeout_ms: 4611686018428\n", says: "raft.election_timeout_ms 4611686018428 is too large: the largest a node accepts is 4611686018427, as hashicorp/raft's timers wait up to twice the timeout"},
+		{name: "a heartbeat timeout over the largest value", env: map[string]string{"SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS": "4611686018428"}, says: "raft.heartbeat_timeout_ms 4611686018428 is too large: the largest a node accepts is 4611686018427, as hashicorp/raft's timers wait up to twice the timeout"},
 		{name: "an election timeout that wraps to an accepted duration", yaml: "raft:\n  election_timeout_ms: 18446744074710\n", says: "raft.election_timeout_ms 18446744074710 is too large"},
 		{name: "a heartbeat timeout that wraps to an accepted duration", env: map[string]string{"SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS": "18446744073715"}, says: "raft.heartbeat_timeout_ms 18446744073715 is too large"},
 	} {

@@ -1022,8 +1022,9 @@ Configuration loading refuses what hashicorp/raft would refuse at the start: a
 timeout under 5 ms, and an election timeout below the heartbeat timeout, the
 default of 1 s counted, so a `heartbeat_timeout_ms` over 1000 needs an
 `election_timeout_ms` at least as long. It also refuses a value over
-9223372036854, the most milliseconds a Go duration holds, as too large, naming
-that largest value.
+4611686018427 (about 146 years) as too large, naming that largest value:
+hashicorp/raft's heartbeat and election timers wait up to twice the timeout in
+a Go duration, which holds 9223372036854 whole milliseconds at most.
 
 `snapshot_interval`, `snapshot_threshold` and `trailing_logs` set how a node
 compacts its raft log. Every `snapshot_interval` (a duration string such as

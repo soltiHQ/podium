@@ -483,9 +483,14 @@ the stores are open and the transport listens: each at 5 ms at least, 0 keeping
 the default of 1 s, and the election timeout no shorter than the heartbeat
 timeout, the defaults counted (`TestRaftTimeoutsConfig` and
 `TestRaftTimeoutLimitsAreHashicorps`, in `internal/cluster`). `Validate` also
-refuses a value over 9223372036854 ms, the most milliseconds a Go duration
-holds, as too large: as a duration it would wrap, to a value under 5 ms or to
-one the other checks pass (`TestRaftTimeoutsConfig`). The lease, which
+refuses a value over 4611686018427 ms as too large: the follower's heartbeat
+timer and the candidate's election timer wait the timeout plus a random part of
+it, up to twice the timeout, summed in a Go duration (`randomTimeout` in
+v1.8.0), which wraps negative past twice that limit, a wait that ends at once;
+and over 9223372036854 ms the node's own conversion to a duration wraps
+already, to a value under 5 ms or to one the other checks pass
+(`TestRaftTimeoutsConfig`); podium itself adds nothing to a timeout. The lease,
+which
 `New` lowers to the heartbeat timeout when that is shorter, and the snapshot
 interval, 5 ms at least, are then within its limits too; nothing else of it
 depends on the configuration. `New` runs hashicorp/raft's check itself before
