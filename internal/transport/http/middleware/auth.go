@@ -86,7 +86,7 @@ func OptionalAuth(verifier token.Verifier, sessionSvc *session.Service, secure f
 //     in again. A node that shut down names no leader.
 func checkFailed(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, logger zerolog.Logger, err error) {
 	if cluster.IsLeadershipError(err) {
-		message := "auth refresh needs the leader: a follower cannot rotate a refresh token, so with auth.rotate_refresh route browsers to the leader (X-Leader), or turn rotation off"
+		message := "auth refresh needs the leader: with auth.rotate_refresh only the leader rotates a refresh token, and this node does not lead, as a follower or a node that shut down, so nothing changed: route browsers to the leader, which the 503 names in X-Leader when this node knows it, which a node that shut down does not, or turn rotation off"
 		if errors.Is(err, cluster.ErrLeadershipLost) {
 			message = "auth refresh outcome unknown: with auth.rotate_refresh, this node lost its leadership, or shut down, while the rotation of the refresh token committed, which may have taken effect: a retry at the current leader refreshes the browser unless it did, and then the browser logs in again; the 503 names that leader in X-Leader when this node knows it, which a node that shut down does not"
 		}

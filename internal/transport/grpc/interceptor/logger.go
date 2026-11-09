@@ -2,6 +2,7 @@ package interceptor
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -14,7 +15,9 @@ import (
 )
 
 // UnaryLogger returns a unary server interceptor that logs every completed call: at INFO, and at ERROR when it
-// fails. There are two exceptions. The Unavailable "not the leader" answer with the x-leader hint is logged at WARN: a
+// fails. A grpc.health.v1 call is logged at DEBUG whatever its answer (isHealthProbe): supervisors and load balancers
+// probe every few seconds, and a probe that names an unknown service would write an ERROR each time. There are two
+// other exceptions. The Unavailable "not the leader" answer with the x-leader hint is logged at WARN: a
 // write that reached a follower is a routing condition and not a failure of this node, as the HTTP access log has
 // it for a 503 with X-Leader, and only the interceptors that route writes, inside this one, mark it
 // (hintNotLeader). Any other failure stays an ERROR: an Unavailable without the hint, and "leader unreachable",
@@ -36,6 +39,11 @@ func UnaryLogger(logger zerolog.Logger) grpc.UnaryServerInterceptor {
 			evt  = logger.Info()
 		)
 		switch {
+		case isHealthProbe(info.FullMethod):
+			evt = logger.Debug()
+			if err != nil {
+				evt = evt.Err(err)
+			}
 		case code == codes.Unavailable && slot.notLeader.Load():
 			evt = logger.Warn().Err(err)
 		case throttle(st):
@@ -60,6 +68,14 @@ func UnaryLogger(logger zerolog.Logger) grpc.UnaryServerInterceptor {
 		return resp, err
 	}
 }
+
+// healthService is the prefix of the full methods of grpc.health.v1: Check and
+// Watch.
+const healthService = "/grpc.health.v1.Health/"
+
+// isHealthProbe reports whether fullMethod is a method of the health service,
+// which the access log keeps at DEBUG whatever the call's answer.
+func isHealthProbe(fullMethod string) bool { return strings.HasPrefix(fullMethod, healthService) }
 
 // throttle reports whether st is a throttle: a ResourceExhausted with RetryInfo.
 func throttle(st *grpcstatus.Status) bool {

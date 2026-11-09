@@ -15,6 +15,9 @@ import (
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -180,5 +183,66 @@ func TestUnaryLoggerLogsAThrottleAtDebug(t *testing.T) {
 				t.Fatalf("logged the call at %v, want once at %s", got, tc.level)
 			}
 		})
+	}
+}
+
+// A grpc.health.v1 call is logged at DEBUG, whatever its answer: supervisors and
+// load balancers probe every few seconds, as they probe the ops listener, which
+// logs nothing per request, and a probe that names an unknown service must not
+// write an ERROR each time. A Watch is logged when its stream ends, at DEBUG
+// too.
+func TestHealthCallsAreLoggedAtDebug(t *testing.T) {
+	logs := &logSink{}
+	logger := zerolog.New(logs)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(UnaryRequestID(), UnaryLogger(logger)),
+		grpc.ChainStreamInterceptor(StreamRequestID(), StreamLogger(logger)),
+	)
+	healthpb.RegisterHealthServer(srv, health.NewServer())
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	conn, err := grpc.NewClient("passthrough:///"+lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	client := healthpb.NewHealthClient(conn)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if resp, err := client.Check(ctx, &healthpb.HealthCheckRequest{}); err != nil || resp.GetStatus() != healthpb.HealthCheckResponse_SERVING {
+		t.Fatalf("Check: %v, %v; want SERVING", resp, err)
+	}
+	if _, err := client.Check(ctx, &healthpb.HealthCheckRequest{Service: "unknown.Service"}); status.Code(err) != codes.NotFound {
+		t.Fatalf("Check of an unknown service: %v, want NotFound", err)
+	}
+	if got := logs.levels(t, "grpc request"); len(got) != 2 || got[0] != "debug" || got[1] != "debug" {
+		t.Fatalf("logged the checks at %v, want twice at debug", got)
+	}
+
+	watchCtx, endWatch := context.WithCancel(ctx)
+	stream, err := client.Watch(watchCtx, &healthpb.HealthCheckRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Recv(); err != nil {
+		t.Fatalf("first Watch message: %v", err)
+	}
+	endWatch()
+	deadline := time.Now().Add(5 * time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for len(logs.levels(t, "grpc stream")) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the end of the Watch stream was not logged within 5s")
+		}
+		<-tick.C
+	}
+	if got := logs.levels(t, "grpc stream"); len(got) != 1 || got[0] != "debug" {
+		t.Fatalf("logged the Watch at %v, want once at debug", got)
 	}
 }

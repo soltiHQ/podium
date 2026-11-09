@@ -230,7 +230,9 @@ client, a health checker included, for a certificate of the agents' CA: the
 overall service (`""`) and `solti.discover.v1.DiscoverService` are `SERVING`
 while `/readyz` answers 200, and `NOT_SERVING` while it does not. A `Check`
 reads the state anew; a client that `Watch`es sees a change within a second, and
-its stream ends when the gRPC listener starts to stop.
+its stream ends when the gRPC listener starts to stop. The access log records
+each health call at DEBUG, whatever its answer, so probes write nothing at the
+default `info` (see "Request lifecycle" in `internal/transport/README.md`).
 
 Tests: `TestReadinessFollowsStoreAndShutdown`, `TestReadinessReasonOrder`,
 `TestLeaderProbeOnRaft`, `TestOpsEndpointsNeedNoAuth`,

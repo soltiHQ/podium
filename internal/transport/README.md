@@ -93,7 +93,8 @@ browser refuses (`TestForwardedWriteCarriesTheCORSHeadersOnce`).
         │   HTTPS_PROXY) and answers with the leader's answer; any other write is Unavailable, + x-leader when the leader is known;
         │   a call it passes on carries the means to hint the leader, for a handler's leadership error (HintLeader)
         │   UnaryLogger logs a failed call at ERROR, but a "not the leader" answer with x-leader at WARN
-        │   and a throttle (ResourceExhausted with RetryInfo, status.Throttled) at DEBUG
+        │   and a throttle (ResourceExhausted with RetryInfo, status.Throttled) at DEBUG;
+        │   a grpc.health.v1 call at DEBUG whatever its answer
         ▼
   handler/discovery.go (GRPCDiscovery)
         │
@@ -103,6 +104,13 @@ browser refuses (`TestForwardedWriteCarriesTheCORSHeadersOnce`).
                        ├─ attaches requestID as errdetails.RequestInfo
                        └─ sets the error slot → UnaryLogger appends it
 ```
+
+A call of `grpc.health.v1.Health`, `Check` or `Watch`, is logged at DEBUG,
+whatever its answer, by `UnaryLogger` and `StreamLogger` alike: supervisors and
+load balancers probe every few seconds, as they probe the ops listener, which
+logs nothing per request, and a probe that names an unknown service, answered
+`NotFound`, would otherwise write an ERROR each time
+(`TestHealthCallsAreLoggedAtDebug`).
 
 ## Client IP
 
@@ -256,7 +264,8 @@ meets a leadership error all the same, as gRPC discovery does on a leader that
 lost its leadership, answers it with `interceptor.HintLeader`, which sets the
 hint of the leader the node knows then, and the mark of a routing answer, so
 `UnaryLogger` logs it at WARN as well; with no leader known it sets neither.
-`StreamLogger` logs every stream at INFO, a failed one included, as before.
+`StreamLogger` logs every stream at INFO when it ends, a failed one included, as
+before, but a health `Watch` (see "gRPC" above).
 
 ## TLS
 

@@ -54,10 +54,10 @@ func followerRefresh(t *testing.T, err error) (token.Verifier, *session.Service,
 // reaches a follower, or reaches a node that loses leadership, or shuts down,
 // as the rotation commits, gets 503, with the leader's address in X-Leader when
 // the node knows it, and no cookie; Auth logs one WARN, no ERROR, and never a
-// credential, worded for what happened: a follower that cannot rotate the
-// token, or a rotation whose outcome is unknown, which says that its 503 names
-// the leader only when the node knows one, as a node that shut down does not.
-// Auth and OptionalAuth alike.
+// credential, worded for what happened: a node that does not lead, a follower
+// or one that shut down, and so changed nothing, or a rotation whose outcome is
+// unknown. Each says that its 503 names the leader only when the node knows
+// one, as a node that shut down does not. Auth and OptionalAuth alike.
 func TestRefreshOnAFollowerAsksForTheLeader(t *testing.T) {
 	for _, failure := range []struct {
 		name string
@@ -65,7 +65,10 @@ func TestRefreshOnAFollowerAsksForTheLeader(t *testing.T) {
 		says []string // what the WARN says happened
 		not  string   // what it must not say
 	}{
-		{"not the leader", nil, []string{"a follower cannot rotate a refresh token"}, "outcome unknown"},
+		{"not the leader", nil, []string{
+			"auth refresh needs the leader", "this node does not lead, as a follower or a node that shut down",
+			"names in X-Leader when this node knows it, which a node that shut down does not",
+		}, "outcome unknown"},
 		{"leadership lost", fmt.Errorf("raft: apply: %w", cluster.ErrLeadershipLost), []string{
 			"auth refresh outcome unknown", "lost its leadership, or shut down",
 			"names that leader in X-Leader when this node knows it, which a node that shut down does not",
