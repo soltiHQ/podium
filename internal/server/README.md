@@ -26,7 +26,7 @@ server/
 ```go
 type Runner interface {
     Name()  string
-    Start(ctx) error   // blocks until done or ctx cancelled
+    Start(ctx) error   // blocks until done: the listener runners until Stop, the others until Stop or ctx cancelled
     Stop(ctx)  error   // graceful shutdown within ctx deadline
 }
 ```
@@ -79,7 +79,8 @@ drives: it turns readiness off and waits `server.shutdown_delay` before it lets
 Both follow the same pattern:
 
 1. `New` validates config and handler/server
-1. `Start` binds a TCP listener, serves, blocks
+1. `Start` binds a TCP listener, serves, and blocks until `Stop`; it ignores its
+   context
 1. `Stop` shuts down gracefully, falls back to hard close on timeout. For
    `httpserver` that means the listener closes, the requests in flight finish,
    and the ones still running at the deadline are cut (their context is
@@ -89,6 +90,13 @@ Both follow the same pattern:
 1. `ready` channel synchronises Stop with listener binding; `Bound()` is that
    channel, and `Addr()` the bound address, `""` before it is bound or when the
    bind failed.
+1. A `Stop` that comes before `Start` marks the runner stopped and closes
+   `ready`: `Start` then returns nil at once and never binds, and `Addr()` stays
+   `""`. That is the order when a runner exits, or the shutdown signal comes,
+   before the goroutine of another runner has reached `Start`: `Run` stops every
+   runner at once, and the late one neither binds nor holds `Run` until
+   `server.shutdown_timeout` (`TestStopBeforeStartNeverBinds`,
+   `TestRunReturnsAtOnceWhenARunnerIsStoppedBeforeItStarts`).
 
 ### Metrics
 

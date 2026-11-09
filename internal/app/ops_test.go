@@ -43,10 +43,10 @@ type runningApp struct {
 	err    error              // what Run returned, set before done closes
 }
 
-// startApp builds the app of a default configuration that configure changes, and
-// before it runs calls before, which may set the seams of its readiness. The app
-// stops when the test ends.
-func startApp(t *testing.T, configure func(*config.Config), before func(*App)) *runningApp {
+// newApp builds, with New, the app of a default configuration that configure
+// changes: standalone with ephemeral state, every listener on a loopback port the
+// kernel picks. It returns the app, its configuration and its logs.
+func newApp(t *testing.T, configure func(*config.Config)) (*App, config.Config, *syncBuffer) {
 	t.Helper()
 	cfg := config.Default()
 	cfg.Cluster.Standalone.Ephemeral = true
@@ -61,6 +61,15 @@ func startApp(t *testing.T, configure func(*config.Config), before func(*App)) *
 	if err != nil {
 		t.Fatal(err)
 	}
+	return a, cfg, logs
+}
+
+// startApp builds the app of a default configuration that configure changes, and
+// before it runs calls before, which may set the seams of its readiness. The app
+// stops when the test ends.
+func startApp(t *testing.T, configure func(*config.Config), before func(*App)) *runningApp {
+	t.Helper()
+	a, cfg, logs := newApp(t, configure)
 	if before != nil {
 		before(a)
 	}
@@ -574,16 +583,35 @@ func TestHealthWatchDoesNotHoldShutdown(t *testing.T) {
 }
 
 // A runner that exits on its own, here the ops listener that cannot bind, turns
-// readiness and the gRPC health service to "shutting down" as well.
+// readiness and the gRPC health service to "shutting down" as well. Run returns
+// at once, far within a shutdown timeout of a minute, and the UI and gRPC
+// addresses refuse a connection after it: a listener that Run stopped before its
+// Start ran never binds.
 func TestRunnerExitFlipsReadiness(t *testing.T) {
 	taken, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = taken.Close() }()
-	r := startApp(t, func(c *config.Config) { c.Ops.Addr = taken.Addr().String() }, nil)
+	ports := sharedPorts(t, []string{"127.0.0.1"}, 2)
+	ui, grpcAddr := net.JoinHostPort("127.0.0.1", ports[0]), net.JoinHostPort("127.0.0.1", ports[1])
+	r := startApp(t, func(c *config.Config) {
+		c.Ops.Addr = taken.Addr().String()
+		c.HTTP.Addr, c.GRPC.Addr = ui, grpcAddr
+		c.Server.ShutdownTimeout = time.Minute
+	}, nil)
+	begin := time.Now()
 	if err := r.wait(t); err == nil || err == context.Canceled {
 		t.Fatalf("Run: %v, want the error of the listener that could not bind", err)
+	}
+	if took := time.Since(begin); took > 5*time.Second {
+		t.Fatalf("Run took %v to return after a runner exited, want far below the shutdown timeout of a minute", took)
+	}
+	for name, addr := range map[string]string{"UI": ui, "gRPC": grpcAddr} {
+		if conn, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+			_ = conn.Close()
+			t.Fatalf("the %s address %s accepted a connection after Run returned", name, addr)
+		}
 	}
 	if got := r.app.ready.reason(); got != reasonShuttingDown {
 		t.Fatalf("readiness after the runner exited: %q, want %q", got, reasonShuttingDown)
@@ -591,6 +619,45 @@ func TestRunnerExitFlipsReadiness(t *testing.T) {
 	resp, err := r.app.grpcHealth.Check(context.Background(), &healthpb.HealthCheckRequest{})
 	if err != nil || resp.GetStatus() != healthpb.HealthCheckResponse_NOT_SERVING {
 		t.Fatalf("gRPC health after the runner exited: %v, %v; want NOT_SERVING", resp, err)
+	}
+}
+
+// A shutdown signal that comes before Run, as a SIGTERM during New does, with no
+// shutdown delay, ends Run at once with exactly context.Canceled, which exitCode
+// takes for a clean exit: a listener that Run stops before its Start ran does not
+// bind and hold Run until the shutdown timeout.
+func TestSignalBeforeRunEndsCleanly(t *testing.T) {
+	a, _, _ := newApp(t, nil)
+	if a.shutdownDelay != 0 {
+		t.Fatalf("shutdown delay %v, want none", a.shutdownDelay)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var (
+		done = make(chan struct{})
+		err  error
+	)
+	go func() {
+		err = a.Run(ctx)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		case <-time.After(20 * time.Second):
+			t.Error("Run did not return within 20s of the signal")
+		}
+		if err := a.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	})
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return within 5s of a signal that came before it")
+	}
+	if err != context.Canceled {
+		t.Fatalf("Run: %v, want exactly context.Canceled", err)
 	}
 }
 

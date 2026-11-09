@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -53,6 +54,61 @@ func recv[T any](t *testing.T, ch <-chan T, what string) T {
 		t.Fatalf("%s: nothing within %v", what, waitTimeout)
 		panic("unreachable")
 	}
+}
+
+// freeAddr returns a loopback address that nothing listens on when it returns.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return addr
+}
+
+// A Stop that comes before Start, as server.Run's does for a runner whose
+// goroutine has not reached Start yet, keeps the runner from ever binding: Start
+// then returns nil at once, Bound is closed, Addr is "", and the address stays
+// free.
+func TestStopBeforeStartNeverBinds(t *testing.T) {
+	addr := freeAddr(t)
+	r, err := New(Config{Addr: addr}, zerolog.Nop(), http.NotFoundHandler())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return r.Stop(ctx)
+	}
+	// A runner that binds all the same is shut down here, so that it does not
+	// serve past the test.
+	t.Cleanup(func() { _ = stop() })
+	if err := stop(); err != nil {
+		t.Fatalf("Stop before Start: %v", err)
+	}
+	started := make(chan error, 1)
+	go func() { started <- r.Start(context.Background()) }()
+	if err := recv(t, started, "Start after Stop returns"); err != nil {
+		t.Fatalf("Start after Stop: %v, want nil", err)
+	}
+	select {
+	case <-r.Bound():
+	default:
+		t.Fatal("Bound is not closed after Stop")
+	}
+	if got := r.Addr(); got != "" {
+		t.Fatalf("Addr = %q after Stop, want none", got)
+	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("the runner's address is taken after Start: %v", err)
+	}
+	_ = l.Close()
 }
 
 // startRunner starts r and returns the channel of Start's result, once the

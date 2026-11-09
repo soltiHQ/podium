@@ -7,7 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync/atomic"
+	"sync"
 
 	"github.com/rs/zerolog"
 )
@@ -28,18 +28,28 @@ func (w errorLogWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// state is where a Runner is in its life.
+type state int
+
+const (
+	idle    state = iota // neither Start nor Stop has run
+	serving              // Start has run: it bound the listener, or failed to
+	stopped              // Stop ran before Start, which then never binds
+)
+
 // Runner is a server.Runner implementation for http.Server.
 type Runner struct {
 	logger  zerolog.Logger
 	handler http.Handler
 	cfg     Config
 
+	// mu guards state, and the fields that Start sets before ready closes.
+	mu        sync.Mutex
+	state     state
 	srv       *http.Server
 	ln        net.Listener
 	ready     chan struct{}
 	cancelCtx context.CancelFunc
-
-	started atomic.Bool
 }
 
 // New creates an HTTP server runner.
@@ -64,11 +74,12 @@ func New(cfg Config, logger zerolog.Logger, handler http.Handler) (*Runner, erro
 // Name returns the runner name.
 func (r *Runner) Name() string { return r.cfg.Name }
 
-// Bound returns a channel that closes once Start has tried to bind the listener.
+// Bound returns a channel that closes once Start has tried to bind the listener,
+// or once a Stop that came before Start has run.
 func (r *Runner) Bound() <-chan struct{} { return r.ready }
 
-// Addr returns the address the listener is bound to, and "" before it is bound
-// or when it could not be.
+// Addr returns the address the listener is bound to, and "" before it is bound,
+// when it could not be, or when Stop came before Start.
 func (r *Runner) Addr() string {
 	select {
 	case <-r.ready:
@@ -80,29 +91,43 @@ func (r *Runner) Addr() string {
 	return ""
 }
 
-// Start binds the listener and serves until Stop() shuts it down.
+// Start binds the listener and serves until Stop() shuts it down. After a Stop
+// that came first it returns nil at once and never binds: server.Run stops a
+// runner whose goroutine has not reached Start yet when another runner exits.
 func (r *Runner) Start(_ context.Context) error {
-	if !r.started.CompareAndSwap(false, true) {
+	r.mu.Lock()
+	switch r.state {
+	case serving:
+		r.mu.Unlock()
 		return ErrAlreadyStarted
+	case stopped:
+		r.mu.Unlock()
+		return nil
 	}
+	r.state = serving
 
+	// The lock is held until the server is built, so that a Stop that comes in
+	// the meantime waits for it, and then shuts it down: Serve after Shutdown
+	// returns at once, and closes the listener.
 	ln, err := net.Listen("tcp", r.cfg.Addr)
 	if err != nil {
 		close(r.ready)
+		r.mu.Unlock()
 		return err
 	}
 	r.ln = ln
 
 	// Stop cancels the base context of every connection when the requests in
-	// flight outlast its deadline. It is made here, before ready closes, so that
-	// Stop, which waits for ready, sees its cancel: Serve would ask for it only
-	// later, on this goroutine.
+	// flight outlast its deadline. It is made here, under the lock, so that Stop
+	// sees its cancel: Serve would ask for it only later, on this goroutine.
 	baseCtx, cancel := context.WithCancel(context.Background())
 	r.cancelCtx = cancel
 
-	r.srv = &http.Server{
-		Addr:    r.cfg.Addr,
-		Handler: r.handler,
+	tlsEnabled := r.cfg.TLSConfig != nil
+	srv := &http.Server{
+		Addr:      r.cfg.Addr,
+		Handler:   r.handler,
+		TLSConfig: r.cfg.TLSConfig,
 
 		ReadHeaderTimeout: r.cfg.ReadHeaderTimeout,
 		ReadTimeout:       r.cfg.ReadTimeout,
@@ -116,11 +141,12 @@ func (r *Runner) Start(_ context.Context) error {
 		ConnContext: r.cfg.ConnContext,
 	}
 	if r.cfg.OnShutdown != nil {
-		r.srv.RegisterOnShutdown(r.cfg.OnShutdown)
+		srv.RegisterOnShutdown(r.cfg.OnShutdown)
 	}
+	r.srv = srv
 	close(r.ready)
+	r.mu.Unlock()
 
-	tlsEnabled := r.cfg.TLSConfig != nil
 	r.logger.Info().
 		Str("runner", r.cfg.Name).
 		Str("addr", r.cfg.Addr).
@@ -128,10 +154,9 @@ func (r *Runner) Start(_ context.Context) error {
 		Msg("http server listening")
 
 	if tlsEnabled {
-		r.srv.TLSConfig = r.cfg.TLSConfig
-		err = r.srv.ServeTLS(ln, "", "")
+		err = srv.ServeTLS(ln, "", "")
 	} else {
-		err = r.srv.Serve(ln)
+		err = srv.Serve(ln)
 	}
 	if err == nil || errors.Is(err, http.ErrServerClosed) {
 		return nil
@@ -142,35 +167,31 @@ func (r *Runner) Start(_ context.Context) error {
 // Stop shuts the server down within the ctx deadline: the listener closes at
 // once, the requests in flight finish, and idle connections close. A request
 // that is still running when ctx ends is cut: its context is cancelled and its
-// connection closed.
+// connection closed. A Stop before Start marks the runner stopped, so that Start
+// never binds, and closes Bound.
 func (r *Runner) Stop(ctx context.Context) error {
-	if !r.started.Load() {
+	r.mu.Lock()
+	if r.state == idle {
+		r.state = stopped
+		close(r.ready)
+		r.mu.Unlock()
 		return nil
 	}
-
-	select {
-	case <-r.ready:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-
-	srv := r.srv
+	srv, cancelCtx := r.srv, r.cancelCtx
+	r.mu.Unlock()
 	if srv == nil {
-		return nil
+		return nil // Start could not bind, or a Stop ran before it
 	}
 
 	r.logger.Info().
 		Str("runner", r.cfg.Name).
 		Msg("http server shutdown requested")
 
-	if r.cancelCtx != nil {
-		defer r.cancelCtx()
-	}
+	// Start sets the cancel with the server.
+	defer cancelCtx()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		if r.cancelCtx != nil {
-			r.cancelCtx()
-		}
+		cancelCtx()
 		_ = srv.Close()
 		r.logger.Warn().
 			Err(err).
