@@ -64,6 +64,11 @@ The signal that reaches `Run` is the end of a longer sequence that `app.App.Run`
 drives: it turns readiness off and waits `server.shutdown_delay` before it lets
 `Run` see the cancellation (see "Shutdown" in `internal/config/README.md`).
 
+A runner that returns nil once the signal has cancelled its context, as the tick
+runners do, did not exit on its own: `Run` returns the signal's
+`context.Canceled`, not a `RunnerExitedError`, also when that return reaches it
+together with the signal (`TestRunReportsTheSignalWhenRunnersEndWithIt`).
+
 ## Runner implementations
 
 | Runner | Tick-based | Purpose |

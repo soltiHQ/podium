@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -116,4 +117,34 @@ func TestRunReturnsAtOnceWhenARunnerIsStoppedBeforeItStarts(t *testing.T) {
 		t.Fatalf("the address of the runner stopped before it started is taken after Run: %v", err)
 	}
 	_ = l.Close()
+}
+
+// endsWithItsContext is a runner whose Start returns nil once its context ends,
+// as the tick runners' does: it ends with the shutdown signal, not on its own.
+type endsWithItsContext struct{ name string }
+
+func (r endsWithItsContext) Name() string                  { return r.name }
+func (endsWithItsContext) Start(ctx context.Context) error { <-ctx.Done(); return nil }
+func (endsWithItsContext) Stop(context.Context) error      { return nil }
+
+// A runner that returns because the shutdown signal cancelled its context did
+// not exit on its own: Run reports the signal, exactly context.Canceled, though
+// that runner's return is ready as soon as the signal is. Many runners and many
+// runs make it all but certain that a return is ready when Run looks.
+func TestRunReportsTheSignalWhenRunnersEndWithIt(t *testing.T) {
+	runners := make([]Runner, 0, 32)
+	for i := range 32 {
+		runners = append(runners, endsWithItsContext{name: fmt.Sprintf("tick-%d", i)})
+	}
+	for range 200 {
+		s, err := New(Config{}, zerolog.New(io.Discard), runners...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := s.Run(ctx); err != context.Canceled {
+			t.Fatalf("Run: %v, want exactly context.Canceled", err)
+		}
+	}
 }
