@@ -3,6 +3,7 @@ package cluster
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"slices"
 	"strconv"
@@ -405,6 +406,11 @@ func (c Config) validateRaft() error {
 	return c.Discovery.validate(r.NodeID, r.advertise())
 }
 
+// maxRaftTimeoutMs is the largest election or heartbeat timeout, in
+// milliseconds, that a node accepts: the most whole milliseconds a
+// time.Duration holds, as the node runs with the timeout as one.
+const maxRaftTimeoutMs = math.MaxInt64 / int64(time.Millisecond)
+
 // validateTimeouts refuses the election and heartbeat timeouts that
 // hashicorp/raft refuses when the node starts, in BootstrapCluster or NewRaft,
 // once the stores are open and the transport listens: each, a value of 0 or
@@ -412,11 +418,17 @@ func (c Config) validateRaft() error {
 // timeout no shorter than the heartbeat timeout. The lease, which the node
 // lowers to the heartbeat timeout when that is shorter, is then within
 // hashicorp/raft's limits as well, and nothing else of its ValidateConfig
-// depends on the configuration but node_id and the snapshot interval.
+// depends on the configuration but node_id and the snapshot interval. A value
+// over maxRaftTimeoutMs is refused first, as too large: as a time.Duration it
+// would wrap, to a value that the other rules would misjudge.
 func (r RaftConfig) validateTimeouts() error {
 	election := raftTimeout(r.ElectionTimeoutMs, DefaultRaftElectionTimeout)
 	heartbeat := raftTimeout(r.HeartbeatTimeoutMs, DefaultRaftHeartbeatTimeout)
 	switch {
+	case int64(r.ElectionTimeoutMs) > maxRaftTimeoutMs:
+		return fmt.Errorf("raft.election_timeout_ms %d is too large: the largest a node accepts is %d", r.ElectionTimeoutMs, maxRaftTimeoutMs)
+	case int64(r.HeartbeatTimeoutMs) > maxRaftTimeoutMs:
+		return fmt.Errorf("raft.heartbeat_timeout_ms %d is too large: the largest a node accepts is %d", r.HeartbeatTimeoutMs, maxRaftTimeoutMs)
 	case election < MinRaftTimeout:
 		return fmt.Errorf("raft.election_timeout_ms %d is under the %s that hashicorp/raft accepts", r.ElectionTimeoutMs, MinRaftTimeout)
 	case heartbeat < MinRaftTimeout:
@@ -428,7 +440,8 @@ func (r RaftConfig) validateTimeouts() error {
 }
 
 // raftTimeout is the timeout of ms milliseconds that a node runs with, or def
-// for 0 or less, as the node gives hashicorp/raft no value then.
+// for 0 or less, as the node gives hashicorp/raft no value then. It wraps for
+// ms over maxRaftTimeoutMs, which validateTimeouts refuses.
 func raftTimeout(ms int, def time.Duration) time.Duration {
 	if ms <= 0 {
 		return def
