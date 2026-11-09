@@ -92,9 +92,11 @@ Both follow the same pattern:
    cancelled and the connection closed); `Config.OnShutdown` runs as `Stop`
    starts, and is how a stream is told to end. For `grpcserver` it is
    `GracefulStop`, then `Stop`.
-1. `ready` channel synchronises Stop with listener binding; `Bound()` is that
-   channel, and `Addr()` the bound address, `""` before it is bound or when the
-   bind failed.
+1. `Bound()` closes once `Start` has tried to bind, or once a `Stop` that came
+   first has run; `Addr()` is the bound address, `""` before it is bound, when
+   the bind failed, or after such a `Stop`. A mutex orders `Stop` with the bind:
+   a `Stop` that comes while `Start` binds waits for it, then shuts the server
+   down.
 1. A `Stop` that comes before `Start` marks the runner stopped and closes
    `ready`: `Start` then returns nil at once and never binds, and `Addr()` stays
    `""`. That is the order when a runner exits, or the shutdown signal comes,

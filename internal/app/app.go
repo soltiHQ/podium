@@ -360,9 +360,11 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 
 // listener is a runner that binds a port.
 type listener interface {
-	// Bound returns a channel that closes once the runner tried to bind.
+	// Bound returns a channel that closes once the runner tried to bind, or once
+	// a Stop that came before Start has run.
 	Bound() <-chan struct{}
-	// Addr returns the bound address, "" when the bind failed.
+	// Addr returns the bound address, "" before the bind, when it failed, or
+	// after a Stop that came before Start.
 	Addr() string
 }
 

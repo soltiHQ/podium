@@ -294,7 +294,7 @@ tasks:
         printf '%s' "$body" | grep -q '"go_version":"[^"]' || fail "/version has no go_version value: $body"
         want={{.EXPECT_VERSION | default "" | shellQuote}}
         if [ -n "$want" ] && [ "$version" != "$want" ]; then fail "/version is $version, expected $want"; fi
-        # Every asset the UI's pages load, as its root layout links them.
+        # The three assets task assets downloads or builds, which the root layout links.
         for asset in /static/js/alpine.min.js /static/js/htmx.min.js /static/css/tailwindcss.css; do
           code=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' "http://$web$asset") || true
           [ "$code" = 200 ] || fail "$asset answered $code"

@@ -674,7 +674,7 @@ the tasks.
 | `task ci/golang/bench` | Runs every benchmark once, as a smoke check, not a performance gate. |
 | `task ci/ui/test` | Runs the UI's Node tests. |
 | `task ci/markdown/fmt`, `task markdown/fix` | Checks, or applies, mdformat on every README. |
-| `task ci/docker/smoke` | Builds the image from `bin/podium-linux-<arch>` for the host's architecture and checks a container of it: `/readyz`, `/version`, the three UI assets, the data directory's mode and owner, and the uid of the process; it needs curl and tar. |
+| `task ci/docker/smoke` | Builds the image from `bin/podium-linux-<arch>` for the host's architecture and checks a container of it: `/readyz`, `/version`, Alpine, HTMX and the Tailwind CSS, the data directory's mode and owner, and the uid of the process; it needs curl and tar. |
 
 To try a build, run it with its state in memory, which logs the generated
 administrator password at WARN:
