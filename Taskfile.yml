@@ -226,12 +226,12 @@ tasks:
       - 'true'
 
   ci/docker/smoke:
-    desc: Build the image from bin/ for the host's linux architecture and check a container of it
+    desc: Build the image from bin/ for the host's linux architecture and check a container of it (IMAGE=<ref> checks a published image instead)
     vars:
-      image: podium-smoke:local
+      image: '{{.IMAGE | default "podium-smoke:local"}}'
       container: podium-smoke
     preconditions:
-      - sh: 'test -f bin/{{.name}}-linux-$(case "$(uname -m)" in x86_64) echo amd64 ;; *) echo arm64 ;; esac)'
+      - sh: 'test -n "{{.IMAGE | default ""}}" || test -f bin/{{.name}}-linux-$(case "$(uname -m)" in x86_64) echo amd64 ;; *) echo arm64 ;; esac)'
         msg: 'bin/{{.name}}-linux-<arch> is missing: run task ci/golang/build GOOS=linux GOARCH=<arch>'
     cmds:
       - defer: docker rm -f {{.container}} >/dev/null 2>&1; docker rmi -f {{.image}} >/dev/null 2>&1; true
@@ -239,7 +239,9 @@ tasks:
         set -eu
         case "$(uname -m)" in x86_64) arch=amd64 ;; *) arch=arm64 ;; esac
         docker rm -f {{.container}} >/dev/null 2>&1 || true
-        docker build --platform "linux/$arch" -t {{.image}} .
+        if [ -z {{.IMAGE | default "" | shellQuote}} ]; then
+          docker build --platform "linux/$arch" -t {{.image}} .
+        fi
         # A generated throwaway secret: never a real one.
         secret=$(head -c 24 /dev/urandom | base64)
         docker run -d --name {{.container}} -e SOLTI_AUTH_JWT_SECRET="$secret" -p 127.0.0.1::8080 -p 127.0.0.1::8081 {{.image}} >/dev/null
