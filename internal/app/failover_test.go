@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // loopbackIPs returns count loopback IPs, 127.0.0.1 and on, one for each whole
@@ -61,6 +63,75 @@ func wholeNodesAt(t *testing.T, hosts []string, ids ...string) []*clusterNode {
 		n.cfg.GRPC.Addr = net.JoinHostPort(hosts[i], ports[3])
 	}
 	return nodes
+}
+
+// wholeStartAttempts is how many times startWholeNodes builds its nodes when
+// another process takes one of their ports before they bind it.
+const wholeStartAttempts = 3
+
+// startWholeNodes returns the whole nodes wholeNodesAt builds, the first
+// started of them started and serving their listeners; the rest are for the
+// test to start. configure, when set, runs on the nodes of each attempt before
+// any starts. A port that another process took between sharedPorts and a bind
+// ends the attempt: the nodes already started stop, and fresh nodes on fresh
+// ports take their place, at most wholeStartAttempts times in all. Any other
+// failure fails the test.
+func startWholeNodes(t *testing.T, hosts []string, started int, configure func([]*clusterNode), ids ...string) []*clusterNode {
+	t.Helper()
+	for attempt := 1; ; attempt++ {
+		nodes := wholeNodesAt(t, hosts, ids...)
+		if configure != nil {
+			configure(nodes)
+		}
+		err := runWholeNodes(t, nodes[:started])
+		if err == nil {
+			return nodes
+		}
+		for _, n := range nodes[:started] {
+			n.discarded = true
+			if n.stop != nil {
+				n.stop()
+			}
+		}
+		if attempt == wholeStartAttempts || !strings.Contains(err.Error(), "address already in use") {
+			t.Fatal(err)
+		}
+		t.Logf("attempt %d of %d lost a port to another process, retrying on fresh ports: %v", attempt, wholeStartAttempts, err)
+	}
+}
+
+// runWholeNodes starts each of nodes and waits until each serves its three
+// listeners, or returns the error of the start, or of the Run that ended
+// before its node served.
+func runWholeNodes(t *testing.T, nodes []*clusterNode) error {
+	t.Helper()
+	for _, n := range nodes {
+		if err := n.tryStart(t); err != nil {
+			return err
+		}
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for _, n := range nodes {
+		for _, addr := range []string{n.cfg.HTTP.Addr, n.cfg.HTTPDiscovery.Addr, n.cfg.GRPC.Addr} {
+			for {
+				select {
+				case <-n.runDone:
+					return fmt.Errorf("%s: Run ended before it served %s: %w", n.id, addr, n.runErr)
+				default:
+				}
+				conn, err := net.Dial("tcp", addr)
+				if err == nil {
+					_ = conn.Close()
+					break
+				}
+				if time.Now().After(deadline) {
+					return fmt.Errorf("%s does not serve %s within 10s: %w", n.id, addr, err)
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
+	}
+	return nil
 }
 
 // serving waits until each of nodes, started, serves its three listeners: Run
@@ -153,7 +224,7 @@ func loginThrough(t *testing.T, leader, via *clusterNode, nodes []*clusterNode, 
 	if err := leader.app.store.UpsertUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
-	if err := credential.New(leader.app.store, zerolog.Nop()).SetPassword(ctx, credential.SetPasswordRequest{UserID: u.ID(), Password: browserPassword, Cost: 4}); err != nil {
+	if err := credential.New(leader.app.store, zerolog.Nop(), bcrypt.MinCost).SetPassword(ctx, credential.SetPasswordRequest{UserID: u.ID(), Password: browserPassword, Cost: 4}); err != nil {
 		t.Fatal(err)
 	}
 	login, body := send(t, httpClient(), http.MethodPost, "http://"+via.cfg.HTTP.Addr+"/login", formType, loginForm(subject), "", nil)
@@ -212,11 +283,7 @@ func servedAPI(t *testing.T, n *clusterNode, method, path string, status int) bo
 // Every node, which runs without tls.server, logged the WARN of its plaintext
 // forwarding once at start.
 func TestFollowerWritesLandOnTheNewLeaderAfterFailover(t *testing.T) {
-	nodes := wholeNodesAt(t, loopbackIPs(t, 3), "n1", "n2", "n3")
-	for _, n := range nodes {
-		n.start(t)
-	}
-	serving(t, nodes...)
+	nodes := startWholeNodes(t, loopbackIPs(t, 3), 3, nil, "n1", "n2", "n3")
 	warnedOfPlaintextForwarding(t, nodes...)
 	leader, followers := readyNodes(t, nodes)
 	ctx := context.Background()
@@ -328,18 +395,15 @@ func statusMembers(n *clusterNode) []string {
 // configuration. The leader's access log, not the follower's, holds each change
 // it served.
 func TestMembershipChangesThroughAFollower(t *testing.T) {
-	nodes := wholeNodesAt(t, loopbackIPs(t, 4), "n1", "n2", "n3", "n4")
+	// The joiner lists the three members as its peers and asks to join.
+	nodes := startWholeNodes(t, loopbackIPs(t, 4), 3, func(nodes []*clusterNode) {
+		peers := nodes[0].cfg.Cluster.Discovery.Peers[:3]
+		for _, n := range nodes {
+			n.cfg.Cluster.Discovery.Peers = peers
+		}
+		nodes[3].cfg.Cluster.Raft.Join = true
+	}, "n1", "n2", "n3", "n4")
 	members, joiner := nodes[:3], nodes[3]
-	peers := members[0].cfg.Cluster.Discovery.Peers[:3]
-	for _, n := range members {
-		n.cfg.Cluster.Discovery.Peers = peers
-	}
-	joiner.cfg.Cluster.Discovery.Peers = peers
-	joiner.cfg.Cluster.Raft.Join = true
-	for _, n := range members {
-		n.start(t)
-	}
-	serving(t, members...)
 	leader, followers := readyNodes(t, members)
 	ctx := context.Background()
 	cookies := loginThrough(t, leader, followers[0], members, "operator", enum.ClusterGet, enum.ClusterManage)

@@ -28,13 +28,12 @@ import (
 func TestResetThroughFollowerForwards(t *testing.T) {
 	const secret = "0123456789abcdef0123456789abcdef"
 	ctx := context.Background()
-	nodes := wholeNodesAt(t, loopbackIPs(t, 3), "n1", "n2", "n3")
-	for _, n := range nodes {
-		// Each replica reads its own environment: every one gets the same secret.
-		n.cfg.AgentAuth.EnrollSecret = secret
-		n.start(t)
-	}
-	serving(t, nodes...)
+	nodes := startWholeNodes(t, loopbackIPs(t, 3), 3, func(nodes []*clusterNode) {
+		for _, n := range nodes {
+			// Each replica reads its own environment: every one gets the same secret.
+			n.cfg.AgentAuth.EnrollSecret = secret
+		}
+	}, "n1", "n2", "n3")
 	leader, followers := readyNodes(t, nodes)
 	enrolling, resetting := followers[1], followers[0]
 	client := httpClient()

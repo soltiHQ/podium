@@ -15,6 +15,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/config"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -175,7 +176,7 @@ func TestStandaloneRunsNoConfigCheck(t *testing.T) {
 	cfg.Cluster.Standalone.Ephemeral = true
 	cfg.Auth.JWTSecret = strings.Repeat("standalone-config-check-secret", 2)
 	cfg.HTTP.Addr, cfg.HTTPDiscovery.Addr, cfg.GRPC.Addr = "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0"
-	a, err := New(context.Background(), cfg, zerolog.New(logs))
+	a, err := New(context.Background(), cfg, zerolog.New(logs), WithPasswordCost(bcrypt.MinCost))
 	if err != nil {
 		t.Fatal(err)
 	}

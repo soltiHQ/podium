@@ -19,6 +19,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // mainHandlerSecret signs the access tokens of the listeners mainHandlerOver builds.
@@ -42,8 +43,8 @@ func mainHandlerOver(t *testing.T, cfg config.Config, store storage.Storage, log
 func mainHandlerOf(t *testing.T, cfg config.Config, store storage.Storage, logger zerolog.Logger, leadership cluster.Leadership, forwardTLS *tls.Config) http.Handler {
 	t.Helper()
 	cfg.Auth.JWTSecret = mainHandlerSecret
-	authModel := kit.New(store, cfg.Auth)
-	svc, err := initServices(store, authModel, cfg.History.Archive, cfg.AgentAuth, logger)
+	authModel := kit.New(store, cfg.Auth, bcrypt.MinCost)
+	svc, err := initServices(store, authModel, cfg.History.Archive, cfg.AgentAuth, logger, bcrypt.MinCost)
 	if err != nil {
 		t.Fatal(err)
 	}

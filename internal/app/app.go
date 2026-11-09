@@ -13,6 +13,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	authcred "github.com/soltiHQ/control-plane/internal/auth/credentials"
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
 	"github.com/soltiHQ/control-plane/internal/cluster"
@@ -34,6 +35,26 @@ import (
 
 	pageSystem "github.com/soltiHQ/control-plane/ui/templates/page/system"
 )
+
+// options are the settings of [New] that production never changes.
+type options struct {
+	passwordCost int
+}
+
+// defaultOptions are the production settings.
+func defaultOptions() options {
+	return options{passwordCost: authcred.DefaultBcryptCost}
+}
+
+// Option changes how [New] assembles the App.
+type Option func(*options)
+
+// WithPasswordCost sets the bcrypt cost of stored passwords and of the login
+// dummy hash. The cost is 12 and operators cannot change it; this option is
+// for tests, which pass bcrypt.MinCost to keep logins fast.
+func WithPasswordCost(cost int) Option {
+	return func(o *options) { o.passwordCost = cost }
+}
 
 // App is the fully wired control-plane runtime.
 type App struct {
@@ -58,7 +79,11 @@ type App struct {
 // seeds at the start of each of its leadership terms (see [seedingRunner]).
 // Returned [App] is ready to [Run]. Caller must call [Shutdown] to release
 // deferred resources (Raft node, proxy pool, event hub).
-func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, error) {
+func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...Option) (*App, error) {
+	o := defaultOptions()
+	for _, opt := range opts {
+		opt(&o)
+	}
 	raftMode := cfg.Cluster.Backend == cluster.BackendRaft
 	clusterOpts := []clusterOption{withHubOptions(hubOptions(cfg)...)}
 	// A raft node digests the settings that every replica must share, answers
@@ -95,8 +120,8 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	authModel := kit.New(store, cfg.Auth)
-	svc, err := initServices(store, authModel, cfg.History.Archive, cfg.AgentAuth, logger)
+	authModel := kit.New(store, cfg.Auth, o.passwordCost)
+	svc, err := initServices(store, authModel, cfg.History.Archive, cfg.AgentAuth, logger, o.passwordCost)
 	if err != nil {
 		closeOnError(raftShutdown, eventHub)
 		return nil, err

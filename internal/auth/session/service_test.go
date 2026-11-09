@@ -16,6 +16,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth/token"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type fakeClock struct{ t time.Time }
@@ -113,7 +114,7 @@ func newService(t *testing.T, st storage.Storage, clk token.Clock, iss token.Iss
 	}
 
 	provs := map[enum.Auth]providers.Provider{
-		enum.Password: passwordprovider.New(st),
+		enum.Password: passwordprovider.New(st, bcrypt.MinCost),
 	}
 
 	return New(st, iss, clk, cfg, rbac, provs)

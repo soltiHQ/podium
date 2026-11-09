@@ -201,3 +201,14 @@ func TestCheckPasswordPolicy(t *testing.T) {
 		}
 	}
 }
+
+// Passwords are stored at cost 12; operators cannot change it, so a change of
+// the constant is a decision to see in review.
+func TestDefaultPasswordCostIsTwelve(t *testing.T) {
+	if DefaultBcryptCost != 12 {
+		t.Fatalf("DefaultBcryptCost = %d, want 12", DefaultBcryptCost)
+	}
+	if cost, err := normalizeCost(0); err != nil || cost != 12 {
+		t.Fatalf("normalizeCost(0) = %d, %v; want 12", cost, err)
+	}
+}

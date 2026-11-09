@@ -26,6 +26,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/credential"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -70,7 +71,7 @@ func newBrowserFixture(t *testing.T, cfg config.Config, wrap func(storage.Storag
 	t.Helper()
 	ctx := context.Background()
 	store := inmemory.New()
-	creds := credential.New(store, zerolog.Nop())
+	creds := credential.New(store, zerolog.Nop(), bcrypt.MinCost)
 	all := make([]string, 0, len(enum.All))
 	for _, p := range enum.All {
 		all = append(all, string(p))

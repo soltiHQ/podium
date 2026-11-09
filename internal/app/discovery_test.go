@@ -30,6 +30,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -100,7 +101,7 @@ func TestStandaloneWarnsOfNoForwarding(t *testing.T) {
 	cfg := config.Default()
 	cfg.Cluster.Standalone.Ephemeral = true
 	cfg.Auth.JWTSecret = strings.Repeat("standalone-forwarding-secret", 2)
-	a, err := New(context.Background(), cfg, zerolog.New(&logs))
+	a, err := New(context.Background(), cfg, zerolog.New(&logs), WithPasswordCost(bcrypt.MinCost))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +146,7 @@ func TestNewWarnsWhoCanRegisterAgents(t *testing.T) {
 			cfg.Cluster.Standalone.Ephemeral = true
 			cfg.Auth.JWTSecret = strings.Repeat("agent-auth-test-secret", 2)
 			cfg.AgentAuth.Require = tc.require
-			a, err := New(context.Background(), cfg, zerolog.New(&logs))
+			a, err := New(context.Background(), cfg, zerolog.New(&logs), WithPasswordCost(bcrypt.MinCost))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -262,7 +263,7 @@ func newDiscoveryClientsFor(t *testing.T, cfg config.Config) discoveryClients {
 func newDiscoveryClientsLogged(t *testing.T, cfg config.Config, logger zerolog.Logger) discoveryClients {
 	t.Helper()
 	store := inmemory.New()
-	svc, err := initServices(store, kit.New(store, cfg.Auth), cfg.History.Archive, cfg.AgentAuth, logger)
+	svc, err := initServices(store, kit.New(store, cfg.Auth, bcrypt.MinCost), cfg.History.Archive, cfg.AgentAuth, logger, bcrypt.MinCost)
 	if err != nil {
 		t.Fatal(err)
 	}

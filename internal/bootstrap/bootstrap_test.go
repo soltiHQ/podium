@@ -33,7 +33,7 @@ func TestRestartPreservesAdminAndPassword(t *testing.T) {
 	ctx := context.Background()
 	store := inmemory.New()
 	logger := zerolog.New(io.Discard)
-	roles, users, creds := role.New(store, logger), user.New(store, logger), credential.New(store, logger)
+	roles, users, creds := role.New(store, logger), user.New(store, logger), credential.New(store, logger, bcrypt.MinCost)
 	if err := reconcileRoles(ctx, logger, roles); err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestBootstrapSeedsOnceAndRepairsPartialFirstStart(t *testing.T) {
 	ctx := context.Background()
 	store := inmemory.New()
 	logger := zerolog.New(io.Discard)
-	roles, users, creds := role.New(store, logger), user.New(store, logger), credential.New(store, logger)
+	roles, users, creds := role.New(store, logger), user.New(store, logger), credential.New(store, logger, bcrypt.MinCost)
 	if err := reconcileRoles(ctx, logger, roles); err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestCancelledBootstrapDoesNotSeed(t *testing.T) {
 	cancel()
 	store := inmemory.New()
 	logger := zerolog.New(io.Discard)
-	err := Run(ctx, logger, Options{}, role.New(store, logger), user.New(store, logger), credential.New(store, logger))
+	err := Run(ctx, logger, Options{}, role.New(store, logger), user.New(store, logger), credential.New(store, logger, bcrypt.MinCost))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v", err)
 	}
@@ -174,7 +174,7 @@ func newFixture() *fixture {
 		logger: logger,
 		roles:  role.New(store, logger),
 		users:  user.New(store, logger),
-		creds:  credential.New(store, logger),
+		creds:  credential.New(store, logger, bcrypt.MinCost),
 	}
 }
 
@@ -249,7 +249,7 @@ func names(t *testing.T, dir string) []string {
 func login(t *testing.T, store storage.Storage, password string) []enum.Permission {
 	t.Helper()
 	cfg := auth.Config{JWTSecret: strings.Repeat("k", auth.MinJWTSecretLen), CookieSecure: auth.CookieSecureAuto}
-	_, id, err := kit.New(store, cfg).Session.Login(context.Background(), enum.Password, adminSubject, password)
+	_, id, err := kit.New(store, cfg, bcrypt.MinCost).Session.Login(context.Background(), enum.Password, adminSubject, password)
 	if err != nil {
 		t.Fatalf("login as %s: %v", adminSubject, err)
 	}
@@ -622,7 +622,7 @@ func (failingTx) WithTx(context.Context, func(storage.Storage) error) error { re
 func TestBootstrapFinishesAFirstStartThatStoppedHalfway(t *testing.T) {
 	ctx := context.Background()
 	f, dir := newFixture(), t.TempDir()
-	broken := credential.New(failingTx{f.store}, f.logger)
+	broken := credential.New(failingTx{f.store}, f.logger, bcrypt.MinCost)
 	err := Run(ctx, f.logger, Options{DataDir: dir, cost: bcrypt.MinCost}, f.roles, f.users, broken)
 	if !errors.Is(err, errStore) {
 		t.Fatalf("first start: %v, want the store failure", err)
@@ -679,7 +679,7 @@ func (c commitThenFail) WithTx(ctx context.Context, fn func(storage.Storage) err
 // it in its error (never the password), and the next start leaves it alone.
 func TestBootstrapKeepsPasswordFileWhenWriteOutcomeIsUncertain(t *testing.T) {
 	f, dir := newFixture(), t.TempDir()
-	uncertain := credential.New(commitThenFail{f.store}, f.logger)
+	uncertain := credential.New(commitThenFail{f.store}, f.logger, bcrypt.MinCost)
 	err := Run(context.Background(), f.logger, Options{DataDir: dir, cost: bcrypt.MinCost}, f.roles, f.users, uncertain)
 	if !errors.Is(err, errUncertain) {
 		t.Fatalf("start: %v, want the uncertain write", err)
@@ -869,7 +869,7 @@ func TestBootstrapRemovesStalePasswordFileWhenEnvPasswordIsStored(t *testing.T) 
 	t.Run("storing fails", func(t *testing.T) {
 		f, dir := newFixture(), t.TempDir()
 		path := staleFile(t, dir)
-		broken := credential.New(failingTx{f.store}, f.logger)
+		broken := credential.New(failingTx{f.store}, f.logger, bcrypt.MinCost)
 		err := Run(context.Background(), f.logger, Options{DataDir: dir, AdminPassword: password, cost: bcrypt.MinCost}, f.roles, f.users, broken)
 		if !errors.Is(err, errStore) {
 			t.Fatalf("start: %v, want the store failure", err)

@@ -67,10 +67,11 @@ type services struct {
 	cluster *clustersvc.Service
 }
 
-// initServices constructs the domain services. agentAuth gives the agent
+// initServices constructs the domain services. passwordCost is the bcrypt cost
+// of the passwords the credential service stores. agentAuth gives the agent
 // service the enrollment secret that closes discovery to unknown agent IDs and
 // that derived credentials derive from, and tells it when agent auth is off.
-func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history.Config, agentAuth config.AgentAuthConfig, logger zerolog.Logger) (services, error) {
+func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history.Config, agentAuth config.AgentAuthConfig, logger zerolog.Logger, passwordCost int) (services, error) {
 	historySVC, err := history.New(store, historyCfg)
 	if err != nil {
 		return services{}, err
@@ -82,7 +83,7 @@ func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history
 	return services{
 		history:    historySVC,
 		access:     access.New(authModel, store, logger),
-		credential: credential.New(store, logger),
+		credential: credential.New(store, logger, passwordCost),
 		session:    session.New(store, logger),
 		agent:      agent.New(store, logger, agentOpts...),
 		spec:       spec.New(store, logger),
