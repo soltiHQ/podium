@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -51,13 +52,46 @@ var discoverySyncMarshal = protojson.MarshalOptions{
 // request body and the gRPC message alike.
 const MaxSyncBytes = 256 << 10
 
+// The sync budget of an agent ID, see [NewSyncBuckets]. These are constants of
+// podium; there are no configuration keys for them.
+const (
+	syncBurst       = 10
+	syncRefill      = time.Second
+	syncBucketIdle  = 10 * time.Minute
+	syncLimitNotice = time.Minute
+)
+
+// syncLimitedAnswer is what an agent that syncs faster than its budget is told,
+// and what the WARN about it says.
+var syncLimitedAnswer = fmt.Sprintf("agent syncs too often: at most %d at once, then one per %s", syncBurst, syncRefill)
+
+// NewSyncBuckets returns the sync budget of the agents: a bucket per agent ID of
+// syncBurst syncs, refilled one per syncRefill, and dropped once the agent has
+// not synced for syncBucketIdle. HTTP and gRPC discovery take the same set, so
+// an agent has one budget whichever transport it uses.
+//
+// The buckets live in memory on the node that runs the handlers. In raft mode
+// that is the leader, where a follower forwards the syncs it gets. A restart
+// clears them, and after a failover the new leader counts from its own, which
+// hold nothing for the syncs the former leader served.
+func NewSyncBuckets() *ratelimit.Buckets {
+	return ratelimit.NewBuckets(ratelimit.BucketConfig{
+		Burst:  syncBurst,
+		Refill: syncRefill,
+		Idle:   syncBucketIdle,
+		Notice: syncLimitNotice,
+	})
+}
+
 // HTTPDiscovery handles agent discovery over HTTP.
 type HTTPDiscovery struct {
 	logger      zerolog.Logger
 	agentSVC    *agent.Service
 	eventHub    *event.Hub
 	limiter     *ratelimit.Limiter
+	syncs       *ratelimit.Buckets
 	resolver    *clientip.Resolver
+	clock       func() time.Time
 	requireAuth bool
 }
 
@@ -68,8 +102,10 @@ type HTTPDiscovery struct {
 // use, or only the token derived from the agent service's enrollment secret
 // when it has one), later ones must present it (constant-time verify). limiter
 // bounds the token checks of each (client IP, agent ID) pair, see
-// verifyAgentToken; resolver gives the client IP (nil trusts no proxy).
-func NewHTTPDiscovery(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, limiter *ratelimit.Limiter, resolver *clientip.Resolver, requireAuth bool) *HTTPDiscovery {
+// verifyAgentToken; syncs bounds how often each agent ID may sync, see
+// NewSyncBuckets, syncOverRate and chargeSync; resolver gives the client IP (nil trusts no
+// proxy).
+func NewHTTPDiscovery(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, requireAuth bool) *HTTPDiscovery {
 	if agentSVC == nil {
 		panic(service.ErrNilService)
 	}
@@ -79,12 +115,17 @@ func NewHTTPDiscovery(logger zerolog.Logger, agentSVC *agent.Service, eventHub *
 	if limiter == nil {
 		panic("handler.NewHTTPDiscovery: nil rate limiter")
 	}
+	if syncs == nil {
+		panic("handler.NewHTTPDiscovery: nil sync buckets")
+	}
 	return &HTTPDiscovery{
 		logger:      logger.With().Str("handler", "discovery-http").Logger(),
 		agentSVC:    agentSVC,
 		eventHub:    eventHub,
 		limiter:     limiter,
+		syncs:       syncs,
 		resolver:    resolver,
+		clock:       time.Now,
 		requireAuth: requireAuth,
 	}
 }
@@ -95,6 +136,16 @@ func NewHTTPDiscovery(logger zerolog.Logger, agentSVC *agent.Service, eventHub *
 // enum-as-string) matching solti.discover.v1.SyncRequest. The SDK emits
 // this format via pbjson; both HTTP and gRPC paths therefore share a single
 // wire schema.
+//
+// The order is: the payload is validated, the bucket of the agent is looked at
+// and a sync that finds it empty is answered 429 with Retry-After, then the
+// agent's token is verified (and enrolled, for an ID not seen before), the bucket
+// is charged, and only then is the agent written. So a payload that breaks a
+// limit enrolls and charges nothing; a sync of a throttled agent is refused
+// before the store is touched, with any token; a wrong token never takes from
+// the bucket of the agent whose ID it carries; and a sync over the rate writes
+// nothing. The look at the bucket takes nothing, so it can race a concurrent
+// sync, and the charge after the token check is what decides.
 func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 	mode := httpctx.ModeFromRequest(r)
 
@@ -126,6 +177,11 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if syncOverRate(h.logger, h.syncs, h.clock(), in.GetId()) {
+		tooManySyncs(w, r, mode)
+		return
+	}
+
 	if h.requireAuth {
 		token := bearerToken(r.Header.Get("Authorization"))
 		if err := verifyAgentToken(r.Context(), h.logger, h.agentSVC, h.limiter, h.resolver.IP(r), in.GetId(), token); err != nil {
@@ -142,6 +198,11 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+	}
+
+	if !chargeSync(h.logger, h.syncs, h.clock(), in.GetId()) {
+		tooManySyncs(w, r, mode)
+		return
 	}
 
 	existing, getErr := h.agentSVC.Get(r.Context(), in.GetId())
@@ -170,7 +231,9 @@ type GRPCDiscovery struct {
 	agentSVC    *agent.Service
 	hub         *event.Hub
 	limiter     *ratelimit.Limiter
+	syncs       *ratelimit.Buckets
 	resolver    *clientip.Resolver
+	clock       func() time.Time
 	requireAuth bool
 }
 
@@ -178,10 +241,11 @@ type GRPCDiscovery struct {
 //
 // requireAuth turns on per-agent bearer-token authentication on every sync,
 // as for NewHTTPDiscovery. limiter bounds the token checks of each (client IP,
-// agent ID) pair, see verifyAgentToken. resolver gives the client IP from the
+// agent ID) pair, see verifyAgentToken. syncs bounds how often each agent ID may
+// sync, see NewSyncBuckets, syncOverRate and chargeSync. resolver gives the client IP from the
 // peer and its x-forwarded-for metadata, see grpcClientIP; nil trusts no peer,
 // so the peer is the client.
-func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event.Hub, limiter *ratelimit.Limiter, resolver *clientip.Resolver, requireAuth bool) *GRPCDiscovery {
+func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event.Hub, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, requireAuth bool) *GRPCDiscovery {
 	if agentSVC == nil {
 		panic(service.ErrNilService)
 	}
@@ -191,21 +255,33 @@ func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event
 	if limiter == nil {
 		panic("handler.NewGRPCDiscovery: nil rate limiter")
 	}
+	if syncs == nil {
+		panic("handler.NewGRPCDiscovery: nil sync buckets")
+	}
 	return &GRPCDiscovery{
 		logger:      logger.With().Str("handler", "discovery-grpc").Logger(),
 		agentSVC:    agentSVC,
 		hub:         hub,
 		limiter:     limiter,
+		syncs:       syncs,
 		resolver:    resolver,
+		clock:       time.Now,
 		requireAuth: requireAuth,
 	}
 }
 
-// Sync implements discoverv1.DiscoverServiceServer.
+// Sync implements discoverv1.DiscoverServiceServer, in the order of
+// HTTPDiscovery.Sync: validate the payload, look at the bucket (ResourceExhausted
+// when it is empty), verify the token, charge the bucket (ResourceExhausted over
+// the rate), write the agent.
 func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (*discoverv1.SyncResponse, error) {
 	a, err := agentFromSyncRequest(req)
 	if err != nil {
 		return nil, status.Errorf(ctx, codes.InvalidArgument, "invalid agent data: %s", brokenRule(err))
+	}
+
+	if syncOverRate(g.logger, g.syncs, g.clock(), req.GetId()) {
+		return nil, throttledSync(ctx)
 	}
 
 	if g.requireAuth {
@@ -222,6 +298,10 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 				return nil, grpcSyncFailed(ctx, err)
 			}
 		}
+	}
+
+	if !chargeSync(g.logger, g.syncs, g.clock(), req.GetId()) {
+		return nil, throttledSync(ctx)
 	}
 
 	existing, getErr := g.agentSVC.Get(ctx, req.GetId())
@@ -258,6 +338,55 @@ func grpcSyncFailed(ctx context.Context, err error) error {
 	return status.FromError(ctx, err).Err()
 }
 
+// syncOverRate reports whether the bucket of agentID in syncs is empty at time
+// now, for both Sync transports, without taking from it. Both call it before the
+// token check, so a sync of a throttled agent is refused whatever token it
+// carries and before the store is touched, and takes nothing from the bucket of
+// an agent that has tokens left. That shows the throttling state of an agent ID
+// to a caller that has not authenticated, and lets that caller cause the WARN of
+// the refusal, at most once a minute for the ID; a look takes no token, so it
+// drains nothing. The look can race a concurrent sync: chargeSync decides. The
+// refusal logs what logSyncLimited says.
+func syncOverRate(logger zerolog.Logger, syncs *ratelimit.Buckets, now time.Time, agentID string) bool {
+	ok, notice := syncs.Peek(now, agentID)
+	logSyncLimited(logger, agentID, ok, notice)
+	return !ok
+}
+
+// chargeSync takes one token of the bucket of agentID in syncs, at time now, for
+// both Sync transports, and reports whether it did. Both call it after the token
+// check, so a sync that did not authenticate takes nothing from the bucket of the
+// agent whose ID it carries, and before any write. A refused sync writes nothing.
+// The refusal logs what logSyncLimited says.
+func chargeSync(logger zerolog.Logger, syncs *ratelimit.Buckets, now time.Time, agentID string) bool {
+	ok, notice := syncs.Take(now, agentID)
+	logSyncLimited(logger, agentID, ok, notice)
+	return ok
+}
+
+// logSyncLimited logs a WARN with the agent ID, never a token, for a refusal of
+// the bucket that asks to be logged: the first one of an agent ID, and then at
+// most one per syncLimitNotice for each ID, whichever of syncOverRate and
+// chargeSync refused. syncOverRate runs before the token check, so the WARN can
+// come from a caller that has not authenticated.
+func logSyncLimited(logger zerolog.Logger, agentID string, ok, notice bool) {
+	if !ok && notice {
+		logger.Warn().Str("agent_id", agentID).Msg(syncLimitedAnswer)
+	}
+}
+
+// tooManySyncs answers an HTTP sync that the rate refuses: 429 with Retry-After,
+// which the access log takes for a throttle.
+func tooManySyncs(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
+	response.TooManyRequests(w, r, mode, syncRefill, syncLimitedAnswer)
+}
+
+// throttledSync is the gRPC answer to a sync that the rate refuses:
+// ResourceExhausted with RetryInfo, which the call log takes for a throttle.
+func throttledSync(ctx context.Context) error {
+	return status.Throttled(ctx, syncRefill, "%s", syncLimitedAnswer)
+}
+
 // verifyAgentToken checks the bearer token of agentID synced from clientIP, for
 // both Sync transports. A token over model.AgentTokenMaxBytes returns
 // agent.ErrTokenTooLong before anything else. Otherwise it reserves an attempt
@@ -265,10 +394,12 @@ func grpcSyncFailed(ctx context.Context, err error) error {
 // it returns auth.ErrRateLimited while the failures plus the checks in flight
 // of the pair reach the limit. A missing or wrong token
 // (agent.ErrUnauthenticated, which includes agent.ErrEnrollRefused, a
-// first-contact token other than the one derived from the enrollment secret)
-// becomes a failure. A missing token and a refused enrollment each log a WARN,
-// never the token, at most rate_attempts per window for the pair; every other
-// outcome, a panic included, releases the attempt.
+// first-contact token other than the one derived from the enrollment secret,
+// and agent.DerivedCredentialError, a derived credential of another
+// enrollment secret or with none set) becomes a failure. A missing token, a
+// refused enrollment and a DerivedCredentialError each log a WARN, never the
+// token, at most rate_attempts per window for the pair; every other outcome, a
+// panic included, releases the attempt.
 func verifyAgentToken(ctx context.Context, logger zerolog.Logger, svc *agent.Service, limiter *ratelimit.Limiter, clientIP, agentID, token string) error {
 	if len(token) > model.AgentTokenMaxBytes {
 		return agent.ErrTokenTooLong
@@ -292,9 +423,14 @@ func verifyAgentToken(ctx context.Context, logger zerolog.Logger, svc *agent.Ser
 		logger.Warn().Str("agent_id", agentID).Msg(msg)
 	}
 	err = svc.VerifyOrEnrollToken(ctx, agentID, token)
-	if errors.Is(err, agent.ErrEnrollRefused) {
+	var derived *agent.DerivedCredentialError
+	switch {
+	case errors.Is(err, agent.ErrEnrollRefused):
 		logger.Warn().Str("agent_id", agentID).Str("client_ip", clientIP).
 			Msg("enrollment refused: an unknown agent ID presented a token that is not the one derived for it from the enrollment secret; give the agent the token podium agent-token prints for its ID")
+	case errors.As(err, &derived):
+		// The text names the agent and the token it needs, never a token.
+		logger.Warn().Str("agent_id", agentID).Str("client_ip", clientIP).Msg(derived.Error())
 	}
 	if errors.Is(err, agent.ErrUnauthenticated) {
 		attempt.Fail(time.Now())
@@ -310,7 +446,8 @@ func brokenRule(err error) string {
 
 // agentFromSyncRequest builds a domain Agent from a discovery heartbeat. Shared
 // by the HTTP and gRPC Sync handlers — both carry the same proto SyncRequest.
-// Both call it before token enrollment, so an invalid payload enrolls nothing.
+// Both call it before token enrollment, so a payload that breaks a limit of
+// model.NewAgentFrom, the capability fields included, enrolls nothing.
 func agentFromSyncRequest(req *discoverv1.SyncRequest) (*model.Agent, error) {
 	return model.NewAgentFrom(model.AgentParams{
 		ID:                 req.GetId(),

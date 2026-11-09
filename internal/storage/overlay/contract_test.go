@@ -249,6 +249,32 @@ func readYourWrites() []rywCase {
 				return missing(tx.GetAgentCredential(t.Context(), "agent-b"))
 			},
 		},
+		{
+			"ListAgentCredentials/listing order", "ListAgentCredentials",
+			func(t *testing.T, tx storage.Storage) error {
+				ctx := t.Context()
+				return errors.Join(
+					tx.UpsertAgentCredential(ctx, agentCredential(t, "agent-a", "token-a", 1)),
+					tx.UpsertAgentCredential(ctx, agentCredential(t, "agent-c", "token-c", 2)),
+					tx.UpsertAgentCredential(ctx, agentCredential(t, "agent-e", "token-e", 3)),
+					tx.UpsertAgentCredential(ctx, agentCredential(t, "agent-g", "token-g", 2)),
+					tx.UpsertAgentCredential(ctx, agentCredential(t, "agent-b", "token-b2", 3)),
+					tx.DeleteAgentCredential(ctx, "agent-g"),
+				)
+			},
+			func(t *testing.T, tx storage.Storage) error {
+				rows, err := paged(func(o storage.ListOptions) (*storage.AgentCredentialListResult, error) {
+					return tx.ListAgentCredentials(t.Context(), o)
+				})
+				if err != nil {
+					return err
+				}
+				if err := listingOrder(rows, "agent-b", "agent-e", "agent-c", "agent-a"); err != nil {
+					return err
+				}
+				return field("token of agent-b", rows[0].Token(), "token-b2")
+			},
+		},
 
 		// Users.
 		{
@@ -1348,7 +1374,7 @@ func agent(t *testing.T, id string, created int, env string) *model.Agent {
 
 func agentCredential(t *testing.T, agentID, token string, created int) *model.AgentCredential {
 	t.Helper()
-	c, err := model.NewAgentCredential(agentID, token)
+	c, err := model.NewStoredAgentCredential(agentID, token)
 	if err != nil {
 		t.Fatal(err)
 	}

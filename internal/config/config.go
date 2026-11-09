@@ -72,9 +72,12 @@ type AgentAuthConfig struct {
 
 	// EnrollSecret closes enrollment (env SOLTI_AGENT_AUTH_ENROLL_SECRET): an
 	// unknown agent ID then enrolls only with the token derived from the
-	// secret for that ID, see [agent.EnrollToken]. Known agents are
-	// unaffected. It is never read from YAML, so config files stay free of
-	// it. Empty means enrollment stays trust on first use.
+	// secret for that ID, see [agent.DeriveToken], and gets a derived
+	// credential, which stores no token: podium derives it again from the
+	// secret, which every derived credential then needs. Changing or removing
+	// the secret locks out the agents that hold one. It is never read from
+	// YAML, so config files stay free of it. Empty means enrollment stays trust
+	// on first use.
 	EnrollSecret string `yaml:"-" envconfig:"ENROLL_SECRET"`
 }
 

@@ -117,13 +117,30 @@ by how long they have been silent. `hb` is the heartbeat the agent reported, or
   agent `active` again. No event is recorded when the status does not change;
   each change records `agent_inactive`, `agent_disconnected` or `agent_deleted`.
 - **Deletion drops the row only.** Deleting an agent drops its row, and with
-  it the labels operators set on it; its rollouts and its credential stay.
+  it the labels operators set on it; its rollouts and its credential stay. Once
+  the deletion is committed the runner has the proxy pool close the gRPC
+  connection it holds to the agent (`Pool.Forget`); a later call dials afresh.
   Until the agent syncs again, each of its pushes fails with `agent not found`
   until `max_retries`, and its synced rollouts are skipped: no call goes out,
-  so its backoff does not change. When it syncs again, its stored token still
+  so its backoff does not change. When it syncs again, its credential still
   authenticates it, and it is created anew, without labels: the next Deploy
   of a spec that targets it by labels turns its rollout into an uninstall,
   unless the labels are restored first.
+- **An operator's delete drops the rollouts too.** `DELETE /api/v1/agents/{id}`
+  (`agents:delete`, see `internal/handler/README.md`) removes the agent's row, if
+  it has one, and every rollout of the agent ID in one transaction, where
+  lifecycle deletion leaves the rollouts so that a returning agent resumes them.
+  So it also drops what lifecycle deletion leaves: the rollouts of an agent that
+  lifecycle deleted, which has no row. It answers 404 only when the ID has
+  neither a row nor a rollout. It keeps the credential and the execution
+  history, as lifecycle deletion does, closes the pooled connection the same
+  way, and records `agent_removed` with the actor, which is no issue, unlike
+  lifecycle's `agent_deleted`; it also closes the agent's open `agent_inactive`
+  and `agent_disconnected` issues, as a reconnect does. An agent that still runs
+  registers again at its next sync with its credential, and comes back with no
+  labels and no rollouts (`TestDeletedAgentReturnsWithoutRollouts`). To keep it
+  out, reset its credential first (`POST /api/v1/agents/{id}/credential`): its
+  old token is then refused, so only the new one brings it back.
 - **`delete_after` is a floor.** No agent is deleted sooner, whatever
   `delete_multiplier` says. Discovery refuses a reported heartbeat above 3600s
   (1h), so with the defaults (multiplier 10, `delete_after` 24h) the multiplier
@@ -170,38 +187,66 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   listing of the agent's tasks, with no filter, instead of a call per rollout.
   Each page is a call like any other and starts only while the turn is within
   its budget. A page starts at 1000 tasks. One that the proxy refuses as too
-  large (an answer over 4 MiB) is asked again from the same cursor with half
-  the limit, down to one task, and the smaller limit holds for the rest of the
-  turn; the next turn starts at 1000 again. The listing is bounded, whatever
-  the agent answers: a page with more tasks than it was asked for, or a cursor
-  over 4096 bytes, is refused, and a listing that would hold more than 65536
-  task IDs or 32 MiB of them, or take more than 1024 calls, refused pages
-  included, stops. A synced rollout whose task is missing from the listing is
-  queued for a reinstall, but only a complete listing shows a task missing. If
-  the budget runs out, a page fails or is refused (a task too large to list
-  even alone included), the listing passes a bound, the agent returns a cursor
-  it returned before, or its pages name different snapshots (resource
-  versions that differ; a page without one is let through), no rollout is
-  judged and none is touched, and the next tick lists again from the first
-  page, as a cursor holds only within a tick. So every synced rollout of an
-  agent is observed each tick when, after the turn's pushes, the agent's task
-  list can be listed within those bounds, with the last page starting inside
-  `push_timeout`; an agent whose list cannot is not observed. A synced rollout
-  without a task makes no call.
+  large (an answer over 4 MiB) or as holding too many elements (more than 262144
+  repeated elements in all) is asked again from the same cursor with half the
+  limit, down to one task, and the smaller limit holds for the rest of the turn;
+  the next turn starts at 1000 again. A task with more than 64 conditions is a
+  bound of the task, not of the page: no smaller page avoids it, so the page is
+  not asked again and the listing ends at the call that meets it. The proxy
+  refuses it at the 65th condition over either transport, so a flood of
+  conditions in one status is one call with one cause whichever the agent
+  speaks, as long as nothing ahead of it in the answer has spent the budget of
+  elements. Over gRPC two floods go another way: a status that the agent splits
+  into several occurrences of the task's `status` field, each of 64 conditions
+  or fewer, which the scan counts one occurrence at a time, and a flood behind
+  tasks that spent the budget. The scan refuses either as too many elements,
+  before anything is decoded, once the budget is passed, and the page is asked
+  again with half the limit as above: up to ten calls, and ten for a split flood
+  that passes the budget even alone, every one refused before decoding. A split
+  within the budget is decoded and refused as too many conditions, as below, and
+  the listing ends without halving. The listing is bounded, whatever the
+  agent answers. The proxy bounds what a page builds (see "What an answer may
+  build" in `internal/proxy/README.md`). What is past a bound is not built: the
+  task past the limit, the element past 262144 in all (gRPC) and the condition
+  past the 64th of a task (both). Over HTTP what is under a bound is built
+  first: the first tasks of a page up to the limit, and the first 64 conditions
+  of a task, are decoded and dropped with the error; over gRPC the scan refuses
+  such an answer before any of it is decoded. A task ID over 1024 bytes and a cursor
+  over 4096 bytes are refused once decoded, and so is a gRPC task whose `status`
+  field the agent split in several occurrences that hold more than 64 conditions
+  in all within the budget, which the decoder merges, at the cost of a page the
+  other bounds have capped. The tests measure a refused `ListTasks` flood at 1
+  to 21 MiB allocated in all (what each sends is in the proxy README). The runner
+  counts the tasks of a page again, and refuses a cursor over 4096 bytes itself.
+  A listing that would hold more than 65536 task IDs or 32 MiB of them, or take
+  more than 1024 calls, refused pages included, stops. A synced rollout whose
+  task is missing from the listing is queued for a reinstall, but only a
+  complete listing shows a task missing. If the budget runs out, a page fails or
+  is refused (a task too large to list, or with too many elements, even alone,
+  or with more than 64 conditions, included), the listing passes a bound, the
+  agent returns a cursor it returned before, or its pages name different
+  snapshots (resource versions that differ; a page without one is let through),
+  no rollout is judged and none is touched, and the next tick lists again from
+  the first page, as a cursor holds only within a tick. So every synced rollout
+  of an agent is observed each tick when, after the turn's pushes, the agent's
+  task list can be listed within those bounds, with the last page starting
+  inside `push_timeout`; an agent whose list cannot is not observed. A synced
+  rollout without a task makes no call.
 - **Reinstalls are not bounded by `push_timeout`.** After a complete listing,
   each rollout whose task is missing is queued for a reinstall by a write to
   the store, about 1 ms on the durable store; in raft mode each write is a
   replicated commit. These writes make no agent call, so the turn's budget does
   not stop them: an agent that lost all its tasks has one write per rollout in
   one turn.
-- **A listing that cannot finish is logged when that changes.** When an
-  agent's listing turns incomplete, the runner logs one warning that names the
-  cause (a task too large to list, the budget used, a repeated cursor, pages of
-  different snapshots, a page answered with an error, a page with more tasks
-  than asked, a cursor that is too long, a listing over the bounds). When it
-  turns complete again, one info line names the latest cause. Neither is
-  repeated on every tick, and a cause that changes meanwhile is not logged. An
-  agent that flips between the two logs a pair of lines for each flip.
+- **A listing that cannot finish is logged when that changes.** When an agent's
+  listing turns incomplete, the runner logs one warning that names the cause (a
+  task too large to list, the budget used, a repeated cursor, pages of different
+  snapshots, a page answered with an error, a page with more tasks than asked, a
+  task with too many conditions, a task or a page with too many elements even
+  alone, a cursor that is too long, a listing over the bounds). When it turns
+  complete again, one info line names the latest cause. Neither is repeated on
+  every tick, and a cause that changes meanwhile is not logged. An agent that
+  flips between the two logs a pair of lines for each flip.
 - **An unanswered call ends the agent's turn.** A failed push records its
   failure on the rollout; an unanswered listing records nothing and only backs
   the agent off. The agent's other rollouts wait, untouched. An answer,
@@ -214,3 +259,10 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   that used up its timeout still records the status, the attempt and the
   `sync_failed` event. A tick cancelled by shutdown or lost leadership records
   nothing.
+- **An agent's error text is cut.** The text of a failed call is the agent's to
+  choose. The runner cuts the message it stores in the rollout and records as the
+  detail of the `sync_failed` event to 4 KiB on a UTF-8 boundary, with `…` where
+  it cut (`proxy.CapAgentText`), and the errors of the proxy that it logs read as
+  the cut text. The archive of history, which keeps the error an agent reports
+  for a run, does not use the helper: it has a bound of its own, 32 KiB, and
+  refuses a record over it.

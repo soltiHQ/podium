@@ -68,18 +68,23 @@ type services struct {
 }
 
 // initServices constructs the domain services. agentAuth gives the agent
-// service the enrollment secret that closes discovery to unknown agent IDs.
+// service the enrollment secret that closes discovery to unknown agent IDs and
+// that derived credentials derive from, and tells it when agent auth is off.
 func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history.Config, agentAuth config.AgentAuthConfig, logger zerolog.Logger) (services, error) {
 	historySVC, err := history.New(store, historyCfg)
 	if err != nil {
 		return services{}, err
+	}
+	agentOpts := []agent.Option{agent.WithEnrollSecret(agentAuth.EnrollSecret)}
+	if !agentAuth.Require {
+		agentOpts = append(agentOpts, agent.WithAuthDisabled())
 	}
 	return services{
 		history:    historySVC,
 		access:     access.New(authModel, store, logger),
 		credential: credential.New(store, logger),
 		session:    session.New(store, logger),
-		agent:      agent.New(store, logger, agent.WithEnrollSecret(agentAuth.EnrollSecret)),
+		agent:      agent.New(store, logger, agentOpts...),
 		spec:       spec.New(store, logger),
 		role:       role.New(store, logger),
 		user:       user.New(store, logger),
@@ -301,6 +306,57 @@ func seedingRunner(cfg config.Config, logger zerolog.Logger, leadership cluster.
 	})
 }
 
+// What credentialSweepRunner logs of a sweep (agent.CredentialSweep).
+const (
+	convertedCredentials = "agent credentials: stored tokens that the enrollment secret derives are now derived credentials: no snapshot or log entry written from now on holds them"
+	storedCredentials    = "agent credentials: stored tokens are left, kept raw in podium's state and in its backups: tokens agents chose while no enrollment secret was set, and tokens an earlier secret derived, which stay valid and which that secret still derives; resetting an agent's credential (POST /api/v1/agents/{id}/credential) while an enrollment secret is set moves it to a derived credential"
+	otherSecretCreds     = "agent credentials: derived credentials of another enrollment secret than the current one: podium refuses these agents and makes no call to them until the secret they derive from is set again, each is re-provisioned with the token podium agent-token prints for it under the current secret, or its credential is reset (POST /api/v1/agents/{id}/credential), which issues a token derived under the current secret"
+	noSecretCreds        = "agent credentials: derived credentials and no enrollment secret is set: podium refuses these agents and makes no call to them until the secret they derive from is set again, or each credential is reset (POST /api/v1/agents/{id}/credential), which issues a stored token"
+)
+
+// credentialSweepRunner is the runner that sweeps the agent credentials
+// (agent.Service.SweepCredentials) at the start of each leadership term of this
+// replica, through Leadership.WhenLeader: once at start in standalone, which
+// always leads, and once per term on a raft leader, a leader write like any
+// other. It converts the stored credentials whose token the enrollment secret
+// derives at generation 0, and logs what it found (logCredentialSweep). A
+// failure is retried while the term lasts (see [base.NewTermTask]). New runs it
+// only while agent auth is required: with agent_auth.require false podium checks
+// no token and presents none.
+func credentialSweepRunner(logger zerolog.Logger, leadership cluster.Leadership, agents *agent.Service) *base.Runner {
+	return base.NewTermTask("agent-credentials", leadership, logger, func(ctx context.Context) error {
+		res, err := agents.SweepCredentials(ctx)
+		if err != nil {
+			return err
+		}
+		logCredentialSweep(logger, res, agents.EnrollSecretSet())
+		return nil
+	})
+}
+
+// logCredentialSweep logs, with its count, each finding of a sweep: an INFO for
+// the stored credentials it converted, a WARN for the stored ones left, whose
+// tokens stay in the state and its backups (tokens agents chose without a
+// secret, and tokens a former secret derived), and an ERROR for the derived
+// ones podium cannot use, which says whether no secret is set (secretSet false)
+// or they derive from another one, and every way back. A sweep that found
+// nothing logs nothing.
+func logCredentialSweep(logger zerolog.Logger, res agent.CredentialSweep, secretSet bool) {
+	if res.Converted > 0 {
+		logger.Info().Int("converted_credentials", res.Converted).Msg(convertedCredentials)
+	}
+	if res.Stored > 0 {
+		logger.Warn().Int("stored_credentials", res.Stored).Msg(storedCredentials)
+	}
+	if res.Unusable > 0 {
+		msg := otherSecretCreds
+		if !secretSet {
+			msg = noSecretCreds
+		}
+		logger.Error().Int("unusable_credentials", res.Unusable).Msg(msg)
+	}
+}
+
 // buildMainHandler wires the UI and API listener. resolver gives client IPs to
 // the login limiter and the stream limiter, and tells the auth and device
 // cookies whether the client used HTTPS. The listener has no limit on failed authentication:
@@ -408,28 +464,31 @@ func warnForwarding(logger zerolog.Logger, cfg config.Config) {
 }
 
 // buildDiscoveryListeners wires the HTTP and gRPC discovery listeners around one
-// failure limiter: both count agent token failures per (client IP, agent ID), so
-// an agent has one budget whichever transport it uses. resolver gives both the
-// client IP; gRPC discovery reads it from x-forwarded-for only in raft mode, where
-// a follower forwards its syncs to the leader with forwarder, while standalone
-// keeps the peer address, as before.
+// failure limiter and one set of sync buckets: both count agent token failures
+// per (client IP, agent ID) and charge each sync to the bucket of its agent ID,
+// so an agent has one budget of each whichever transport it uses. resolver gives
+// both the client IP; gRPC discovery reads it from x-forwarded-for only in raft
+// mode, where a follower forwards its syncs to the leader with forwarder, while
+// standalone keeps the peer address, as before.
 func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, cfg config.Config, resolver *clientip.Resolver, serverTLS, forwardTLS *tls.Config, forwarder *interceptor.Forwarder) (http.Handler, *grpc.Server) {
 	limiter := kit.NewLimiter(cfg.Auth)
+	syncs := handler.NewSyncBuckets()
 	var grpcClients *clientip.Resolver
 	if _, raft := leadership.(cluster.Membership); raft {
 		grpcClients = resolver
 	}
-	return buildDiscoveryHandler(logger, agentSVC, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), limiter, resolver, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled(), forwardTLS),
-		buildGRPCServer(logger, agentSVC, eventHub, leadership, limiter, grpcClients, serverTLS, cfg.AgentAuth.Require, addrPort(cfg.GRPC.Addr), forwarder)
+	return buildDiscoveryHandler(logger, agentSVC, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), limiter, syncs, resolver, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled(), forwardTLS),
+		buildGRPCServer(logger, agentSVC, eventHub, leadership, limiter, syncs, grpcClients, serverTLS, cfg.AgentAuth.Require, addrPort(cfg.GRPC.Addr), forwarder)
 }
 
 // buildDiscoveryHandler wires the HTTP discovery listener. It has no per-IP
 // limit: the handler counts authentication failures per (client IP, agent ID)
-// in limiter, so agents behind one egress IP never block each other. A
-// follower forwards syncs to the leader with forwardTLS, see [leaderOptions].
-func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, resolver *clientip.Resolver, requireAuth bool, targetTLS bool, forwardTLS *tls.Config) http.Handler {
+// in limiter, so agents behind one egress IP never block each other, and charges
+// each sync to the bucket of its agent ID in syncs. A follower forwards syncs to
+// the leader with forwardTLS, see [leaderOptions].
+func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, requireAuth bool, targetTLS bool, forwardTLS *tls.Config) http.Handler {
 	var (
-		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC, eventHub, limiter, resolver, requireAuth)
+		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC, eventHub, limiter, syncs, resolver, requireAuth)
 		mux           = http.NewServeMux()
 	)
 	mux.HandleFunc("/api/v1/discovery/sync", httpDiscovery.Sync)
@@ -466,7 +525,7 @@ func buildLogHub(logger zerolog.Logger, agentSVC *agent.Service, proxyPool *prox
 		if err != nil {
 			return nil, err
 		}
-		p, err := proxyPool.Get(ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
+		p, err := proxyPool.Get(ag.ID(), ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
 		if err != nil {
 			return nil, err
 		}
@@ -499,11 +558,12 @@ func addrPort(addr string) int {
 // buildGRPCServer wires the gRPC discovery listener, which serves on port. Like
 // HTTP discovery, it has no per-IP limit: the Sync handler counts authentication
 // failures per (client IP, agent ID) in limiter, with the client IP that
-// resolver gives (nil: the peer). On a follower, forwarder sends a Sync to the
-// leader's gRPC listener, at the host of the leader's raft address and port,
-// which every replica is assumed to serve it on; a write it does not forward
-// answers Unavailable with that address in the x-leader hint.
-func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, limiter *ratelimit.Limiter, resolver *clientip.Resolver, serverTLS *tls.Config, requireAuth bool, port int, forwarder *interceptor.Forwarder) *grpc.Server {
+// resolver gives (nil: the peer), and charges each sync to the bucket of its
+// agent ID in syncs. On a follower, forwarder sends a Sync to the leader's gRPC
+// listener, at the host of the leader's raft address and port, which every
+// replica is assumed to serve it on; a write it does not forward answers
+// Unavailable with that address in the x-leader hint.
+func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, serverTLS *tls.Config, requireAuth bool, port int, forwarder *interceptor.Forwarder) *grpc.Server {
 	// Write methods (must run on leader). Sync is the only agent-facing
 	// mutation; everything else is pure read.
 	writeMethods := map[string]struct{}{
@@ -538,7 +598,7 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *e
 
 	var (
 		srv           = grpc.NewServer(opts...)
-		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC, eventHub, limiter, resolver, requireAuth)
+		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC, eventHub, limiter, syncs, resolver, requireAuth)
 	)
 	discoverv1.RegisterDiscoverServiceServer(srv, grpcDiscovery)
 	return srv

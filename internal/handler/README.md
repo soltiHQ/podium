@@ -17,8 +17,8 @@ handler/
 | Handler           | Transport | Constructor           | Dependencies                                                         |
 |-------------------|-----------|-----------------------|----------------------------------------------------------------------|
 | `API`             | HTTP      | `NewAPI`              | user, access, session, credential, agent, spec services + proxy.Pool; the cluster service in raft mode (`WithCluster`) |
-| `HTTPDiscovery`   | HTTP      | `NewHTTPDiscovery`    | agent service, discovery limiter, client IP resolver                 |
-| `GRPCDiscovery`   | gRPC      | `NewGRPCDiscovery`    | agent service, discovery limiter, client IP resolver (raft mode)     |
+| `HTTPDiscovery`   | HTTP      | `NewHTTPDiscovery`    | agent service, discovery limiter, sync buckets, client IP resolver   |
+| `GRPCDiscovery`   | gRPC      | `NewGRPCDiscovery`    | agent service, discovery limiter, sync buckets, client IP resolver (raft mode) |
 | `UI`              | HTTP      | `NewUI`               | access + spec services, client IP resolver, cookie Secure policy     |
 | `Static`          | HTTP      | `NewStatic`           | embedded `ui.Static` filesystem                                      |
 
@@ -76,9 +76,27 @@ cross-origin browser mutations with 403 (see `internal/config`, "Browser session
 `PUT /api/v1/users/{id}` is a patch applied inside the transaction. A non-empty `subject`, `name` or `email` and a
 present `role_ids` or `permissions` list (`[]` clears it) replace the stored value; everything else stays as the
 transaction reads it. Fields the request does not set keep a change committed meanwhile, and `disabled` always does
-(see disable and enable). A present `role_ids` or `permissions` list overwrites the stored set, and the UI form for
-editing another user always sends both, so a stale form can still revert a concurrent role or permission change
-(known residual).
+(see disable and enable). A present `role_ids` or `permissions` list overwrites the stored set, so of two edits of one
+user the later one's lists win, unless it names with `If-Match` the version it is based on (below).
+
+`GET /api/v1/users/{id}` answers `ETag: "<tag>"`, and the UI edit form carries the same tag. The tag is the lowercase
+hex of the first 16 bytes of SHA-256 over every stored field of the user: ID, subject, email, name, disabled, role IDs,
+permissions, creation time and update time, with strings and lists length prefixed. It is computed, never stored. It
+does not rest on the update time alone, which two changes may share when they read the same clock and which a writer
+may set, so it changes whenever any stored field does, whichever write made the change: update, disable or enable. A
+write that stores what is already stored leaves it as it was. A change to the permissions of a role is not a change of
+the user and leaves it too.
+
+`PUT` takes the tag as `If-Match`, read the way Deploy reads it (see Specs): RFC 9110 lists over every `If-Match`
+header, strong tags with or without their quotes; a weak tag never matches, and a blank header names no tag. The
+update transaction compares the list with the user it reads, after the target ceiling (a caller who may not manage the
+user gets 403 whatever the tag) and before the patch is applied. When none of the tags names the stored user, nothing is
+written and the answer is 412 `User changed since it was read; reload and retry.`; a user deleted meanwhile is still
+404. Without `If-Match`, or with `*` anywhere in it, the patch is applied to the stored user as it is, as before: API
+clients that never read before they write keep working, and of two such edits the later one's role and permission
+lists win. A client that sends those lists should send the tag. Only the update takes `If-Match`; disable, enable,
+delete and the password route do not. The UI edit form always sends the tag of the user it shows, so a form that went
+stale is refused instead of reverting a concurrent role or permission change (see `ui/README.md`).
 
 ### Sessions `/api/v1/session`
 | Method | Path                          | Permission  |
@@ -95,16 +113,79 @@ The user, credential and session services enforce these inside the transaction o
 - **Last admin.** A delete, disable or role/permission change that would leave no enabled user holding every permission → 409.
 
 ### Agents `/api/v1/agents`
-| Method | Path                                             | Permission   |
-|--------|--------------------------------------------------|--------------|
-| GET    | `/api/v1/agents`                                 | `AgentsGet`  |
-| GET    | `/api/v1/agents/{id}`                            | `AgentsGet`  |
-| PUT    | `/api/v1/agents/{id}/labels`                     | `AgentsEdit` |
-| GET    | `/api/v1/agents/{id}/tasks`                      | `AgentsGet`  |
-| GET    | `/api/v1/agents/{id}/tasks/{taskID}`             | `AgentsGet`  |
-| POST   | `/api/v1/agents/{id}/tasks/{taskID}/cancel`      | `AgentsEdit` |
-| GET    | `/api/v1/agents/{id}/tasks/{taskID}/logs/stream` | `AgentsGet`  |
-| GET    | `/api/v1/history`                                | `AgentsGet`  |
+| Method | Path                                             | Permission     |
+|--------|--------------------------------------------------|----------------|
+| GET    | `/api/v1/agents`                                 | `AgentsGet`    |
+| GET    | `/api/v1/agents/{id}`                            | `AgentsGet`    |
+| DELETE | `/api/v1/agents/{id}`                            | `AgentsDelete` |
+| PUT    | `/api/v1/agents/{id}/labels`                     | `AgentsEdit`   |
+| POST   | `/api/v1/agents/{id}/credential`                 | `AgentsReset`  |
+| GET    | `/api/v1/agents/{id}/tasks`                      | `AgentsGet`    |
+| GET    | `/api/v1/agents/{id}/tasks/{taskID}`             | `AgentsGet`    |
+| POST   | `/api/v1/agents/{id}/tasks/{taskID}/cancel`      | `AgentsEdit`   |
+| GET    | `/api/v1/agents/{id}/tasks/{taskID}/logs/stream` | `AgentsGet`    |
+| GET    | `/api/v1/history`                                | `AgentsGet`    |
+
+`POST /api/v1/agents/{id}/credential` (no body) issues the agent a new credential in place of the one it holds, in one
+transaction. From its commit discovery refuses the old token (401 / `Unauthenticated`), and podium's calls to the agent
+present the new one, so the old token ends in both directions at once (`TestResetCredentialRevokesBothDirections`). The
+new credential keeps the enrollment time.
+
+- With an enrollment secret set it is a derived credential (see `internal/config`, "Enrollment secret"), and it names
+  the current secret, whatever secret the old one derived from. Its generation is the later of the old generation plus
+  one (a stored credential has none and counts as 0) and the time of the reset in Unix seconds, at least 1 and below the
+  last generation (`TestResetCredentialIssuesTheLaterOfTheNextGenerationAndTheTime` and `TestResetTakesTheTimeFloor` in
+  `internal/service/agent`). The time is there because the old generation can be below one that was issued and revoked:
+  a stored credential counts as 0 though its agent held derived ones before (a secret removed, a reset while none was
+  set, the same secret set again), and a restored backup brings a credential back below the generations reset since
+  (`TestResetAfterAStoredInterludeRevivesNoGeneration` and `TestResetAfterARestoredBackupExceedsEveryGenerationIssued`).
+  The generation is above every earlier one as long as each reset of the agent falls in a later second than the one
+  before it, on the clock of the leader, the node that serves the reset; a reset in the same second as the last takes
+  the generation after it. The answer is `{"agent_id", "token", "generation"}`, and `podium agent-token --generation
+  <generation> <agent-id>`, run with the secret, prints the token again.
+- Without a secret it is a stored credential, as trust on first use stores tokens, with a new random token of 32 bytes
+  as 64 lowercase hex digits (`TestResetWithoutSecretIssuesRandomToken`). The answer has no `generation`, and nothing
+  derives that token again.
+- 404 when the ID has no credential, with or without an agent row. 409 while `agent_auth.require` is false, where
+  podium checks and presents no token, so there is nothing to reset and nothing changes (`TestResetRefusals`). 409 too
+  for a derived credential at the last generation (4294967295): the next would wrap around to 0, the token its agent ID
+  enrolls with.
+
+No response, event or log other than this answer holds the token. The answer carries `Cache-Control: no-store`; the
+event `agent_credential_reset` holds the agent ID, its name and the actor, no token; no log line holds one, and no read
+returns it. A reset without a secret also keeps its random token in the state, as every stored token is kept, replicated
+in raft mode and in backups; a derived credential holds no token. A token that was not kept is replaced by another
+reset.
+
+Once the reset is committed, the node that served it, the leader in a raft cluster since followers forward the write,
+closes its pooled gRPC connection to the agent (`Pool.Forget`); a call in flight on it fails, a log stream included.
+That is all it closes: an HTTP agent's open log stream (SSE), and the pooled connections of the followers with the log
+streams open on them, keep running. No pool keeps a token, so every new call to the agent, on any node that holds the
+reset, carries the new token. The agent has to be given the new token: until it is, podium refuses its syncs, and the
+calls podium makes to it carry a token that it does not hold.
+
+`DELETE /api/v1/agents/{id}` removes the agent's row, if it has one, and every rollout of the agent ID in one
+transaction, so that it never loses one and keeps the other (`TestDeleteIsAtomic` in `internal/service/agent`). An agent
+that lifecycle deleted has no row and keeps its rollouts (see `internal/server/README.md`): its delete drops them
+(`TestDeleteDropsTheRolloutsOfAnAgentWithoutARow`). Its credential and its execution history stay. It answers 204 with
+`HX-Redirect: /agents`, and 404 only when the ID has neither a row nor a rollout. Once the delete is committed it closes
+the serving node's pooled gRPC connection to the agent the same way, records `agent_removed` with the actor and the
+agent ID, and closes the agent's open `agent_inactive` and `agent_disconnected` issues, as a reconnect does, recording
+`issue_closed` by the actor when it closed one. `agent_removed` is no issue kind, so the dashboard lists an operator's
+delete in its activity only; lifecycle's deletion records `agent_deleted`, which stays an issue. An agent that still
+runs registers again at its next sync with its credential, as a new agent with no labels and no rollouts
+(`TestDeletedAgentReturnsWithoutRollouts`). To keep it out, reset its credential first: its old token is then refused,
+and only the new one brings it back.
+
+Both are leader writes. A follower forwards the reset like any write (`TestResetThroughFollowerForwards`, in
+`internal/app`); no test sends the delete through a follower, which forwards it by construction: the `Leader` middleware
+forwards every `DELETE`, as every `POST`, `PUT` and `PATCH`. A write that reached a follower or lost leadership answers
+503 with `X-Leader` (`TestWriteHandlersAnswerLeadershipErrorsWithTheLeader`, both routes).
+
+`AgentsDelete` and `AgentsReset` are in `enum.All`, so the Admin role holds them, and no other built-in role does
+(`TestOnlyAdminMayResetOrDeleteAnAgent`). As with `ClusterGet` and `ClusterManage`, a user who holds every permission
+directly, not through the Admin role, does not gain them: bootstrap gives them to the Admin role only, and such a user
+needs both to keep counting as an administrator. `AgentsEdit` gives neither action.
 
 The task log stream and the event stream (see "Other") run their route's access check again every keepalive interval
 (15s), whether they wrote or not: the session is live, the user enabled and, for task logs, still holds `AgentsGet`.
@@ -154,12 +235,12 @@ clients that never preview keep working.
 
 Every event kind maps to a subject (`event.SubjectOf`):
 
-| Subject | Event kinds                                                                | Read        | Dismiss      |
-|---------|----------------------------------------------------------------------------|-------------|--------------|
-| agent   | `agent_connected`, `agent_inactive`, `agent_disconnected`, `agent_deleted` | `AgentsGet` | `AgentsEdit` |
-| spec    | `spec_created`, `spec_updated`, `spec_deployed`, `sync_failed`             | `SpecsGet`  | `SpecsEdit`  |
-| user    | `user_*`, `session_created`, `rate_limited`                                | `UsersGet`  | `UsersEdit`  |
-| unknown | `issue_closed` (it can name any subject) and unknown kinds                 | all three   | all three    |
+| Subject | Event kinds                                                                                                           | Read        | Dismiss      |
+|---------|-----------------------------------------------------------------------------------------------------------------------|-------------|--------------|
+| agent   | `agent_connected`, `agent_inactive`, `agent_disconnected`, `agent_deleted`, `agent_removed`, `agent_credential_reset` | `AgentsGet` | `AgentsEdit` |
+| spec    | `spec_created`, `spec_updated`, `spec_deployed`, `sync_failed`                                                        | `SpecsGet`  | `SpecsEdit`  |
+| user    | `user_*`, `session_created`, `rate_limited`                                                                           | `UsersGet`  | `UsersEdit`  |
+| unknown | `issue_closed` (it can name any subject) and unknown kinds                                                            | all three   | all three    |
 
 ### Cluster `/api/v1/cluster`
 | Method | Path                           | Permission      |
@@ -244,7 +325,22 @@ token.
 | HTTP      | POST               | `/api/v1/discovery/sync`       |
 | gRPC      | `DiscoverService/Sync` | proto-defined                |
 
-Both parse the agent heartbeat payload, call `model.NewAgentFrom`, then `agentSVC.Upsert`. The upsert reports what
+Both parse the agent heartbeat payload and call `model.NewAgentFrom`, which checks its field limits before anything
+is enrolled or charged. They then look at the bucket of the agent ID (`syncOverRate`, see "Sync rate" below), verify the
+token (`verifyAgentToken`) when agent auth is required, charge the sync to the bucket (`chargeSync`), and call
+`agentSVC.Upsert`. The capability fields have
+limits of their own: at most 64 runners, each name at most 128 bytes; per runner at most 256 labels (key at most 317
+bytes, value at most 1024 bytes) and at most 256 workloads (`api_version` at most 317 bytes, `kind` at most 128 bytes).
+Data that breaks one is answered 400 / `InvalidArgument` naming the field (such as
+`agent capabilities.runners[1].name exceeds 128 bytes`), with nothing enrolled or stored
+(`TestCapabilityCapsRefuseOversizedFields`). The SDK treats a 400 as permanent. No byte limit that refuses is below the
+SDK's own: there a label key is a qualified name, an optional DNS prefix of at most 253 bytes, a slash and a name of at
+most 63, and an `api_version` is a CRD group of at most 253 bytes, a slash and a version of at most 63, so both are 317
+bytes at most. The three counts are below what the SDK lets an agent send, since it sets none: an agent with more than
+64 runners, or more than 256 labels or 256 workloads in one, gets that 400. A sync with the longest key and
+`api_version` the SDK allows and the counts at the caps is stored whole (`TestCapabilityCapsAcceptWhatTheSDKSends`).
+`os`, `arch` and `platform` are not refused for their length: each is cut to 256 bytes on a rune boundary
+(`TestLongPlatformFieldsAreCut`). The limits are not applied to rows already stored. The upsert reports what
 the sync changed in the stored row (`agent.UpsertResult`), and discovery sends the `agent_update` refresh pulse only
 when the sync gave the UI pages something new: a **visible change**, that is, a new agent or a different status, name,
 endpoint, labels or capabilities, or a **reconnect**, that is, a new agent, an agent that was not active, or one that
@@ -255,18 +351,35 @@ A heartbeat that moves only the time of the sync and the uptime sends none. The 
 With agent auth required, the first sync of an unknown agent ID enrolls the token it presents (trust on first use) and
 sets the endpoint podium calls; every later sync of that ID must present the same token. With an enrollment secret
 (`SOLTI_AGENT_AUTH_ENROLL_SECRET`, held by the agent service as `agent.WithEnrollSecret`), the first sync enrolls only
-the token derived for that ID (`agent.EnrollToken`, printed by `podium agent-token`): any other token is an
-`ErrEnrollRefused`, an `ErrUnauthenticated` like a wrong one, so 401 / `Unauthenticated`, nothing stored, one failure for
-the limiter, and a WARN with the agent ID and the client IP, never the token. Known IDs
-are checked against their stored token, secret or not. Without a secret, only the network or client certificates keep
-other hosts from enrolling new IDs (see `internal/config`, "Agent authentication"). A token over 1024 bytes
+the token derived for that ID at generation 0 (`agent.DeriveToken`, printed by `podium agent-token`), as a derived
+credential, which stores no token: any other token is an `ErrEnrollRefused`, an `ErrUnauthenticated` like a wrong one,
+so 401 / `Unauthenticated`, nothing stored, one failure for the limiter, and a WARN with the agent ID and the client IP,
+never the token. A known ID is checked against its credential: a stored token, of an agent that enrolled without the
+secret or that an older version enrolled, as it always was, secret or not (one a former secret derived keeps working);
+a derived credential against the token the secret derives for its generation.
+With the secret set, a stored token that it derives at generation 0 becomes a derived credential in the transaction of
+the check, and a derived credential of another secret that presents the token of the current secret for its generation,
+as an agent re-provisioned under it does, moves to the current secret. Any other sync of a derived credential with no
+secret set, or of another secret than the current one, is refused as an `agent.DerivedCredentialError`, an
+`ErrUnauthenticated` too, with one failure for the limiter and a WARN with the agent ID, the client IP and the error's
+text. The text says the credential derives from another enrollment secret, or from one while none is set, and names the
+ways back, never a token: the secret it derives from set again; with a secret set, the token that `podium agent-token
+--generation` prints under it; and a reset of the credential (`POST /api/v1/agents/{id}/credential`), which issues a
+stored token while none is set and a derived one under the current secret otherwise
+(`TestChangedSecretRefusesDerivedAgentClearly`); the agent service's token lookup for the agent's calls fails with the
+same error, so podium makes no call to it. The agent routes that would call it answer as for their other failures:
+`GET /api/v1/agents/{id}/tasks` with 503 and an ERROR line that holds the error, the task detail and cancel with 409
+(`errkind` classifies the error as `FailedPrecondition`), and the log stream with 503 and a WARN line that holds it.
+Without a secret, only the network or client certificates keep other hosts
+from enrolling new IDs (see `internal/config`, "Agent authentication" and "Enrollment secret"). A token over 1024 bytes
 (`model.AgentTokenMaxBytes`) is refused first, with HTTP 400
 `Agent token is too long.` / gRPC `InvalidArgument`, and counts as no failure; `VerifyOrEnrollToken` never enrolls one
 either, while stored credentials load whatever their length. Then each sync reserves an attempt on
 the pair (client IP, agent ID) before its token check (`verifyAgentToken`), so checks in flight count like failures; a
 missing or wrong token turns the attempt into a failure, any other outcome releases it. A missing token is also logged
 at WARN with the agent ID and the ways out; with an enrollment secret they name `podium agent-token`, not
-`agent_auth.require=false`. Only attempts the limiter admits log, so each WARN comes at most `auth.rate_attempts` times
+`agent_auth.require=false`. Only attempts the limiter admits log, so each WARN, the one of a derived credential podium
+cannot use included, comes at most `auth.rate_attempts` times
 per `auth.rate_window` for a pair. Both transports share one limiter, so failures over HTTP count toward gRPC
 and back. `auth.rate_attempts` failures block that pair for `auth.rate_window`: HTTP answers 429, gRPC `ResourceExhausted`.
 There is no per-IP limit, so agents behind one egress IP (NAT, Kubernetes) never block each other.
@@ -280,6 +393,43 @@ or a deposed leader whose check of the leadership failed. That is a routing cond
 logged at WARN, and answered with the leader's address when one is known, over HTTP a 503 with `X-Leader`
 (`response.StoreFailed`), over gRPC an `Unavailable` with the `x-leader` hint and the mark that makes `UnaryLogger` log
 the call at WARN too, once (`interceptor.HintLeader`; `TestDiscoveryAnswersLeadershipErrorsWithTheLeader`).
+
+### Sync rate
+
+Each agent ID has a bucket of 10 syncs, refilled one per second (`NewSyncBuckets`; the numbers are constants, with no
+configuration keys). It is used twice, for each sync that passed the payload checks. `syncOverRate` looks at it before the
+token check, without taking from it: a sync that finds it empty is refused at once, whatever token it carries, so a
+flood of syncs for a throttled agent opens no transaction (`TestThrottledAgentIsRefusedBeforeTheTokenCheck`,
+`TestLimitedSyncWritesNothing`) and makes no failure for the failure limiter. `chargeSync` takes the token after the token
+check, before the agent is written, so a sync with a wrong token, no token or an invalid payload takes nothing from the
+bucket of the agent whose ID it carries (`TestWrongTokenDoesNotDrainTheBucket`), and the sync that enrolls an ID is charged
+one token like any other (`TestEnrollingSyncIsChargedOneToken`). The look can race a concurrent sync, so a sync that found
+a token may be refused at the charge, with nothing written (`TestSyncThatPassedThePeekMayBeRefusedAtTheCharge`); thirty
+concurrent syncs of one agent land 10 all the same (`TestSyncBurstIsLimitedPerAgent`). A sync over the rate is answered
+429 with `Retry-After: 1` over HTTP (`response.TooManyRequests`) or `ResourceExhausted` over gRPC, and writes nothing,
+though the body read and the validation came first. `HTTPDiscovery` and `GRPCDiscovery` take the same buckets
+(`TestDiscoveryTransportsShareTheSyncBudget`), so an agent has one budget whichever transport it uses, and with
+`agent_auth.require=false` the rate still applies.
+
+Refusing before the token check shows the throttling state of an agent ID to a caller that has not authenticated: a
+wrong token for an agent whose bucket is empty gets 429, and one for an agent with tokens left gets 401 and takes nothing
+from the bucket. Nobody can drain a bucket that way, since only a sync that passed the token check takes a token. The
+WARN of the next paragraph can be caused by such a caller too: it names the agent ID, not who sent the sync.
+
+The refusal logs one WARN with the agent ID, the first time for an ID and then at most once a minute for it, whichever of
+the two steps refused; the log never holds a token. The access loggers record each refused call at DEBUG, one line each,
+instead of the WARN of a 4xx or the ERROR of a failed gRPC call. That is the level of the lines, not their number:
+podium sets no minimum log level (`cmd/main.go` builds its logger with none), so a DEBUG line is written like any other,
+and an agent that keeps syncing writes one for each refused sync (`TestThrottledSyncsAreLoggedAtDebug` counts them).
+The 429 carries `Retry-After` (`response.TooManyRequests`), the gRPC status carries `RetryInfo` (`status.Throttled`), and
+`Logger` and `UnaryLogger` take either for a throttle, whichever node wrote it, so a follower that forwards a sync logs
+the leader's refusal at DEBUG too (`TestAccessLogOfAForwardedThrottleIsDebug`, `TestUnaryLoggerLogsAThrottleAtDebug`).
+The other refusals keep their levels: a wrong token, and the 429 / `ResourceExhausted` of the failure limiter.
+
+The buckets are in memory, on the node that runs the handlers: in raft mode the leader, where a follower forwards a
+sync, so the new leader counts from its own after a failover, and a restart clears them. A bucket that was not used for 10
+minutes is dropped, and a look at a bucket is no use of it. The handlers read the time from a `clock` field that the
+tests replace, so a refill is never waited for.
 
 ## UI pages
 | Path                | Handler          | Auth | Permission  |

@@ -95,6 +95,7 @@ func TestReadMethodsRejectCanceledContext(t *testing.T) {
 		"agent":               func() error { _, e := s.GetAgent(ctx, "missing"); return e },
 		"agents":              func() error { _, e := s.ListAgents(ctx, nil, storage.ListOptions{}); return e },
 		"agent-credential":    func() error { _, e := s.GetAgentCredential(ctx, "missing"); return e },
+		"agent-credentials":   func() error { _, e := s.ListAgentCredentials(ctx, storage.ListOptions{}); return e },
 		"user":                func() error { _, e := s.GetUser(ctx, "missing"); return e },
 		"user-subject":        func() error { _, e := s.GetUserBySubject(ctx, "missing"); return e },
 		"users":               func() error { _, e := s.ListUsers(ctx, nil, storage.ListOptions{}); return e },

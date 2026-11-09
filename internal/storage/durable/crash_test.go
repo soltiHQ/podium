@@ -199,7 +199,7 @@ func TestExitDuringMigrationKeepsSingleBlob(t *testing.T) {
 	if after, err := os.ReadFile(filepath.Join(dir, FileName)); err != nil || !bytes.Equal(before, after) {
 		t.Fatalf("an exit inside the migration changed the file: %v", err)
 	}
-	want := singleBlob(t, dir)
+	want := atCurrentVersion(t, singleBlob(t, dir))
 	s, err := Open(dir)
 	if err != nil {
 		t.Fatal(err)

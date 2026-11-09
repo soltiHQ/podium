@@ -22,3 +22,6 @@ const formBody = "p-6 space-y-4 "
 
 // Shared form error style (used in password and form modals).
 const formError = "text-sm text-danger font-medium "
+
+// Link under a form error, such as the Reload offered after a stale save.
+const formLink = "text-sm text-primary hover:underline "

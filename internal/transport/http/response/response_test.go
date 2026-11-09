@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/a-h/templ"
 
@@ -220,6 +221,40 @@ func TestStoreFailed(t *testing.T) {
 
 			if w.Code != http.StatusServiceUnavailable || w.Header().Get(LeaderHeader) != tt.want {
 				t.Fatalf("HTTP %d with %s %q, want 503 with %q", w.Code, LeaderHeader, w.Header().Get(LeaderHeader), tt.want)
+			}
+		})
+	}
+}
+
+// TooManyRequests answers 429 with the message it is given, and with a positive
+// retryAfter the Retry-After header: whole seconds, rounded up, so that a client
+// that waits that long does not come early. Without one it sets no header.
+func TestTooManyRequests(t *testing.T) {
+	const msg = "a message of the handler"
+	for _, tt := range []struct {
+		name       string
+		retryAfter time.Duration
+		want       string // Retry-After
+	}{
+		{"one second", time.Second, "1"},
+		{"a part of a second", time.Nanosecond, "1"},
+		{"rounded up", 1500 * time.Millisecond, "2"},
+		{"a minute", time.Minute, "60"},
+		{"none", 0, ""},
+		{"negative", -time.Second, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/", nil)
+			w := httptest.NewRecorder()
+
+			TooManyRequests(w, r, httpctx.RenderBlock, tt.retryAfter, msg)
+
+			var body errorBody
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || w.Code != http.StatusTooManyRequests || body.Code != http.StatusTooManyRequests || body.Message != msg {
+				t.Fatalf("HTTP %d %s (%v), want 429 with %q", w.Code, w.Body.String(), err, msg)
+			}
+			if _, set := w.Header()["Retry-After"]; set != (tt.want != "") || w.Header().Get("Retry-After") != tt.want {
+				t.Fatalf("Retry-After = %q, want %q", w.Header().Get("Retry-After"), tt.want)
 			}
 		})
 	}

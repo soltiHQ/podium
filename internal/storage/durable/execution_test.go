@@ -7,8 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	raftv1 "github.com/soltiHQ/control-plane/api/gen/solti/raft/v1"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/snapshot"
 	"google.golang.org/protobuf/proto"
@@ -81,13 +84,16 @@ func TestDurableExecutionRestartRollbackAndNoCascade(t *testing.T) {
 	}
 }
 
-// A single-blob file of snapshot version 2 migrates to a version 3 snapshot with no
-// archive and its nine groups unchanged; the archive then joins the log, and the
-// next snapshot.
-func TestDurableSnapshotV2UpgradePreservesNineGroups(t *testing.T) {
+// A single-blob file of snapshot version 3 migrates to a version-4 snapshot with
+// its ten groups unchanged, its stored credential stored still; a derived
+// credential then joins the log, and the next snapshot.
+func TestDurableSnapshotV3UpgradePreservesTenGroups(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 	populate(t, s)
+	if err := s.UpsertExecution(ctx, durableArchiveRow(t)); err != nil {
+		t.Fatal(err)
+	}
 	data, err := snapshot.Marshal(s.inner.SnapshotForRaft())
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +102,7 @@ func TestDurableSnapshotV2UpgradePreservesNineGroups(t *testing.T) {
 	if err := proto.Unmarshal(data, &msg); err != nil {
 		t.Fatal(err)
 	}
-	msg.Header.Version = 2
+	msg.Header.Version = 3
 	data, err = proto.MarshalOptions{Deterministic: true}.Marshal(&msg)
 	if err != nil {
 		t.Fatal(err)
@@ -106,9 +112,6 @@ func TestDurableSnapshotV2UpgradePreservesNineGroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(again.inner.SnapshotForRaft().Executions) != 0 {
-		t.Fatal("v2 invented history")
-	}
 	reencoded, err := snapshot.Marshal(again.inner.SnapshotForRaft())
 	if err != nil {
 		t.Fatal(err)
@@ -117,9 +120,9 @@ func TestDurableSnapshotV2UpgradePreservesNineGroups(t *testing.T) {
 	if err := proto.Unmarshal(reencoded, &got); err != nil {
 		t.Fatal(err)
 	}
-	msg.Header.Version = 3
+	msg.Header.Version = 4
 	if !proto.Equal(&msg, &got) {
-		t.Fatal("v2 migration changed existing entity fields")
+		t.Fatal("v3 migration changed existing entity fields")
 	}
 	if err := again.Close(); err != nil {
 		t.Fatal(err)
@@ -128,14 +131,16 @@ func TestDurableSnapshotV2UpgradePreservesNineGroups(t *testing.T) {
 	if err := proto.Unmarshal(readLayout(t, dir).blob, &migrated); err != nil {
 		t.Fatal(err)
 	}
-	if migrated.GetHeader().GetVersion() != 3 || len(migrated.GetExecutions()) != 0 {
-		t.Fatalf("the snapshot right after the migration is version %d with %d records, want version 3 with none", migrated.GetHeader().GetVersion(), len(migrated.GetExecutions()))
+	if migrated.GetHeader().GetVersion() != 4 || len(migrated.GetExecutions()) != 1 || len(migrated.GetAgentCredentials()) != 1 ||
+		migrated.GetAgentCredentials()[0].Generation != nil || migrated.GetAgentCredentials()[0].GetToken() != "test-enrollment-token" {
+		t.Fatalf("the snapshot right after the migration is version %d with %d records and credentials %v, want version 4 with the record and the stored credential",
+			migrated.GetHeader().GetVersion(), len(migrated.GetExecutions()), migrated.GetAgentCredentials())
 	}
 	again, err = Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := again.UpsertExecution(ctx, durableArchiveRow(t)); err != nil {
+	if err := agent.New(again, zerolog.Nop(), agent.WithEnrollSecret(credentialSecret)).VerifyOrEnrollToken(ctx, "a3", agent.DeriveToken(credentialSecret, "a3", 0)); err != nil {
 		t.Fatal(err)
 	}
 	if err := again.writeSnapshot(ctx); err != nil {
@@ -148,7 +153,7 @@ func TestDurableSnapshotV2UpgradePreservesNineGroups(t *testing.T) {
 	if err := proto.Unmarshal(readLayout(t, dir).blob, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.GetHeader().GetVersion() != 3 || len(saved.GetExecutions()) != 1 {
-		t.Fatal("the snapshot after the archive write is not version 3 with the archive")
+	if saved.GetHeader().GetVersion() != 4 || len(saved.GetAgentCredentials()) != 2 || saved.GetAgentCredentials()[1].Generation == nil {
+		t.Fatal("the snapshot after the derived credential is not version 4 with it")
 	}
 }

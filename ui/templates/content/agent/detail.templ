@@ -83,11 +83,31 @@ templ Identity(a restv1.Agent, p policy.AgentDetail) {
 					@asset.Icon("edit")
 				}
 			}
+			if p.CanResetCredential {
+				@button.Button("", "button", false, button.VariantWarning, false,
+					templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent(resetCredentialModal), "title": "Reset credential", "aria-label": "Reset credential"},
+				) {
+					@asset.Icon("password")
+				}
+			}
+			if p.CanDelete {
+				@button.Button("", "button", false, button.VariantDanger, false,
+					templ.Attributes{"x-data": "", "x-on:click": modal.OpenEvent(deleteAgentModal), "title": "Delete agent", "aria-label": "Delete agent"},
+				) {
+					@asset.Icon("delete")
+				}
+			}
 		}
 	}
 
 	if p.CanEditLabels {
 		@labelsEditor(a)
+	}
+	if p.CanResetCredential {
+		@credentialDialogs(a)
+	}
+	if p.CanDelete {
+		@deleteDialog(a)
 	}
 }
 

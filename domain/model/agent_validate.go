@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/soltiHQ/control-plane/domain"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -21,6 +22,32 @@ const (
 	agentMetadataKeyMaxBytes   = 128
 	agentMetadataValueMaxBytes = 1024
 	agentHeartbeatMaxSeconds   = 3600
+)
+
+// Limits for the platform and capability fields of a discovery payload: os,
+// arch and platform, and the runners with their names, labels and workloads.
+//
+// The SDK treats a refusal, HTTP 400 or gRPC InvalidArgument, as permanent, so
+// no byte limit here that refuses is below the SDK's own. A label key there is a
+// qualified name, an optional DNS prefix of at most 253 bytes, a slash and a name
+// of at most 63; an api_version is a CRD group of at most 253 bytes, a slash and
+// a version of at most 63; both are 317 at most. Its runner names, label values
+// and kinds are 63 at most, below the limits here. The counts are another
+// matter: the SDK sets none, so the caps on runners, labels and workloads are
+// below what it lets an agent send, and an agent over them gets a 400 that the
+// SDK does not retry. os, arch and platform are cut to their limit, never
+// refused: on Linux, os is the PRETTY_NAME of the host's os-release, which the
+// SDK does not bound.
+const (
+	agentPlatformMaxBytes           = 256 // os, arch and platform are cut to this, each
+	agentRunnersMax                 = 64
+	agentRunnerNameMaxBytes         = 128
+	agentRunnerLabelsMax            = 256
+	agentRunnerLabelKeyMaxBytes     = 317
+	agentRunnerLabelValueMaxBytes   = 1024
+	agentRunnerWorkloadsMax         = 256
+	agentWorkloadAPIVersionMaxBytes = 317
+	agentWorkloadKindMaxBytes       = 128
 )
 
 // agentIDPattern is the SDK AgentId charset.
@@ -157,5 +184,76 @@ func validateAgentParams(p AgentParams, epType enum.EndpointType) error {
 			return fmt.Errorf("%w: agent metadata keys are limited to %d bytes and values to %d bytes", domain.ErrInvalidArgument, agentMetadataKeyMaxBytes, agentMetadataValueMaxBytes)
 		}
 	}
+	return validateCapabilities(p.Capabilities)
+}
+
+// cutUTF8 returns s cut to at most limit bytes, on a rune boundary: when the
+// cut would split a rune, it falls before that rune. Nothing is added to the
+// text. It steps back at most three bytes, so that text that is not UTF-8 cannot
+// make it cut to nothing.
+func cutUTF8(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	for back := 0; back < utf8.UTFMax-1 && limit > 0 && !utf8.RuneStart(s[limit]); back++ {
+		limit--
+	}
+	return s[:limit]
+}
+
+// validateCapabilities bounds the runner inventory of a discovery payload: the
+// runners, and per runner its name, labels and workloads. A refusal names the
+// field, as the SDK's SyncRequest does, with the index of the runner or the
+// workload.
+func validateCapabilities(runners []RunnerCapability) error {
+	if len(runners) > agentRunnersMax {
+		return fmt.Errorf("%w: agent capabilities exceed %d runners", domain.ErrInvalidArgument, agentRunnersMax)
+	}
+	for i, r := range runners {
+		if err := validateRunner(i, r); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func validateRunner(i int, r RunnerCapability) error {
+	switch {
+	case len(r.Name) > agentRunnerNameMaxBytes:
+		return invalidRunner(i, ".name exceeds %d bytes", agentRunnerNameMaxBytes)
+	case len(r.Labels) > agentRunnerLabelsMax:
+		return invalidRunner(i, ".labels exceed %d entries", agentRunnerLabelsMax)
+	case len(r.Workloads) > agentRunnerWorkloadsMax:
+		return invalidRunner(i, ".workloads exceed %d entries", agentRunnerWorkloadsMax)
+	}
+	for k, v := range r.Labels {
+		switch {
+		case len(k) > agentRunnerLabelKeyMaxBytes:
+			return invalidRunner(i, ".labels has a key over %d bytes", agentRunnerLabelKeyMaxBytes)
+		case len(v) > agentRunnerLabelValueMaxBytes:
+			return invalidRunner(i, ".labels has a value over %d bytes", agentRunnerLabelValueMaxBytes)
+		}
+	}
+	for j, w := range r.Workloads {
+		switch {
+		case apiVersionBytes(w) > agentWorkloadAPIVersionMaxBytes:
+			return invalidRunner(i, ".workloads[%d].api_version exceeds %d bytes", j, agentWorkloadAPIVersionMaxBytes)
+		case len(w.Kind) > agentWorkloadKindMaxBytes:
+			return invalidRunner(i, ".workloads[%d].kind exceeds %d bytes", j, agentWorkloadKindMaxBytes)
+		}
+	}
+	return nil
+}
+
+// apiVersionBytes is the length of the api_version of a workload: the version,
+// preceded by the group and a slash when there is a group.
+func apiVersionBytes(w GroupVersionKind) int {
+	if w.Group == "" {
+		return len(w.Version)
+	}
+	return len(w.Group) + 1 + len(w.Version)
+}
+
+func invalidRunner(i int, format string, args ...any) error {
+	return fmt.Errorf("%w: agent capabilities.runners[%d]%s", domain.ErrInvalidArgument, i, fmt.Sprintf(format, args...))
 }

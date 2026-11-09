@@ -22,7 +22,7 @@ func TestSubmitExpressionsQuoteActionAndMethodAsLiterals(t *testing.T) {
 		t.Errorf("hostile text appears %d times, want 1 (inside the literal):\n%s", got, password)
 	}
 
-	form := formSubmitExpr(hostile, hostile, []Field{{ID: "subject"}}, []AsyncSelect{{ID: "permissions"}})
+	form := formSubmitExpr(hostile, hostile, []Field{{ID: "subject"}}, []AsyncSelect{{ID: "permissions"}}, "")
 	for _, want := range []string{
 		"fetch(" + hostileLiteral + ", {",
 		"method: " + hostileLiteral + ",",
@@ -72,10 +72,42 @@ func TestEditFormDataEncodesValuesAsLiterals(t *testing.T) {
 func TestUIMutationsSendJSONContentType(t *testing.T) {
 	for name, expr := range map[string]string{
 		"password": passwordSubmitExpr("/api/v1/users/u/password"),
-		"form":     formSubmitExpr("PUT", "/api/v1/users/u", []Field{{ID: "subject"}}, []AsyncSelect{{ID: "permissions"}}),
+		"form":     formSubmitExpr("PUT", "/api/v1/users/u", []Field{{ID: "subject"}}, []AsyncSelect{{ID: "permissions"}}, ""),
 	} {
 		if !strings.Contains(expr, "'Content-Type': 'application/json'") || !strings.Contains(expr, "body: JSON.stringify(") {
 			t.Errorf("%s modal does not send a JSON body as application/json:\n%s", name, expr)
 		}
+	}
+}
+
+// The entity tag a form was rendered from goes into the request as a string
+// literal, like every other value in the expression; a form without one sends
+// no If-Match.
+func TestFormSubmitSendsIfMatchAsALiteral(t *testing.T) {
+	fields, selects := []Field{{ID: "subject"}}, []AsyncSelect{{ID: "permissions"}}
+
+	with := formSubmitExpr("PUT", "/api/v1/users/u", fields, selects, hostile)
+	if !strings.Contains(with, "'If-Match': "+hostileLiteral) {
+		t.Errorf("the entity tag is not sent as If-Match, as a string literal:\n%s", with)
+	}
+	if got := strings.Count(with, "alert(1)"); got != 1 {
+		t.Errorf("hostile text appears %d times, want 1 (inside the literal):\n%s", got, with)
+	}
+	if without := formSubmitExpr("POST", "/api/v1/users", fields, selects, ""); strings.Contains(without, "If-Match") {
+		t.Errorf("a form without an entity tag sends If-Match:\n%s", without)
+	}
+}
+
+// A 412 is the server saying the record changed: the form notes it so that it
+// can offer a reload, and clears the note on the next try.
+func TestFormSubmitNotesAPreconditionFailure(t *testing.T) {
+	expr := formSubmitExpr("PUT", "/api/v1/users/u", []Field{{ID: "subject"}}, nil, `"tag"`)
+	for _, want := range []string{"stale = false;", "stale = r.status === 412;"} {
+		if !strings.Contains(expr, want) {
+			t.Errorf("missing %s in:\n%s", want, expr)
+		}
+	}
+	if got := editFormData(nil, nil); !strings.Contains(got, "stale: false") {
+		t.Errorf("a new form is already stale: %s", got)
 	}
 }

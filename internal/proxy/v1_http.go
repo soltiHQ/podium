@@ -49,12 +49,12 @@ type taskResource struct {
 		Slot string `json:"slot"`
 	} `json:"spec"`
 	Status struct {
-		Phase              string                  `json:"phase"`
-		Attempt            int                     `json:"attempt"`
-		Error              string                  `json:"error"`
-		ExitCode           *int32                  `json:"exitCode"`
-		ObservedGeneration uint64                  `json:"observedGeneration"`
-		Conditions         []taskConditionResource `json:"conditions"`
+		Phase              string         `json:"phase"`
+		Attempt            int            `json:"attempt"`
+		Error              string         `json:"error"`
+		ExitCode           *int32         `json:"exitCode"`
+		ObservedGeneration uint64         `json:"observedGeneration"`
+		Conditions         taskConditions `json:"conditions"`
 	} `json:"status"`
 }
 
@@ -114,15 +114,18 @@ func (p *httpProxyV1) ListTasks(ctx context.Context, f TaskFilter) (*proxyv1.Lis
 		q.Set("labelSelector", f.LabelSelector)
 	}
 	u.RawQuery = q.Encode()
-	var out struct {
-		Metadata listMeta       `json:"metadata"`
-		Items    []taskResource `json:"items"`
-	}
+	out := struct {
+		Metadata listMeta  `json:"metadata"`
+		Items    taskItems `json:"items"`
+	}{Items: taskItems{limit: pageBound(f.Limit)}}
 	if err := p.request(ctx, http.MethodGet, u.String(), nil, &out); err != nil {
 		return nil, agentError(ErrListTasks, err)
 	}
-	tasks := make([]proxyv1.Task, len(out.Items))
-	for i, t := range out.Items {
+	if err := checkCursor(out.Metadata.Next); err != nil {
+		return nil, agentError(ErrListTasks, fmt.Errorf("%w: %w", ErrDecode, err))
+	}
+	tasks := make([]proxyv1.Task, len(out.Items.list))
+	for i, t := range out.Items.list {
 		tasks[i] = t.flat()
 	}
 	return &proxyv1.ListTasksResponse{Tasks: tasks, Total: len(tasks), NextCursor: out.Metadata.Next, ResourceVersion: out.Metadata.ResourceVersion, RemainingCount: out.Metadata.Remaining}, nil
@@ -284,7 +287,7 @@ func (p *httpProxyV1) StreamTaskLogsForUID(ctx context.Context, name, uid string
 	req.Header.Set("Accept", "text/event-stream")
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrStreamTaskLogs, err)
+		return nil, agentError(ErrStreamTaskLogs, err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		err := formatUnexpectedStatus(resp)

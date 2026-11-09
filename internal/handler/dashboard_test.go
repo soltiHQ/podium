@@ -41,6 +41,7 @@ func TestDismissIssueRequiresSubjectEditPermission(t *testing.T) {
 		{event.AgentInactive, []enum.Permission{enum.AgentsEdit}},
 		{event.AgentDisconnected, []enum.Permission{enum.AgentsEdit}},
 		{event.AgentDeleted, []enum.Permission{enum.AgentsEdit}},
+		{event.AgentRemoved, []enum.Permission{enum.AgentsEdit}},
 		{event.SyncFailed, []enum.Permission{enum.SpecsEdit}},
 		{event.RateLimited, []enum.Permission{enum.UsersEdit}},
 		{"not_a_kind", []enum.Permission{enum.AgentsEdit, enum.SpecsEdit, enum.UsersEdit}},
@@ -112,7 +113,7 @@ func dashboardKinds(t *testing.T, f *apiFixture, perms []enum.Permission) (event
 func TestDashboardFeedFiltersByReadPermission(t *testing.T) {
 	f := newAPIFixture(t)
 	for _, kind := range []string{
-		"agent_connected", "agent_inactive", "agent_disconnected", "agent_deleted",
+		"agent_connected", "agent_inactive", "agent_disconnected", "agent_deleted", "agent_removed", "agent_credential_reset",
 		"spec_created", "spec_updated", "spec_deployed", "sync_failed",
 		"user_created", "user_updated", "user_deleted", "user_password_changed", "user_status_changed",
 		"session_created", "rate_limited", "issue_closed", "not_a_kind",
@@ -127,7 +128,7 @@ func TestDashboardFeedFiltersByReadPermission(t *testing.T) {
 		{
 			"agents",
 			[]enum.Permission{enum.AgentsGet},
-			[]string{"agent_connected", "agent_deleted", "agent_disconnected", "agent_inactive"},
+			[]string{"agent_connected", "agent_credential_reset", "agent_deleted", "agent_disconnected", "agent_inactive", "agent_removed"},
 			[]string{"agent_deleted", "agent_disconnected", "agent_inactive"},
 		},
 		{
@@ -146,7 +147,7 @@ func TestDashboardFeedFiltersByReadPermission(t *testing.T) {
 			"every subject",
 			[]enum.Permission{enum.AgentsGet, enum.SpecsGet, enum.UsersGet},
 			[]string{
-				"agent_connected", "agent_deleted", "agent_disconnected", "agent_inactive", "issue_closed", "not_a_kind",
+				"agent_connected", "agent_credential_reset", "agent_deleted", "agent_disconnected", "agent_inactive", "agent_removed", "issue_closed", "not_a_kind",
 				"rate_limited", "session_created", "spec_created", "spec_deployed", "spec_updated", "sync_failed",
 				"user_created", "user_deleted", "user_password_changed", "user_status_changed", "user_updated",
 			},

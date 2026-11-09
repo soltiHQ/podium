@@ -12,12 +12,14 @@ import (
 )
 
 // Detail renders the user identity card with roles, permissions, and actions.
-templ Detail(apiUser restv1.User, p policy.UserDetail) {
-	@Identity(apiUser, p)
+// etag is the ETag of the stored user that apiUser was read from, quotes
+// included; the edit form sends it as If-Match.
+templ Detail(apiUser restv1.User, p policy.UserDetail, etag string) {
+	@Identity(apiUser, p, etag)
 }
 
 // Identity renders the user info card body (returned as an HTMX fragment).
-templ Identity(u restv1.User, p policy.UserDetail) {
+templ Identity(u restv1.User, p policy.UserDetail, etag string) {
 	@card.Card("") {
 		// — header: name + status —
 		@card.CardHeader() {
@@ -119,6 +121,7 @@ templ Identity(u restv1.User, p policy.UserDetail) {
 				"PUT",
 				editFields(u),
 				editSelects(u),
+				editPrecondition(u, etag),
 			)
 		} else {
 			@modal.FormModal(
@@ -128,6 +131,7 @@ templ Identity(u restv1.User, p policy.UserDetail) {
 				"PUT",
 				editFields(u),
 				nil,
+				editPrecondition(u, etag),
 			)
 		}
 		@modal.Password(

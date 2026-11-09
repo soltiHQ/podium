@@ -11,6 +11,9 @@ import "github.com/soltiHQ/control-plane/ui/templates/component/button"
 //   - action:       URL for the HTMX request
 //   - method:       HTTP method — "post", "delete", "put", "patch"
 //   - variant:      controls the confirm button colour
+//
+// The children, if any, are rendered under the message: a list of what the
+// action does, say.
 templ Confirm(
 	name string,
 	titleText string,
@@ -20,13 +23,16 @@ templ Confirm(
 	method Method,
 	variant Variant,
 ) {
-	@ConfirmWith(name, titleText, messageText, confirmLabel, action, method, variant, nil)
+	@ConfirmWith(name, titleText, messageText, confirmLabel, action, method, variant, nil) {
+		{ children... }
+	}
 }
 
 // ConfirmWith is Confirm with extra attributes on the form that sends the
 // request, for example an Alpine handler that adds a request header. They must
 // not repeat the form's own attributes. Their values are code: dynamic values
-// go through jsexpr, names and selectors are constants.
+// go through jsexpr, names and selectors are constants. The children, if any,
+// are rendered under the message, as for Confirm.
 templ ConfirmWith(
 	name string,
 	titleText string,
@@ -42,6 +48,7 @@ templ ConfirmWith(
 		@Body() {
 			@Title(titleText)
 			@Message(messageText)
+			{ children... }
  <p x-show="error" x-text="error" role="alert" class="text-sm text-danger"></p>
 		}
 		@Footer() {

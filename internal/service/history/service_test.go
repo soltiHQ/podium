@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -228,6 +229,44 @@ func TestCaptureRejectsMixedSnapshotWithoutPublishingAnyRows(t *testing.T) {
 			_, err := svc.Capture(context.Background(), captureReq(), src, CaptureOptions{})
 			if err == nil || s.transactions != 0 || len(all(t, s)) != 0 {
 				t.Fatalf("published invalid snapshot err=%v tx=%d", err, s.transactions)
+			}
+		})
+	}
+}
+
+// A run whose status is no phase that podium archives is refused with an error
+// that names the status, quoted and cut by proxy.CapAgentText, and the history
+// runner logs that error: so the log holds at most MaxAgentTextBytes of the status
+// and the marker, whatever the pager answered. The HTTP proxy refuses a phase over
+// MaxRunPhaseBytes before that. Nothing is archived.
+func TestUnknownRunStatusIsCutInTheError(t *testing.T) {
+	const prefix = "history: unknown source run status "
+	for _, tc := range []struct {
+		name, status string
+		cut          bool
+	}{
+		{"a short status", "paused", false},
+		{"a status of 1 MiB", strings.Repeat("x", 1<<20), true},
+		{"a status of 1 MiB that quoting escapes", strings.Repeat("\x00", 1<<20), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, s := newService(t, Config{})
+			_, err := svc.Capture(context.Background(), captureReq(), source(run(1, tc.status)), CaptureOptions{})
+			if err == nil || s.transactions != 0 || len(all(t, s)) != 0 {
+				t.Fatalf("archived a run of an unknown status: err=%.100v tx=%d", err, s.transactions)
+			}
+			text, ok := strings.CutPrefix(err.Error(), prefix)
+			if !ok {
+				t.Fatalf("error %.100q, want it to start with %q", err, prefix)
+			}
+			if !tc.cut {
+				if text != strconv.Quote(tc.status) {
+					t.Fatalf("error %q, want the status quoted whole", err)
+				}
+				return
+			}
+			if len(text) > proxy.MaxAgentTextBytes+len("…") || !strings.HasSuffix(text, "…") {
+				t.Fatalf("the error holds %d bytes of the status, want at most %d and the marker", len(text), proxy.MaxAgentTextBytes)
 			}
 		})
 	}

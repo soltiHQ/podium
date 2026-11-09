@@ -167,7 +167,7 @@ func TestMismatchedReplicaLogsError(t *testing.T) {
 }
 
 // Standalone digests nothing and checks nothing: New gives the app no cluster
-// service, whose status would give a fingerprint, and Run starts the six
+// service, whose status would give a fingerprint, and Run starts the seven
 // runners of standalone, the configuration check not among them.
 func TestStandaloneRunsNoConfigCheck(t *testing.T) {
 	logs := &syncBuffer{}
@@ -196,15 +196,15 @@ func TestStandaloneRunsNoConfigCheck(t *testing.T) {
 	})
 	node := &clusterNode{id: "standalone", logs: logs}
 	starting := map[string]any{"message": "runner starting"}
-	waitFor(t, 10*time.Second, "the runners of standalone start", func() bool { return len(node.logged(t, starting)) >= 6 })
+	waitFor(t, 10*time.Second, "the runners of standalone start", func() bool { return len(node.logged(t, starting)) >= 7 })
 	// A deliberate delay, not a wait for a condition: the server starts every
-	// runner at once, so a seventh would log its start within it.
+	// runner at once, so an eighth would log its start within it.
 	time.Sleep(100 * time.Millisecond)
 	var names []string
 	for _, line := range node.logged(t, starting) {
 		names = append(names, fmt.Sprint(line.fields["runner"]))
 	}
-	if len(names) != 6 || slices.Contains(names, configCheck) {
-		t.Fatalf("standalone started the runners %v, want six without %s", names, configCheck)
+	if len(names) != 7 || slices.Contains(names, configCheck) {
+		t.Fatalf("standalone started the runners %v, want seven without %s", names, configCheck)
 	}
 }

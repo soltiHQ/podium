@@ -33,7 +33,7 @@ func (a *API) AgentTaskDetail(w http.ResponseWriter, r *http.Request) {
 		response.FromError(w, r, mode, err)
 		return
 	}
-	p, err := a.proxyPool.Get(ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
+	p, err := a.proxyPool.Get(ag.ID(), ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
 	if err != nil {
 		response.FromError(w, r, mode, err)
 		return
@@ -83,7 +83,7 @@ func (a *API) AgentTaskCancel(w http.ResponseWriter, r *http.Request) {
 		response.FromError(w, r, mode, err)
 		return
 	}
-	p, err := a.proxyPool.Get(ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
+	p, err := a.proxyPool.Get(ag.ID(), ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
 	if err != nil {
 		response.FromError(w, r, mode, err)
 		return

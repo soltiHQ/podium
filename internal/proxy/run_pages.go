@@ -105,22 +105,10 @@ func (p *httpProxyV1) ListTaskRunsPage(ctx context.Context, name string, q TaskR
 		params.Set("continue", q.Cursor)
 	}
 	parsed.RawQuery = params.Encode()
-	var page struct {
+	page := struct {
 		Metadata listMeta `json:"metadata"`
-		Runs     []struct {
-			Generation uint64     `json:"generation"`
-			Attempt    int        `json:"attempt"`
-			Phase      string     `json:"phase"`
-			StartedAt  *time.Time `json:"startedAt"`
-			FinishedAt *time.Time `json:"finishedAt"`
-			Error      string     `json:"error"`
-			ExitCode   *int32     `json:"exitCode"`
-			Workload   struct {
-				APIVersion string `json:"apiVersion"`
-				Kind       string `json:"kind"`
-			} `json:"workload"`
-		} `json:"runs"`
-	}
+		Runs     runItems `json:"runs"`
+	}{Runs: runItems{limit: int(q.Limit)}}
 	if err := p.request(ctx, http.MethodGet, parsed.String(), nil, &page); err != nil {
 		var response interface{ HTTPStatus() int }
 		if errors.As(err, &response) && response.HTTPStatus() == http.StatusGone {
@@ -128,8 +116,8 @@ func (p *httpProxyV1) ListTaskRunsPage(ctx context.Context, name string, q TaskR
 		}
 		return nil, agentError(ErrListTaskRuns, err)
 	}
-	out := &TaskRunPage{TaskUID: page.Metadata.TaskUID, ResourceVersion: page.Metadata.ResourceVersion, NextCursor: page.Metadata.Next, Runs: make([]proxyv1.TaskRun, 0, len(page.Runs))}
-	for _, r := range page.Runs {
+	out := &TaskRunPage{TaskUID: page.Metadata.TaskUID, ResourceVersion: page.Metadata.ResourceVersion, NextCursor: page.Metadata.Next, Runs: make([]proxyv1.TaskRun, 0, len(page.Runs.list))}
+	for _, r := range page.Runs.list {
 		run := proxyv1.TaskRun{Generation: r.Generation, Attempt: r.Attempt, Status: r.Phase, StartedAt: 0, Error: r.Error, ExitCode: r.ExitCode, WorkloadAPIVersion: r.Workload.APIVersion, WorkloadKind: r.Workload.Kind, FinishedAtPresent: r.FinishedAt != nil}
 		if r.StartedAt != nil {
 			run.StartedAt = r.StartedAt.UnixMilli()
@@ -148,7 +136,12 @@ func (p *grpcProxyV1) ListTaskRunsPage(ctx context.Context, name string, q TaskR
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	page, err := taskv1.NewTaskServiceClient(p.conn).ListTaskRuns(p.authCtx(ctx), &taskv1.ListTaskRunsRequest{Name: name, Limit: q.Limit, Continue: q.Cursor})
+	// The page is bounded by the page size asked for, as a page of tasks is by its limit.
+	answer := newAnswerCodec(runsField, int(q.Limit))
+	page, err := taskv1.NewTaskServiceClient(p.conn).ListTaskRuns(p.authCtx(ctx), &taskv1.ListTaskRunsRequest{Name: name, Limit: q.Limit, Continue: q.Cursor}, answer.option())
+	if refused := answer.refused(); refused != nil {
+		return nil, agentError(ErrListTaskRuns, refused)
+	}
 	if err != nil {
 		if status.Code(err) == codes.OutOfRange {
 			return nil, fmt.Errorf("%w: %w", ErrRunSnapshotExpired, agentError(ErrListTaskRuns, err))

@@ -209,7 +209,7 @@ func TestIsIssueKind(t *testing.T) {
 		}
 	}
 
-	nonIssues := []string{AgentConnected, UserCreated, SpecCreated, SessionCreated, IssueClosed}
+	nonIssues := []string{AgentConnected, AgentRemoved, AgentCredentialReset, UserCreated, SpecCreated, SessionCreated, IssueClosed}
 	for _, k := range nonIssues {
 		if IsIssueKind(k) {
 			t.Errorf("expected %q to NOT be an issue kind", k)

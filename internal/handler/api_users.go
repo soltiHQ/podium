@@ -142,11 +142,17 @@ func (a *API) usersDetails(w http.ResponseWriter, r *http.Request, mode httpctx.
 	}
 
 	apiUser := wire.UserToREST(u)
+	tag := userETag(u)
+	w.Header().Set("ETag", tag)
 	response.OK(w, r, mode, &responder.View{
 		Data:      apiUser,
-		Component: contentUser.Detail(apiUser, policy.BuildUserDetail(a.identity(r), id, manageable)),
+		Component: contentUser.Detail(apiUser, policy.BuildUserDetail(a.identity(r), id, manageable), tag),
 	})
 }
+
+// userETag is the ETag of u: user.ETag as a strong entity tag, which is also
+// the form in which PUT takes it back as If-Match.
+func userETag(u *model.User) string { return `"` + user.ETag(u) + `"` }
 
 func (a *API) usersSessions(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	res, err := a.sessionSVC.ListByUser(r.Context(), session.ListByUserQuery{UserID: id})
@@ -245,8 +251,12 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		// The service reads the user inside its transaction and applies the
 		// patch there, so a change to a field the patch does not set is not
 		// overwritten. A role_ids or permissions list the body sets still
-		// replaces the stored one.
-		u, err = a.userSVC.Update(r.Context(), actor, id, userPatch(in))
+		// replaces the stored one, unless If-Match is sent: then the service
+		// refuses the patch when the user is no longer the one the tag names.
+		// The header is read as Deploy's is, so its absence, or "*", checks nothing.
+		patch := userPatch(in)
+		patch.IfMatch = planTokensFromIfMatch(r)
+		u, err = a.userSVC.Update(r.Context(), actor, id, patch)
 	default:
 		response.BadRequest(w, r, mode)
 		return
@@ -265,6 +275,9 @@ func (a *API) userUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		case errors.Is(err, storage.ErrNotFound):
 			// The user does not exist or was deleted meanwhile, or a role it names does not exist.
 			response.NotFound(w, r, mode)
+		case errors.Is(err, user.ErrStale):
+			a.logger.Warn().Str("user_id", uid).Msg("user update rejected: changed since it was read")
+			response.PreconditionFailed(w, r, mode, "User changed since it was read; reload and retry.")
 		default:
 			a.failure(err).Str("user_id", uid).Msg("user upsert failed")
 			response.StoreFailed(w, r, mode, err)

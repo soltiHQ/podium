@@ -26,6 +26,30 @@ var (
 	// may succeed, a list page with a lower limit for one. An agent's own
 	// ResourceExhausted, a quota for one, does not carry it.
 	ErrResponseTooLarge = errors.New("proxy: response too large")
+	// ErrTooManyItems indicates a ListTasks or ListTaskRuns page that holds more
+	// items than the request's limit, its page size for runs. The proxy refuses it
+	// before it builds them, and the error is a decode failure too: no agent
+	// answers so.
+	ErrTooManyItems = errors.New("proxy: too many items")
+	// ErrTooManyElements indicates a gRPC answer that holds more repeated elements
+	// in all than the proxy builds. It is an ErrTooManyItems, and a decode failure
+	// too. A page with a lower limit may come under the bound, so the sync runner
+	// asks again for one.
+	ErrTooManyElements error = elementsError{}
+	// ErrTooManyConditions indicates a task with more conditions than a task may
+	// hold, MaxTaskConditions, over either transport: over HTTP while the JSON is
+	// decoded, over gRPC at the 65th condition of a status message on the wire,
+	// before the budget of elements in all can trip in it, or after decoding for a
+	// status the agent split in several occurrences of the task's status field.
+	// It is an ErrTooManyItems and an ErrDecode, and no ErrTooManyElements: no
+	// smaller page avoids the task, so the sync runner ends the listing on it,
+	// without asking again. Over gRPC a budget that the tasks ahead of the task
+	// spent, or a split status whose occurrences pass it, trips first, as
+	// ErrTooManyElements, which the runner asks again smaller for.
+	ErrTooManyConditions error = conditionsError{}
+	// ErrCursorTooLong indicates a ListTasks page whose next cursor is longer than
+	// MaxCursorBytes. It is a decode failure too.
+	ErrCursorTooLong = errors.New("proxy: cursor too long")
 	// ErrListTasks indicates a ListTasks call failed (HTTP or gRPC).
 	ErrListTasks = errors.New("proxy: list tasks")
 	// ErrUnsupportedAPIVersion indicates the agent reported an unknown API version.
@@ -44,3 +68,19 @@ var (
 	// ErrNilPool indicates a required *Pool dependency is nil.
 	ErrNilPool = errors.New("proxy: nil pool")
 )
+
+// elementsError is the type of ErrTooManyElements: it reads as its own error and is
+// also ErrTooManyItems.
+type elementsError struct{}
+
+func (elementsError) Error() string { return "proxy: too many elements" }
+
+func (elementsError) Unwrap() error { return ErrTooManyItems }
+
+// conditionsError is the type of ErrTooManyConditions: it reads as its own error and
+// is also an ErrTooManyItems and an ErrDecode, but not an ErrTooManyElements.
+type conditionsError struct{}
+
+func (conditionsError) Error() string { return "proxy: too many conditions" }
+
+func (conditionsError) Unwrap() []error { return []error{ErrTooManyItems, ErrDecode} }

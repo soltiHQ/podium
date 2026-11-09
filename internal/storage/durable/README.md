@@ -21,7 +21,10 @@ and ignores DataDir, including the default. A blank DataDir without that flag
 fails configuration validation instead of silently discarding restart state.
 
 `podium.db` contains all storage entities, including credentials, sessions, task
-specifications, rollout intent/state and agent enrollment tokens. New directories
+specifications, rollout intent/state and agent credentials: the raw token of a
+stored credential, of an agent that enrolled without the enrollment secret or
+that an older version enrolled, and no token for an agent enrolled under the
+secret (see "Enrollment secret" in `internal/config/README.md`). New directories
 use mode 0700; the database uses 0600. Existing directories and database files
 with group/world permissions or symlinks, and files whose state does not check
 out, are rejected without resetting state. No existing permissions are changed;
@@ -30,11 +33,28 @@ The existing event hub remains transient; this does not persist event/SSE histor
 
 ## Upgrading
 
-The first start of this version on a `podium.db` that an earlier version wrote
-migrates it, once, from the single-blob layout to format 2, and earlier
-versions refuse the migrated file. So stop Podium and copy `podium.db` first: a
-cold backup. Then start the new version, which migrates the file and logs one
-warning. Rolling back needs that copy.
+The first start of this version on a `podium.db` of the single-blob layout,
+which versions before format 2 wrote, migrates it, once, to format 2 when its
+snapshot is version 3, and earlier versions refuse the migrated file. A
+single-blob file whose snapshot is version 2 is refused, as this version reads
+version 2 no more: start the version before this one on it first, which
+migrates it to format 2 with a version-3 snapshot, and then this one. A file in
+format 2 opens as it is: the versions that wrote it wrote version 3. So stop
+Podium and copy `podium.db` first: a cold backup. Then start the new version,
+which migrates a single-blob file and logs one warning. Rolling back needs that
+copy.
+
+This version writes its snapshot and its log entries in version 4, which carries
+derived agent credentials, and the version before it reads version 3 at most: it
+refuses a file this version wrote to with its version error (`unsupported
+command version 4`, `unsupported version 4`), and every earlier version refuses
+the file too. That holds from the first write after the upgrade, as every
+snapshot and log entry this version writes is version 4. Rolling back needs the
+cold backup above. The raw tokens already in the file stay there until the store
+compacts them: the snapshot and the log entries written before the upgrade until
+the next snapshot replaces them, and the freed pages of the file until bbolt
+writes over them. Take a fresh backup after that, and drop the older ones, which
+hold the raw tokens too.
 
 ## Log and snapshots
 
@@ -42,11 +62,15 @@ The file holds three bbolt buckets, format 2:
 
 - `meta`: `format` (2) and `snapshot_index`, the last log entry the snapshot
   holds;
-- `snapshot`: `blob`, the state at `snapshot_index` in the version-3 snapshot
+- `snapshot`: `blob`, the state at `snapshot_index` in the version-4 snapshot
   codec Raft uses, and its `sha256`;
 - `log`: the entries after `snapshot_index`, by index. An entry is the
-  `SOLTI-CMD` version-3 command of one transaction, the encoding Raft logs,
+  `SOLTI-CMD` version-4 command of one transaction, the encoding Raft logs,
   followed by the CRC-32C of its index and the command.
+
+Both are read in version 3 as well, which the version before this one wrote
+(`TestV3StoreLoads`), so a file it left opens with the state it holds, and the
+entries this version appends follow its version-3 ones.
 
 Numbers and keys are 8-byte big-endian integers.
 
@@ -98,7 +122,8 @@ is skipped. The file stays as it was.
 A file of the single-blob layout that earlier versions wrote, one
 `control-plane-state` bucket holding the whole state, is migrated by the first
 Open in one bbolt transaction: its snapshot, checked against its sha256 and
-decoded, becomes the snapshot at index 0 in version 3, with an empty log, and
+decoded, becomes the snapshot at index 0 in the current version, 4, with an
+empty log, and
 the old bucket is deleted. A file that fails the checks is left as it was.
 Earlier versions refuse the migrated file ("missing state bucket") without
 changing it, so reverting after the migration needs a backup taken before the
@@ -113,14 +138,16 @@ file aside, keeping it, and start again; otherwise restore a backup.
 
 Snapshot encoding is shared with Raft to keep the entity schema consistent.
 Decoding rejects invalid entities and duplicate IDs before replacing live state.
-Snapshot writers use version 3, which adds the bounded terminal execution archive.
-Readers accept version 2 losslessly with an empty archive: its nine existing
-entity groups and structured runner capabilities are unchanged. A single-blob
-file of version 2 is migrated to a version-3 snapshot
-(`TestDurableSnapshotV2UpgradePreservesNineGroups`). A version-2 snapshot
-containing archive rows is rejected. Legacy version 1 snapshots are rejected
-explicitly rather than decoded with the changed capabilities schema; automatic
-v1 migration is not implemented.
+Snapshot writers use version 4, which adds derived agent credentials: a
+generation and the ID of the enrollment secret in place of a token. Readers
+accept version 3 losslessly: its ten entity groups are unchanged, and its agent
+credentials, all of them with a token, stay stored ones. A single-blob file of
+version 3 is migrated to a version-4 snapshot
+(`TestDurableSnapshotV3UpgradePreservesTenGroups`). A version-3 snapshot that
+holds a derived credential is rejected. Version 2 snapshots are rejected with
+the version error, and legacy version 1 snapshots explicitly, rather than
+decoded with the changed capabilities schema; automatic migration of either is
+not implemented.
 A transaction costs what its callback reads and writes plus one commit of its
 own operations; it no longer copies or rewrites the state. A snapshot costs
 O(total state) serialization once per threshold. This backend is appropriate
@@ -135,13 +162,15 @@ startup: retain the failing file and restore a verified backup instead. The one
 case without a backup to restore is a zero-byte file on a deployment that never
 started, above: move it aside and start again.
 
-Raft recovery uses the same version-3 snapshot codec and versioned internal log
-commands. New command writers use `SOLTI-CMD` followed by version byte 3. Readers
-accept existing version-2 commands for the prior operations, but reject archive
-operations mislabeled as version 2 and unknown operations. Old binaries reject
-version-3 commands/snapshots instead of silently dropping archived history.
-Coordinate a cluster-wide upgrade; mixed v2/v3 binary operation is unsupported.
-After a version-3 write, reverting the application requires a compatible backup.
+Raft recovery uses the same version-4 snapshot codec and versioned internal log
+commands. New command writers use `SOLTI-CMD` followed by version byte 4. Readers
+accept existing version-3 commands, but reject a derived agent credential
+mislabeled as version 3, version-2 commands and unknown operations. Old
+binaries reject version-4 commands/snapshots with their version error instead
+of reading a derived credential as a stored one (`TestV4StoreRefusedByV3Reader`
+shows every snapshot and entry this version writes says version 4). Coordinate
+a cluster-wide upgrade; mixed v3/v4 binary operation is unsupported. After a
+version-4 write, reverting the application requires a compatible backup.
 Startup preflights retained snapshots and command entries before
 starting the FSM. Legacy snapshots or headerless commands require a compatible
 backup or offline migration; automatic migration is not implemented. The log

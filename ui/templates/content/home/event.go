@@ -76,14 +76,14 @@ func eventLabelColor(kind string) string {
 	switch kind {
 	case event.AgentConnected, event.SessionCreated:
 		return "text-success"
-	case event.AgentDisconnected, event.AgentDeleted,
+	case event.AgentDisconnected, event.AgentDeleted, event.AgentRemoved,
 		event.UserDeleted, event.RateLimited, event.SyncFailed:
 		return "text-danger"
 	case event.AgentInactive:
 		return "text-warning"
 	case event.SpecCreated, event.UserCreated:
 		return "text-primary"
-	case event.SpecUpdated, event.SpecDeployed,
+	case event.SpecUpdated, event.SpecDeployed, event.AgentCredentialReset,
 		event.UserUpdated, event.UserPasswordChanged, event.UserStatusChanged:
 		return "text-secondary"
 	default:
@@ -102,6 +102,10 @@ func eventLabel(kind string) string {
 		return "disconnected"
 	case event.AgentDeleted:
 		return "deleted"
+	case event.AgentRemoved:
+		return "removed"
+	case event.AgentCredentialReset:
+		return "credential reset"
 	case event.SpecCreated:
 		return "created"
 	case event.SpecUpdated:
@@ -135,7 +139,7 @@ func eventLabel(kind string) string {
 func eventEntity(kind string) string {
 	switch kind {
 	case event.AgentConnected, event.AgentInactive,
-		event.AgentDisconnected, event.AgentDeleted:
+		event.AgentDisconnected, event.AgentDeleted, event.AgentRemoved, event.AgentCredentialReset:
 		return "agent"
 	case event.SpecCreated, event.SpecUpdated, event.SpecDeployed,
 		event.SyncFailed:

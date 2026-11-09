@@ -16,7 +16,10 @@ import (
 
 // The read-only open does not initialize buckets or rewrite database metadata.
 // Legacy or corrupt commands are rejected before NewRaft can replay them. The
-// writable log handle is rechecked after acquiring its exclusive lock.
+// writable log handle is rechecked after acquiring its exclusive lock. The checks
+// read what the codecs read, commands and snapshots of versions 3 and 4
+// (overlay.DecodeCommand, snapshot.Unmarshal): a version-2 entry or one of a
+// later version stops the start with the codec's version error.
 func preflightLogFile(path string) error {
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {

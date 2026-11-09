@@ -3,6 +3,7 @@ package user
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 
 	"github.com/rs/zerolog"
@@ -186,6 +187,11 @@ func (s *Service) Create(ctx context.Context, actor *identity.Identity, u *model
 // permissions, the result may hold only permissions actor holds
 // (ErrPermissionCeiling), and an enabled user with every permission must remain
 // (ErrLastAdmin). A missing user is storage.ErrNotFound.
+//
+// With patch.IfMatch set, the user the transaction reads must have one of its
+// tags (ETag), else nothing is written and the error is ErrStale. The tags are
+// compared after the target ceiling, so a caller who may not manage the user
+// learns nothing from them, and before the patch is applied.
 func (s *Service) Update(ctx context.Context, actor *identity.Identity, id string, patch UpdatePatch) (*model.User, error) {
 	if id == "" {
 		return nil, storage.ErrInvalidArgument
@@ -199,6 +205,9 @@ func (s *Service) Update(ctx context.Context, actor *identity.Identity, id strin
 		}
 		if err = CheckTarget(ctx, tx, actor, existing); err != nil {
 			return err
+		}
+		if patch.IfMatch != nil && !slices.Contains(patch.IfMatch, ETag(existing)) {
+			return ErrStale
 		}
 		next := existing.Clone()
 		patch.apply(next)

@@ -19,6 +19,8 @@ import (
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/server/runner/base"
+	"github.com/soltiHQ/control-plane/internal/service"
+	agentsvc "github.com/soltiHQ/control-plane/internal/service/agent"
 	historysvc "github.com/soltiHQ/control-plane/internal/service/history"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
@@ -26,7 +28,13 @@ import (
 
 // proxyGetter is the small subset of *proxy.Pool that the sync runner actually needs.
 type proxyGetter interface {
-	Get(endpoint string, epType enum.EndpointType, apiVersion enum.APIVersion, token string) (proxy.AgentProxy, error)
+	Get(agentID, endpoint string, epType enum.EndpointType, apiVersion enum.APIVersion, token string) (proxy.AgentProxy, error)
+}
+
+// tokenSource gives the token the runner presents to an agent: the agent
+// service's AgentToken, which derives it for a derived credential.
+type tokenSource interface {
+	AgentToken(ctx context.Context, agentID string) (string, error)
 }
 
 // Runner periodically reconciles Rollout records against live state on agents.
@@ -34,6 +42,7 @@ type Runner struct {
 	*base.Runner
 
 	pool    proxyGetter
+	tokens  tokenSource
 	hub     *event.Hub
 	history *historysvc.Service
 
@@ -61,13 +70,17 @@ type agentBackoff struct {
 	uptime int64
 }
 
-// New creates a sync runner.
-func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.Pool, hub *event.Hub, history *historysvc.Service, leadership cluster.Leadership) (*Runner, error) {
+// New creates a sync runner. It presents to each agent the token agents gives
+// for it (agent.Service.AgentToken).
+func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.Pool, agents *agentsvc.Service, hub *event.Hub, history *historysvc.Service, leadership cluster.Leadership) (*Runner, error) {
 	if store == nil {
 		return nil, fmt.Errorf("sync: %w", storage.ErrNilStore)
 	}
 	if pool == nil {
 		return nil, fmt.Errorf("sync: %w", proxy.ErrNilPool)
+	}
+	if agents == nil {
+		return nil, fmt.Errorf("sync: %w", service.ErrNilService)
 	}
 	if hub == nil {
 		return nil, fmt.Errorf("sync: %w", event.ErrNilHub)
@@ -84,6 +97,7 @@ func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.P
 		logger:  logger.With().Str("runner", cfg.Name).Logger(),
 		store:   store,
 		pool:    pool,
+		tokens:  agents,
 		cfg:     cfg,
 		hub:     hub,
 		history: history,
@@ -171,6 +185,8 @@ const (
 	causeSnapshot   = "pages name different snapshots"
 	causeAnswer     = "page answered with an error"
 	causeMoreTasks  = "agent returned more tasks than asked"
+	causeElements   = "page holds too many elements even at limit 1"
+	causeConditions = "agent returned a task with too many conditions"
 	causeLongCursor = "agent returned a cursor that is too long"
 	causeListSize   = "listing too large"
 )
@@ -531,7 +547,7 @@ func (r *Runner) getProxy(ctx context.Context, ss *model.Rollout) (proxy.AgentPr
 		r.markFailed(ctx, ss, "agent credential lookup: "+err.Error())
 		return nil, false
 	}
-	ap, err := r.pool.Get(ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
+	ap, err := r.pool.Get(ag.ID(), ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
 	if err != nil {
 		r.markFailed(ctx, ss, "proxy error: "+err.Error())
 		return nil, false
@@ -539,17 +555,12 @@ func (r *Runner) getProxy(ctx context.Context, ss *model.Rollout) (proxy.AgentPr
 	return ap, true
 }
 
-// Missing credentials mean auth is disabled or the agent is not enrolled.
-// Storage failures must not silently turn authenticated calls into anonymous ones.
+// agentToken is the token presented to the agent, "" for an agent that is not
+// enrolled. A failure, of the store or of a derived credential podium cannot
+// use, makes no call: storage failures must not silently turn authenticated
+// calls into anonymous ones.
 func (r *Runner) agentToken(ctx context.Context, agentID string) (string, error) {
-	c, err := r.store.GetAgentCredential(ctx, agentID)
-	if errors.Is(err, storage.ErrNotFound) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return c.Token(), nil
+	return r.tokens.AgentToken(ctx, agentID)
 }
 
 // finalizeDeletedSpecs removes any spec with DeletionRequested=true whose last rollout has drained.
@@ -683,6 +694,10 @@ func (r *Runner) markFailed(ctx context.Context, attempted *model.Rollout, errMs
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return
 	}
+	// The message is the words of the runner and, after them, the text of an agent's
+	// error. The proxy cuts that text, but the words come on top of it: the rollout
+	// and the event keep the whole message cut to the same limit.
+	errMsg = proxy.CapAgentText(errMsg)
 	ctx, cancel := writeContext(ctx)
 	defer cancel()
 	changed := false
@@ -751,7 +766,7 @@ func (r *Runner) observeAgent(ctx context.Context, turn *agentTurn, start time.T
 	if err != nil {
 		return
 	}
-	ap, err := r.pool.Get(ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
+	ap, err := r.pool.Get(ag.ID(), ag.Endpoint(), ag.EndpointType(), ag.APIVersion(), token)
 	if err != nil {
 		return
 	}
@@ -772,11 +787,14 @@ const taskListLimit = 1000
 
 // What an agent may make a listing cost, whatever it answers. A page with more
 // tasks than were asked for, or a cursor longer than maxCursorBytes, is an answer
-// no agent gives. A listing that would hold more than maxListedTasks task IDs or
-// maxListedIDBytes bytes of them, or take more than maxListedPages calls, refused
-// pages included, is not followed further: the runner keeps neither without bound,
-// and a task ID has no length limit of its own, so the count alone does not bound
-// the bytes. Each leaves the listing incomplete, see listTasks.
+// no agent gives. The proxy bounds both, and what a page builds besides, see
+// internal/proxy/README.md; the runner checks the two itself as well. A listing
+// that would hold more than maxListedTasks task IDs or maxListedIDBytes bytes of
+// them, or take more than maxListedPages calls, refused pages included, is not
+// followed further: the runner keeps neither without bound, and the longest task ID
+// the proxy lets through (proxy.MaxTaskIDBytes) times the count is more bytes than
+// maxListedIDBytes allows, so the count alone does not bound them. Each leaves the
+// listing incomplete, see listTasks.
 const (
 	maxCursorBytes   = 4096
 	maxListedTasks   = 65536
@@ -784,23 +802,41 @@ const (
 	maxListedPages   = 1024
 )
 
+// refusedAsTooBig reports whether the proxy refused a page for what it holds in all:
+// the answer is over the 4 MiB it reads (ErrResponseTooLarge), or holds more
+// elements than it builds in all (ErrTooManyElements). A page of fewer tasks may come
+// under either. It may not under a bound of the task itself: a task with more
+// conditions than a task may hold (ErrTooManyConditions) is refused in any page that
+// holds it, so it is not asked again, and the listing ends on it.
+func refusedAsTooBig(err error) bool {
+	return errors.Is(err, proxy.ErrResponseTooLarge) || errors.Is(err, proxy.ErrTooManyElements)
+}
+
 // listTasks lists every task of the turn's agent, a page at a time and with no
 // filter, so that a task is there whatever its phase, as it was to GetTask. Each
 // page is a call of its own, within PushTimeout, and starts only while the turn is
 // within its budget. A page starts at taskListLimit tasks. One that the proxy
-// refuses as too large is asked again from the same cursor with half the limit,
-// down to one task, and the smaller limit holds for the rest of the turn. Only a
-// listing that reaches the last page is complete. One that stops short reports
-// false, and no task may be judged missing by it: the budget is used, a task is
-// too large to list, a page fails, a page holds more tasks than it was asked for,
-// a cursor is longer than maxCursorBytes, the listing would hold more than
+// refuses as too large, or as holding too many elements in all (see
+// refusedAsTooBig), is asked again from the same cursor with half the limit, down to
+// one task, and the smaller limit holds for the rest of the turn. Only a listing
+// that reaches the last page is complete. One that stops short reports false, and no
+// task may be judged missing by it: the budget is used, a task is too large to list
+// or holds too many elements even alone, a task has more conditions than a task may
+// hold (a bound of the task, not of the page: the call that meets it is not repeated
+// with a smaller page, and the listing ends there; over gRPC a status split into
+// occurrences of 64 or fewer that pass the budget, or a budget spent by the tasks
+// ahead, is refused as too many elements first, before decoding, and halved up to
+// ten calls), a page fails, a page holds more tasks than it was asked for (the
+// proxy refuses it before it builds the tasks, as ErrTooManyItems, and the runner
+// counts them again), a cursor is longer than maxCursorBytes (the proxy refuses it
+// first too), the listing would hold more than
 // maxListedTasks task IDs or maxListedIDBytes bytes of them, or take more than
 // maxListedPages calls (a refused page is a call), the agent returns a cursor it
 // returned before, the pages name different snapshots (a resource version that
 // differs from the first one named; a page without one is let through) or the tick
-// is cancelled. A page answers or goes unanswered as any call does, a refusal and
-// an error status included: the turn notes it, and turn.listed says why a listing
-// is incomplete.
+// is cancelled. A page answers or goes unanswered as any call does, a refusal and an
+// error status included: the turn notes it, and turn.listed says why a listing is
+// incomplete.
 func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agentTurn, start time.Time) (map[string]struct{}, bool) {
 	var (
 		tasks   = make(map[string]struct{})
@@ -834,11 +870,23 @@ func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agent
 			return nil, false
 		}
 		switch {
-		case errors.Is(err, proxy.ErrResponseTooLarge) && limit > 1:
+		case refusedAsTooBig(err) && limit > 1:
 			limit /= 2
 			continue
 		case errors.Is(err, proxy.ErrResponseTooLarge):
 			turn.listed = listing{cause: causeTooLarge, err: err}
+			return nil, false
+		case errors.Is(err, proxy.ErrTooManyElements):
+			turn.listed = listing{cause: causeElements, err: err}
+			return nil, false
+		case errors.Is(err, proxy.ErrTooManyConditions): // before ErrTooManyItems, which it is too
+			turn.listed = listing{cause: causeConditions, err: err}
+			return nil, false
+		case errors.Is(err, proxy.ErrTooManyItems):
+			turn.listed = listing{cause: causeMoreTasks, err: err}
+			return nil, false
+		case errors.Is(err, proxy.ErrCursorTooLong):
+			turn.listed = listing{cause: causeLongCursor, err: err}
 			return nil, false
 		case err != nil:
 			turn.listed = listing{cause: causeAnswer, err: err}
@@ -851,6 +899,8 @@ func (r *Runner) listTasks(ctx context.Context, ap proxy.AgentProxy, turn *agent
 			}
 			version = resp.ResourceVersion
 		}
+		// The proxy refuses such a page before it builds the tasks, see above; this
+		// check is the runner's own.
 		if len(resp.Tasks) > limit {
 			turn.listed = listing{cause: causeMoreTasks, err: fmt.Errorf("%d tasks for a limit of %d", len(resp.Tasks), limit)}
 			return nil, false

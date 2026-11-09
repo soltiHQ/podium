@@ -31,16 +31,35 @@ import (
 // base64 inflation × 4/3 + envelope overhead fits under 4 MiB with ~33% headroom.
 const maxAgentMessageBytes = 4 * 1024 * 1024
 
+// maxAgentHeaderListBytes is the largest header list, headers or trailers, that a
+// gRPC client accepts from an agent: grpc-go counts the sizes of the names and
+// values, and 32 bytes for each entry. The status message of a failed call travels
+// in the trailers, so the limit bounds the error text an agent can send; the
+// default of grpc-go is 16 MiB. A call whose answer carries a longer list fails
+// with an error of the transport, and the status is lost.
+const maxAgentHeaderListBytes = 64 << 10
+
+// grpcEntry is a pooled connection and the target it dials.
+type grpcEntry struct {
+	target string
+	conn   *grpc.ClientConn
+}
+
 // Pool manages shared outbound connections to agents.
 //
 // For HTTP it holds a single *http.Client whose Transport pools TCP connections.
-// For gRPC it caches one *grpc.ClientConn per endpoint address.
+// For gRPC it holds one *grpc.ClientConn for each agent, to the endpoint the agent
+// advertises now: a Get for another endpoint closes the old connection, Forget
+// closes it for an agent that is gone, when it is called on this pool, so the pool
+// grows with the agents this node has called, deleted ones included that it was
+// not told of, and not with the endpoints they once advertised. The pool keeps no
+// token: Get takes it on every call.
 type Pool struct {
 	mu     sync.RWMutex
 	closed bool
 
 	httpCli     *http.Client
-	grpcConns   map[string]*grpc.ClientConn
+	grpcConns   map[string]grpcEntry // by agent ID
 	grpcCreds   credentials.TransportCredentials
 	requireAuth bool
 }
@@ -52,7 +71,7 @@ type Pool struct {
 // engaged for https:// endpoints) and gRPC dials insecurely — preserving the
 // pre-TLS behavior.
 //
-// requireAuth mirrors agent_auth.require: when false, no stored token is sent.
+// requireAuth mirrors agent_auth.require: when false, no token is sent.
 func NewPool(clientTLS *tls.Config, requireAuth bool) *Pool {
 	httpTLS := clientTLS
 	if httpTLS == nil {
@@ -80,19 +99,22 @@ func NewPool(clientTLS *tls.Config, requireAuth bool) *Pool {
 				MaxIdleConnsPerHost:   10,
 			},
 		},
-		grpcConns:   make(map[string]*grpc.ClientConn),
+		grpcConns:   make(map[string]grpcEntry),
 		grpcCreds:   creds,
 		requireAuth: requireAuth,
 	}
 }
 
-// Get returns an AgentProxy bound to the given endpoint and (optional) bearer
-// token, selecting the implementation by API version and endpoint type. The
-// proxy presents the token on every call, and only when the pool requires
-// agent auth; an empty token means the agent is not yet enrolled.
+// Get returns an AgentProxy for the agent bound to the given endpoint and
+// (optional) bearer token, selecting the implementation by API version and
+// endpoint type. The proxy presents the token on every call, and only when the
+// pool requires agent auth; an empty token means the agent is not yet enrolled.
 // The endpoint is validated again, so an agent stored before validation
 // existed gets an error instead of a client.
-func (p *Pool) Get(endpoint string, epType enum.EndpointType, apiVersion enum.APIVersion, token string) (AgentProxy, error) {
+//
+// The connection of a gRPC agent is the agent's own, see Pool. A call in flight on
+// a connection that Get closes, for an endpoint the agent left, fails.
+func (p *Pool) Get(agentID, endpoint string, epType enum.EndpointType, apiVersion enum.APIVersion, token string) (AgentProxy, error) {
 	p.mu.RLock()
 	closed := p.closed
 	p.mu.RUnlock()
@@ -104,18 +126,20 @@ func (p *Pool) Get(endpoint string, epType enum.EndpointType, apiVersion enum.AP
 	}
 	switch apiVersion {
 	case enum.APIVersionV1:
-		return p.getV1(endpoint, epType, token)
+		return p.getV1(agentID, endpoint, epType, token)
 	default:
 		return nil, ErrUnsupportedAPIVersion
 	}
 }
 
-func (p *Pool) getV1(endpoint string, epType enum.EndpointType, token string) (AgentProxy, error) {
+func (p *Pool) getV1(agentID, endpoint string, epType enum.EndpointType, token string) (AgentProxy, error) {
 	switch epType {
 	case enum.EndpointHTTP:
 		if err := validateEndpoint(endpoint, epType); err != nil {
 			return nil, err
 		}
+		// An agent that moved from gRPC to HTTP has no use for its connection.
+		p.Forget(agentID)
 		// Wrap the shared client so every request carries the bearer header;
 		// keep the bare shared client when there is no token (zero overhead).
 		var client httpClient = p.httpCli
@@ -130,7 +154,7 @@ func (p *Pool) getV1(endpoint string, epType enum.EndpointType, token string) (A
 		if err := validateEndpoint(endpoint, epType); err != nil {
 			return nil, err
 		}
-		conn, err := p.grpcConn(endpoint)
+		conn, err := p.grpcConn(agentID, endpoint)
 		if err != nil {
 			return nil, err
 		}
@@ -148,8 +172,9 @@ func validateEndpoint(endpoint string, epType enum.EndpointType) error {
 	return nil
 }
 
-// grpcConn returns a cached *grpc.ClientConn or creates one.
-func (p *Pool) grpcConn(endpoint string) (*grpc.ClientConn, error) {
+// grpcConn returns the agent's *grpc.ClientConn to the endpoint, or creates it. A
+// connection of the agent to another endpoint is closed.
+func (p *Pool) grpcConn(agentID, endpoint string) (*grpc.ClientConn, error) {
 	// Normalise the agent-advertised endpoint: grpc-go's `NewClient`
 	// wants a bare authority (`host:port`) and chokes on scheme-prefixed
 	// URLs with "too many colons in address". Agents that accidentally
@@ -162,26 +187,28 @@ func (p *Pool) grpcConn(endpoint string) (*grpc.ClientConn, error) {
 		p.mu.RUnlock()
 		return nil, ErrClosed
 	}
-	conn, ok := p.grpcConns[target]
+	held, ok := p.grpcConns[agentID]
 	p.mu.RUnlock()
-	if ok {
-		return conn, nil
+	if ok && held.target == target {
+		return held.conn, nil
 	}
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if p.closed {
+		p.mu.Unlock()
 		return nil, ErrClosed
 	}
-	if conn, ok = p.grpcConns[target]; ok {
-		return conn, nil
+	held, ok = p.grpcConns[agentID]
+	if ok && held.target == target {
+		p.mu.Unlock()
+		return held.conn, nil
 	}
 	// The explicit scheme keeps grpc-go's default DNS resolver for every
 	// host: a bare "unix:1" would otherwise select the unix socket resolver.
 	conn, err := grpc.NewClient(
 		"dns:///"+target,
 		grpc.WithTransportCredentials(p.grpcCreds),
+		grpc.WithMaxHeaderListSize(maxAgentHeaderListBytes),
 		// Align with solti-api's MAX_REQUEST_BYTES so a 5 MiB script body
 		// (base64 → ~7 MiB on the wire) goes through cleanly. Without this
 		// the agent's SubmitTaskResponse would still fit, but any response
@@ -193,10 +220,37 @@ func (p *Pool) grpcConn(endpoint string) (*grpc.ClientConn, error) {
 		),
 	)
 	if err != nil {
+		p.mu.Unlock()
 		return nil, fmt.Errorf("%w %s: %v", ErrDial, endpoint, err)
 	}
-	p.grpcConns[target] = conn
+	p.grpcConns[agentID] = grpcEntry{target: target, conn: conn}
+	p.mu.Unlock()
+	if ok {
+		// The agent advertises another endpoint: the connection to the old one is of no
+		// use. Calls in flight on it fail.
+		_ = held.conn.Close()
+	}
 	return conn, nil
+}
+
+// Forget closes the agent's pooled gRPC connection, if it has one: the agent was
+// deleted, or its credential was reset. The next Get for the agent dials afresh.
+// The pool holds no token (Get takes it on every call), so nothing it keeps
+// presents a credential that was reset. A call in flight on the connection fails.
+func (p *Pool) Forget(agentID string) {
+	p.mu.RLock()
+	_, ok := p.grpcConns[agentID]
+	p.mu.RUnlock()
+	if !ok {
+		return
+	}
+	p.mu.Lock()
+	held, ok := p.grpcConns[agentID]
+	delete(p.grpcConns, agentID)
+	p.mu.Unlock()
+	if ok {
+		_ = held.conn.Close()
+	}
 }
 
 // normalizeGrpcTarget strips HTTP-style scheme prefixes and trailing
@@ -223,9 +277,9 @@ func (p *Pool) Close() error {
 	}
 	p.closed = true
 	var errs []error
-	for ep, conn := range p.grpcConns {
-		if err := conn.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("%w %s: %v", ErrClose, ep, err))
+	for _, held := range p.grpcConns {
+		if err := held.conn.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("%w %s: %v", ErrClose, held.target, err))
 		}
 	}
 	p.grpcConns = nil

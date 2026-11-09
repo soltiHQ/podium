@@ -49,3 +49,17 @@ type UpsertResult struct {
 	// failed rollouts and ends the sync runner's backoff.
 	Reconnected bool
 }
+
+// IssuedCredential is the credential ResetCredential issued, with its token.
+type IssuedCredential struct {
+	AgentID string
+	// Token is the new token of the agent: the only place podium returns it,
+	// apart from the calls it makes with it.
+	Token string
+	// Derived says whether the credential is derived from the enrollment secret,
+	// which is so while one is set. Then Generation is its generation, at least 1,
+	// and `podium agent-token --generation <Generation> <AgentID>` prints Token
+	// again. A stored credential has a random token and no generation, 0 here.
+	Derived    bool
+	Generation uint32
+}

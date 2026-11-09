@@ -2,6 +2,8 @@ package response
 
 import (
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
@@ -15,6 +17,11 @@ import (
 // LeaderHeader is the response header that carries the HTTP address of the cluster leader: host:port, no scheme.
 // See "Leader hint" in internal/transport/README.md.
 const LeaderHeader = "X-Leader"
+
+// RetryAfterHeader is the response header that tells a throttled client when to
+// try again. TooManyRequests sets it, and a 429 that carries it is a throttle:
+// the access log (Logger) records it at DEBUG.
+const RetryAfterHeader = "Retry-After"
 
 // SetLeader adds the leader's HTTP address to an answer as LeaderHeader. Every answer that carries it
 // sets it here. An empty address adds nothing: a node that leads, that knows no leader, or that has no
@@ -379,6 +386,39 @@ func Internal(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
 					http.StatusInternalServerError,
 					"Server error",
 					"Something went wrong on our side. Please try again later.",
+				)
+			}
+			return nil
+		}(mode),
+	})
+}
+
+// TooManyRequests renders a 429 response with a custom message. With a positive
+// retryAfter it sets Retry-After to that many whole seconds, rounded up, so that
+// a client that waits that long does not come early. Such an answer is a
+// throttle, and the access log (Logger) records it at DEBUG; AuthRateLimit, the
+// answer of the failure limiters, sets no Retry-After and stays a WARN.
+func TooManyRequests(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, retryAfter time.Duration, msg string) {
+	if retryAfter > 0 {
+		seconds := int64(retryAfter / time.Second)
+		if retryAfter%time.Second != 0 {
+			seconds++
+		}
+		w.Header().Set(RetryAfterHeader, strconv.FormatInt(seconds, 10))
+	}
+	transportctx.SetError(r.Context(), msg)
+	httpctx.Responder(r.Context()).Respond(w, r, http.StatusTooManyRequests, &responder.View{
+		Data: errorBody{
+			Code:      http.StatusTooManyRequests,
+			Message:   msg,
+			RequestID: transportctx.TryRequestID(r.Context()),
+		},
+		Component: func(m httpctx.RenderMode) templ.Component {
+			if m == httpctx.RenderPage {
+				return renderErrorPage(
+					http.StatusTooManyRequests,
+					"Too many requests",
+					msg,
 				)
 			}
 			return nil

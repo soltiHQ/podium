@@ -33,6 +33,7 @@ func TestEveryIDHelperEscapesItsSegment(t *testing.T) {
 		{"ApiAgentByID", ApiAgentByID, "/api/v1/agents/{id}"},
 		{"ApiAgentLabels", ApiAgentLabels, "/api/v1/agents/{id}/labels"},
 		{"ApiAgentTasks", ApiAgentTasks, "/api/v1/agents/{id}/tasks"},
+		{"ApiAgentCredential", ApiAgentCredential, "/api/v1/agents/{id}/credential"},
 		{"PageSpecInfoByID", PageSpecInfoByID, "/specs/info/{id}"},
 		{"PageSpecEditByID", PageSpecEditByID, "/specs/edit/{id}"},
 		{"ApiSpecByID", ApiSpecByID, "/api/v1/specs/{id}"},

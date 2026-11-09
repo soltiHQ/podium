@@ -81,8 +81,10 @@ type AgentParams struct {
 }
 
 // NewAgentFrom constructs an Agent from AgentParams. The ID, endpoint, name,
-// heartbeat interval and metadata must pass the agent validation rules
-// (see ValidateAgentID and ValidateAgentEndpoint).
+// heartbeat interval, metadata and capabilities must pass the agent validation
+// rules (see ValidateAgentID and ValidateAgentEndpoint). OS, Arch and Platform
+// are not refused when they are long: they are cut to 256 bytes, on a rune
+// boundary.
 func NewAgentFrom(p AgentParams) (*Agent, error) {
 	if err := ValidateAgentID(p.ID); err != nil {
 		return nil, err
@@ -118,9 +120,9 @@ func NewAgentFrom(p AgentParams) (*Agent, error) {
 		endpoint:     p.Endpoint,
 		endpointType: epType,
 		apiVersion:   enum.APIVersionFromInt(p.APIVersion),
-		os:           p.OS,
-		arch:         p.Arch,
-		platform:     p.Platform,
+		os:           cutUTF8(p.OS, agentPlatformMaxBytes),
+		arch:         cutUTF8(p.Arch, agentPlatformMaxBytes),
+		platform:     cutUTF8(p.Platform, agentPlatformMaxBytes),
 
 		uptimeSeconds: p.UptimeSeconds,
 

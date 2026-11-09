@@ -1,13 +1,16 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
@@ -63,8 +66,14 @@ func (s *taskContractServer) StreamTaskLogs(r *taskv1.StreamTaskLogsRequest, str
 
 func grpcContractProxy(t *testing.T, s *taskContractServer, opts ...grpc.DialOption) *grpcProxyV1 {
 	t.Helper()
+	return grpcContractProxyOver(t, s, nil, opts...)
+}
+
+// grpcContractProxyOver is grpcContractProxy over a server that has serverOpts.
+func grpcContractProxyOver(t *testing.T, s taskv1.TaskServiceServer, serverOpts []grpc.ServerOption, opts ...grpc.DialOption) *grpcProxyV1 {
+	t.Helper()
 	l := &memoryListener{conns: make(chan net.Conn), done: make(chan struct{})}
-	server := grpc.NewServer()
+	server := grpc.NewServer(serverOpts...)
 	taskv1.RegisterTaskServiceServer(server, s)
 	go func() { _ = server.Serve(l) }()
 	opts = append([]grpc.DialOption{grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return l.DialContext(ctx) }), grpc.WithTransportCredentials(insecure.NewCredentials())}, opts...)
@@ -97,6 +106,69 @@ func TestGRPCResourceIdentityAndUIDPinning(t *testing.T) {
 	}
 	if s.logUID != "selected-uid" {
 		t.Fatalf("log follows latest incarnation %s", s.logUID)
+	}
+}
+
+// chunkServer streams one log chunk for each of its lines, with the index of the
+// line as its sequence number, then keeps the stream open until the client ends
+// it: a stream that ends before that was ended by the client.
+type chunkServer struct {
+	taskv1.UnimplementedTaskServiceServer
+	lines [][]byte
+}
+
+func (s *chunkServer) StreamTaskLogs(_ *taskv1.StreamTaskLogsRequest, stream grpc.ServerStreamingServer[taskv1.StreamTaskLogsResponse]) error {
+	for i, line := range s.lines {
+		chunk := &taskv1.OutputChunk{Seq: uint64(i), Line: line}
+		if err := stream.Send(&taskv1.StreamTaskLogsResponse{Kind: &taskv1.StreamTaskLogsResponse_Chunk{Chunk: chunk}}); err != nil {
+			return err
+		}
+	}
+	<-stream.Context().Done()
+	return nil
+}
+
+// A message of the log stream holds at most 1 MiB over gRPC, as a line does over
+// HTTP: a chunk within it is delivered, and one over it ends the stream with the
+// client's error, with nothing of it or after it delivered, though the agent keeps
+// the stream open and the call has no deadline.
+func TestGRPCLogStreamCapsAMessageAt1MiB(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line int      // bytes of the line of the second chunk
+		want []uint64 // the sequence numbers delivered
+	}{
+		{"a chunk within 1 MiB", 1<<20 - 64, []uint64{0, 1, 2}},
+		{"a chunk of 1 MiB, over it with its framing", 1 << 20, []uint64{0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := [][]byte{[]byte("before"), bytes.Repeat([]byte("x"), tc.line), []byte("after")}
+			p := grpcContractProxyOver(t, &chunkServer{lines: lines}, nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			stream, err := p.StreamTaskLogsForUID(ctx, "task", "uid")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var seqs []uint64
+			timeout := time.After(5 * time.Second)
+		receive:
+			for len(seqs) < len(lines) {
+				select {
+				case ev, open := <-stream:
+					if !open {
+						break receive
+					}
+					seqs = append(seqs, ev.GetChunk().GetSeq())
+				case <-timeout:
+					t.Fatalf("the stream neither ended nor delivered a chunk for 5s, after %v", seqs)
+				}
+			}
+			if !slices.Equal(seqs, tc.want) {
+				t.Fatalf("delivered the chunks %v, want %v", seqs, tc.want)
+			}
+		})
 	}
 }
 

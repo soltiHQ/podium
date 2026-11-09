@@ -83,6 +83,7 @@ keeps the rest: an answer that names the origin twice is one a browser refuses (
         │   HTTPS_PROXY) and answers with the leader's answer; any other write is Unavailable + x-leader;
         │   a call it passes on carries the means to hint the leader, for a handler's leadership error (HintLeader)
         │   UnaryLogger logs a failed call at ERROR, but a "not the leader" answer with x-leader at WARN
+        │   and a throttle (ResourceExhausted with RetryInfo, status.Throttled) at DEBUG
         ▼
   handler/discovery.go (GRPCDiscovery)
         │
@@ -115,6 +116,11 @@ forwards a sync; standalone gRPC discovery uses the peer address, whatever metad
 - The main listener has no limit on failed authentication: its tokens and session IDs cannot be guessed, and passwords go through the login limiter (`internal/auth`).
 - Discovery has no per-IP limit. Both Sync handlers reserve an attempt per (client IP, agent ID) before the token check, in one shared limiter, so checks in flight and failures count
   together and across HTTP and gRPC, and one agent with a stale token never blocks the other agents behind its egress IP. HTTP answers 429, gRPC `ResourceExhausted`.
+- Discovery also limits how fast each agent ID syncs: a bucket of 10 syncs, one back per second, shared by HTTP and gRPC, looked at before the token check (a sync that finds it empty is refused without touching the store) and charged after it.
+  HTTP answers 429 with `Retry-After: 1` (`response.TooManyRequests`), gRPC `ResourceExhausted` with `RetryInfo` (`status.Throttled`). See `internal/config`, "Rate limiting".
+  Such an answer is a throttle: `Logger` and `UnaryLogger` record it at DEBUG, one line per call, where they record any other 4xx at WARN and any other failed call at ERROR.
+  That is the level of the line, not the number of lines: podium's logger has no minimum level, so the line is written. A follower that proxies or forwards the leader's answer
+  logs it at DEBUG as well, the header and the detail being the leader's.
 - `middleware.StreamLimit` caps concurrent streams per client IP.
 
 ## Error model (shared)

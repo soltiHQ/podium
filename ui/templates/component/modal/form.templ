@@ -14,6 +14,8 @@ import (
 //   - method:    HTTP method — "POST" renders Create/Creating, "PUT" renders Save/Saving
 //   - fields:    static text inputs
 //   - selects:   async multi-selects loaded from API
+//   - pre:       the version of the record the form shows, sent as If-Match
+//     (see Precondition); the zero value sends none
 templ FormModal(
 	name string,
 	titleText string,
@@ -21,12 +23,13 @@ templ FormModal(
 	method string,
 	fields []Field,
 	selects []AsyncSelect,
+	pre Precondition,
 ) {
 	@Modal(name) {
 		<form
 			x-data={ editFormData(fields, selects) }
 			x-init={ initExpr(selects) }
-			x-on:submit.prevent={ formSubmitExpr(method, action, fields, selects) }
+			x-on:submit.prevent={ formSubmitExpr(method, action, fields, selects, pre.IfMatch) }
 		>
 			<!-- preloader -->
 			<div x-show="loading" class={ formBody }>
@@ -113,6 +116,9 @@ templ FormModal(
 						x-cloak
 						class={ formError }
 					></p>
+					if pre.ReloadHref != "" {
+						<a x-show="stale" x-cloak href={ templ.SafeURL(pre.ReloadHref) } class={ formLink }>Reload</a>
+					}
 				</div>
 
 				@Footer() {

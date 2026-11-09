@@ -1,8 +1,13 @@
 package proxy
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
 	grpcstatus "google.golang.org/grpc/status"
@@ -48,5 +53,117 @@ func TestAgentErrorCarriesKindAndSentinel(t *testing.T) {
 	// The op sentinel stays in the chain for errors.Is.
 	if !errors.Is(err, ErrGetTask) {
 		t.Fatalf("errors.Is(ErrGetTask) = false, want true")
+	}
+}
+
+// A text an agent produced is cut to MaxAgentTextBytes on a UTF-8 boundary, with a
+// marker where it was cut. A text within the limit is left as it is.
+func TestCapAgentText(t *testing.T) {
+	const marker = "…"
+	for _, tc := range []struct {
+		name string
+		in   string
+	}{
+		{"no text", ""},
+		{"a short text", "agent said no"},
+		{"a text of the most", strings.Repeat("x", MaxAgentTextBytes)},
+		{"a text one byte over", strings.Repeat("x", MaxAgentTextBytes+1)},
+		{"a text of a MiB", strings.Repeat("x", 1<<20)},
+		{"two-byte runes", "a" + strings.Repeat("é", MaxAgentTextBytes)},
+		{"two-byte runes, cut the other way", strings.Repeat("é", MaxAgentTextBytes)},
+		{"three-byte runes", strings.Repeat("世", MaxAgentTextBytes)},
+		{"three-byte runes, shifted by one", "a" + strings.Repeat("世", MaxAgentTextBytes)},
+		{"three-byte runes, shifted by two", "ab" + strings.Repeat("世", MaxAgentTextBytes)},
+		{"four-byte runes", strings.Repeat("😀", MaxAgentTextBytes)},
+		{"four-byte runes, shifted by one", "a" + strings.Repeat("😀", MaxAgentTextBytes)},
+		{"four-byte runes, shifted by two", "ab" + strings.Repeat("😀", MaxAgentTextBytes)},
+		{"four-byte runes, shifted by three", "abc" + strings.Repeat("😀", MaxAgentTextBytes)},
+		{"bytes that are no UTF-8", strings.Repeat("\x80", 2*MaxAgentTextBytes)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CapAgentText(tc.in)
+
+			if len(tc.in) <= MaxAgentTextBytes {
+				if got != tc.in {
+					t.Fatalf("CapAgentText cut a text of %d bytes", len(tc.in))
+				}
+				return
+			}
+			if len(got) > MaxAgentTextBytes+len(marker) || !strings.HasSuffix(got, marker) {
+				t.Fatalf("got %d bytes ending %q, want at most %d, ending with the marker", len(got), got[len(got)-4:], MaxAgentTextBytes+len(marker))
+			}
+			kept := strings.TrimSuffix(got, marker)
+			if !strings.HasPrefix(tc.in, kept) {
+				t.Fatal("what is kept is not the start of the text")
+			}
+			if utf8.ValidString(tc.in) && !utf8.ValidString(got) {
+				t.Fatalf("a valid text was cut inside a rune: %q", got[len(got)-8:])
+			}
+			if utf8.ValidString(tc.in) && len(kept) <= MaxAgentTextBytes-utf8.UTFMax {
+				t.Fatalf("kept %d bytes, a rune boundary is at most %d bytes below the limit", len(kept), utf8.UTFMax-1)
+			}
+			if again := CapAgentText(got); again != got {
+				t.Fatal("capping a capped text changed it")
+			}
+		})
+	}
+}
+
+// The error of an agent call is capped when it is read, wherever it is read:
+// stored, recorded or logged. What lies behind it stays in the chain.
+func TestAgentErrorCapsItsText(t *testing.T) {
+	huge := strings.Repeat("x", 1<<20)
+	t.Run("short text is the text", func(t *testing.T) {
+		if got := agentError(ErrGetTask, errors.New("gone")).Error(); got != "proxy: get task: gone" {
+			t.Fatalf("Error() = %q", got)
+		}
+	})
+	t.Run("a long text is cut", func(t *testing.T) {
+		err := agentError(ErrGetTask, errors.New(huge))
+		if len(err.Error()) > MaxAgentTextBytes+len("…") || !strings.HasPrefix(err.Error(), "proxy: get task: xxx") {
+			t.Fatalf("Error() is %d bytes: %.40q", len(err.Error()), err.Error())
+		}
+		if !errors.Is(err, ErrGetTask) {
+			t.Fatal("the operation left the chain")
+		}
+	})
+	t.Run("the status and the kind behind a long text stay", func(t *testing.T) {
+		err := agentError(ErrGetTask, grpcstatus.Error(codes.NotFound, huge))
+		if len(err.Error()) > MaxAgentTextBytes+len("…") {
+			t.Fatalf("Error() is %d bytes", len(err.Error()))
+		}
+		if kind := errkind.Classify(err); kind != errkind.NotFound {
+			t.Fatalf("kind = %v, want NotFound", kind)
+		}
+		if code := grpcstatus.Code(err); code != codes.NotFound {
+			t.Fatalf("code = %v, want NotFound", code)
+		}
+	})
+	t.Run("a wrapper of the error is capped through it", func(t *testing.T) {
+		err := fmt.Errorf("apply task: %w", agentError(ErrApplyTask, errors.New(huge)))
+		if len(err.Error()) > MaxAgentTextBytes+len("apply task: ")+len("…") {
+			t.Fatalf("Error() is %d bytes", len(err.Error()))
+		}
+	})
+}
+
+// failingClient is an httpClient whose every call fails with err.
+type failingClient struct{ err error }
+
+func (c failingClient) Do(*http.Request) (*http.Response, error) { return nil, c.err }
+
+// The error of opening a log stream is an agent error like the others of the proxy:
+// the text of it may be what a hostile agent chose, so it is capped when it is read.
+func TestStreamLogsConnectionErrorIsAnAgentError(t *testing.T) {
+	p := &httpProxyV1{endpoint: "http://127.0.0.1:1", client: failingClient{errors.New(strings.Repeat("x", 1<<20))}}
+
+	_, err := p.StreamTaskLogsForUID(context.Background(), "task", "uid")
+
+	var agentErr *AgentError
+	if !errors.As(err, &agentErr) || !errors.Is(err, ErrStreamTaskLogs) {
+		t.Fatalf("StreamTaskLogsForUID = %T %.80v, want an *AgentError of the log stream", err, err)
+	}
+	if len(err.Error()) > MaxAgentTextBytes+len("…") {
+		t.Fatalf("the error is %d bytes, want at most %d", len(err.Error()), MaxAgentTextBytes+len("…"))
 	}
 }

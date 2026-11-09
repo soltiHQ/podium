@@ -149,7 +149,9 @@ func (ss *Rollout) MarkDrift() {
 	ss.updatedAt = time.Now()
 }
 
-// MarkFailed records a push failure.
+// MarkFailed records a push failure. errMsg may hold the text of an agent's error,
+// and the model keeps it as given: the caller, the sync runner, cuts it first (see
+// proxy.CapAgentText), as the model cannot import the proxy.
 func (ss *Rollout) MarkFailed(errMsg string) {
 	ss.status = enum.SyncStatusFailed
 	ss.lastPushedAt = time.Now()

@@ -7,7 +7,8 @@
 //   - Recheck             repeats Auth and RequirePermission for a long-lived stream.
 //   - Negotiate           chooses the Responder (JSON / HTML) per request.
 //   - CrossOrigin         refuses cross-origin browser mutations (http.CrossOriginProtection).
-//   - Logger              structured request/response logging with zerolog; a 503 with X-Leader is a WARN, any other 5xx an ERROR.
+//   - Logger              structured request/response logging with zerolog; a 503 with X-Leader is a WARN, any other 5xx an ERROR;
+//     a 429 with Retry-After, a throttle, is a DEBUG.
 //   - Recovery            catches panics and renders a 503 response.
 //   - CORS                configurable cross-origin resource sharing.
 package middleware

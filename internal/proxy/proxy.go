@@ -13,6 +13,31 @@ import (
 	proxyv1 "github.com/soltiHQ/control-plane/api/proxy/v1"
 )
 
+const (
+	// MaxTaskIDBytes is the longest task ID a listing page may name. The SDK limits
+	// a name to 63 bytes a segment; a page that lists a longer ID than this is
+	// refused, as one that could not be decoded.
+	MaxTaskIDBytes = 1024
+
+	// MaxTaskConditions is the most conditions a task may hold in an answer, on both
+	// transports. An answer with a task that has more is refused, not cut.
+	MaxTaskConditions = 64
+
+	// MaxCursorBytes is the longest next cursor a ListTasks page may name; a page
+	// that names a longer one is refused.
+	MaxCursorBytes = 4096
+
+	// MaxRunPhaseBytes is the longest phase a run of a ListTaskRuns page may name
+	// over HTTP, where the phase is a string the agent chooses; the SDK names a word
+	// of a few letters. A page that names a longer one is refused, as one that
+	// could not be decoded. Over gRPC the phase is an enum.
+	MaxRunPhaseBytes = 64
+
+	// maxTaskPage is the most tasks a page holds, and the largest limit a request
+	// may name.
+	maxTaskPage = 1000
+)
+
 // TaskFilter holds optional filters and pagination for listing tasks.
 type TaskFilter struct {
 	Limit         int
@@ -76,8 +101,8 @@ type TaskLogStreamer interface {
 }
 
 func validateTaskFilter(f TaskFilter) error {
-	if f.Limit < 0 || f.Limit > 1000 {
-		return fmt.Errorf("%w: limit must be 0..1000", ErrListTasks)
+	if f.Limit < 0 || f.Limit > maxTaskPage {
+		return fmt.Errorf("%w: limit must be 0..%d", ErrListTasks, maxTaskPage)
 	}
 	if f.Offset != 0 {
 		return fmt.Errorf("%w: offset pagination unsupported; use cursor", ErrListTasks)
@@ -86,6 +111,60 @@ func validateTaskFilter(f TaskFilter) error {
 		if _, ok := parseV1TaskStatus(f.Status); !ok {
 			return fmt.Errorf("%w: invalid task phase %q", ErrListTasks, f.Status)
 		}
+	}
+	return nil
+}
+
+// pageBound is the most items a ListTasks page may hold for a request with this
+// limit. A request that names none leaves the page size to the agent, whose pages
+// hold maxTaskPage at most.
+func pageBound(limit int) int {
+	if limit > 0 {
+		return limit
+	}
+	return maxTaskPage
+}
+
+// tooManyItems is the error for a page that holds more than limit items.
+func tooManyItems(limit int) error {
+	return fmt.Errorf("%w: more than %d items", ErrTooManyItems, limit)
+}
+
+// tooManyElements is the error for a gRPC answer that holds more repeated elements
+// in all than the proxy builds; what says how many.
+func tooManyElements(what string) error {
+	return fmt.Errorf("%w: %s", ErrTooManyElements, what)
+}
+
+// tooManyConditions is the error for a task that holds more than MaxTaskConditions.
+// It is no budget of elements: no smaller page avoids the task.
+func tooManyConditions() error {
+	return fmt.Errorf("%w: a task holds more than %d", ErrTooManyConditions, MaxTaskConditions)
+}
+
+// checkCursor refuses a next cursor over MaxCursorBytes. The cursor is not in the
+// error: it can be as long as the page.
+func checkCursor(cursor string) error {
+	if len(cursor) > MaxCursorBytes {
+		return fmt.Errorf("%w: next cursor of %d bytes, over %d", ErrCursorTooLong, len(cursor), MaxCursorBytes)
+	}
+	return nil
+}
+
+// checkTaskID refuses a task ID over MaxTaskIDBytes. The ID is not in the error:
+// it can be as long as the page.
+func checkTaskID(id string) error {
+	if len(id) > MaxTaskIDBytes {
+		return fmt.Errorf("task ID of %d bytes, over %d", len(id), MaxTaskIDBytes)
+	}
+	return nil
+}
+
+// checkRunPhase refuses a run phase over MaxRunPhaseBytes. The phase is not in the
+// error: it can be as long as the page.
+func checkRunPhase(phase string) error {
+	if len(phase) > MaxRunPhaseBytes {
+		return fmt.Errorf("run phase of %d bytes, over %d", len(phase), MaxRunPhaseBytes)
 	}
 	return nil
 }

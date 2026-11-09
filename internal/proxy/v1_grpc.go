@@ -52,13 +52,28 @@ func (p *grpcProxyV1) ListTasks(ctx context.Context, f TaskFilter) (*proxyv1.Lis
 		}
 	}
 
-	resp, err := client.ListTasks(p.authCtx(ctx), req)
+	// The codec of the call scans the answer before it is decoded: see answerCodec.
+	// A cursor or a task ID over its bound is refused after, when the page is
+	// decoded, which the scan has bounded. So is a task whose status the agent split
+	// in several occurrences of the task's status field, each within the cap, for
+	// the decoder merges them.
+	answer := newAnswerCodec(tasksField, pageBound(f.Limit))
+	resp, err := client.ListTasks(p.authCtx(ctx), req, answer.option())
+	if refused := answer.refused(); refused != nil {
+		return nil, agentError(ErrListTasks, refused)
+	}
 	if err != nil {
 		return nil, responseError(ErrListTasks, err)
+	}
+	if err = checkCursor(resp.GetContinue()); err != nil {
+		return nil, agentError(ErrListTasks, fmt.Errorf("%w: %w", ErrDecode, err))
 	}
 
 	tasks := make([]proxyv1.Task, len(resp.GetTasks()))
 	for i, t := range resp.GetTasks() {
+		if err = checkListed(t); err != nil {
+			return nil, agentError(ErrListTasks, fmt.Errorf("%w: %w", ErrDecode, err))
+		}
 		tasks[i] = taskDataToProxy(t)
 	}
 
@@ -76,9 +91,16 @@ func (p *grpcProxyV1) ApplyTask(ctx context.Context, sub TaskSubmission) (string
 	}
 	client := taskv1.NewTaskServiceClient(p.conn)
 
-	resp, err := client.ApplyTask(p.authCtx(ctx), &taskv1.ApplyTaskRequest{Manifest: sub.Spec, Preconditions: sub.Preconditions})
+	answer := newAnswerCodec(0, 0)
+	resp, err := client.ApplyTask(p.authCtx(ctx), &taskv1.ApplyTaskRequest{Manifest: sub.Spec, Preconditions: sub.Preconditions}, answer.option())
+	if refused := answer.refused(); refused != nil {
+		return "", agentError(ErrApplyTask, refused)
+	}
 	if err != nil {
 		return "", agentError(ErrApplyTask, err)
+	}
+	if err = checkConditions(resp.GetTask()); err != nil {
+		return "", agentError(ErrApplyTask, fmt.Errorf("%w: %w", ErrDecode, err))
 	}
 	taskID := resp.GetTask().GetMetadata().GetName()
 	if taskID == "" {
@@ -98,9 +120,16 @@ func (p *grpcProxyV1) GetTask(ctx context.Context, taskID string) (*proxyv1.GetT
 	defer cancel()
 	client := taskv1.NewTaskServiceClient(p.conn)
 
-	resp, err := client.GetTask(p.authCtx(ctx), &taskv1.GetTaskRequest{Name: taskID})
+	answer := newAnswerCodec(0, 0)
+	resp, err := client.GetTask(p.authCtx(ctx), &taskv1.GetTaskRequest{Name: taskID}, answer.option())
+	if refused := answer.refused(); refused != nil {
+		return nil, agentError(ErrGetTask, refused)
+	}
 	if err != nil {
 		return nil, responseError(ErrGetTask, err)
+	}
+	if err = checkConditions(resp.GetTask()); err != nil {
+		return nil, agentError(ErrGetTask, fmt.Errorf("%w: %w", ErrDecode, err))
 	}
 
 	if resp.GetTask() == nil || resp.GetTask().GetMetadata().GetName() != taskID || resp.GetTask().GetMetadata().GetUid() == "" {
@@ -131,7 +160,11 @@ func (p *grpcProxyV1) DeleteTask(ctx context.Context, taskID string) error {
 	if task.Task == nil || task.Task.UID == "" {
 		return fmt.Errorf("%w: missing task UID", ErrDeleteTask)
 	}
-	_, err = taskv1.NewTaskServiceClient(p.conn).DeleteTask(p.authCtx(ctx), &taskv1.DeleteTaskRequest{Name: taskID, Preconditions: &taskv1.WritePreconditions{Uid: &task.Task.UID}})
+	answer := newAnswerCodec(0, 0)
+	_, err = taskv1.NewTaskServiceClient(p.conn).DeleteTask(p.authCtx(ctx), &taskv1.DeleteTaskRequest{Name: taskID, Preconditions: &taskv1.WritePreconditions{Uid: &task.Task.UID}}, answer.option())
+	if refused := answer.refused(); refused != nil {
+		return agentError(ErrDeleteTask, refused)
+	}
 	if err != nil {
 		return agentError(ErrDeleteTask, err)
 	}
@@ -148,17 +181,28 @@ func (p *grpcProxyV1) CancelTask(ctx context.Context, taskID string) error {
 	if task.Task == nil || task.Task.UID == "" {
 		return fmt.Errorf("%w: missing task UID", ErrDeleteTask)
 	}
-	_, err = taskv1.NewTaskServiceClient(p.conn).CancelTask(p.authCtx(ctx), &taskv1.CancelTaskRequest{Name: taskID, Preconditions: &taskv1.WritePreconditions{Uid: &task.Task.UID}})
+	answer := newAnswerCodec(0, 0)
+	_, err = taskv1.NewTaskServiceClient(p.conn).CancelTask(p.authCtx(ctx), &taskv1.CancelTaskRequest{Name: taskID, Preconditions: &taskv1.WritePreconditions{Uid: &task.Task.UID}}, answer.option())
+	if refused := answer.refused(); refused != nil {
+		return agentError(ErrDeleteTask, refused)
+	}
 	if err != nil {
 		return agentError(ErrDeleteTask, err)
 	}
 	return nil
 }
 
+// maxLogMessageBytes is the most a message of an agent's log stream may hold over
+// gRPC: 1 MiB, as a line of the stream is over HTTP. A message over it ends the
+// stream with the client's error. The answers of the unary calls keep the 4 MiB
+// of the pool (maxAgentMessageBytes).
+const maxLogMessageBytes = 1 << 20
+
 // StreamTaskLogs opens the agent's StreamTaskLogs server-stream, forwards
 // each StreamTaskLogsResponse into a channel, and closes it on EOF, ctx
-// cancellation, or transport error. Channel buffer is 64 — typical chunk
-// cadence (~10 lines/sec) is well below; bursts are absorbed.
+// cancellation, or transport error, a message over maxLogMessageBytes
+// included. Channel buffer is 64 — typical chunk cadence (~10 lines/sec) is
+// well below; bursts are absorbed.
 func (p *grpcProxyV1) StreamTaskLogs(ctx context.Context, taskID string) (<-chan *taskv1.StreamTaskLogsResponse, error) {
 	task, err := p.GetTask(ctx, taskID)
 	if err != nil {
@@ -172,7 +216,7 @@ func (p *grpcProxyV1) StreamTaskLogsForUID(ctx context.Context, taskID, uid stri
 		return nil, fmt.Errorf("%w: missing task UID", ErrStreamTaskLogs)
 	}
 	client := taskv1.NewTaskServiceClient(p.conn)
-	stream, err := client.StreamTaskLogs(p.authCtx(ctx), &taskv1.StreamTaskLogsRequest{Name: taskID, TaskUid: uid})
+	stream, err := client.StreamTaskLogs(p.authCtx(ctx), &taskv1.StreamTaskLogsRequest{Name: taskID, TaskUid: uid}, grpc.MaxCallRecvMsgSize(maxLogMessageBytes))
 	if err != nil {
 		return nil, agentError(ErrStreamTaskLogs, err)
 	}
@@ -192,6 +236,28 @@ func (p *grpcProxyV1) StreamTaskLogsForUID(ctx context.Context, taskID, uid stri
 		}
 	}()
 	return ch, nil
+}
+
+// checkListed refuses a task of a listing whose ID is over MaxTaskIDBytes or that
+// has more conditions than MaxTaskConditions.
+func checkListed(t *taskv1.Task) error {
+	if err := checkTaskID(t.GetMetadata().GetName()); err != nil {
+		return err
+	}
+	return checkConditions(t)
+}
+
+// checkConditions refuses a task with more conditions than MaxTaskConditions, with
+// ErrTooManyConditions, as the JSON of an HTTP agent is refused while it is decoded.
+// The scan of the answer has refused a status message that holds more of them on
+// the wire; this is for a status that the decoder merged from several occurrences
+// of the task's status field, which the scan counted each on its own, and keeps the
+// transports to one rule.
+func checkConditions(t *taskv1.Task) error {
+	if len(t.GetStatus().GetConditions()) > MaxTaskConditions {
+		return tooManyConditions()
+	}
+	return nil
 }
 
 // taskDataToProxy converts a proto TaskData (nested metadata + spec + status)

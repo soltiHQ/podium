@@ -47,7 +47,7 @@ func populate(t *testing.T, s storage.Storage) string {
 	a.LabelAdd("env", "test")
 	a.SetOS("linux")
 	a.SetCapabilities([]model.RunnerCapability{{Name: "echo", Labels: map[string]string{"tier": "test"}, Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Shell"}}}})
-	ac, err := model.NewAgentCredential("a1", "test-enrollment-token")
+	ac, err := model.NewStoredAgentCredential("a1", "test-enrollment-token")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestEveryMutationSurvivesRestart(t *testing.T) {
 		}},
 		{"agent delete", func(s *Store, _ string) error { return s.DeleteAgent(ctx, "a1") }},
 		{"agent credential upsert", func(s *Store, _ string) error {
-			c, _ := model.NewAgentCredential("a1", "rotated-token")
+			c, _ := model.NewStoredAgentCredential("a1", "rotated-token")
 			return s.UpsertAgentCredential(ctx, c)
 		}},
 		{"agent credential delete", func(s *Store, _ string) error { return s.DeleteAgentCredential(ctx, "a1") }},

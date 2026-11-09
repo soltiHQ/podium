@@ -176,9 +176,9 @@ func TestFSMSessionClockExplicitReplaySnapshot(t *testing.T) {
 }
 
 func TestFSMSessionClockLegacyReplaySnapshot(t *testing.T) {
-	for _, version := range []byte{2, overlay.CommandVersion} {
+	for _, version := range []byte{3, overlay.CommandVersion} {
 		for _, unset := range []bool{false, true} {
-			name := map[byte]string{2: "version2", overlay.CommandVersion: "current"}[version] + map[bool]string{false: "-previous", true: "-unset"}[unset]
+			name := map[byte]string{3: "version3", overlay.CommandVersion: "current"}[version] + map[bool]string{false: "-previous", true: "-unset"}[unset]
 			t.Run(name, func(t *testing.T) {
 				original := clockSession(t)
 				if unset {

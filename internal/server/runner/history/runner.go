@@ -15,6 +15,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/server/runner/base"
+	agentsvc "github.com/soltiHQ/control-plane/internal/service/agent"
 	historysvc "github.com/soltiHQ/control-plane/internal/service/history"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"golang.org/x/sync/errgroup"
@@ -35,12 +36,19 @@ type runProgress struct {
 	continuation historysvc.RunContinuation
 	touched      time.Time
 }
+
+// tokenSource gives the token the collector presents to an agent: the agent
+// service's AgentToken, which derives it for a derived credential.
+type tokenSource interface {
+	AgentToken(ctx context.Context, agentID string) (string, error)
+}
 type Runner struct {
 	*base.Runner
 	cfg            Config
 	logger         zerolog.Logger
 	store          storage.Storage
 	pool           *proxy.Pool
+	tokens         tokenSource
 	svc            *historysvc.Service
 	tickMu         sync.Mutex
 	workMu         sync.Mutex
@@ -52,14 +60,16 @@ type Runner struct {
 	progressCursor string
 }
 
-func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.Pool, svc *historysvc.Service, leadership cluster.Leadership) (*Runner, error) {
-	if store == nil || pool == nil || svc == nil || leadership == nil {
+// New creates the collector. It presents to each agent the token agents gives
+// for it (agent.Service.AgentToken).
+func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.Pool, agents *agentsvc.Service, svc *historysvc.Service, leadership cluster.Leadership) (*Runner, error) {
+	if store == nil || pool == nil || agents == nil || svc == nil || leadership == nil {
 		return nil, fmt.Errorf("history collector: missing dependency")
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	r := &Runner{cfg: cfg.WithDefaults(), logger: logger.With().Str("runner", "history").Logger(), store: store, pool: pool, svc: svc, work: map[string]*agentWork{}, progress: map[string]*runProgress{}}
+	r := &Runner{cfg: cfg.WithDefaults(), logger: logger.With().Str("runner", "history").Logger(), store: store, pool: pool, tokens: agents, svc: svc, work: map[string]*agentWork{}, progress: map[string]*runProgress{}}
 	r.Runner = base.New("history", r.cfg.TickInterval, leadership, logger, r.tick)
 	// Another node may have written history while this one did not lead.
 	r.OnLeader(svc.Resume)
@@ -127,13 +137,12 @@ func (r *Runner) collectAgent(ctx context.Context, agentID string) {
 	if agent.Endpoint() == "" {
 		return
 	}
-	token := ""
-	if credential, err := r.store.GetAgentCredential(ctx, agentID); err == nil {
-		token = credential.Token()
-	} else if !errors.Is(err, storage.ErrNotFound) {
+	token, err := r.tokens.AgentToken(ctx, agentID)
+	if err != nil {
+		r.logger.Debug().Err(err).Str("agent_id", agentID).Msg("archive: agent token unavailable")
 		return
 	}
-	remote, err := r.pool.Get(agent.Endpoint(), agent.EndpointType(), agent.APIVersion(), token)
+	remote, err := r.pool.Get(agent.ID(), agent.Endpoint(), agent.EndpointType(), agent.APIVersion(), token)
 	if err != nil {
 		r.logger.Debug().Err(err).Str("agent_id", agentID).Msg("archive: agent proxy unavailable")
 		return

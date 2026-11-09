@@ -8,7 +8,7 @@ service/
 ├── helper.go         shared utilities (NormalizeListLimit)
 │
 ├── access/           authentication: login, logout, permission listing
-├── agent/            agent CRUD, label patching, heartbeat preservation
+├── agent/            agent CRUD, label patching, heartbeat preservation, credential reset, deletion with rollouts
 ├── cluster/          raft membership: status, adding and removing members (over cluster.Admin, not storage)
 ├── credential/       credential lifecycle, password creation, verifier cascade
 ├── role/             role CRUD

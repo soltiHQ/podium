@@ -30,6 +30,7 @@ storage/
 ```text
   Storage (aggregate)
   ├── AgentStore        Upsert / Get / List / Delete
+  ├── AgentCredentialStore  Upsert / Get / List / Delete
   ├── UserStore         Upsert / Get / GetBySubject / List / Delete
   ├── CredentialStore   Upsert / Get / GetByUserAndAuth / ListByUser / Delete
   ├── VerifierStore     Upsert / Get / GetByCredential / Delete / DeleteByCredential

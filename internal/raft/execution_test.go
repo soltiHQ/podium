@@ -33,20 +33,26 @@ func TestCommandArchiveVersionCompatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if data[len(overlay.CommandMagic)] != 3 {
+	if data[len(overlay.CommandMagic)] != overlay.CommandVersion {
 		t.Fatal("newcommands lack downgrade guard")
 	}
 	if _, err := overlay.DecodeCommand(data); err != nil {
 		t.Fatal(err)
 	}
+	// Version 3 brought the archive, so a version-3 command carries it.
+	data[len(overlay.CommandMagic)] = 3
+	if _, err := overlay.DecodeCommand(data); err != nil {
+		t.Fatal("v3 archive op rejected", err)
+	}
 	data[len(overlay.CommandMagic)] = 2
 	if _, err := overlay.DecodeCommand(data); err == nil {
 		t.Fatal("v2 newentity allowed")
 	}
+	// Version 2 is no longer read, whatever it holds.
 	old, _ := overlay.EncodeCommand([]*raftv1.Op{{Op: &raftv1.Op_AgentDelete{AgentDelete: "a"}}})
 	old[len(overlay.CommandMagic)] = 2
-	if _, err := overlay.DecodeCommand(old); err != nil {
-		t.Fatal("compatible v2 old ops rejected", err)
+	if _, err := overlay.DecodeCommand(old); err == nil {
+		t.Fatal("v2 command accepted")
 	}
 	unknown := protowire.AppendTag(nil, 99, protowire.BytesType)
 	unknown = protowire.AppendBytes(unknown, []byte("future"))

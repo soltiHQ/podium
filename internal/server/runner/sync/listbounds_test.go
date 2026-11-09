@@ -80,16 +80,18 @@ func freshCursors(call int, _ proxy.TaskFilter) ([]string, string, error) {
 	return nil, cursorAt(call), nil
 }
 
-// refusesAllButOne refuses every page of more than one task as too large, and
-// serves one fresh task and a fresh cursor on every other.
-func refusesAllButOne(call int, asked proxy.TaskFilter) ([]string, string, error) {
-	switch {
-	case asked.Limit > 1:
-		return nil, "", tooLarge()
-	case call > giveUpAfter:
-		return []string{taskName(call)}, "", nil
+// refusesAllButOne refuses every page of more than one task with refusal (too large,
+// or too many elements), and serves one fresh task and a fresh cursor on every other.
+func refusesAllButOne(refusal func() error) servePage {
+	return func(call int, asked proxy.TaskFilter) ([]string, string, error) {
+		switch {
+		case asked.Limit > 1:
+			return nil, "", refusal()
+		case call > giveUpAfter:
+			return []string{taskName(call)}, "", nil
+		}
+		return []string{taskName(call)}, cursorAt(call), nil
 	}
-	return []string{taskName(call)}, cursorAt(call), nil
 }
 
 // overfull serves one task more than it is asked for, from task-000000 on.
@@ -171,6 +173,19 @@ func TestListingsThatBreakABoundJudgeNothing(t *testing.T) {
 		cause string
 	}{
 		{"a page holds more tasks than asked", overfull, 1, causeMoreTasks},
+		{"the proxy refuses a page of more tasks than asked", func(int, proxy.TaskFilter) ([]string, string, error) {
+			return nil, "", tooManyItems()
+		}, 1, causeMoreTasks},
+		// Asked again at every size down to one task: ten calls.
+		{"the proxy refuses a page of any size for its elements", func(int, proxy.TaskFilter) ([]string, string, error) {
+			return nil, "", tooManyElementsErr()
+		}, 10, causeElements},
+		{"the proxy refuses a task with too many conditions", func(int, proxy.TaskFilter) ([]string, string, error) {
+			return nil, "", tooManyConditionsErr()
+		}, 1, causeConditions},
+		{"the proxy refuses a cursor that is too long", func(int, proxy.TaskFilter) ([]string, string, error) {
+			return nil, "", cursorTooLongErr()
+		}, 1, causeLongCursor},
 		{"a page holds more tasks than the smaller limit asked", func(call int, asked proxy.TaskFilter) ([]string, string, error) {
 			if asked.Limit > 500 {
 				return nil, "", tooLarge()
@@ -185,7 +200,8 @@ func TestListingsThatBreakABoundJudgeNothing(t *testing.T) {
 		{"65537 tasks", held(65537, 1000), 66, causeListSize},
 		{"one byte of task IDs over the bound, across pages", serves(heavyNames(maxListedIDBytes+1), 3), 11, causeListSize},
 		{"1025 pages", held(1025, 1), 1024, causeListSize},
-		{"refused pages are pages", refusesAllButOne, 1024, causeListSize},
+		{"refused pages are pages", refusesAllButOne(tooLarge), 1024, causeListSize},
+		{"pages refused for their elements are pages", refusesAllButOne(tooManyElementsErr), 1024, causeListSize},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := newBoundsRun(t, tc.page, taskName(0))

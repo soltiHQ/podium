@@ -9,6 +9,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	raftv1 "github.com/soltiHQ/control-plane/api/gen/solti/raft/v1"
+	"github.com/soltiHQ/control-plane/domain"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 )
@@ -111,25 +112,50 @@ func AgentFromProto(p *raftv1.AgentMsg) (*model.Agent, error) {
 
 // === Agent credentials ===
 
-// AgentCredentialToProto serialises a model.AgentCredential for Raft replication.
+// AgentCredentialToProto serialises a model.AgentCredential for Raft replication:
+// a derived credential as its generation and secret ID, with no token, a stored
+// one as its token.
 func AgentCredentialToProto(c *model.AgentCredential) *raftv1.AgentCredentialMsg {
 	if c == nil {
 		return nil
 	}
-	return &raftv1.AgentCredentialMsg{
+	msg := &raftv1.AgentCredentialMsg{
 		AgentId:     c.AgentID(),
-		Token:       c.Token(),
 		CreatedAtNs: timeToUnixNano(c.CreatedAt()),
 		UpdatedAtNs: timeToUnixNano(c.UpdatedAt()),
 	}
+	if c.Derived() {
+		generation := c.Generation()
+		msg.Generation = &generation
+		msg.SecretId = c.SecretID()
+	} else {
+		msg.Token = c.Token()
+	}
+	return msg
 }
 
-// AgentCredentialFromProto reconstructs a model.AgentCredential from its Raft representation.
+// AgentCredentialFromProto reconstructs a model.AgentCredential from its Raft
+// representation. A message with a generation is a derived credential and must
+// carry a secret ID and no token; one without is a stored credential and must
+// carry a token and no secret ID.
 func AgentCredentialFromProto(p *raftv1.AgentCredentialMsg) (*model.AgentCredential, error) {
 	if p == nil {
 		return nil, nil
 	}
-	c, err := model.NewAgentCredential(p.GetAgentId(), p.GetToken())
+	var (
+		c   *model.AgentCredential
+		err error
+	)
+	switch {
+	case p.Generation != nil && p.GetToken() != "":
+		return nil, fmt.Errorf("%w: agent credential %q is derived and carries a token", domain.ErrInvalidArgument, p.GetAgentId())
+	case p.Generation != nil:
+		c, err = model.NewDerivedAgentCredential(p.GetAgentId(), p.GetGeneration(), p.GetSecretId())
+	case len(p.GetSecretId()) != 0:
+		return nil, fmt.Errorf("%w: agent credential %q is stored and carries a secret ID", domain.ErrInvalidArgument, p.GetAgentId())
+	default:
+		c, err = model.NewStoredAgentCredential(p.GetAgentId(), p.GetToken())
+	}
 	if err != nil {
 		return nil, err
 	}

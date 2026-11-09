@@ -11,6 +11,12 @@ type AgentDetail struct {
 	CanEditLabels   bool
 	CanOperateTasks bool
 	CanViewHistory  bool
+
+	// CanResetCredential shows the credential reset and CanDelete the delete of
+	// the agent, each with its own permission (agents:reset, agents:delete): the
+	// API requires the same, and agents:edit gives neither.
+	CanResetCredential bool
+	CanDelete          bool
 }
 
 // BuildAgentDetail derives UI action flags from the authenticated identity.
@@ -24,5 +30,8 @@ func BuildAgentDetail(id *identity.Identity) AgentDetail {
 		CanEditLabels:   hasAny(perms, agentsEdit),
 		CanOperateTasks: hasAny(perms, agentsEdit),
 		CanViewHistory:  hasAny(perms, agentsGet),
+
+		CanResetCredential: hasAny(perms, agentsReset),
+		CanDelete:          hasAny(perms, agentsDelete),
 	}
 }

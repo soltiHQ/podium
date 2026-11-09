@@ -88,3 +88,79 @@ func TestLegacyHeaderRejectedBeforeIncompatibleEntityDecode(t *testing.T) {
 		t.Fatalf("legacy schema was parsed before header rejection: %v", err)
 	}
 }
+
+// Snapshots are written in version 4, which carries derived agent credentials,
+// and read in versions 3 and 4. A version-3 snapshot, which a previous version
+// wrote, decodes with its stored credentials as they were, but one that holds a
+// derived credential, which no version-3 writer made, is refused. Versions 2, 1
+// and 5 are refused with the version error.
+func TestSnapshotVersions(t *testing.T) {
+	derived, err := model.NewDerivedAgentCredential("agent-1", 1, []byte{1, 2, 3, 4, 5, 6, 7, 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := model.NewStoredAgentCredential("agent-2", "raw-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := snapshot.Marshal(inmemory.SnapshotContent{AgentCreds: []*model.AgentCredential{derived, stored}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg raftv1.Snapshot
+	if err := proto.Unmarshal(data, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if v := msg.GetHeader().GetVersion(); v != 4 || snapshot.Version != 4 {
+		t.Fatalf("a new snapshot is version %d (Version %d), want 4", v, snapshot.Version)
+	}
+	content, err := snapshot.Unmarshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(content.AgentCreds) != 2 || !content.AgentCreds[0].Derived() || content.AgentCreds[0].Generation() != 1 ||
+		content.AgentCreds[1].Derived() || content.AgentCreds[1].Token() != "raw-token" {
+		t.Fatal("a version-4 snapshot changed its credentials on the round trip")
+	}
+
+	encode := func(change func(*raftv1.Snapshot)) []byte {
+		t.Helper()
+		m := proto.Clone(&msg).(*raftv1.Snapshot)
+		change(m)
+		out, err := proto.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	storedOnly := func(version uint32) func(*raftv1.Snapshot) {
+		return func(m *raftv1.Snapshot) {
+			m.Header.Version = version
+			m.AgentCredentials = m.AgentCredentials[1:]
+		}
+	}
+	content, err = snapshot.Unmarshal(encode(storedOnly(3)))
+	if err != nil {
+		t.Fatalf("a version-3 snapshot: %v", err)
+	}
+	if len(content.AgentCreds) != 1 || content.AgentCreds[0].Derived() || content.AgentCreds[0].Token() != "raw-token" {
+		t.Fatal("a version-3 snapshot did not decode its stored credential as written")
+	}
+
+	for _, tc := range []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{"version 3 with a derived credential", encode(func(m *raftv1.Snapshot) { m.Header.Version = 3 }), "version 3 cannot contain derived agent credentials"},
+		{"version 2", encode(storedOnly(2)), "unsupported version 2"},
+		{"version 1", encode(storedOnly(1)), "unsupported version 1"},
+		{"version 5", encode(storedOnly(5)), "unsupported version 5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := snapshot.Unmarshal(tc.data); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Unmarshal: %v, want an error naming %q", err, tc.want)
+			}
+		})
+	}
+}

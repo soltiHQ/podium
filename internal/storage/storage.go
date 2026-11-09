@@ -11,6 +11,9 @@ import (
 // AgentListResult contains a page of agent results with pagination support.
 type AgentListResult = ListResult[*model.Agent]
 
+// AgentCredentialListResult contains a page of agent credentials with pagination support.
+type AgentCredentialListResult = ListResult[*model.AgentCredential]
+
 // UserListResult contains a page of user results with pagination support.
 type UserListResult = ListResult[*model.User]
 
@@ -74,12 +77,14 @@ type AgentStore interface {
 	DeleteAgent(ctx context.Context, id string) error
 }
 
-// AgentCredentialStore persists per-agent bearer secrets learned at discovery.
-// The first sync of an unknown agent ID enrolls one: the token it presents
-// (trust on first use), or, while an enrollment secret is set, only the token
-// derived from that secret for the ID. Keyed by agent ID — one credential per
-// agent. The token is raw (the control plane must present it on outbound
-// calls), so it is never surfaced to API/UI and never logged in clear.
+// AgentCredentialStore persists the per-agent credentials discovery enrolls.
+// The first sync of an unknown agent ID enrolls one: while an enrollment secret
+// is set, a derived credential, which holds no token, for the token derived from
+// that secret for the ID; otherwise a stored credential, which holds the token
+// the agent presented (trust on first use). Older versions stored every token.
+// Keyed by agent ID — one credential per agent. A stored token is raw (the
+// control plane must present it on outbound calls), so it is never surfaced to
+// API/UI and never logged in clear.
 type AgentCredentialStore interface {
 	// UpsertAgentCredential stores or replaces an agent's credential.
 	//
@@ -98,7 +103,19 @@ type AgentCredentialStore interface {
 	//   - ErrInternal for unexpected storage failures.
 	GetAgentCredential(ctx context.Context, agentID string) (*model.AgentCredential, error)
 
-	// DeleteAgentCredential removes an agent's credential (revoke / reset).
+	// ListAgentCredentials retrieves the agent credentials with pagination support.
+	//
+	// Ordering and cursor contract are defined by ListOptions.
+	//
+	// Returns:
+	//   - ErrInvalidArgument if the cursor is malformed.
+	//   - ErrUnavailable if the backend is temporarily unavailable.
+	//   - ErrInternal for unexpected storage failures.
+	ListAgentCredentials(ctx context.Context, opts ListOptions) (*AgentCredentialListResult, error)
+
+	// DeleteAgentCredential removes an agent's credential. A reset does not use
+	// it: it replaces the credential (agent.Service.ResetCredential), since an
+	// ID without a credential is open to enrollment again.
 	//
 	// Returns:
 	//   - ErrNotFound if no credential exists for the agent.

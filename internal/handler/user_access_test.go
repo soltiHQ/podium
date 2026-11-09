@@ -510,8 +510,9 @@ func TestUserEditModalOffersOnlyGrantableAccess(t *testing.T) {
 		{editor, []string{"012", "013"}, []string{"users:add", "users:edit", "users:get"}},
 		// The cluster permissions exist in standalone too, where they guard nothing.
 		{admin, []string{"001", "002", "003", "011", "012", "013", "021", "022", "023", "031", "032"}, []string{
-			"agents:edit", "agents:get", "cluster:get", "cluster:manage", "taskspecs:add", "taskspecs:delete",
-			"taskspecs:deploy", "taskspecs:edit", "taskspecs:get", "users:add", "users:delete", "users:edit", "users:get",
+			"agents:delete", "agents:edit", "agents:get", "agents:reset", "cluster:get", "cluster:manage",
+			"taskspecs:add", "taskspecs:delete", "taskspecs:deploy", "taskspecs:edit", "taskspecs:get",
+			"users:add", "users:delete", "users:edit", "users:get",
 		}},
 	} {
 		var roles restv1.ListRolesResponse

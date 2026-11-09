@@ -18,6 +18,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
+	agentsvc "github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
@@ -155,7 +156,7 @@ type fakePool struct {
 	agents map[string]proxy.AgentProxy
 }
 
-func (p *fakePool) Get(endpoint string, _ enum.EndpointType, _ enum.APIVersion, _ string) (proxy.AgentProxy, error) {
+func (p *fakePool) Get(_, endpoint string, _ enum.EndpointType, _ enum.APIVersion, _ string) (proxy.AgentProxy, error) {
 	if ap, ok := p.agents[endpoint]; ok {
 		return ap, nil
 	}
@@ -170,6 +171,7 @@ func newFakeRunner(t *testing.T, fp *fakeProxy) (*Runner, *inmemory.Store, *even
 	hub := event.NewHub(zerolog.New(io.Discard))
 	r := &Runner{
 		pool:   &fakePool{ap: fp},
+		tokens: agentsvc.New(store, zerolog.New(io.Discard)),
 		hub:    hub,
 		logger: zerolog.New(io.Discard),
 		store:  store,

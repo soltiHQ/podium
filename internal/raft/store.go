@@ -146,6 +146,10 @@ func (s *Store) GetAgentCredential(ctx context.Context, agentID string) (*model.
 	return s.inner.GetAgentCredential(ctx, agentID)
 }
 
+func (s *Store) ListAgentCredentials(ctx context.Context, o storage.ListOptions) (*storage.AgentCredentialListResult, error) {
+	return s.inner.ListAgentCredentials(ctx, o)
+}
+
 func (s *Store) DeleteAgentCredential(ctx context.Context, agentID string) error {
 	return s.WithTx(ctx, func(tx storage.Storage) error { return tx.DeleteAgentCredential(ctx, agentID) })
 }
