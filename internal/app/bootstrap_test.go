@@ -12,7 +12,9 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth"
+	authcred "github.com/soltiHQ/control-plane/internal/auth/credentials"
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/config"
@@ -170,6 +172,42 @@ func TestNewRaftRefusesToStartWithoutADataDirectory(t *testing.T) {
 	}
 	if !errors.Is(err, bootstrap.ErrNoDataDir) {
 		t.Fatalf("New() = %v, want ErrNoDataDir", err)
+	}
+}
+
+// The cost New is given is the cost of the password hashes the services write:
+// the hash of the administrator that a standalone start seeds has it. A New that
+// dropped the option, or passed the services another cost, would hash at the
+// default, 12.
+func TestPasswordCostReachesTheServices(t *testing.T) {
+	const cost = bcrypt.MinCost + 1 // neither the default nor the floor
+	cfg := config.Default()
+	cfg.Cluster.Standalone.Ephemeral = true
+	cfg.Auth.JWTSecret = strings.Repeat("password-cost-test-secret", 2)
+	a, err := New(context.Background(), cfg, zerolog.Nop(), WithPasswordCost(cost))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Shutdown(context.Background()) }()
+	ctx := context.Background()
+	admin, err := a.store.GetUserBySubject(ctx, "admin")
+	if err != nil {
+		t.Fatalf("the seeded administrator: %v", err)
+	}
+	cred, err := a.store.GetCredentialByUserAndAuth(ctx, admin.ID(), enum.Password)
+	if err != nil {
+		t.Fatalf("the administrator's password credential: %v", err)
+	}
+	verifier, err := a.store.GetVerifierByCredential(ctx, cred.ID())
+	if err != nil {
+		t.Fatalf("the administrator's password verifier: %v", err)
+	}
+	hash, ok := verifier.DataGet(authcred.PasswordHashKey)
+	if !ok {
+		t.Fatal("the administrator's verifier holds no password hash")
+	}
+	if got, err := bcrypt.Cost([]byte(hash)); err != nil || got != cost {
+		t.Fatalf("the stored hash has cost %d (%v), want the cost New was given, %d", got, err, cost)
 	}
 }
 
