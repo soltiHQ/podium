@@ -47,13 +47,24 @@ type Setting struct {
 func (s Setting) Key() string { return strings.Join(s.Path, ".") }
 
 // Walk returns every setting of dst, which must be a pointer to a struct, in
-// field order. prefix starts every derived variable name.
+// field order. prefix starts every derived variable name. Two settings of one
+// variable make Walk panic: keys that hold "_" can join to one name, as
+// http.discovery_addr would with http_discovery.addr, and that variable would
+// set both.
 func Walk(prefix string, dst any) []Setting {
 	v := reflect.ValueOf(dst)
 	if v.Kind() != reflect.Pointer || v.Elem().Kind() != reflect.Struct {
 		panic(fmt.Sprintf("settings: Walk wants a pointer to a struct, got %T", dst))
 	}
-	return walk(prefix, v.Elem(), nil, nil)
+	out := walk(prefix, v.Elem(), nil, nil)
+	owner := make(map[string]string, len(out))
+	for _, s := range out {
+		if other, taken := owner[s.Env]; taken {
+			panic(fmt.Sprintf("settings: %s and %s both have the variable %s", other, s.Key(), s.Env))
+		}
+		owner[s.Env] = s.Key()
+	}
+	return out
 }
 
 func walk(prefix string, v reflect.Value, path []string, out []Setting) []Setting {
@@ -214,9 +225,10 @@ func splitList(raw string) []string {
 }
 
 // CheckYAML reports the first key of the mapping node that dst does not take:
-// an unknown key, with the keys known at its level, or the key of an env-only
-// setting. file names the source in the message, with the key's line; prefix is
-// the one [Walk] takes.
+// an unknown key, with the keys known at its level, the key of an env-only
+// setting, or a setting without a value (key:, key: ~ or key: null), which
+// yaml.v3 would leave at its default. file names the source in the message, with
+// the key's line; prefix is the one [Walk] takes.
 func CheckYAML(file, prefix string, node *yaml.Node, dst any) error {
 	t := reflect.TypeOf(dst)
 	for t.Kind() == reflect.Pointer {
@@ -266,9 +278,22 @@ func checkNode(file string, n *yaml.Node, t reflect.Type, prefix string, path []
 			if err := checkNode(file, v, f.typ, prefix, append(append([]string(nil), path...), k.Value)); err != nil {
 				return err
 			}
+		case v.Kind == yaml.ScalarNode && v.Tag == "!!null":
+			return fmt.Errorf("%s:%d: %s has no value; %s or remove the key", file, k.Line, full, emptyValue(f.typ))
 		}
 	}
 	return nil
+}
+
+// emptyValue says what to write for an empty value of a setting of type t.
+func emptyValue(t reflect.Type) string {
+	switch t.Kind() {
+	case reflect.String:
+		return `write ""`
+	case reflect.Slice:
+		return "write []"
+	}
+	return "write a value"
 }
 
 // Closest returns the candidate within edit distance 2 of name, the nearest and,

@@ -90,6 +90,45 @@ func TestWalkPanicsOnATypeNoVariableCanSet(t *testing.T) {
 	settings.Walk("APP", &struct{ Opts map[string]string }{})
 }
 
+// Two settings whose paths join to one variable name, or an env-only setting
+// that takes the name another setting derives, would both be set by that one
+// variable: Walk panics, naming the variable and both settings.
+func TestWalkPanicsOnTwoSettingsOfOneVariable(t *testing.T) {
+	type httpSection struct {
+		DiscoveryAddr string `yaml:"discovery_addr"`
+	}
+	type discoverySection struct {
+		Addr string `yaml:"addr"`
+	}
+	for _, tc := range []struct {
+		name string
+		dst  any
+		want []string
+	}{
+		{"derived names", &struct {
+			HTTP      httpSection      `yaml:"http"`
+			Discovery discoverySection `yaml:"http_discovery"`
+		}{}, []string{"APP_HTTP_DISCOVERY_ADDR", "http.discovery_addr", "http_discovery.addr"}},
+		// An env-only setting's key is derived from its variable.
+		{"an env-only name", &struct {
+			Discovery discoverySection `yaml:"http_discovery"`
+			Secret    string           `yaml:"-" env:"APP_HTTP_DISCOVERY_ADDR"`
+		}{}, []string{"APP_HTTP_DISCOVERY_ADDR", "http_discovery.addr", "http_discovery_addr"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				msg, _ := recover().(string)
+				for _, want := range tc.want {
+					if !strings.Contains(msg, want) {
+						t.Fatalf("recover() = %q, want a panic that names %s", msg, strings.Join(tc.want, ", "))
+					}
+				}
+			}()
+			settings.Walk("APP", tc.dst)
+		})
+	}
+}
+
 func TestClosest(t *testing.T) {
 	names := []string{"SOLTI_HTTP_ADDR", "SOLTI_HTTP_NAME", "SOLTI_GRPC_ADDR"}
 	for _, tc := range []struct {

@@ -151,7 +151,9 @@ changes nothing.
 
 Loading is strict. A YAML key that is not a setting stops podium at start,
 before any listener or store opens, with the file, the line and the keys known
-there. So does a mistyped variable under a section's prefix, such as
+there. So do a setting written without a value (`addr:`), which would otherwise
+keep its default, and a second YAML document, whose settings podium would not
+read. So does a mistyped variable under a section's prefix, such as
 `SOLTI_HTTP_ADRR`, with the closest setting's variable when one is close. A
 `SOLTI_` variable outside every section's prefix, such as the SDK's
 `SOLTI_CONTROL_PLANE`, is logged at WARN and ignored.
@@ -178,7 +180,7 @@ cluster:
   standalone:
     data_dir: /var/lib/podium    # default data/podium, under the working directory
 ops:
-  addr: 127.0.0.1:8081           # the default; an empty value turns the ops listener off
+  addr: 127.0.0.1:8081           # the default; "" turns the ops listener off
 log:
   level: info                    # debug, info, warn or error
   format: json                   # or text
@@ -493,7 +495,7 @@ health-checks `/leaderz`. The gRPC listener serves `grpc.health.v1.Health`
 without authentication: the overall service and
 `solti.discover.v1.DiscoverService` are `SERVING` while `/readyz` answers 200;
 with `tls.server.client_ca_file` set, the listener asks a health checker for a
-client certificate of the agents' CA too. With `ops.addr` empty the ops listener
+client certificate of the agents' CA too. With `ops.addr: ""` the ops listener
 is off. Keep it on an internal network: it tells the node's health, its
 leadership, its build and its metrics. See
 [Ops listener](internal/config/README.md#ops-listener).

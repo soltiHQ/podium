@@ -104,6 +104,103 @@ func TestEmptyFileFails(t *testing.T) {
 	}
 }
 
+// podium reads one YAML document: a later one that holds anything fails loading
+// with its line, so that its keys are not dropped unread. A syntax error in it
+// fails too.
+func TestSecondYAMLDocumentFails(t *testing.T) {
+	for _, tc := range []struct{ name, body, want string }{
+		{
+			name: "a document whose settings would fail validation",
+			body: "http:\n  addr: 127.0.0.1:18080\n---\ntls:\n  server:\n    cert_file: /nonexistent\n",
+			want: "config: %s:3: a second YAML document; podium reads one document",
+		},
+		{
+			name: "a document after an empty one",
+			body: "http:\n  addr: 127.0.0.1:18080\n---\n---\nhttp:\n  addr: 127.0.0.1:28080\n",
+			want: "config: %s:4: a second YAML document; podium reads one document",
+		},
+		{
+			name: "a document that does not parse",
+			body: "http:\n  addr: 127.0.0.1:18080\n---\nhttp: [\n",
+			want: "config: decode %s: yaml:",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfig(t, tc.body)
+			_, err := load("")
+			if want := strings.Replace(tc.want, "%s", path, 1); err == nil || !strings.HasPrefix(err.Error(), want) {
+				t.Fatalf("error = %v, want %s", err, want)
+			}
+		})
+	}
+}
+
+// A trailing document that holds nothing, an empty one after --- or the end
+// marker ..., loads: the settings are those of the first document.
+func TestEmptyTrailingDocumentIsAccepted(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"empty", "http:\n  addr: 127.0.0.1:18080\n---\n"},
+		{"comments only", "http:\n  addr: 127.0.0.1:18080\n---\n# nothing more\n"},
+		{"null", "http:\n  addr: 127.0.0.1:18080\n--- ~\n"},
+		{"end marker", "http:\n  addr: 127.0.0.1:18080\n...\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfig(t, tc.body)
+			cfg, err := load("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.HTTP.Addr != "127.0.0.1:18080" {
+				t.Fatalf("http.addr = %q, want the first document's", cfg.HTTP.Addr)
+			}
+		})
+	}
+}
+
+// A setting written without a value (key:, key: ~ or key: null) fails loading
+// with its line and its path, and says what to write instead: yaml.v3 would
+// keep the default, so ops.addr: with no value would leave the ops listener on.
+// A section without keys changes nothing, and loads.
+func TestNullSettingFails(t *testing.T) {
+	for _, tc := range []struct{ name, body, want string }{
+		{"a string", "ops:\n  addr:\n", `config: %s:2: ops.addr has no value; write "" or remove the key`},
+		{"null", "ops:\n  addr: null\n", `config: %s:2: ops.addr has no value; write "" or remove the key`},
+		{"tilde", "# ops\nops:\n  addr: ~\n", `config: %s:3: ops.addr has no value; write "" or remove the key`},
+		{"a duration", "server:\n  shutdown_delay:\n", `config: %s:2: server.shutdown_delay has no value; write a value or remove the key`},
+		{"a list", "trusted_proxies:\n", `config: %s:1: trusted_proxies has no value; write [] or remove the key`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfig(t, tc.body)
+			_, err := load("")
+			if want := strings.Replace(tc.want, "%s", path, 1); err == nil || err.Error() != want {
+				t.Fatalf("error = %v, want %s", err, want)
+			}
+		})
+	}
+	t.Run("a section without keys", func(t *testing.T) {
+		writeConfig(t, "ops:\nhttp:\n  addr: 127.0.0.1:18080\n")
+		cfg, err := load("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Ops.Addr != Default().Ops.Addr {
+			t.Fatalf("ops.addr = %q, want the default %q", cfg.Ops.Addr, Default().Ops.Addr)
+		}
+	})
+}
+
+// ops.addr: "" turns the ops listener off.
+func TestEmptyOpsAddrTurnsTheListenerOff(t *testing.T) {
+	writeConfig(t, "ops:\n  addr: \"\"\n")
+	cfg, err := load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Ops.Addr != "" || cfg.Ops.Enabled() {
+		t.Fatalf("ops.addr = %q, enabled %v; want the listener off", cfg.Ops.Addr, cfg.Ops.Enabled())
+	}
+}
+
 // leaf is a setting of the configuration in the test's own words: the variable
 // name derived here from the yaml tags, independent of the loader.
 type leaf struct {
@@ -184,6 +281,20 @@ func TestEnvNamesFollowYAMLPaths(t *testing.T) {
 		if !reflect.DeepEqual(got, want[l.env]) {
 			t.Errorf("%s (%s) = %#v, want %#v", l.env, l.path, got, want[l.env])
 		}
+	}
+}
+
+// No two settings share a variable: keys that hold "_" could join to one name,
+// as http.discovery_addr would with http_discovery.addr, and that one variable
+// would then set both.
+func TestEveryVariableCarriesOneSetting(t *testing.T) {
+	cfg := Default()
+	owner := make(map[string]string)
+	for _, l := range leaves(t, reflect.ValueOf(&cfg).Elem(), nil, nil) {
+		if other, taken := owner[l.env]; taken {
+			t.Errorf("%s is the variable of both %s and %s", l.env, other, l.path)
+		}
+		owner[l.env] = l.path
 	}
 }
 

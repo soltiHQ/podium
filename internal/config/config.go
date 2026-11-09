@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/rs/zerolog"
@@ -289,7 +290,9 @@ func Load(path string, log zerolog.Logger) (Config, error) {
 }
 
 // loadYAML reads path into dst. A key that is not a setting, or that only the
-// environment may carry, fails with its line; so does a file without a setting.
+// environment may carry, fails with its line, and so does a setting without a
+// value; so does a file without a setting, and a second document that holds
+// anything.
 func loadYAML(path string, dst *Config) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -310,7 +313,20 @@ func loadYAML(path string, dst *Config) error {
 	if err = dec.Decode(dst); err != nil {
 		return fmt.Errorf("decode %s: %w", path, err)
 	}
-	return nil
+	// Unmarshal and Decode each read the first document only, so the keys of a
+	// later one would go unread: one that holds anything fails, and an empty one
+	// (a trailing ---) is let through.
+	for {
+		var next yaml.Node
+		switch err = dec.Decode(&next); {
+		case errors.Is(err, io.EOF):
+			return nil
+		case err != nil:
+			return fmt.Errorf("decode %s: %w", path, err)
+		case len(next.Content) > 0 && !isEmpty(next.Content[0]):
+			return fmt.Errorf("%s:%d: a second YAML document; podium reads one document", path, next.Line)
+		}
+	}
 }
 
 // isEmpty reports whether a document's root holds no setting: null or an empty

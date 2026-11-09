@@ -75,6 +75,18 @@ configuration loads (`TestCLIRefusesUnknownFlagBeforeStarting`):
   `agent_auth.enroll_secret is read from SOLTI_AGENT_AUTH_ENROLL_SECRET only; remove it from the file`.
 - An empty file, a file of comments only, `---` or `{}` fails with
   `config: <file> holds no settings`.
+- A setting without a value (`addr:`, `addr: ~` or `addr: null`) fails: yaml.v3
+  would leave it at its default, so `ops:` with an `addr:` that has no value
+  would keep the ops listener on. The error names the line and the path, and
+  what to write: `config: config.yaml:9: ops.addr has no value; write "" or remove the key`,
+  `write []` for a list and `write a value` for the other types. A section
+  without keys (`ops:` alone) changes nothing (`TestNullSettingFails`).
+- podium reads one YAML document. A later document that holds anything fails
+  with the line of its `---`:
+  `config: config.yaml:14: a second YAML document; podium reads one document`,
+  and one that does not parse fails as a decode error. An empty one, such as a
+  trailing `---`, is let through (`TestSecondYAMLDocumentFails`,
+  `TestEmptyTrailingDocumentIsAccepted`).
 
 ### Environment variables
 
@@ -85,7 +97,9 @@ the parts joined by `_`: `http.read_header_timeout` is
 carry keep their own names, `SOLTI_AGENT_AUTH_ENROLL_SECRET` and
 `SOLTI_BOOTSTRAP_ADMIN_PASSWORD`. No other name is read, but `CONFIG_PATH`,
 which names the file: `HOSTNAME`, `PORT`, `DATA_DIR`, `REQUIRE` and the like,
-without `SOLTI_` and the path, change nothing.
+without `SOLTI_` and the path, change nothing. No two settings share a variable:
+keys that hold `_` could join to one name, and `settings.Walk` panics on a pair
+that does (`TestEveryVariableCarriesOneSetting`).
 
 A value is read as follows:
 
@@ -130,7 +144,7 @@ The top-level setting `trusted_proxies` has no section prefix, so a mistyped
 
 `Config.Validate()` covers every section. Addresses (`http.addr`,
 `http_discovery.addr`, and `grpc.addr` on a TCP network) are non-empty and
-`host:port` with a numeric port; `ops.addr` is that too, or empty, which turns
+`host:port` with a numeric port; `ops.addr` is that too, or `""`, which turns
 the ops listener off. A negative timeout, interval, size or count fails in
 `http`, `http_discovery`, `sync`, `lifecycle`, `server` and
 `streams.subscriber_buffer`; zero keeps the setting's default. Each
@@ -164,8 +178,9 @@ of a handler, are WARN lines with the server's name in `runner`
 ### Ops listener
 
 `ops.addr` (env `SOLTI_OPS_ADDR`, default `127.0.0.1:8081`) is a listener of its
-own for the probes of supervisors and load balancers; an empty value turns it
-off. `ops.name` (default `ops`) names its runner in the logs. The listener is
+own for the probes of supervisors and load balancers; `ops.addr: ""`, or
+`SOLTI_OPS_ADDR` set but empty, turns it off (`TestEmptyOpsAddrTurnsTheListenerOff`).
+`ops.name` (default `ops`) names its runner in the logs. The listener is
 **plain HTTP** and its routes are **never authenticated**: they sit outside the
 UI's middleware, set no cookie and show no token, secret or stored record. What
 they do tell is the node's health, whether it leads, its build and its metrics,

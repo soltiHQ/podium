@@ -104,7 +104,7 @@ Both follow the same pattern:
 `internal/config/README.md`) serves the Prometheus exposition of
 `internal/metrics`: one private registry, never the global default, with the Go
 and process collectors. It is unauthenticated like the other ops routes, so it
-shares their network boundary, and a node with `ops.addr` empty records the
+shares their network boundary, and a node whose `ops.addr` is `""` records the
 metrics and serves none. Every name starts with `podium_`. No label carries an
 agent, user, spec, task or session ID, or a token
 (`TestMetricsLabelsAreBounded`): the `route` of the HTTP metrics is the matched
