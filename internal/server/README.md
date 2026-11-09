@@ -10,9 +10,11 @@ server/
 ├── error.go        RunnerError, RunnerExitedError, sentinel errors
 │
 └── runner/
+    ├── base/        leader-gated tick runner and term task, the base of the tick runners
     ├── grpcserver/  gRPC listener → grpc.Server.Serve
     ├── httpserver/  TCP listener  → http.Server.Serve
     ├── ops/         ops listener: /livez /readyz /leaderz /version /metrics, over httpserver
+    ├── history/     periodic collection of the agents' terminal runs into the history archive
     ├── lifecycle/   periodic agent liveness checks (active → … → deleted)
     └── sync/        periodic rollout reconciliation (push specs to agents)
 ```
@@ -66,6 +68,7 @@ drives: it turns readiness off and waits `server.shutdown_delay` before it lets
 | `grpcserver`  | no          | Serve gRPC (agent discovery)                |
 | `lifecycle`   | yes         | Transition stale agents through statuses    |
 | `sync`        | yes         | Push pending rollouts to agents via proxy   |
+| `history`     | yes         | Collect the agents' terminal runs           |
 
 ### Server runners (httpserver, grpcserver)
 Both follow the same pattern:
@@ -101,7 +104,7 @@ or `other`, and the other labels take the fixed values below.
 | `podium_grpc_requests_total` | counter | `method`, `code` | Calls of the gRPC listener, by full method and status code. |
 | `podium_grpc_request_duration_seconds` | histogram | `method` | `prometheus.DefBuckets`. Unary calls only: a stream is counted above and not timed. |
 | `podium_discovery_syncs_total` | counter | `transport` (`http`, `grpc`), `outcome` | How each sync ended on this node, see below. |
-| `podium_logins_total` | counter | `outcome` (`ok`, `failed`, `limited`) | UI login attempts that reached the credential check; `failed` is a wrong subject or password, a user without permissions, and any other error, `limited` an attempt the login limiter refused. |
+| `podium_logins_total` | counter | `outcome` (`ok`, `failed`, `limited`) | UI login attempts that reached the login service (`access.Service.Login`); `failed` is a wrong subject or password, a user without permissions, and any other error, an empty subject or password included, `limited` an attempt the login limiter refused. |
 | `podium_agents` | gauge | `status` (`active`, `inactive`, `disconnected`) | Agents in this node's store, read at scrape. |
 | `podium_rollouts` | gauge | `status` (`pending`, `synced`, `drift`, `failed`, `unknown`) | Rollouts in this node's store, read at scrape. |
 | `podium_sync_turns_total` | counter | `outcome` (`answered`, `unanswered`, `local`) | Agent turns of the sync runner, which runs on the leader only: `answered` when the agent answered a call, `unanswered` when a call got no answer, `local` when the turn needed no call. A tick that is cancelled reports none. |
@@ -289,7 +292,7 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   field the agent split in several occurrences that hold more than 64 conditions
   in all within the budget, which the decoder merges, at the cost of a page the
   other bounds have capped. The tests measure a refused `ListTasks` flood at 1
-  to 21 MiB allocated in all (what each sends is in the proxy README). The runner
+  to 14 MiB allocated in all (what each sends is in the proxy README). The runner
   counts the tasks of a page again, and refuses a cursor over 4096 bytes itself.
   A listing that would hold more than 65536 task IDs or 32 MiB of them, or take
   more than 1024 calls, refused pages included, stops. A synced rollout whose

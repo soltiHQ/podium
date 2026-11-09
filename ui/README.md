@@ -197,11 +197,16 @@ local Node. It fails when no file matches: Node would pass with no test. The
 `task generate` runs `go tool templ generate`, so the generator is always the
 templ version pinned in `go.mod`. `task assets` downloads Alpine and HTMX and
 compiles CSS with Tailwind 4 using `static/css/app.css` as input; `task prepare`
-runs both. `task assets` checks each download against the sha256 pinned in
-`Taskfile.yml` next to its version: a mismatch fails and keeps the previous
-file, and a version bump changes the version and its hash together.
-`task ci/golang/build` runs `assets` first, so every built binary embeds the UI. Generated templates are required to build; the CSS and JS assets are
+runs both. Generated templates are required to build; the CSS and JS assets are
 required for a working UI in the embedded binary.
+
+`task assets` checks the Alpine and HTMX downloads against the sha256 pinned in
+`Taskfile.yml` next to each version: a mismatch fails and keeps the previous
+file, so a version bump has to change the version and its hash together. The
+Tailwind binary it fetches is checked against the `sha256sums.txt` of its
+release. `task ci/golang/build` runs `assets` first, and then fails unless the
+Alpine, HTMX and CSS files exist and are not empty, so every binary it builds
+embeds the UI; a plain `go build` embeds whatever `static/` holds.
 
 The builder currently supports the original built-in Subprocess, Wasm and
 Container workload types. Arbitrary extension workload creation and durable log

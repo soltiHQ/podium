@@ -35,6 +35,7 @@ Main listener (`app.buildMainHandler`), outermost first:
   Browser / API client
         │
         ▼
+  metrics        ── counts every request the listener answers, and times all but event streams (podium_http_*, see internal/server)
   Recovery       ── turns a panic into 503
    CORS          ── answers preflights, adds the CORS headers
     Negotiate    ── picks the Responder (JSON vs HTML), stores it in ctx
@@ -48,7 +49,7 @@ Main listener (`app.buildMainHandler`), outermost first:
                     after the reverse proxy dropped the hop-by-hop headers, and never forwards a marked write
                     again; drops the leader's CORS headers from its answer, as CORS above has set the follower's;
                     stores where the leader serves this listener in ctx (httpctx.Leader), for X-Leader
-       mux
+       mux       ── wrapped by metrics.Route, which hands the matched pattern to the metrics
         │  per route:
   RequestID      ── installs request id + error slot (API routes and the event stream only)
    Logger        ── reads the slot back after the handler returns (same routes); logs 5xx at ERROR, but a 503 with X-Leader at WARN
@@ -59,7 +60,7 @@ Main listener (`app.buildMainHandler`), outermost first:
         │              └─ Responder from ctx → JSON (json.Marshal + sec headers)
         │                                    or HTML (templ.Render + CSP)
         └─ error   → response.FromError(w, r, mode, err)   ← classifies via errkind
-                       ├─ cluster.ErrNotLeader / ErrLeadershipLost: 503 + X-Leader, see "Leader hint" below
+                       ├─ cluster.ErrNotLeader / ErrLeadershipLost: 503, + X-Leader when the leader is known, see "Leader hint" below
                        └─ sets the error slot → Logger appends it to the log line
 ```
 
@@ -68,7 +69,7 @@ only the negotiated `Responder` is stored in context.
 
 `Negotiate` and `CrossOrigin` run ahead of `Leader`, and nothing depended on the old order: `Negotiate` only stores a
 `Responder`, which the leader picks again for a request a follower forwards, `Leader` answers its own 502 and 503 in plain
-text without it, and `CORS` stays outermost, as before. The reverse proxy adds the leader's headers to the ones the follower
+text without it, and `CORS` stays outside both, as before. The reverse proxy adds the leader's headers to the ones the follower
 set, so `Leader` drops the leader's CORS headers, every `Access-Control-*` header and the `Origin` token of `Vary`, and
 keeps the rest: an answer that names the origin twice is one a browser refuses (`TestForwardedWriteCarriesTheCORSHeadersOnce`).
 
@@ -77,10 +78,11 @@ keeps the rest: an answer that names the origin twice is one a browser refuses (
 ```text
   gRPC client
         ▼
-  UnaryRecovery → UnaryRequestID → UnaryLogger → UnaryLeader
-        │   (UnaryAuth / UnaryRequirePermission exist but are not chained yet)
+  metrics → UnaryRecovery → UnaryRequestID → UnaryLogger → UnaryLeader
+        │   (the metrics interceptor counts and times every unary call, podium_grpc_*;
+        │   UnaryAuth / UnaryRequirePermission exist but are not chained yet)
         │   UnaryLeader, raft only: a follower forwards a Sync to the leader (Forwarder, never through
-        │   HTTPS_PROXY) and answers with the leader's answer; any other write is Unavailable + x-leader;
+        │   HTTPS_PROXY) and answers with the leader's answer; any other write is Unavailable, + x-leader when the leader is known;
         │   a call it passes on carries the means to hint the leader, for a handler's leadership error (HintLeader)
         │   UnaryLogger logs a failed call at ERROR, but a "not the leader" answer with x-leader at WARN
         │   and a throttle (ResourceExhausted with RetryInfo, status.Throttled) at DEBUG
@@ -97,7 +99,9 @@ keeps the rest: an answer that names the origin twice is one a browser refuses (
 ## Client IP
 
 `clientip.Resolver` decides who the client of a request is (`trusted_proxies`, see `internal/config`):
-- `IP(r)` - the TCP peer; when the peer is a trusted proxy, the right-most `X-Forwarded-For` entry that is not itself trusted.
+- `IP(r)` - the TCP peer; when the peer is a trusted proxy, the right-most `X-Forwarded-For` entry that is not itself trusted,
+  or the left-most entry when all are; the peer when the header is missing or empty, or when the walk meets an entry that
+  does not parse.
 - `Forwarded(peer, values)` - the same walk over any forwarding values, such as the gRPC `x-forwarded-for` metadata.
 - `HTTPS(r)` - direct TLS, or `X-Forwarded-Proto: https` from a trusted proxy. With `auth.cookie_secure: auto` it decides
   whether the auth and device cookies are `Secure`; `app` builds that decision once and hands it to every cookie writer.
@@ -176,10 +180,11 @@ A `not the leader` answer with the hint is a routing condition, so `UnaryLogger`
 
 `tlsconf` turns PEM file config into `*tls.Config`; the shared `config.TLS` block drives it. 
 Both halves are opt-in (empty = plaintext):
-- `tls.server` → the CP's serving identity for the HTTP, HTTP-discovery, and gRPC listeners (`client_ca_file` enables mTLS - client cert required).
+- `tls.server` → the CP's serving identity for the HTTP, HTTP-discovery, and gRPC listeners (`client_ca_file` enables mTLS - client cert required on the
+  HTTP-discovery and gRPC listeners; the UI and API listener never asks for one, so browsers keep working). The ops listener serves plain HTTP.
 - `tls.client` → the CP as a client when dialing agents (proxy); verifies agent certs and optionally presents a client cert.
 
-Applied uniformly: one server `*tls.Config` for all listeners, one client config for the proxy pool, for the `Leader` middleware,
+Applied uniformly: one server certificate for those listeners, one client config for the proxy pool, for the `Leader` middleware,
 whose follower forwards writes to the leader over TLS when `tls.server` is set (`LeaderOptions.TLSClientConfig`), and for the
 gRPC `Forwarder`, which forwards a follower's syncs under the same rule: TLS with `tls.client` when `tls.server` is set, checked
 for the leader's raft host, with `tls.client`'s certificate presented when the leader asks for one. Both forwards dial the

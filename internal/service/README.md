@@ -6,11 +6,13 @@ Each sub-package owns a single domain aggregate and exposes a `Service` struct w
 ```text
 service/
 ├── helper.go         shared utilities (NormalizeListLimit)
+├── error.go          ErrNilService, which the handler constructors panic with on a nil service
 │
 ├── access/           authentication: login, logout, permission listing
 ├── agent/            agent CRUD, label patching, heartbeat preservation, credential reset, deletion with rollouts
 ├── cluster/          raft membership: status, adding and removing members (over cluster.Admin, not storage)
 ├── credential/       credential lifecycle, password creation, verifier cascade
+├── history/          run history: the archive of observed terminal runs (capture, listing, retention)
 ├── role/             role CRUD
 ├── session/          session retrieval, revocation, bulk deletion
 ├── spec/             spec CRUD, deployment (rollout fan-out), rollout queries
@@ -26,10 +28,11 @@ Every sub-package follows the same structure:
 └── types.go     request/response DTOs (ListQuery, Page, …)
 ```
 
-- `New(store, …)` panics on nil dependencies — fail-fast at startup.
+- `New(store, …)` panics on nil dependencies — fail-fast at startup; `history.New` returns an error instead.
 - Methods accept `context.Context` as first argument.
 - Returned entities are always **clones** — callers cannot mutate storage state.
-- Errors are `storage.Err*` sentinels, compatible with `errors.Is()`.
+- Errors are `storage.Err*` sentinels, a sub-package's own (such as `user.ErrLastAdmin` or `agent.ErrUnauthenticated`),
+  or the errors of `internal/auth`, all compatible with `errors.Is()`.
 
 ## Dependency direction
 ```text

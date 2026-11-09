@@ -4,22 +4,30 @@ HTTP and gRPC request handlers for the control plane.
 ## Package map
 ```text
 handler/
-├── handler.go      package documentation
-├── api.go          API — REST + HTMX endpoints (users, agents, specs, sessions, roles)
-├── api_cluster.go  API — the cluster status and membership routes of a raft node
-├── discovery.go    HTTPDiscovery + GRPCDiscovery — agent heartbeat / sync
-├── ui.go           UI — full-page HTML renders (login, dashboard, detail pages)
-└── static.go       Static — embedded file serving (CSS, JS, images)
+├── handler.go             package documentation
+├── api.go                 API — constructor, route registration, permissions and roles lists, JSON body decoding
+├── api_users.go           API — users, their passwords and sessions
+├── api_agents.go          API — agents, labels, credential reset, task list and the task log stream
+├── api_agent_task.go      API — task detail and cancel
+├── api_history.go         API — run history
+├── api_specs.go           API — specs and deploy
+├── api_spec_placement.go  API — the placement preview and its plan token
+├── api_dashboard.go       API — the dashboard and issue dismissal
+├── api_cluster.go         API — the cluster status and membership routes of a raft node
+├── discovery.go           HTTPDiscovery + GRPCDiscovery — agent heartbeat / sync
+├── ui.go                  UI — full-page HTML renders (login, dashboard, detail pages)
+├── ui_history.go          UI — the history page
+└── static.go              Static — embedded file serving (CSS, JS, images)
 ```
 
 ## Handlers
 
 | Handler           | Transport | Constructor           | Dependencies                                                         |
 |-------------------|-----------|-----------------------|----------------------------------------------------------------------|
-| `API`             | HTTP      | `NewAPI`              | user, access, session, credential, agent, spec services + proxy.Pool; the cluster service in raft mode (`WithCluster`) |
-| `HTTPDiscovery`   | HTTP      | `NewHTTPDiscovery`    | agent service, discovery limiter, sync buckets, client IP resolver   |
-| `GRPCDiscovery`   | gRPC      | `NewGRPCDiscovery`    | agent service, discovery limiter, sync buckets, client IP resolver (raft mode) |
-| `UI`              | HTTP      | `NewUI`               | access + spec services, client IP resolver, cookie Secure policy     |
+| `API`             | HTTP      | `NewAPI`              | user, access, session, credential, agent, spec, history services + proxy.Pool, event hub, log hub, stream limiter, log stream access check; the cluster service in raft mode (`WithCluster`) |
+| `HTTPDiscovery`   | HTTP      | `NewHTTPDiscovery`    | agent service, event hub, discovery limiter, sync buckets, client IP resolver |
+| `GRPCDiscovery`   | gRPC      | `NewGRPCDiscovery`    | agent service, event hub, discovery limiter, sync buckets, client IP resolver (raft mode) |
+| `UI`              | HTTP      | `NewUI`               | access + spec services, event hub, client IP resolver, cookie Secure policy |
 | `Static`          | HTTP      | `NewStatic`           | embedded `ui.Static` filesystem                                      |
 
 All constructors panic on nil dependencies — fail-fast at startup. The client IP resolver is the exception:
@@ -30,22 +38,23 @@ nil means no trusted proxies.
 mux (http.ServeMux)
 │
 ├── API.Routes(mux, auth, _, common...)
-│     auth enforced at mux level, permissions per-method inside handler
+│     auth enforced at mux level, permissions per-method inside handler;
+│     the task detail, cancel and log stream routes take theirs at registration
 │
 ├── UI.Routes(mux, auth, optionalAuth, perm, common...)
-│     perm(kind.Permission) added per-route at mux level; optionalAuth guards /logout
+│     perm(enum.Permission) added per-route at mux level; optionalAuth guards /logout
 │
-├── HTTPDiscovery.Sync  ← registered externally (no Routes method)
+├── HTTPDiscovery.Sync  ← registered by app on the discovery listener's own mux (no Routes method)
 │
 └── Static.Routes(mux)  ← no middleware
 ```
 
 ## Middleware model
 ```text
-  API:   common → auth → handler → middleware.RequirePermission(kind.*)
+  API:   common → auth → handler → middleware.RequirePermission(enum.*)
                                     └── per-method, wraps individual http.HandlerFunc
 
-  UI:    common → auth → [perm(kind.*)] → handler
+  UI:    common → auth → [perm(enum.*)] → handler
                           └── per-route, added at mux registration
 ```
 API checks permissions **inside** handler methods (per-action granularity).
@@ -180,7 +189,8 @@ and only the new one brings it back.
 Both are leader writes. A follower forwards the reset like any write (`TestResetThroughFollowerForwards`, in
 `internal/app`); no test sends the delete through a follower, which forwards it by construction: the `Leader` middleware
 forwards every `DELETE`, as every `POST`, `PUT` and `PATCH`. A write that reached a follower or lost leadership answers
-503 with `X-Leader` (`TestWriteHandlersAnswerLeadershipErrorsWithTheLeader`, both routes).
+503, with `X-Leader` when the node knows the leader (`TestWriteHandlersAnswerLeadershipErrorsWithTheLeader`, both
+routes).
 
 `AgentsDelete` and `AgentsReset` are in `enum.All`, so the Admin role holds them, and no other built-in role does
 (`TestOnlyAdminMayResetOrDeleteAnAgent`). As with `ClusterGet` and `ClusterManage`, a user who holds every permission
@@ -285,13 +295,13 @@ a change of the configuration in between refuses it instead of slipping past the
 | 415    | a body that is not declared as JSON                                                                          |
 | 422    | no raft node of the cluster answers at the `address`, which the message names: before it adds a voter, the leader dials the address as the raft transport would and checks the certificate there as raft does, so that a typo never adds a voter nobody reaches, which raises the quorum |
 | 500    | the leader cannot read its configuration: a read of its stores that fails, or gives index 0 or no server, logged at ERROR as `cannot read the raft configuration` (see "Membership" in `internal/raft/README.md`) |
-| 503    | the write met a follower or lost leadership: with `X-Leader`, as every write (see "Leader hint" in `internal/transport/README.md`); a 404 or 409 of the rules above that the node could not confirm its leadership for, also with `X-Leader`, below; the leader's own removal, below |
+| 503    | the write met a follower or lost leadership: with `X-Leader` when the node knows the leader, as every write (see "Leader hint" in `internal/transport/README.md`); a 404 or 409 of the rules above that the node could not confirm its leadership for, also with `X-Leader` when known, below; the leader's own removal, below |
 
 The 404 and the 409s of the rules, an unknown member, an `id` or `address` in use, the force guard and the last
 voter, come from the leader's own configuration, which a deposed leader reads stale. So before it answers one, the
 cluster service asks a quorum whether the node still leads the term it read the configuration in
-(`cluster.Admin.VerifyLeader`), and answers 503 with `X-Leader`, as for a follower, when it does not, having changed
-nothing (`TestRefusalsFromTheConfigurationConfirmTheLeadership` in `internal/service/cluster`). A change the rules let
+(`cluster.Admin.VerifyLeader`), and answers 503, with `X-Leader` when it knows the leader, as for a follower, when it
+does not, having changed nothing (`TestRefusalsFromTheConfigurationConfirmTheLeadership` in `internal/service/cluster`). A change the rules let
 through needs no check: a deposed leader cannot commit it.
 
 The leader asked to remove itself first hands its leadership over to another voter, with hashicorp/raft's leadership
@@ -307,7 +317,9 @@ members first. See "Membership" in `internal/raft/README.md`, which also says ho
 becomes of a removed node, whose process must be stopped.
 
 Every change that commits logs one INFO line, `cluster membership changed`, with `actor_user_id`, `operation` (`add` or
-`remove`), `member_id`, `member_address` and `force`; a hand-over logs one too, with the `transfer` operation. A change
+`remove`), `member_id`, `member_address` and `force`; a hand-over logs one INFO line of its own, `cluster leadership
+handed over before the removal of this node`, with the `transfer` operation, the same fields and `leader_id` and
+`leader_address`. A change
 that lost leadership while it committed, or whose node shut down before its outcome was known, which may still take
 effect, logs one WARN line with the same fields instead, `cluster membership change outcome unknown`. No line names a
 token.
@@ -455,8 +467,9 @@ the cookies untouched, so nobody is told they logged out while their session liv
 ERROR.
 
 ## Response pattern
-All handlers detect render mode via `httpctx.ModeFromRequest(r)`:
+The API, UI and HTTP discovery handlers detect render mode via `httpctx.ModeFromRequest(r)`:
 - **JSON** — returns `responder.View.Data` as JSON
 - **HTML** — renders `responder.View.Component` (templ)
 
-HTMX updates are coordinated via `trigger.Set(w, event)` headers.
+HTMX updates are coordinated via headers: `htmx.Trigger(w, event)` sets `HX-Trigger` and `htmx.Redirect(w, url)` sets
+`HX-Redirect` (`internal/uikit/htmx`).

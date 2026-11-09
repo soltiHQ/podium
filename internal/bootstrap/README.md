@@ -77,7 +77,7 @@ In order:
      mode ever logs a password.
    - **Neither**: bootstrap does not guess ephemeral mode from an empty data
      directory. With no data directory and no `Ephemeral` flag a seed fails with
-     `ErrNoDataDir` before anything is stored, and nothing is logged. A data
+     `ErrNoDataDir` before anything is stored, and no password is logged. A data
      directory wins when both are given.
 
 The file is written before the password is stored. A start that stops in between

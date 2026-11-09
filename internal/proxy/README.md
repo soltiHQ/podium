@@ -147,17 +147,18 @@ no budget in all, as the three bounds add up to less.
 What the committed tests send, and what a call allocated while it refused it
 (`TotalAlloc` of the whole process during the call, the fake agent included, as
 `go test -v` logs it; each test asserts under 64 MiB, and a call that reads a page of
-4 MiB allocates 8 to 20 MiB by itself). The figures of the gRPC `ListTasks` floods
-vary by a MiB between runs:
+4 MiB allocates 8 to 20 MiB by itself). The figures are what the tests logged with
+go 1.27.3 on linux/arm64; they vary with the run (the gRPC `ListTasks` floods by a
+MiB), the platform and the Go version:
 
 | Test | What it sends | Allocated |
 |---|---|---|
 | `TestGRPCListTasksRefusesNestedElementFloodBeforeDecode` | to `ListTasks` (limit 1000), over gRPC: one task with 1048576 empty conditions, or empty env entries, or empty args, or labels; 1000 tasks with 1000 empty conditions each; or 1000 tasks with 300 empty env entries each | 1 to 4 MiB |
-| `TestHTTPListTasksRefusesConditionFlood` | to `ListTasks` (limit 1000), over HTTP: one task with 1048576 empty conditions | 21 MiB |
-| `TestGetTaskRefusesNestedElementFlood` | to `GetTask`: one task with 1048576 empty conditions, over HTTP; the same, and one with 1048576 empty env entries, over gRPC | 13 MiB (HTTP), 4 MiB each (gRPC) |
-| `TestApplyTaskRefusesNestedElementFlood` | to `ApplyTask`: one task with 1048576 empty conditions | 13 MiB (HTTP), 4 MiB (gRPC) |
+| `TestHTTPListTasksRefusesConditionFlood` | to `ListTasks` (limit 1000), over HTTP: one task with 1048576 empty conditions | 14 MiB |
+| `TestGetTaskRefusesNestedElementFlood` | to `GetTask`: one task with 1048576 empty conditions, over HTTP; the same, and one with 1048576 empty env entries, over gRPC | 6 MiB (HTTP), 4 MiB each (gRPC) |
+| `TestApplyTaskRefusesNestedElementFlood` | to `ApplyTask`: one task with 1048576 empty conditions | 6 MiB (HTTP), 4 MiB (gRPC) |
 | `TestAStatusSplitUpToTheBudgetIsRefusedAfterDecoding` | to `GetTask`, over gRPC: one task whose status is split in 4096 occurrences of 64 empty conditions, 262144 in all, which the scan lets through; it is refused after it is decoded | 40 MiB |
-| `TestListTaskRunsRefusesExtraRunsBeforeDecode` | a `ListTaskRuns` page (limit 1000) of 1048576 empty runs over HTTP, of 2097152 (4 MiB) over gRPC | 14 MiB (HTTP), 8 MiB (gRPC) |
+| `TestListTaskRunsRefusesExtraRunsBeforeDecode` | a `ListTaskRuns` page (limit 1000) of 1048576 empty runs over HTTP, of 2097152 (4 MiB) over gRPC | 7 MiB (HTTP), 8 MiB (gRPC) |
 | `TestCompliantAnswersNearTheBudgetStillDecode` | to `GetTask`, over gRPC: one task with exactly 262144 empty env entries; it decodes | 32 MiB |
 
 Before these bounds the floods above allocated 86 to 748 MiB a call, all but the

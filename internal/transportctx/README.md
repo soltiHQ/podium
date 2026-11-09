@@ -55,12 +55,12 @@ The reason is held in an `atomic.Pointer[string]` and the handler-side writing a
 ```
 
 ## Why a separate package
-HTTP middleware lives in `internal/transport/http/middleware`, gRPC interceptors in `internal/transport/grpc/interceptors`.
+HTTP middleware lives in `internal/transport/http/middleware`, gRPC interceptors in `internal/transport/grpc/interceptor`.
 Both need to write and read the same context values.  
 Putting the keys here avoids a circular import:
 ```text
   transport/http/middleware ──┐
                               ├──→ transportctx ←── handler/api.go
-  transport/grpc/interceptors ┘                 ←── handler/ui.go
+  transport/grpc/interceptor  ┘                 ←── handler/ui.go
                                                 ←── loggers, responders
 ```

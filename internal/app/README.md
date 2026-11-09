@@ -3,7 +3,9 @@ Composition root for the podium control-plane binary.
 Assembles cluster state, services, transports, and background runners into
 a single [`App`] aggregate with a clean **Build / Run / Shutdown** contract.
 
-`cmd/main.go` is a thin entry point: load config → `app.New` → `app.Run` →
+`cmd/main.go` is a thin entry point: it parses the command line, answers
+`podium agent-token` and `podium version` itself, and to serve builds the
+loggers and the signal handling around: load config → `app.New` → `app.Run` →
 `app.Shutdown`. Everything else lives here.
 
 ## Package map
@@ -18,7 +20,7 @@ app/
 ```go
 type App struct { /* opaque */ }
 
-func New(ctx, cfg, logger) (*App, error)   // build; standalone seeds here, raft never waits for a leader
+func New(ctx, cfg, logger, opts...) (*App, error) // build; standalone seeds here, raft never waits for a leader
 func (a *App) Run(ctx) error               // start runners; block until ctx done or runner exits
 func (a *App) Shutdown(ctx) error          // release resources; idempotent
 ```
@@ -40,19 +42,20 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   share with the leader's, see "Configuration drift" in
   `internal/raft/README.md`).
 - `New` builds the metrics registry (`internal/metrics`) before the cluster, so
-  that the store's commits are timed from the first one, wires each listener's
-  middleware or interceptors and the handlers' observers into it, and registers
+  that the store's commits are timed from the first one, wires the middleware or
+  interceptors of the UI, discovery and gRPC listeners and the handlers'
+  observers into it, and registers
   `GET /metrics` on the ops listener; the series are listed in "Metrics" of
   `internal/server/README.md`.
-- Cancelling the `ctx` of `Run` starts a graceful shutdown: `/readyz` and the gRPC
-  health service report "shutting down" at once, `Run` waits
+- Cancelling the `ctx` of `Run` starts a graceful shutdown: `/readyz` reports
+  "shutting down" and the gRPC health service `NOT_SERVING` at once, `Run` waits
   `server.shutdown_delay`, and only then do the listeners stop accepting (see
   "Shutdown" in `internal/config/README.md`). The event hub and the log hub close
   as the UI listener starts to stop, which ends their streams.
-- `Shutdown` closes resources in reverse acquisition order: log hub → proxy
-  pool → event hub → in raft mode the gRPC sync forwarder, then the lookups of
-  the raft hosts' names that the client IP resolver trusts, then the Raft node.
-  Safe to call multiple times.
+- `Shutdown` closes resources in this order: log hub → proxy pool → event hub →
+  in raft mode the gRPC sync forwarder, then the lookups of the raft hosts' names
+  that the client IP resolver trusts, then the Raft node; in standalone with a
+  data dir, the durable store. Safe to call multiple times.
 
 ## Startup flow
 ```text
@@ -74,7 +77,7 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   kit.New(store, cfg.Auth)        ← auth composition root (JWT, sessions, RBAC, rate-limit)
         │
         ▼
-  initServices()                  ← user, role, credential, session, agent, spec, access; then cluster over the Admin, with the fingerprint, if raft
+  initServices()                  ← history, user, role, credential, session, agent, spec, access; then cluster over the Admin, with the fingerprint, if raft
         │
    ┌────┴───────────────┬────────────────────────────────────────┐
    │ standalone         │ raft                                   │
@@ -92,7 +95,7 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   htmx.Configure() + hooks        ← global UI ↔ transport wiring (errorPage, loginPath)
         │
         ▼
-  build runners                   ← lifecycle, sync, history, http, http-discovery, grpc (+ agent-credentials if agent auth is required; + bootstrap and config-check if raft)
+  build runners                   ← lifecycle, sync, history, http, http-discovery, grpc (+ ops unless ops.addr is empty; + agent-credentials if agent auth is required; + bootstrap and config-check if raft)
         │
         ▼
   server.New(runners…)            ← lifecycle orchestrator
@@ -108,7 +111,6 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
    │ cfg := config.Load()
    │ ctx := notifyShutdown()         ← first SIGINT/SIGTERM cancels it; a second exits 1 at once
    │ a, _ := app.New(ctx, cfg, logger)
-   │ defer a.Shutdown()
    │
    ▼
   a.Run(ctx)
@@ -121,23 +123,27 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
         │
    ┌────┴─────────────────┐
    │ ctx.Done()           │ runner exited
-   │ → graceful shutdown  │ → return RunnerExitedError
+   │ → graceful shutdown  │ → return RunnerExitedError,
+   │                      │   or RunnerError if it failed
    └──────────────────────┘
+        │
+        ▼
+  a.Shutdown(30s timeout)  →  logHub.Close → proxy.Close → eventHub.Close → raftShutdown (forwarder, hosts, raft; standalone: the durable store)
         │
         ▼
   main returns
    │
    │ deferred:
-   │ • a.Shutdown()  →  logHub.Close → proxy.Close → eventHub.Close → raftShutdown (forwarder, hosts, raft)
    │ • signal stop()
    ▼
   process exit
 ```
 
 ## Error path during build
-If any builder fails inside `New` (e.g. `httpserver.New` cannot bind, Raft
-node fails to start, a raft node's seed check or a standalone `bootstrap.Run`
-errors), the function releases every resource already acquired before returning
-the error. The caller never sees a partially-built `App` — either a fully wired
-one or `nil, err`. A raft node's seed at a leadership term fails nothing: its
+If any builder fails inside `New` (e.g. Raft node fails to start, a raft
+node's seed check or a standalone `bootstrap.Run` errors), the function
+releases every resource already acquired before returning the error. The
+caller never sees a partially-built `App` — either a fully wired one or
+`nil, err`. A listener binds its port in `Run`, not in `New`: one that cannot
+bind ends `Run` with a `RunnerError`. A raft node's seed at a leadership term fails nothing: its
 runner retries it while the node leads.

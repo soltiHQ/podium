@@ -59,8 +59,9 @@ account + client IP); see "Login rate limiting"
     ├─ constant-time hash comparison     (subtle.ConstantTimeCompare)
     ├─ check: user not disabled
     ├─ RBAC permission resolution
-    ├─ rotate refresh token (if enabled)
-    └─ issue new access token
+    ├─ re-check session and user, issue new access token
+    └─ rotate refresh token (if enabled; one transaction with the re-check
+       and the signing, so a signing failure does not consume the token)
 ```
 A session or user that is gone, expired, revoked or disabled is an auth error (`ErrInvalidRefresh`, `ErrRevoked`); a
 failed lookup (storage or RBAC) is returned as it is, so `middleware.Auth` answers 503, not 401, logs the error at ERROR
@@ -120,7 +121,7 @@ needs.
 
 | Concern              | Implementation                                                         |
 |----------------------|------------------------------------------------------------------------|
-| Password hashing     | bcrypt, cost 12 (clamped to `[bcrypt.MinCost, 31]`)                    |
+| Password hashing     | bcrypt, cost 12, not configurable                                      |
 | Password policy      | 12 to 72 characters when set (below)                                   |
 | Token signing        | HMAC-SHA256 (HS256)                                                    |
 | Access token         | `exp` required; `exp` and `nbf` allow 30 s of clock skew               |

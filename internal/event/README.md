@@ -29,7 +29,8 @@ event/
 ```
 
 ## Hub
-Created explicitly in `cmd/main.go` and injected into all consumers (no singleton).
+Created explicitly in `internal/app` (`buildCluster`, with the `events.coalesce` window) and injected into all
+consumers (no singleton); the app closes it as the UI listener starts to stop, and in `App.Shutdown`.
 ```go
 hub := event.NewHub(logger, event.WithCoalesce(time.Second))
 defer hub.Close()
@@ -37,7 +38,7 @@ defer hub.Close()
 
 | Method                      | Purpose                                                      |
 |-----------------------------|--------------------------------------------------------------|
-| `Notify(event)`             | Fan-out event name to every connected SSE client (coalesced) |
+| `Notify(event)`             | Fan-out event name to every connected SSE client (refresh pulses coalesced, see below) |
 | `Record(kind, payload)`     | Append to events ring; also to issues ring if `IsIssueKind`  |
 | `Subscribe(ctx)`            | Register a new SSE listener, auto-unregister on ctx cancel   |
 | `RecentEvents(n)`           | Last n activity events (reverse chronological)               |

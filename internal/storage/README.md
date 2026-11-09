@@ -5,8 +5,11 @@ Backend-agnostic interfaces: domain and application layers depend only on these,
 ## Package map
 ```text
 storage/
-├── storage.go      store interfaces + aggregate Storage + optional Scanner
-├── scan.go         All* helpers: every row of a listing, in one pass when the store is a Scanner
+├── storage.go      store interfaces + aggregate Storage + optional Scanner and Counter
+├── execution.go    ExecutionStore: the retained terminal runs, and AllExecutions
+├── session_clock.go ClockedSessionRotation: refresh rotation at a caller's timestamp
+├── scan.go         All* helpers: every row of a listing, in one pass when the store is a Scanner;
+│                   CountAgents / CountRollouts, in place when the store is a Counter
 ├── error.go        sentinel errors (ErrNotFound, ErrConflict …)
 ├── pagination.go   ListResult[T], ListOptions, limits
 ├── filter.go       backend-agnostic filter markers (AgentFilter, RolloutFilter …)
@@ -17,18 +20,26 @@ storage/
 │   ├── generic.go   GenericStore[T] — thread-safe CRUD for any domain.Entity[T]
 │   ├── scan.go      Scanner for Store and for its transaction handle
 │   ├── filter.go    concrete filters with builder API (ByLabel, ByStatus, Query …)
-│   └── cursor.go    opaque base64 cursor encoding / decoding
+│   ├── cursor.go    opaque base64 cursor encoding / decoding
+│   └── tx.go …      WithTx, the store-wide gate, Counter, executions, snapshot content
 │
-└── overlay/
-    ├── overlay.go   Tx — a transaction over an unchanging base: reads its own writes, records them as ops
-    ├── apply.go     ApplyOps — applies recorded ops to a store, as the Raft state machine does
-    ├── command.go   EncodeCommand / DecodeCommand — the SOLTI-CMD framing of the ops
-    └── agent.go …   the Storage methods of Tx, one file per entity group
+├── overlay/
+│   ├── overlay.go   Tx — a transaction over an unchanging base: reads its own writes, records them as ops
+│   ├── apply.go     ApplyOps — applies recorded ops to a store, as the Raft state machine does
+│   ├── command.go   EncodeCommand / DecodeCommand — the SOLTI-CMD framing of the ops
+│   └── agent.go …   the Storage methods of Tx, one file per entity group
+│
+├── durable/         the standalone store on disk, see its README
+├── snapshot/        the versioned state codec of raft compaction and the durable store
+└── storagetest/     the fixture and the measurement the storage and service benchmarks share
 ```
 
 ## Store interfaces
 ```text
   Storage (aggregate)
+  ├── ExecutionStore    Upsert / Get / List / Delete
+  ├── FilterFactory     BuildExecutionFilter / BuildRolloutFilter / BuildSpecFilter
+  ├── TxStore           WithTx
   ├── AgentStore        Upsert / Get / List / Delete
   ├── AgentCredentialStore  Upsert / Get / List / Delete
   ├── UserStore         Upsert / Get / GetBySubject / List / Delete
@@ -123,7 +134,7 @@ Each backend provides concrete types with builder methods:
 
   inmemory.NewRolloutFilter().
       BySpecID("spec-42").
-      ByStatus(kind.SyncStatusPending)  ──→  implements storage.RolloutFilter
+      ByStatus(enum.SyncStatusPending)  ──→  implements storage.RolloutFilter
 ```
 Passing a filter from a wrong backend returns `ErrInvalidArgument`.
 
