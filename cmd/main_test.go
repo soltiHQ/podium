@@ -156,6 +156,33 @@ func TestAgentTokenCommandAcceptsDoubleDash(t *testing.T) {
 	}
 }
 
+// An argument before "--" that starts with "-" and is no option of the command
+// is a usage error: exit 2, nothing on stdout, and one line on stderr that names
+// it, never the secret. It is not taken for the agent ID, which, when it starts
+// with "-", goes after "--" and still gets its token there.
+func TestAgentTokenRefusesUnknownOptions(t *testing.T) {
+	for _, tc := range []struct {
+		args   []string
+		option string // the argument the error names
+	}{
+		{[]string{"-v"}, "-v"},
+		{[]string{"--bogus"}, "--bogus"},
+		{[]string{"-v", "agent-1"}, "-v"},
+		{[]string{"--generation", "1", "-x"}, "-x"},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			code, stdout, stderr := runAgentToken(t, enrollSecret, false, tc.args...)
+			if code != 2 || stdout != "" || strings.Count(stderr, "\n") != 1 || !strings.Contains(stderr, `"`+tc.option+`"`) || strings.Contains(stderr, enrollSecret) {
+				t.Fatalf("exit %d, stdout %q, stderr %q; want exit 2, no stdout and one line on stderr that names %q, without the secret", code, stdout, stderr, tc.option)
+			}
+		})
+	}
+	code, stdout, stderr := runAgentToken(t, enrollSecret, false, "--", "-v")
+	if want := "eb75e08a2239cc99452ff74ab9bc490d7e18a3c6a4c4c9b6caba8a488381f11e\n"; code != 0 || stdout != want || stderr != "" {
+		t.Fatalf("-- -v: exit %d, stdout %q, stderr %q; want exit 0 and the token of agent ID -v, %q", code, stdout, stderr, want)
+	}
+}
+
 // "--generation N" before the agent ID prints the token of that generation,
 // which a credential reset moves an agent to; without it, or with 0, the token
 // is the one podium agent-token printed before generations existed, the token

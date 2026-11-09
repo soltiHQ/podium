@@ -4,16 +4,22 @@ Package config aggregates per-package configuration structs and provides a
 single `Default()` constructor for development use:
 
 - **Config** — top-level struct of every section, each the config struct of its
-  owning package: `history` (`service/history`, `server/runner/history`),
-  `http` and `http_discovery` (`httpserver`), `grpc` (`grpcserver`), `ops`,
-  `sync`, `lifecycle`, `triggers` (`uikit/htmx`), `server`, `auth`, `cors` and
-  `streams` (`transport/http/middleware`), `cluster`, `events` (`event`), `tls`
+  owning package under `internal/`: `history` (`service/history`,
+  `server/runner/history`), `http` and `http_discovery`
+  (`server/runner/httpserver`), `grpc` (`server/runner/grpcserver`), `ops`
+  (`server/runner/ops`), `sync` (`server/runner/sync`), `lifecycle`
+  (`server/runner/lifecycle`), `triggers` (`uikit/htmx`), `server`, `auth` and
+  `cluster` (the packages of those names), `cors` and `streams`
+  (`transport/http/middleware`), `events` (`event`), `tls`
   (`transport/tlsconf`), and `agent_auth` and `log`, defined here.
-- **Default()** — returns safe development defaults. A field left at zero takes
-  its package's default where the package has one, when the package reads it
+- **Default()** — returns safe development defaults: it takes `cluster`,
+  `events` and `history` from their packages' `DefaultConfig()`, and sets the
+  listeners' names and addresses, `auth.cookie_secure`, `streams`,
+  `agent_auth.require` and `log` itself. A field left at zero takes its
+  package's default where the package has one, when the package reads it
   (`withDefaults()` in `server`, `httpserver`, `grpcserver`, `lifecycle` and
-  `sync`, `WithDefaults()` in `auth`, `cors` and `history`); "Every setting"
-  lists the value each setting runs with.
+  `sync`, `WithDefaults()` in `auth`, `cors`, `event` and `history`); "Every
+  setting" lists the value each setting runs with.
 
 ## Adding a new sub-config
 
@@ -52,11 +58,11 @@ configuration loads (`TestCLIRefusesUnknownFlagBeforeStarting`):
 - An unknown flag, an unknown subcommand, a flag without its value or an
   argument that belongs to no command prints the error and the usage to stderr
   and exits 2. A subcommand is the first argument: `podium --config f.yaml
-  agent-token x` is an error. Besides a bare `-h` or `--help`, `podium
-  agent-token` reads only `--generation` and `--` as options: any other
-  argument ends them, so a lone unknown flag,
-  such as `podium agent-token -v`, is taken as the agent ID, and a second
-  argument prints its usage line alone and exits 2.
+  agent-token x` is an error. `podium agent-token` answers so with its own
+  usage line (a second agent ID gets the line alone): before `--`, any argument
+  that starts with `-`, other than `--generation N`, `--generation=N` and a bare
+  `-h` or `--help`, is an unknown option, so an agent ID that starts with `-`
+  goes after `--` (`TestAgentTokenRefusesUnknownOptions`).
 
 ### YAML file
 
@@ -638,8 +644,11 @@ does (1 to 128 bytes of `[A-Za-z0-9._-]`) and reads the secret from the
 environment only. It never prints the secret, and exits non-zero with one short
 line when the secret is missing or shorter than 32 bytes, the ID is invalid, or
 `--generation` has no value or one that is no such number. It needs no configuration
-file. A bare `-h` or `--help` prints the usage and exits 0; for an agent ID that
-starts with `-`, put `--` before it: `podium agent-token -- -h`.
+file. A bare `-h` or `--help` prints the usage and exits 0. Any other argument
+before `--` that starts with `-`, other than `--generation N` and
+`--generation=N`, is an unknown option: one line on stderr that names it, and
+exit 2, with nothing printed to stdout. An agent ID that starts with `-` goes
+after `--`: `podium agent-token -- -h`.
 
 ### Resetting a credential
 

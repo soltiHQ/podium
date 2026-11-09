@@ -232,7 +232,8 @@ const agentTokenUsage = "usage: podium agent-token [--generation N] [--] <agent-
 // and nothing to stdout. A bare -h or --help prints the usage to stdout.
 // --generation N, or --generation=N, comes before the agent ID, N a whole
 // number from 0 to 4294967295. "--" ends the options, for an agent ID that
-// starts with "-".
+// starts with "-": before it, any other argument that starts with "-" is an
+// unknown option, a usage error (exit 2).
 func agentToken(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		_, _ = fmt.Fprintf(stdout, "%s\nPrints the token of <agent-id> at generation N (default 0, the token it enrolls with), derived from %s.\n", agentTokenUsage, config.EnrollSecretEnv)
@@ -269,8 +270,10 @@ func agentToken(args []string, stdout, stderr io.Writer) int {
 }
 
 // agentTokenOptions reads the options of "podium agent-token" off the front of
-// args: --generation N or --generation=N, and "--", which ends them. It returns
-// the generation, 0 when none is given, and the arguments after the options.
+// args: --generation N or --generation=N, and "--", which ends them. Any other
+// argument that starts with "-" before "--" is an unknown option, an error: an
+// agent ID that starts with "-" goes after "--". It returns the generation, 0
+// when none is given, and the arguments after the options.
 func agentTokenOptions(args []string) (uint32, []string, error) {
 	var generation uint32
 	for len(args) > 0 {
@@ -285,6 +288,8 @@ func agentTokenOptions(args []string) (uint32, []string, error) {
 			value, args = args[1], args[2:]
 		case strings.HasPrefix(arg, "--generation="):
 			value, args = strings.TrimPrefix(arg, "--generation="), args[1:]
+		case strings.HasPrefix(arg, "-"):
+			return 0, nil, fmt.Errorf("unknown option %q: an agent ID that starts with - goes after --", arg)
 		default:
 			return generation, args, nil
 		}
