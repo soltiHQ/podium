@@ -311,6 +311,30 @@ func (s *GenericStore[T]) clones(ctx context.Context, pred func(T) bool) ([]T, e
 	return out, nil
 }
 
+// countBy counts the entities of s by key, under the read lock and without
+// cloning any. Like a scan it fails on a done ctx first, and then looks at ctx every
+// 1000 entities.
+func countBy[T domain.Entity[T], K comparable](ctx context.Context, s *GenericStore[T], key func(T) K) (map[K]int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	counts := make(map[K]int)
+	i := 0
+	for _, entity := range s.data {
+		if i%1000 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+		i++
+		counts[key(entity)]++
+	}
+	return counts, nil
+}
+
 // Delete removes an entity by ID.
 //
 // Returns storage.ErrNotFound if the entity doesn't exist, storage.ErrInvalidArgument for empty IDs.

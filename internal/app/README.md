@@ -39,6 +39,11 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   bootstrap and config-check, which compares the settings every replica must
   share with the leader's, see "Configuration drift" in
   `internal/raft/README.md`).
+- `New` builds the metrics registry (`internal/metrics`) before the cluster, so
+  that the store's commits are timed from the first one, wires each listener's
+  middleware or interceptors and the handlers' observers into it, and registers
+  `GET /metrics` on the ops listener; the series are listed in "Metrics" of
+  `internal/server/README.md`.
 - Cancelling the `ctx` of `Run` starts a graceful shutdown: `/readyz` and the gRPC
   health service report "shutting down" at once, `Run` waits
   `server.shutdown_delay`, and only then do the listeners stop accepting (see

@@ -310,7 +310,7 @@ func TestOpsEndpointsNeedNoAuth(t *testing.T) {
 	opsAnswers(t, ops(), "/readyz", 200, "ok")
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	for _, path := range []string{"/livez", "/readyz", "/leaderz", "/version"} {
+	for _, path := range []string{"/livez", "/readyz", "/leaderz", "/version", "/metrics"} {
 		for _, method := range []string{http.MethodGet, http.MethodHead} {
 			req, err := http.NewRequest(method, "http://"+ops()+path, nil)
 			if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 )
 
@@ -61,4 +62,38 @@ func AllAgents(ctx context.Context, s AgentStore, filter AgentFilter) ([]*model.
 		return sc.ScanAgents(ctx, filter)
 	}
 	return CollectPages(ctx, func(o ListOptions) (*AgentListResult, error) { return s.ListAgents(ctx, filter, o) })
+}
+
+// CountAgents returns how many agents have each status: from the store's own
+// count when it is a Counter, from a scan of the rows otherwise.
+func CountAgents(ctx context.Context, s AgentStore) (map[enum.AgentStatus]int, error) {
+	if c, ok := s.(Counter); ok {
+		return c.CountAgents(ctx)
+	}
+	agents, err := AllAgents(ctx, s, nil)
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[enum.AgentStatus]int)
+	for _, a := range agents {
+		counts[a.Status()]++
+	}
+	return counts, nil
+}
+
+// CountRollouts returns how many rollouts have each sync status, as CountAgents
+// counts agents.
+func CountRollouts(ctx context.Context, s RolloutStore) (map[enum.SyncStatus]int, error) {
+	if c, ok := s.(Counter); ok {
+		return c.CountRollouts(ctx)
+	}
+	rollouts, err := AllRollouts(ctx, s, nil)
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[enum.SyncStatus]int)
+	for _, r := range rollouts {
+		counts[r.Status()]++
+	}
+	return counts, nil
 }

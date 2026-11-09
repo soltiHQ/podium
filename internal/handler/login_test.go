@@ -495,3 +495,22 @@ func TestLoginWithoutPermissionsLooksLikeWrongPassword(t *testing.T) {
 		t.Fatalf("no WARN line naming alice:\n%s", f.logs.String())
 	}
 }
+
+// ObserveLogins hears how each attempt that reached the credential check ended:
+// ok, failed for a wrong password, and limited once the limiter refuses; never the
+// subject.
+func TestLoginOutcomesObserved(t *testing.T) {
+	f := newLoginFixture(t)
+	var got []string
+	f.ui.ObserveLogins(func(outcome string) { got = append(got, outcome) })
+
+	f.login(loginSubject, loginPassword, loginIP)
+	for range 5 {
+		f.login(loginSubject, "wrong-password", loginIP)
+	}
+	f.login(loginSubject, "wrong-password", loginIP)
+	want := []string{"ok", "failed", "failed", "failed", "failed", "failed", "limited"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("login outcomes %v, want %v", got, want)
+	}
+}

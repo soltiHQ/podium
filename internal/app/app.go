@@ -22,6 +22,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
+	"github.com/soltiHQ/control-plane/internal/metrics"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/server"
 	"github.com/soltiHQ/control-plane/internal/server/runner/grpcserver"
@@ -104,7 +105,8 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 	}
 	raftMode := cfg.Cluster.Backend == cluster.BackendRaft
 	var hooks probeHooks
-	clusterOpts := []clusterOption{withHubOptions(hubOptions(cfg)...), withProbes(&hooks)}
+	m := metrics.New(buildinfo.Read())
+	clusterOpts := []clusterOption{withHubOptions(hubOptions(cfg)...), withProbes(&hooks), withMetrics(m)}
 	// A raft node digests the settings that every replica must share, answers
 	// its peers' configuration requests with the digests, and checks them
 	// against its leader's (raftpkg.Admin.ConfigCheck). Standalone does neither.
@@ -139,6 +141,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		return nil, err
 	}
 
+	m.Inventory(store)
 	authModel := kit.New(store, cfg.Auth, o.passwordCost)
 	svc, err := initServices(store, authModel, cfg.History.Archive, cfg.AgentAuth, logger, o.passwordCost)
 	if err != nil {
@@ -235,6 +238,8 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		return nil, err
 	}
 
+	syncRunner.ObserveTurns(m.SyncTurn)
+
 	historyRunner, err := historyrunner.New(cfg.History.Collector, logger, store, proxyPool, svc.agent, svc.history, leadership)
 	if err != nil {
 		_ = proxyPool.Close()
@@ -246,8 +251,10 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 	// registered on the gRPC listener below, without auth like the ops routes.
 	ready := newReadiness(hooks)
 	grpcHealth := newGRPCHealth(ready)
+	// The gauge reads the hook that /readyz reads.
+	m.StoreFailed(func() bool { return ready.failure != nil && ready.failure() != nil })
 
-	mainHandler, logHub := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership, resolver, clientTLS)
+	mainHandler, logHub := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership, resolver, clientTLS, m)
 	httpCfg := cfg.HTTP
 	httpCfg.TLSConfig = uiServerTLS
 	// The streams end as the UI listener starts to shut down, so that one that
@@ -273,7 +280,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 	if forwarder != nil {
 		raftShutdown = before(func() { _ = forwarder.Close() }, raftShutdown)
 	}
-	discoveryHandler, grpcSrv := buildDiscoveryListeners(logger, svc.agent, eventHub, leadership, cfg, resolver, serverTLS, clientTLS, forwarder)
+	discoveryHandler, grpcSrv := buildDiscoveryListeners(logger, svc.agent, eventHub, leadership, cfg, resolver, serverTLS, clientTLS, forwarder, m)
 	discoveryCfg := cfg.HTTPDiscovery
 	discoveryCfg.TLSConfig = serverTLS
 	httpDiscoveryRunner, err := httpserver.New(discoveryCfg, logger, discoveryHandler)
@@ -301,6 +308,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		Leader:  func() string { return ready.leaderReason(leadership.AmLeader) },
 		Version: buildinfo.Read(),
 	})
+	opsHandler.Handle("GET /metrics", m.Handler())
 	listeners := []listener{httpRunner, httpDiscoveryRunner, grpcRunner}
 	runners := []server.Runner{httpRunner, httpDiscoveryRunner, grpcRunner, lifecycleRunner, syncRunner, historyRunner}
 	var opsRunner *httpserver.Runner

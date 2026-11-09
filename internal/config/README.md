@@ -149,13 +149,14 @@ UI's middleware, set no cookie and show no token, secret or state of the
 cluster. Keep it on an internal network: the default binds loopback only, and a
 container that is probed from outside binds `0.0.0.0:8081` and publishes the
 port to the orchestrator alone. Every route answers GET and HEAD, as one line of
-text (`ok`, or the reason) except `/version`:
+text (`ok`, or the reason) except `/version` and `/metrics`:
 
 | Route | Answers |
 | --- | --- |
 | `/livez` | 200 `ok` while the process serves. |
 | `/readyz` | 200 `ok` when the node is ready, and otherwise 503 with the reason, one of `starting`, `storage failed`, `no raft leader`, `shutting down`. |
 | `/leaderz` | 200 on the raft leader once start-up has finished, whatever the store does and also during the shutdown delay, while the node still serves; on a standalone node, 200 while it is ready. Otherwise 503, with `starting`, `not leader`, or, on a standalone node, the reason it is not ready. |
+| `/metrics` | The Prometheus exposition of the node's metrics, in the text format; see "Metrics" in `internal/server/README.md`. |
 | `/version` | The build information as JSON: `version`, `modified`, `go_version` and `platform` always, `commit` when the binary carries a VCS revision, `build_time` (the commit time, RFC 3339; the start-up log line calls it `built`) when it carries one. |
 
 A node is ready when start-up has finished (every listener, the ops listener

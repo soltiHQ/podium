@@ -12,7 +12,7 @@ server/
 └── runner/
     ├── grpcserver/  gRPC listener → grpc.Server.Serve
     ├── httpserver/  TCP listener  → http.Server.Serve
-    ├── ops/         ops listener: /livez /readyz /leaderz /version, over httpserver
+    ├── ops/         ops listener: /livez /readyz /leaderz /version /metrics, over httpserver
     ├── lifecycle/   periodic agent liveness checks (active → … → deleted)
     └── sync/        periodic rollout reconciliation (push specs to agents)
 ```
@@ -80,6 +80,67 @@ Both follow the same pattern:
 4. `ready` channel synchronises Stop with listener binding; `Bound()` is that
    channel, and `Addr()` the bound address, `""` before it is bound or when
    the bind failed.
+
+### Metrics
+
+`GET /metrics` on the ops listener (`ops.addr`, see "Ops listener" in
+`internal/config/README.md`) serves the Prometheus exposition of `internal/metrics`:
+one private registry, never the global default, with the Go and process collectors.
+It is unauthenticated like the other ops routes, so it shares their network
+boundary, and a node with `ops.addr` empty records the metrics and serves none.
+Every name starts with `podium_`. No label carries an agent, user, spec, task or
+session ID, or a token (`TestMetricsLabelsAreBounded`): the `route` of the HTTP
+metrics is the matched mux pattern, or `other`, the `method` is a standard method
+or `other`, and the other labels take the fixed values below.
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `podium_build_info` | gauge | `version`, `commit`, `goversion` | Always 1; `commit` is `unknown` when the binary carries none. |
+| `podium_http_requests_total` | counter | `server`, `route`, `method`, `code` | Requests of the `ui` and `discovery` listeners, counted outside every other middleware. |
+| `podium_http_request_duration_seconds` | histogram | `server`, `route`, `method` | `prometheus.DefBuckets`. A response with `Content-Type: text/event-stream` is counted above and not timed. |
+| `podium_grpc_requests_total` | counter | `method`, `code` | Calls of the gRPC listener, by full method and status code. |
+| `podium_grpc_request_duration_seconds` | histogram | `method` | `prometheus.DefBuckets`. Unary calls only: a stream is counted above and not timed. |
+| `podium_discovery_syncs_total` | counter | `transport` (`http`, `grpc`), `outcome` | How each sync ended on this node, see below. |
+| `podium_logins_total` | counter | `outcome` (`ok`, `failed`, `limited`) | UI login attempts that reached the credential check; `failed` is a wrong subject or password, a user without permissions, and any other error, `limited` an attempt the login limiter refused. |
+| `podium_agents` | gauge | `status` (`active`, `inactive`, `disconnected`) | Agents in this node's store, read at scrape. |
+| `podium_rollouts` | gauge | `status` (`pending`, `synced`, `drift`, `failed`, `unknown`) | Rollouts in this node's store, read at scrape. |
+| `podium_sync_turns_total` | counter | `outcome` (`answered`, `unanswered`, `local`) | Agent turns of the sync runner, which runs on the leader only: `answered` when the agent answered a call, `unanswered` when a call got no answer, `local` when the turn needed no call. A tick that is cancelled reports none. |
+| `podium_sync_turn_duration_seconds` | histogram | none | The duration of those turns. |
+| `podium_store_commit_duration_seconds` | histogram | `backend` (`durable`, `raft`) | A durable commit (log append, its sync, and the apply), or a raft write from proposal to answer, which only the leader makes. Buckets from 0.5 ms to 1 s. An in-memory store has none. |
+| `podium_store_failed` | gauge | none | 1 while the store has failed, which `/readyz` reports as `storage failed`; it reads the same hook, and is 0 on a node whose store cannot fail. |
+
+The outcomes of `podium_discovery_syncs_total`:
+
+| Outcome | A sync that |
+| --- | --- |
+| `ok` | wrote an agent that podium knew. |
+| `enrolled` | wrote an agent that had no row: its first sync. |
+| `unauthenticated` | carried a missing or wrong token. |
+| `refused` | was a first contact whose token the enrollment secret does not derive. |
+| `invalid` | failed validation, the capability caps and the token length included, or whose body could not be read or parsed. |
+| `rate_limited` | the sync bucket of its agent, or the limit on token failures, refused (HTTP 429, gRPC `ResourceExhausted`). |
+| `unavailable` | this node could not serve: a follower that has no leader to forward to, or cannot reach it, a leader that lost its leadership, or a store that failed. |
+
+A request that is not a sync, such as a GET of the sync path, has no outcome. A
+sync that a follower forwards is counted by the leader that serves it, not by the
+follower, and a follower counts only the ones it refuses itself
+(`TestFollowerCountsRefusedSyncsAsUnavailable`); `enrolled` and `ok` are decided
+by a read of the agent's row before the write, so two first syncs of one agent
+that race can both count as `enrolled`. The series of `podium_discovery_syncs_total`,
+`podium_logins_total` and `podium_sync_turns_total` exist from the start at 0.
+
+`podium_agents` and `podium_rollouts` are read when the scrape runs, each with
+one read of the store that counts the rows where they live (`storage.Counter`),
+and copies none: over 5000 agents and 5000 rollouts the two counts took 0.16 ms
+and allocated 384 bytes, where scanning the rows took 3.3 ms and 4.5 MB
+(`BenchmarkInventoryOnly5000Agents` and `BenchmarkScanInstead5000Agents`, on one
+Apple-silicon laptop under Docker), and a whole scrape 0.5 ms
+(`BenchmarkScrape5000Agents`). A raft follower reads its own replica, so its
+inventory is as stale as its reads (see "Reads on a follower" in
+`internal/raft/README.md`). A store that fails to count leaves its gauges out of
+that scrape and does not fail it.
+
+The raft node's own metrics are listed in "Metrics" of `internal/raft/README.md`.
 
 ### Tick runners (lifecycle, sync)
 Both follow the same pattern:

@@ -17,6 +17,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/event"
+	"github.com/soltiHQ/control-plane/internal/metrics"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/server/runner/base"
 	"github.com/soltiHQ/control-plane/internal/service"
@@ -58,6 +59,25 @@ type Runner struct {
 	// goroutine only, before the workers start and after they are done.
 	backoffs   map[string]agentBackoff
 	incomplete map[string]string
+	// observeTurn is told how long each agent's turn took and how it ended, nil
+	// for none; ObserveTurns sets it before the runner starts.
+	observeTurn func(outcome string, d time.Duration)
+}
+
+// ObserveTurns tells o how long each agent's turn took and how it ended, one of the
+// Turn outcomes of package metrics; a turn that a cancelled tick cut
+// short is not reported. Call it before the runner starts.
+func (r *Runner) ObserveTurns(o func(outcome string, d time.Duration)) { r.observeTurn = o }
+
+// turnOutcome is how turn ended, once its worker returned.
+func turnOutcome(turn *agentTurn) string {
+	switch {
+	case !turn.silentAt.IsZero():
+		return metrics.TurnUnanswered
+	case turn.answered:
+		return metrics.TurnAnswered
+	}
+	return metrics.TurnLocal
 }
 
 // agentBackoff holds back the calls to one agent.
@@ -233,7 +253,11 @@ func (r *Runner) reconcileRollouts(ctx context.Context) {
 			break
 		}
 		g.Go(func() error {
+			start := time.Now()
 			r.reconcileAgent(ctx, turn)
+			if r.observeTurn != nil && ctx.Err() == nil {
+				r.observeTurn(turnOutcome(turn), time.Since(start))
+			}
 			return nil
 		})
 	}

@@ -1421,6 +1421,28 @@ values reach
 hashicorp/raft's configuration, and that a node with small ones snapshots on
 its own and truncates its log to the trailing logs.
 
+## Metrics
+
+A raft node adds its own series to `GET /metrics` of the ops listener (see "Metrics"
+in `internal/server/README.md`), which `Profile.Collector` reads from the raft node at
+each scrape (`metrics.go`). No label names a node:
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `podium_raft_state` | gauge | `state` (`follower`, `candidate`, `leader`, `shutdown`) | 1 for the state the node is in, 0 for the others. |
+| `podium_raft_term` | gauge | none | The node's current term. |
+| `podium_raft_last_index` | gauge | none | The index of the last entry in its log. |
+| `podium_raft_applied_index` | gauge | none | The index of the last entry it applied to its state; `last_index` minus it is what the node has yet to apply. |
+| `podium_raft_last_contact_seconds` | gauge | none | Seconds since the node, a follower, last heard from the leader. Absent on a node that is not a follower, and before its first contact. |
+| `podium_raft_peers` | gauge | none | The other voting members of the node's configuration, hashicorp/raft's `num_peers`. |
+
+A follower that no longer hears from a leader shows a `last_contact_seconds` that
+keeps growing, until it becomes a candidate and the series is gone.
+`podium_store_commit_duration_seconds{backend="raft"}` times each write this node
+proposes, from the proposal to raft's answer, so only the leader has a count above
+0 (`TestRaftMetricsOnLeaderAndFollower`). hashicorp/raft's own go-metrics still go
+to its default blackhole sink: the series above are all podium exposes of the node.
+
 ## Logging
 
 hashicorp/raft, its snapshot store and its network transport log through the

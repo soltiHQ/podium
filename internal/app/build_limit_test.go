@@ -59,7 +59,7 @@ func mainHandlerOf(t *testing.T, cfg config.Config, store storage.Storage, logge
 	if closeHosts != nil {
 		t.Cleanup(closeHosts)
 	}
-	handler, logs := buildMainHandler(cfg, logger, svc, authModel, pool, events, leadership, resolver, forwardTLS)
+	handler, logs := buildMainHandler(cfg, logger, svc, authModel, pool, events, leadership, resolver, forwardTLS, nil)
 	t.Cleanup(logs.Close)
 	return handler
 }

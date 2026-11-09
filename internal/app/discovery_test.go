@@ -269,7 +269,7 @@ func newDiscoveryClientsLogged(t *testing.T, cfg config.Config, logger zerolog.L
 	}
 	hub := event.NewHub(logger)
 	t.Cleanup(hub.Close)
-	h, srv := buildDiscoveryListeners(logger, svc.agent, hub, standalone.NewLeadership(), cfg, nil, nil, nil, nil)
+	h, srv := buildDiscoveryListeners(logger, svc.agent, hub, standalone.NewLeadership(), cfg, nil, nil, nil, nil, nil)
 	return discoveryClients{http: h, grpc: serveDiscovery(t, srv), agents: svc.agent}
 }
 
@@ -298,7 +298,7 @@ func TestGRPCDiscoveryRejectsOversizedMessage(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, nil, false, 0, nil))
+	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, nil, false, 0, nil, nil))
 	sync := func(id string, osBytes int) error {
 		_, err := client.Sync(ctx, &discoverv1.SyncRequest{
 			Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1,
@@ -325,7 +325,7 @@ func TestGRPCDiscoveryCapsHeaders(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, nil, false, 0, nil))
+	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, nil, false, 0, nil, nil))
 	sync := func(id string, padding int) error {
 		md := metadata.AppendToOutgoingContext(ctx, "x-padding", strings.Repeat("p", padding))
 		_, err := client.Sync(md, &discoverv1.SyncRequest{
@@ -622,7 +622,7 @@ func TestStandaloneGRPCDiscoveryIgnoresForwardedFor(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	t.Cleanup(hub.Close)
-	h, srv := buildDiscoveryListeners(logger, svc, hub, leadership, cfg, resolver, nil, nil, nil)
+	h, srv := buildDiscoveryListeners(logger, svc, hub, leadership, cfg, resolver, nil, nil, nil, nil)
 	client := serveDiscovery(t, srv)
 	forged := func(attempt int) string { return fmt.Sprintf("198.51.100.%d", attempt+1) }
 	for _, tc := range []struct {
