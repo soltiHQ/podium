@@ -1,8 +1,11 @@
 # internal/service
-Application-level use-cases built on top of `storage` contracts.
-Each sub-package owns a single domain aggregate and exposes a `Service` struct with business methods.
+
+Application-level use-cases built on top of `storage` contracts. Each
+sub-package owns a single domain aggregate and exposes a `Service` struct with
+business methods.
 
 ## Package map
+
 ```text
 service/
 ├── helper.go         shared utilities (NormalizeListLimit)
@@ -20,6 +23,7 @@ service/
 ```
 
 ## Service anatomy
+
 Every sub-package follows the same structure:
 
 ```text
@@ -28,13 +32,16 @@ Every sub-package follows the same structure:
 └── types.go     request/response DTOs (ListQuery, Page, …)
 ```
 
-- `New(store, …)` panics on nil dependencies — fail-fast at startup; `history.New` returns an error instead.
+- `New(store, …)` panics on nil dependencies — fail-fast at startup;
+  `history.New` returns an error instead.
 - Methods accept `context.Context` as first argument.
 - Returned entities are always **clones** — callers cannot mutate storage state.
-- Errors are `storage.Err*` sentinels, a sub-package's own (such as `user.ErrLastAdmin` or `agent.ErrUnauthenticated`),
-  or the errors of `internal/auth`, all compatible with `errors.Is()`.
+- Errors are `storage.Err*` sentinels, a sub-package's own (such as
+  `user.ErrLastAdmin` or `agent.ErrUnauthenticated`), or the errors of
+  `internal/auth`, all compatible with `errors.Is()`.
 
 ## Dependency direction
+
 ```text
   handler / runner
         │
@@ -44,12 +51,15 @@ Every sub-package follows the same structure:
         ▼
     storage.Storage    ← interface only, no concrete backend
 ```
-Services depend on `storage.Storage` (interface), never on `inmemory` or any concrete backend.
-Filters are created by the caller (handler) and passed through the service to the store.
-The one exception is `cluster`, which changes no state of the store: it depends on `cluster.Admin` (interface), the
-administration of a raft node, never on hashicorp/raft, and exists in raft mode only.
+
+Services depend on `storage.Storage` (interface), never on `inmemory` or any
+concrete backend. Filters are created by the caller (handler) and passed through
+the service to the store. The one exception is `cluster`, which changes no state
+of the store: it depends on `cluster.Admin` (interface), the administration of a
+raft node, never on hashicorp/raft, and exists in raft mode only.
 
 ## Shared helpers
-| Function             | Purpose                                                                  |
-|----------------------|--------------------------------------------------------------------------|
+
+| Function | Purpose |
+| -- | -- |
 | `NormalizeListLimit` | Clamps page size: applies default if ≤ 0, caps at `storage.MaxListLimit` |

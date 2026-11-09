@@ -80,7 +80,25 @@ vars:
     fetch "https://unpkg.com/htmx.org@{{.htmx_version}}/dist/htmx.min.js" {{.htmx_sha256}} ui/static/js/htmx.min.js
 
   go_paths: api cmd domain internal ui
-  markdown_paths: README.md
+  # Every tracked README: a new one is added here.
+  markdown_paths: >-
+    README.md
+    internal/app/README.md
+    internal/auth/README.md
+    internal/bootstrap/README.md
+    internal/config/README.md
+    internal/event/README.md
+    internal/handler/README.md
+    internal/proxy/README.md
+    internal/raft/README.md
+    internal/server/README.md
+    internal/service/README.md
+    internal/storage/README.md
+    internal/storage/durable/README.md
+    internal/transport/README.md
+    internal/transportctx/README.md
+    internal/uikit/README.md
+    ui/README.md
 
 tasks:
   ci/markdown/fmt:

@@ -1,7 +1,8 @@
 # internal/app
-Composition root for the podium control-plane binary.
-Assembles cluster state, services, transports, and background runners into
-a single [`App`] aggregate with a clean **Build / Run / Shutdown** contract.
+
+Composition root for the podium control-plane binary. Assembles cluster state,
+services, transports, and background runners into a single \[`App`\] aggregate
+with a clean **Build / Run / Shutdown** contract.
 
 `cmd/main.go` is a thin entry point: it parses the command line, answers
 `podium agent-token` and `podium version` itself, and to serve builds the
@@ -9,6 +10,7 @@ loggers and the signal handling around: load config → `app.New` → `app.Run` 
 `app.Shutdown`. Everything else lives here.
 
 ## Package map
+
 ```text
 app/
 ├── app.go     App struct, New / Run / Shutdown
@@ -17,6 +19,7 @@ app/
 ```
 
 ## App contract
+
 ```go
 type App struct { /* opaque */ }
 
@@ -25,39 +28,38 @@ func (a *App) Run(ctx) error               // start runners; block until ctx don
 func (a *App) Shutdown(ctx) error          // release resources; idempotent
 ```
 
-- `New` returns a ready-to-run [`App`]. Standalone seeds the initial data in
+- `New` returns a ready-to-run \[`App`\]. Standalone seeds the initial data in
   `New`, and a seed that fails fails it. A raft node waits for no leader: `New`
   checks before anything starts what any seed needs, and the `bootstrap` runner
   seeds at the start of each leadership term of the node, see
   `internal/bootstrap/README.md`. On error `New` releases anything already
   acquired (Raft node, event hub) before returning.
-- `Run` delegates to [`server.Server.Run`] which orchestrates lifecycle of
-  all runners (HTTP, HTTP discovery, gRPC, the ops listener unless `ops.addr` is
-  empty, sync, lifecycle, history; while agent auth is
-  required, agent-credentials, which at each start of standalone and each
-  leadership term of a raft node converts the stored agent credentials that the
-  enrollment secret derives and logs how many are stored or unusable, see
-  "Enrollment secret" in `internal/config/README.md`; and in raft mode
-  bootstrap and config-check, which compares the settings every replica must
-  share with the leader's, see "Configuration drift" in
-  `internal/raft/README.md`).
+- `Run` delegates to \[`server.Server.Run`\] which orchestrates lifecycle of all
+  runners (HTTP, HTTP discovery, gRPC, the ops listener unless `ops.addr` is
+  empty, sync, lifecycle, history; while agent auth is required,
+  agent-credentials, which at each start of standalone and each leadership term
+  of a raft node converts the stored agent credentials that the enrollment
+  secret derives and logs how many are stored or unusable, see "Enrollment
+  secret" in `internal/config/README.md`; and in raft mode bootstrap and
+  config-check, which compares the settings every replica must share with the
+  leader's, see "Configuration drift" in `internal/raft/README.md`).
 - `New` builds the metrics registry (`internal/metrics`) before the cluster, so
   that the store's commits are timed from the first one, wires the middleware or
   interceptors of the UI, discovery and gRPC listeners and the handlers'
-  observers into it, and registers
-  `GET /metrics` on the ops listener; the series are listed in "Metrics" of
-  `internal/server/README.md`.
+  observers into it, and registers `GET /metrics` on the ops listener; the
+  series are listed in "Metrics" of `internal/server/README.md`.
 - Cancelling the `ctx` of `Run` starts a graceful shutdown: `/readyz` reports
   "shutting down" and the gRPC health service `NOT_SERVING` at once, `Run` waits
   `server.shutdown_delay`, and only then do the listeners stop accepting (see
-  "Shutdown" in `internal/config/README.md`). The event hub and the log hub close
-  as the UI listener starts to stop, which ends their streams.
+  "Shutdown" in `internal/config/README.md`). The event hub and the log hub
+  close as the UI listener starts to stop, which ends their streams.
 - `Shutdown` closes resources in this order: log hub → proxy pool → event hub →
-  in raft mode the gRPC sync forwarder, then the lookups of the raft hosts' names
-  that the client IP resolver trusts, then the Raft node; in standalone with a
-  data dir, the durable store. Safe to call multiple times.
+  in raft mode the gRPC sync forwarder, then the lookups of the raft hosts'
+  names that the client IP resolver trusts, then the Raft node; in standalone
+  with a data dir, the durable store. Safe to call multiple times.
 
 ## Startup flow
+
 ```text
   app.New(ctx, cfg, logger)
         │
@@ -105,6 +107,7 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
 ```
 
 ## Runtime flow
+
 ```text
   main()
    │
@@ -140,10 +143,11 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
 ```
 
 ## Error path during build
-If any builder fails inside `New` (e.g. Raft node fails to start, a raft
-node's seed check or a standalone `bootstrap.Run` errors), the function
-releases every resource already acquired before returning the error. The
-caller never sees a partially-built `App` — either a fully wired one or
-`nil, err`. A listener binds its port in `Run`, not in `New`: one that cannot
-bind ends `Run` with a `RunnerError`. A raft node's seed at a leadership term fails nothing: its
-runner retries it while the node leads.
+
+If any builder fails inside `New` (e.g. Raft node fails to start, a raft node's
+seed check or a standalone `bootstrap.Run` errors), the function releases every
+resource already acquired before returning the error. The caller never sees a
+partially-built `App` — either a fully wired one or `nil, err`. A listener binds
+its port in `Run`, not in `New`: one that cannot bind ends `Run` with a
+`RunnerError`. A raft node's seed at a leadership term fails nothing: its runner
+retries it while the node leads.
