@@ -3,14 +3,15 @@ package cluster_test
 import (
 	"errors"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	hraft "github.com/hashicorp/raft"
-	"github.com/kelseyhightower/envconfig"
 	"github.com/soltiHQ/control-plane/internal/cluster"
+	"github.com/soltiHQ/control-plane/internal/config/settings"
 	"github.com/soltiHQ/control-plane/internal/storage/durable"
 	"gopkg.in/yaml.v3"
 )
@@ -27,7 +28,7 @@ func TestStandaloneDataDirectoryConfig(t *testing.T) {
 		t.Fatal("YAML path not loaded")
 	}
 	t.Setenv("SOLTI_CLUSTER_STANDALONE_DATA_DIR", "/tmp/solti-config-fixture")
-	if err := envconfig.Process("SOLTI_CLUSTER", &cfg); err != nil {
+	if err := settings.ApplyEnv("SOLTI_CLUSTER", &cfg, os.LookupEnv); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Standalone.DataDir != "/tmp/solti-config-fixture" {
@@ -50,7 +51,7 @@ func TestStandaloneDurabilityMustBeExplicit(t *testing.T) {
 	}
 	t.Setenv("SOLTI_CLUSTER_STANDALONE_EPHEMERAL", "true")
 	cfg = cluster.DefaultConfig()
-	if err := envconfig.Process("SOLTI_CLUSTER", &cfg); err != nil {
+	if err := settings.ApplyEnv("SOLTI_CLUSTER", &cfg, os.LookupEnv); err != nil {
 		t.Fatal(err)
 	}
 	if !cfg.Standalone.Ephemeral {
@@ -78,7 +79,7 @@ func TestStandaloneSnapshotThresholdConfig(t *testing.T) {
 			if tc.env != "" {
 				t.Setenv("SOLTI_CLUSTER_STANDALONE_SNAPSHOT_THRESHOLD", tc.env)
 			}
-			if err := envconfig.Process("SOLTI_CLUSTER", &cfg); err != nil {
+			if err := settings.ApplyEnv("SOLTI_CLUSTER", &cfg, os.LookupEnv); err != nil {
 				t.Fatal(err)
 			}
 			if cfg.Standalone.SnapshotThreshold != tc.want {
@@ -136,7 +137,7 @@ func TestRaftCompactionConfig(t *testing.T) {
 			for key, value := range tc.env {
 				t.Setenv(key, value)
 			}
-			if err := envconfig.Process("SOLTI_CLUSTER", &cfg); err != nil {
+			if err := settings.ApplyEnv("SOLTI_CLUSTER", &cfg, os.LookupEnv); err != nil {
 				t.Fatal(err)
 			}
 			if got := (compaction{cfg.Raft.SnapshotInterval, cfg.Raft.SnapshotThreshold, cfg.Raft.TrailingLogs}); got != tc.want {
@@ -180,7 +181,7 @@ func TestRaftTimeoutsConfig(t *testing.T) {
 			for key, value := range tc.env {
 				t.Setenv(key, value)
 			}
-			if err := envconfig.Process("SOLTI_CLUSTER", &cfg); err != nil {
+			if err := settings.ApplyEnv("SOLTI_CLUSTER", &cfg, os.LookupEnv); err != nil {
 				t.Fatal(err)
 			}
 			err := cfg.Validate()
@@ -579,7 +580,7 @@ func TestJoiningNodeValidation(t *testing.T) {
 		}
 		cfg = cluster.DefaultConfig()
 		t.Setenv("SOLTI_CLUSTER_RAFT_JOIN", "true")
-		if err := envconfig.Process("SOLTI_CLUSTER", &cfg); err != nil {
+		if err := settings.ApplyEnv("SOLTI_CLUSTER", &cfg, os.LookupEnv); err != nil {
 			t.Fatal(err)
 		}
 		if !cfg.Raft.Join {

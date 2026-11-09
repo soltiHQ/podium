@@ -25,10 +25,10 @@ const (
 
 // Config is the top-level cluster configuration.
 type Config struct {
-	Standalone StandaloneConfig `yaml:"standalone" envconfig:"STANDALONE"`
-	Backend    Backend          `yaml:"backend"   envconfig:"BACKEND"`
-	Raft       RaftConfig       `yaml:"raft"      envconfig:"RAFT"`
-	Discovery  DiscoveryConfig  `yaml:"discovery" envconfig:"DISCOVERY"`
+	Standalone StandaloneConfig `yaml:"standalone"`
+	Backend    Backend          `yaml:"backend"`
+	Raft       RaftConfig       `yaml:"raft"`
+	Discovery  DiscoveryConfig  `yaml:"discovery"`
 }
 
 // DefaultStandaloneDataDir is relative to the process working directory.
@@ -43,9 +43,9 @@ const DefaultStandaloneSnapshotThreshold = 4096
 // SnapshotThreshold is the number of log entries that starts a snapshot; zero
 // keeps the default.
 type StandaloneConfig struct {
-	Ephemeral         bool   `yaml:"ephemeral" envconfig:"EPHEMERAL"`
-	DataDir           string `yaml:"data_dir" envconfig:"DATA_DIR"`
-	SnapshotThreshold int    `yaml:"snapshot_threshold" envconfig:"SNAPSHOT_THRESHOLD"`
+	Ephemeral         bool   `yaml:"ephemeral"`
+	DataDir           string `yaml:"data_dir"`
+	SnapshotThreshold int    `yaml:"snapshot_threshold"`
 }
 
 // The defaults of the raft log compaction settings of [RaftConfig]: they are
@@ -100,20 +100,20 @@ const (
 // node and may be empty. A node with raft state rejoins its cluster from its
 // own log whatever Join says.
 type RaftConfig struct {
-	NodeID             string `yaml:"node_id"           envconfig:"NODE_ID"`
-	BindAddr           string `yaml:"bind_addr"         envconfig:"BIND_ADDR"`
-	AdvertiseAddr      string `yaml:"advertise_addr"    envconfig:"ADVERTISE_ADDR"`
-	DataDir            string `yaml:"data_dir"          envconfig:"DATA_DIR"`
-	Join               bool   `yaml:"join"              envconfig:"JOIN"`
-	ElectionTimeoutMs  int    `yaml:"election_timeout_ms" envconfig:"ELECTION_TIMEOUT_MS"`
-	HeartbeatTimeoutMs int    `yaml:"heartbeat_timeout_ms" envconfig:"HEARTBEAT_TIMEOUT_MS"`
+	NodeID             string `yaml:"node_id"`
+	BindAddr           string `yaml:"bind_addr"`
+	AdvertiseAddr      string `yaml:"advertise_addr"`
+	DataDir            string `yaml:"data_dir"`
+	Join               bool   `yaml:"join"`
+	ElectionTimeoutMs  int    `yaml:"election_timeout_ms"`
+	HeartbeatTimeoutMs int    `yaml:"heartbeat_timeout_ms"`
 
-	SnapshotInterval  time.Duration `yaml:"snapshot_interval"  envconfig:"SNAPSHOT_INTERVAL"`
-	SnapshotThreshold int           `yaml:"snapshot_threshold" envconfig:"SNAPSHOT_THRESHOLD"`
-	TrailingLogs      int           `yaml:"trailing_logs"      envconfig:"TRAILING_LOGS"`
+	SnapshotInterval  time.Duration `yaml:"snapshot_interval"`
+	SnapshotThreshold int           `yaml:"snapshot_threshold"`
+	TrailingLogs      int           `yaml:"trailing_logs"`
 
-	TLS                    RaftTLSConfig `yaml:"tls"                      envconfig:"TLS"`
-	AllowInsecureTransport bool          `yaml:"allow_insecure_transport" envconfig:"ALLOW_INSECURE_TRANSPORT"`
+	TLS                    RaftTLSConfig `yaml:"tls"`
+	AllowInsecureTransport bool          `yaml:"allow_insecure_transport"`
 }
 
 // RaftTLSConfig names the PEM files of mutual TLS between raft nodes. A node
@@ -123,9 +123,9 @@ type RaftConfig struct {
 // present a certificate for the host it dials: the host of the peer's address
 // as the peers list it, as an IP or DNS subject alternative name.
 type RaftTLSConfig struct {
-	CertFile string `yaml:"cert_file" envconfig:"CERT_FILE"`
-	KeyFile  string `yaml:"key_file"  envconfig:"KEY_FILE"`
-	CAFile   string `yaml:"ca_file"   envconfig:"CA_FILE"`
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+	CAFile   string `yaml:"ca_file"`
 }
 
 // Enabled reports whether any file of t is set, which asks for mutual TLS.
@@ -172,10 +172,10 @@ func (r RaftConfig) advertise() string {
 // DiscoveryConfig picks the Discovery driver a raft node bootstraps from, and
 // its parameters; no other backend reads it.
 type DiscoveryConfig struct {
-	Driver   string   `yaml:"driver"   envconfig:"DRIVER"`   // "static" or "dns"
-	Peers    []string `yaml:"peers"    envconfig:"PEERS"`    // for "static": id=host:port or host:port
-	Hostname string   `yaml:"hostname" envconfig:"HOSTNAME"` // for "dns"
-	Port     int      `yaml:"port"     envconfig:"PORT"`     // for "dns": every node's raft port
+	Driver   string   `yaml:"driver"`   // "static" or "dns"
+	Peers    []string `yaml:"peers"`    // for "static": id=host:port or host:port
+	Hostname string   `yaml:"hostname"` // for "dns"
+	Port     int      `yaml:"port"`     // for "dns": every node's raft port
 }
 
 // Discovery drivers of [DiscoveryConfig.Driver]. An empty driver is static.

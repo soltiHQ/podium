@@ -12,11 +12,11 @@ import (
 // ServerConfig is the server-side TLS configuration (PEM file paths).
 type ServerConfig struct {
 	// CertFile is the PEM server certificate chain (leaf first).
-	CertFile string `yaml:"cert_file" envconfig:"CERT_FILE"`
+	CertFile string `yaml:"cert_file"`
 	// KeyFile is the PEM private key for CertFile.
-	KeyFile string `yaml:"key_file" envconfig:"KEY_FILE"`
+	KeyFile string `yaml:"key_file"`
 	// ClientCAFile, when set, turns on mTLS: clients must present a certificate signed by this CA bundle (tls.RequireAndVerifyClientCert).
-	ClientCAFile string `yaml:"client_ca_file" envconfig:"CLIENT_CA_FILE"`
+	ClientCAFile string `yaml:"client_ca_file"`
 }
 
 // Enabled reports whether server TLS is configured.
@@ -114,9 +114,9 @@ func (c ServerConfig) build(requireClientCert bool) (*tls.Config, error) {
 
 // ClientConfig is the client-side TLS configuration (PEM file paths) used by the CP when dialing agents.
 type ClientConfig struct {
-	CAFile   string `yaml:"ca_file"   envconfig:"CA_FILE"`
-	CertFile string `yaml:"cert_file" envconfig:"CERT_FILE"`
-	KeyFile  string `yaml:"key_file"  envconfig:"KEY_FILE"`
+	CAFile   string `yaml:"ca_file"`
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
 }
 
 // Enabled reports whether the CP should dial agents over TLS.

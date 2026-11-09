@@ -168,43 +168,13 @@ func TestLoadRejectsMalformedCORSOrigins(t *testing.T) {
 	}
 }
 
-// unsetEnv removes the named variables for the rest of the test. envconfig
-// takes a variable that is set but empty as present and overwrites the field
-// with "", which would hide a value the YAML file had set: t.Setenv(name, "")
-// is not enough. t.Setenv comes first so that its cleanup restores the
-// original value.
-func unsetEnv(t *testing.T, names ...string) {
-	t.Helper()
-	for _, name := range names {
-		t.Setenv(name, "")
-		if err := os.Unsetenv(name); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-// The first administrator's password comes from the environment only: a YAML
-// file cannot carry it.
-func TestLoadBootstrapAdminPasswordIsEnvOnly(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	// bootstrapadminpassword is the key yaml.v3 derives when the field has no tag.
-	body := "bootstrapadminpassword: from-yaml-file\nbootstrap_admin_password: from-yaml-file\nbootstrap:\n  admin_password: from-yaml-file\n"
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CONFIG_PATH", path)
+// The first administrator's password comes from the environment only; a YAML
+// file that holds it fails loading (TestEnvOnlyKeyInFileFails).
+func TestLoadBootstrapAdminPasswordFromTheEnvironment(t *testing.T) {
+	t.Setenv("CONFIG_PATH", "")
 	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
-	// Only the file may set it here: envconfig reads both names.
-	unsetEnv(t, bootstrap.AdminPasswordEnv, "BOOTSTRAP_ADMIN_PASSWORD")
-	cfg, err := load(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.BootstrapAdminPassword != "" {
-		t.Fatal("the YAML file set the bootstrap admin password")
-	}
 	t.Setenv(bootstrap.AdminPasswordEnv, "from-the-environment")
-	cfg, err = load(nil)
+	cfg, err := load(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,34 +183,9 @@ func TestLoadBootstrapAdminPasswordIsEnvOnly(t *testing.T) {
 	}
 }
 
-// The enrollment secret comes from the environment only: a YAML file cannot
-// carry it, under the key it would naturally have or under the one yaml.v3
-// derives when the field has no tag.
-func TestLoadEnrollSecretIsEnvOnly(t *testing.T) {
-	secret := strings.Repeat("y", 32)
-	for _, key := range []string{
-		"enroll_secret",
-		"enrollsecret", // the key yaml.v3 derives when the field has no tag
-	} {
-		t.Run(key, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.yaml")
-			if err := os.WriteFile(path, []byte("agent_auth:\n  "+key+": "+secret+"\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("CONFIG_PATH", path)
-			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
-			// Only the file may set it here: envconfig reads both names.
-			unsetEnv(t, "SOLTI_AGENT_AUTH_ENROLL_SECRET", "ENROLL_SECRET")
-			cfg, err := load(nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if cfg.AgentAuth.EnrollSecret != "" {
-				t.Fatalf("the YAML file set the enrollment secret through agent_auth.%s", key)
-			}
-		})
-	}
-
+// The enrollment secret comes from the environment only; a YAML file that holds
+// it fails loading (TestEnvOnlyKeyInFileFails).
+func TestLoadEnrollSecretFromTheEnvironment(t *testing.T) {
 	t.Setenv("CONFIG_PATH", "")
 	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
 	t.Setenv("SOLTI_AGENT_AUTH_ENROLL_SECRET", "from-the-environment-0123456789abcdef")

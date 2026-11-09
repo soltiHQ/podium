@@ -2,10 +2,11 @@ package event
 
 import (
 	"errors"
+	"os"
 	"testing"
 	"time"
 
-	"github.com/kelseyhightower/envconfig"
+	"github.com/soltiHQ/control-plane/internal/config/settings"
 	"gopkg.in/yaml.v3"
 )
 
@@ -31,7 +32,7 @@ func TestConfigCoalesce(t *testing.T) {
 			if tc.env != "" {
 				t.Setenv("SOLTI_EVENTS_COALESCE", tc.env)
 			}
-			if err := envconfig.Process("SOLTI_EVENTS", &cfg); err != nil {
+			if err := settings.ApplyEnv("SOLTI_EVENTS", &cfg, os.LookupEnv); err != nil {
 				t.Fatal(err)
 			}
 			if cfg.Coalesce != tc.wantRaw {

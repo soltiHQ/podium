@@ -6,13 +6,13 @@ import (
 )
 
 type Config struct {
-	TickInterval        time.Duration `yaml:"tick_interval" envconfig:"TICK_INTERVAL"`
-	CycleTimeout        time.Duration `yaml:"cycle_timeout" envconfig:"CYCLE_TIMEOUT"`
-	MaxConcurrency      int           `yaml:"max_concurrency" envconfig:"MAX_CONCURRENCY"`
-	MaxAgentsPerCycle   int           `yaml:"max_agents_per_cycle" envconfig:"MAX_AGENTS_PER_CYCLE"`
-	PageSize            int           `yaml:"page_size" envconfig:"PAGE_SIZE"`
-	MaxRunContinuations int           `yaml:"max_run_continuations" envconfig:"MAX_RUN_CONTINUATIONS"`
-	MaxPages            int           `yaml:"max_pages" envconfig:"MAX_PAGES"`
+	TickInterval        time.Duration `yaml:"tick_interval"`
+	CycleTimeout        time.Duration `yaml:"cycle_timeout"`
+	MaxConcurrency      int           `yaml:"max_concurrency"`
+	MaxAgentsPerCycle   int           `yaml:"max_agents_per_cycle"`
+	PageSize            int           `yaml:"page_size"`
+	MaxRunContinuations int           `yaml:"max_run_continuations"`
+	MaxPages            int           `yaml:"max_pages"`
 }
 
 func DefaultConfig() Config {

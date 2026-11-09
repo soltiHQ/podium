@@ -17,8 +17,193 @@ single `Default()` constructor for development use:
 
 ## Loading from external sources
 
-`Load()` reads in priority order: `Default()` → YAML file (`--config` / `CONFIG_PATH`)
-→ env (`SOLTI_` prefix), then enforces `Config.Validate()`.
+`Load()` reads in priority order: `Default()` → YAML file (`--config` /
+`CONFIG_PATH`) → env, then enforces `Config.Validate()`. Loading is strict:
+a setting that is misspelled or misplaced stops podium at start, before any
+listener or store opens.
+
+### YAML file
+
+- A key that is not a setting fails loading at any depth. The error names the
+  file, the line, the key's full path and the keys known at that level:
+  `config: config.yaml:12: unknown key "http.lisen" (known: addr, idle_timeout, ...)`.
+- A setting that only the environment may carry (`agent_auth.enroll_secret`,
+  `bootstrap_admin_password`) fails the same way when the file holds it, and
+  the error names the variable, never the value:
+  `agent_auth.enroll_secret is read from SOLTI_AGENT_AUTH_ENROLL_SECRET only; remove it from the file`.
+- An empty file, a file of comments only, `---` or `{}` fails with
+  `config: <file> holds no settings`.
+
+### Environment variables
+
+The variable of a setting is `SOLTI_` followed by its YAML path in upper case,
+the parts joined by `_`: `http.read_header_timeout` is
+`SOLTI_HTTP_READ_HEADER_TIMEOUT`, `cluster.raft.tls.ca_file` is
+`SOLTI_CLUSTER_RAFT_TLS_CA_FILE`. The two settings that only the environment
+may carry keep their own names, `SOLTI_AGENT_AUTH_ENROLL_SECRET` and
+`SOLTI_BOOTSTRAP_ADMIN_PASSWORD`. No other name is read: `HOSTNAME`, `PORT`,
+`DATA_DIR`, `REQUIRE` and the like, without `SOLTI_` and the path, change
+nothing.
+
+A value is read as follows:
+
+- A string is taken as is, spaces included. A set but empty variable sets the
+  empty string.
+- A bool is `true` or `false` (also `1`, `0`, `t`, `f`, `T`, `F`, `TRUE`,
+  `FALSE`, `True`, `False`), as `strconv.ParseBool` reads it.
+- An integer is in decimal.
+- A duration is a Go duration, such as `30s` or `1m30s`.
+- A list is comma-separated, with the spaces around each item trimmed:
+  `10.0.0.1, 10.0.0.2` is two items. An empty value is an empty list. An empty
+  item (`10.0.0.1,`) stays, for the setting's own check to refuse.
+- A set but empty bool, integer or duration is an error, not a default.
+
+A value that does not parse fails loading with the variable's name and what was
+expected, never the value, which may be a secret.
+
+A `SOLTI_` variable that is not a setting is handled by where its name falls:
+
+- Under a section's prefix (`SOLTI_HTTP_`, `SOLTI_HTTP_DISCOVERY_`,
+  `SOLTI_GRPC_`, `SOLTI_SYNC_`, `SOLTI_LIFECYCLE_`, `SOLTI_TRIGGERS_`,
+  `SOLTI_SERVER_`, `SOLTI_AUTH_`, `SOLTI_CORS_`, `SOLTI_CLUSTER_`,
+  `SOLTI_EVENTS_`, `SOLTI_STREAMS_`, `SOLTI_TLS_`, `SOLTI_AGENT_AUTH_`,
+  `SOLTI_HISTORY_`): it is a mistyped setting, and loading fails with its name
+  and, when a setting's variable is within edit distance 2, that name:
+  `unknown environment variable SOLTI_HTTP_ADRR (did you mean SOLTI_HTTP_ADDR?)`.
+- Anywhere else: it is logged once at WARN, with the closest setting's variable
+  when one is within edit distance 2, and ignored. The solti SDK and its
+  examples use `SOLTI_CONTROL_PLANE`, `SOLTI_AGENT_ADVERTISE_URL`,
+  `SOLTI_CONTAINERD_*`, `SOLTI_METRICS_ADDR` and `SOLTI_TASK_ENV`, and an agent
+  may run in the same shell as podium, so those must not stop it.
+  `SOLTI_AGENT_ADVERTISE_URL` is not under `SOLTI_AGENT_AUTH_`, so it only
+  warns. A typo in the section's own name, such as `SOLTI_HTPP_ADDR`, is under
+  no section's prefix and also only warns, with `SOLTI_HTTP_ADDR` as the
+  suggestion.
+
+The top-level setting `trusted_proxies` has no section prefix, so a mistyped
+`SOLTI_TRUSTED_PROXY` only warns.
+
+### Validation at load
+
+`Config.Validate()` covers every section. Addresses (`http.addr`,
+`http_discovery.addr`, and `grpc.addr` on a TCP network) are non-empty and
+`host:port` with a numeric port. A negative timeout, interval, size or count
+fails in `http`, `http_discovery`, `sync`, `lifecycle`, `server` and
+`streams.subscriber_buffer`; zero keeps the setting's default. Each
+`triggers.*_refresh` is empty (the default) or `every <n>s`, `every <n>m` or
+`every <n>ms`. The other sections keep the checks described under their own
+headings. An error names the section (`config.http`, `config.cluster`,
+`config.history.archive`, ...).
+
+### Every setting
+
+Default is what the setting holds when neither file nor environment sets it;
+for a setting that is empty here the package or the runner may still apply its
+own default or have no value, as the section on it says.
+
+| YAML key | Environment variable | Type | Default |
+| --- | --- | --- | --- |
+| `history.archive.retention` | `SOLTI_HISTORY_ARCHIVE_RETENTION` | duration | 168h |
+| `history.archive.max_records` | `SOLTI_HISTORY_ARCHIVE_MAX_RECORDS` | integer | 10000 |
+| `history.archive.max_bytes` | `SOLTI_HISTORY_ARCHIVE_MAX_BYTES` | integer | 33554432 |
+| `history.collector.tick_interval` | `SOLTI_HISTORY_COLLECTOR_TICK_INTERVAL` | duration | 5s |
+| `history.collector.cycle_timeout` | `SOLTI_HISTORY_COLLECTOR_CYCLE_TIMEOUT` | duration | 8s |
+| `history.collector.max_concurrency` | `SOLTI_HISTORY_COLLECTOR_MAX_CONCURRENCY` | integer | 2 |
+| `history.collector.max_agents_per_cycle` | `SOLTI_HISTORY_COLLECTOR_MAX_AGENTS_PER_CYCLE` | integer | 100 |
+| `history.collector.page_size` | `SOLTI_HISTORY_COLLECTOR_PAGE_SIZE` | integer | 256 |
+| `history.collector.max_run_continuations` | `SOLTI_HISTORY_COLLECTOR_MAX_RUN_CONTINUATIONS` | integer | 1024 |
+| `history.collector.max_pages` | `SOLTI_HISTORY_COLLECTOR_MAX_PAGES` | integer | 4 |
+| `http.read_header_timeout` | `SOLTI_HTTP_READ_HEADER_TIMEOUT` | duration | 10s |
+| `http.read_timeout` | `SOLTI_HTTP_READ_TIMEOUT` | duration | 30s |
+| `http.write_timeout` | `SOLTI_HTTP_WRITE_TIMEOUT` | duration | 30s |
+| `http.idle_timeout` | `SOLTI_HTTP_IDLE_TIMEOUT` | duration | 60s |
+| `http.max_header_bytes` | `SOLTI_HTTP_MAX_HEADER_BYTES` | integer | 16384 |
+| `http.name` | `SOLTI_HTTP_NAME` | string | http |
+| `http.addr` | `SOLTI_HTTP_ADDR` | string | :8080 |
+| `http_discovery.read_header_timeout` | `SOLTI_HTTP_DISCOVERY_READ_HEADER_TIMEOUT` | duration | 10s |
+| `http_discovery.read_timeout` | `SOLTI_HTTP_DISCOVERY_READ_TIMEOUT` | duration | 30s |
+| `http_discovery.write_timeout` | `SOLTI_HTTP_DISCOVERY_WRITE_TIMEOUT` | duration | 30s |
+| `http_discovery.idle_timeout` | `SOLTI_HTTP_DISCOVERY_IDLE_TIMEOUT` | duration | 60s |
+| `http_discovery.max_header_bytes` | `SOLTI_HTTP_DISCOVERY_MAX_HEADER_BYTES` | integer | 16384 |
+| `http_discovery.name` | `SOLTI_HTTP_DISCOVERY_NAME` | string | http-discovery |
+| `http_discovery.addr` | `SOLTI_HTTP_DISCOVERY_ADDR` | string | :8082 |
+| `grpc.name` | `SOLTI_GRPC_NAME` | string | grpc-discovery |
+| `grpc.addr` | `SOLTI_GRPC_ADDR` | string | :50051 |
+| `grpc.network` | `SOLTI_GRPC_NETWORK` | string | tcp |
+| `sync.tick_interval` | `SOLTI_SYNC_TICK_INTERVAL` | duration | 10s |
+| `sync.push_timeout` | `SOLTI_SYNC_PUSH_TIMEOUT` | duration | 15s |
+| `sync.max_concurrency` | `SOLTI_SYNC_MAX_CONCURRENCY` | integer | 4 |
+| `sync.max_retries` | `SOLTI_SYNC_MAX_RETRIES` | integer | 5 |
+| `sync.name` | `SOLTI_SYNC_NAME` | string | sync |
+| `lifecycle.tick_interval` | `SOLTI_LIFECYCLE_TICK_INTERVAL` | duration | 10s |
+| `lifecycle.default_heartbeat` | `SOLTI_LIFECYCLE_DEFAULT_HEARTBEAT` | duration | 30s |
+| `lifecycle.inactive_multiplier` | `SOLTI_LIFECYCLE_INACTIVE_MULTIPLIER` | integer | 2 |
+| `lifecycle.disconnect_multiplier` | `SOLTI_LIFECYCLE_DISCONNECT_MULTIPLIER` | integer | 5 |
+| `lifecycle.delete_multiplier` | `SOLTI_LIFECYCLE_DELETE_MULTIPLIER` | integer | 10 |
+| `lifecycle.delete_after` | `SOLTI_LIFECYCLE_DELETE_AFTER` | duration | 24h |
+| `lifecycle.max_concurrency` | `SOLTI_LIFECYCLE_MAX_CONCURRENCY` | integer | 4 |
+| `lifecycle.name` | `SOLTI_LIFECYCLE_NAME` | string | lifecycle |
+| `triggers.dashboard_refresh` | `SOLTI_TRIGGERS_DASHBOARD_REFRESH` | string | every 60s |
+| `triggers.users_refresh` | `SOLTI_TRIGGERS_USERS_REFRESH` | string | every 180s |
+| `triggers.user_detail_refresh` | `SOLTI_TRIGGERS_USER_DETAIL_REFRESH` | string | every 300s |
+| `triggers.user_sessions_refresh` | `SOLTI_TRIGGERS_USER_SESSIONS_REFRESH` | string | every 180s |
+| `triggers.agents_refresh` | `SOLTI_TRIGGERS_AGENTS_REFRESH` | string | every 60s |
+| `triggers.agent_detail_refresh` | `SOLTI_TRIGGERS_AGENT_DETAIL_REFRESH` | string | every 60s |
+| `triggers.agent_tasks_refresh` | `SOLTI_TRIGGERS_AGENT_TASKS_REFRESH` | string | every 60s |
+| `triggers.specs_refresh` | `SOLTI_TRIGGERS_SPECS_REFRESH` | string | every 180s |
+| `triggers.spec_detail_refresh` | `SOLTI_TRIGGERS_SPEC_DETAIL_REFRESH` | string | every 60s |
+| `server.shutdown_timeout` | `SOLTI_SERVER_SHUTDOWN_TIMEOUT` | duration | 15s |
+| `auth.jwt_secret` | `SOLTI_AUTH_JWT_SECRET` | string | empty |
+| `auth.audience` | `SOLTI_AUTH_AUDIENCE` | string | control-plane |
+| `auth.issuer` | `SOLTI_AUTH_ISSUER` | string | solti |
+| `auth.access_ttl` | `SOLTI_AUTH_ACCESS_TTL` | duration | 15m |
+| `auth.refresh_ttl` | `SOLTI_AUTH_REFRESH_TTL` | duration | 168h |
+| `auth.rate_window` | `SOLTI_AUTH_RATE_WINDOW` | duration | 1m |
+| `auth.rate_attempts` | `SOLTI_AUTH_RATE_ATTEMPTS` | integer | 5 |
+| `auth.rotate_refresh` | `SOLTI_AUTH_ROTATE_REFRESH` | bool | false |
+| `auth.cookie_secure` | `SOLTI_AUTH_COOKIE_SECURE` | string | auto |
+| `cors.allow_origins` | `SOLTI_CORS_ALLOW_ORIGINS` | list | empty |
+| `cors.allow_methods` | `SOLTI_CORS_ALLOW_METHODS` | list | GET, POST, PUT, DELETE, PATCH, OPTIONS |
+| `cors.allow_headers` | `SOLTI_CORS_ALLOW_HEADERS` | list | Authorization, Content-Type, X-Request-Id, If-Match |
+| `cors.expose_headers` | `SOLTI_CORS_EXPOSE_HEADERS` | list | X-Request-Id, ETag |
+| `cors.allow_credentials` | `SOLTI_CORS_ALLOW_CREDENTIALS` | bool | false |
+| `cors.max_age` | `SOLTI_CORS_MAX_AGE` | duration | 12h |
+| `cluster.standalone.ephemeral` | `SOLTI_CLUSTER_STANDALONE_EPHEMERAL` | bool | false |
+| `cluster.standalone.data_dir` | `SOLTI_CLUSTER_STANDALONE_DATA_DIR` | string | data/podium |
+| `cluster.standalone.snapshot_threshold` | `SOLTI_CLUSTER_STANDALONE_SNAPSHOT_THRESHOLD` | integer | 4096 |
+| `cluster.backend` | `SOLTI_CLUSTER_BACKEND` | string | standalone |
+| `cluster.raft.node_id` | `SOLTI_CLUSTER_RAFT_NODE_ID` | string | empty |
+| `cluster.raft.bind_addr` | `SOLTI_CLUSTER_RAFT_BIND_ADDR` | string | empty |
+| `cluster.raft.advertise_addr` | `SOLTI_CLUSTER_RAFT_ADVERTISE_ADDR` | string | empty |
+| `cluster.raft.data_dir` | `SOLTI_CLUSTER_RAFT_DATA_DIR` | string | empty |
+| `cluster.raft.join` | `SOLTI_CLUSTER_RAFT_JOIN` | bool | false |
+| `cluster.raft.election_timeout_ms` | `SOLTI_CLUSTER_RAFT_ELECTION_TIMEOUT_MS` | integer | 1000 |
+| `cluster.raft.heartbeat_timeout_ms` | `SOLTI_CLUSTER_RAFT_HEARTBEAT_TIMEOUT_MS` | integer | 1000 |
+| `cluster.raft.snapshot_interval` | `SOLTI_CLUSTER_RAFT_SNAPSHOT_INTERVAL` | duration | 2m |
+| `cluster.raft.snapshot_threshold` | `SOLTI_CLUSTER_RAFT_SNAPSHOT_THRESHOLD` | integer | 8192 |
+| `cluster.raft.trailing_logs` | `SOLTI_CLUSTER_RAFT_TRAILING_LOGS` | integer | 10240 |
+| `cluster.raft.tls.cert_file` | `SOLTI_CLUSTER_RAFT_TLS_CERT_FILE` | string | empty |
+| `cluster.raft.tls.key_file` | `SOLTI_CLUSTER_RAFT_TLS_KEY_FILE` | string | empty |
+| `cluster.raft.tls.ca_file` | `SOLTI_CLUSTER_RAFT_TLS_CA_FILE` | string | empty |
+| `cluster.raft.allow_insecure_transport` | `SOLTI_CLUSTER_RAFT_ALLOW_INSECURE_TRANSPORT` | bool | false |
+| `cluster.discovery.driver` | `SOLTI_CLUSTER_DISCOVERY_DRIVER` | string | empty |
+| `cluster.discovery.peers` | `SOLTI_CLUSTER_DISCOVERY_PEERS` | list | empty |
+| `cluster.discovery.hostname` | `SOLTI_CLUSTER_DISCOVERY_HOSTNAME` | string | empty |
+| `cluster.discovery.port` | `SOLTI_CLUSTER_DISCOVERY_PORT` | integer | empty |
+| `events.coalesce` | `SOLTI_EVENTS_COALESCE` | duration | 1s |
+| `streams.max_per_ip` | `SOLTI_STREAMS_MAX_PER_IP` | integer | 10 |
+| `streams.subscriber_buffer` | `SOLTI_STREAMS_SUBSCRIBER_BUFFER` | integer | 64 |
+| `tls.server.cert_file` | `SOLTI_TLS_SERVER_CERT_FILE` | string | empty |
+| `tls.server.key_file` | `SOLTI_TLS_SERVER_KEY_FILE` | string | empty |
+| `tls.server.client_ca_file` | `SOLTI_TLS_SERVER_CLIENT_CA_FILE` | string | empty |
+| `tls.client.ca_file` | `SOLTI_TLS_CLIENT_CA_FILE` | string | empty |
+| `tls.client.cert_file` | `SOLTI_TLS_CLIENT_CERT_FILE` | string | empty |
+| `tls.client.key_file` | `SOLTI_TLS_CLIENT_KEY_FILE` | string | empty |
+| `agent_auth.require` | `SOLTI_AGENT_AUTH_REQUIRE` | bool | true |
+| not in a file | `SOLTI_AGENT_AUTH_ENROLL_SECRET` | string | no default |
+| `trusted_proxies` | `SOLTI_TRUSTED_PROXIES` | list | empty |
+| not in a file | `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` | string | no default |
+
 
 ## TLS
 
@@ -367,9 +552,9 @@ trusted_proxies:   # env SOLTI_TRUSTED_PROXIES=10.0.0.1,10.1.0.0/16
   - 10.1.0.0/16
 ```
 
-Entries are IP addresses or CIDR prefixes, trimmed of spaces, so
-`SOLTI_TRUSTED_PROXIES="10.0.0.1, 10.0.0.2"` works; anything else, an empty
-entry included, fails configuration loading. The headers count only when the
+Entries are IP addresses or CIDR prefixes. The environment list is trimmed of
+spaces around the commas, so `SOLTI_TRUSTED_PROXIES="10.0.0.1, 10.0.0.2"`
+works; anything else, an empty entry included, fails configuration loading. The headers count only when the
 TCP peer is in the list:
 
 - `X-Forwarded-For`: all header lines are joined in order and walked from the
@@ -1068,8 +1253,8 @@ larger of `delete_after` and `delete_multiplier` × its heartbeat, and never
 sooner. Silence counts from the later of the agent's last sync and the start of
 the replica's leadership term, so after a restart, or a change of leader in raft
 mode, every agent that has not synced yet gets the full thresholds to sync again
-before its status changes. Zero or negative values inherit the defaults shown;
-`delete_after` is also read from `SOLTI_LIFECYCLE_DELETEAFTER`. See
+before its status changes. Zero values inherit the defaults shown; negative values fail
+loading. See
 `internal/server/README.md` for the states and the grace of each term.
 
 Deleting an agent drops its row and the labels operators set on it. Its
@@ -1104,5 +1289,5 @@ an agent still has its tasks is one listing of them, up to 1000 to a page (fewer
 when the agent's answer would be too large), and only a whole listing counts:
 an agent whose last page cannot start inside what is left of one `push_timeout`
 after its pushes, or whose listing passes the bounds in the server README (65536
-task IDs, 32 MiB of them, 1024 calls), is not checked. Zero or negative values
-inherit the defaults shown. See `internal/server/README.md` for the scheduling.
+task IDs, 32 MiB of them, 1024 calls), is not checked. Zero values inherit the
+defaults shown; negative values fail loading. See `internal/server/README.md` for the scheduling.

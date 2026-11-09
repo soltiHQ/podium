@@ -3,7 +3,9 @@ package httpserver
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
+	"strconv"
 	"time"
 )
 
@@ -51,4 +53,32 @@ func (c Config) withDefaults() Config {
 		c.MaxHeaderBytes = defaultMaxHeaderBytes
 	}
 	return c
+}
+
+// Validate reports an empty or malformed address and a negative timeout or size
+// (zero keeps the default). The errors name the key, never a secret.
+func (c Config) Validate() error {
+	if c.Addr == "" {
+		return ErrEmptyAddr
+	}
+	if _, port, err := net.SplitHostPort(c.Addr); err != nil {
+		return fmt.Errorf("%w: %q", ErrInvalidAddr, c.Addr)
+	} else if _, err = strconv.ParseUint(port, 10, 16); err != nil {
+		return fmt.Errorf("%w: %q", ErrInvalidAddr, c.Addr)
+	}
+	for _, v := range []struct {
+		key string
+		neg bool
+	}{
+		{"read_header_timeout", c.ReadHeaderTimeout < 0},
+		{"read_timeout", c.ReadTimeout < 0},
+		{"write_timeout", c.WriteTimeout < 0},
+		{"idle_timeout", c.IdleTimeout < 0},
+		{"max_header_bytes", c.MaxHeaderBytes < 0},
+	} {
+		if v.neg {
+			return fmt.Errorf("%w: %s", ErrNegativeValue, v.key)
+		}
+	}
+	return nil
 }

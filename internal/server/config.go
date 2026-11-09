@@ -1,6 +1,9 @@
 package server
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 const (
 	defaultShutdownTimeout = 15 * time.Second
@@ -17,4 +20,16 @@ func (c Config) withDefaults() Config {
 		c.ShutdownTimeout = defaultShutdownTimeout
 	}
 	return c
+}
+
+// ErrNegativeShutdownTimeout indicates a negative shutdown timeout; zero keeps
+// the default.
+var ErrNegativeShutdownTimeout = errors.New("server: negative shutdown_timeout")
+
+// Validate reports a negative shutdown timeout (zero keeps the default).
+func (c Config) Validate() error {
+	if c.ShutdownTimeout < 0 {
+		return ErrNegativeShutdownTimeout
+	}
+	return nil
 }
