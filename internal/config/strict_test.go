@@ -37,7 +37,7 @@ func TestUnknownKeyFailsWithPathAndLine(t *testing.T) {
 		{
 			name: "top level",
 			body: "# settings\nlisten: 1\n",
-			want: `config: %s:2: unknown key "listen" (known: agent_auth, auth, cluster, cors, events, grpc, history, http, http_discovery, lifecycle, log, server, streams, sync, tls, triggers, trusted_proxies)`,
+			want: `config: %s:2: unknown key "listen" (known: agent_auth, auth, cluster, cors, events, grpc, history, http, http_discovery, lifecycle, log, ops, server, streams, sync, tls, triggers, trusted_proxies)`,
 		},
 		{
 			name: "nested",
@@ -307,6 +307,7 @@ func TestEverySectionValidatedAtLoad(t *testing.T) {
 		{"sync", "SOLTI_SYNC_TICK_INTERVAL", "-1s"},
 		{"lifecycle", "SOLTI_LIFECYCLE_MAX_CONCURRENCY", "-1"},
 		{"triggers", "SOLTI_TRIGGERS_DASHBOARD_REFRESH", "often"},
+		{"ops", "SOLTI_OPS_ADDR", "8081"},
 		{"server", "SOLTI_SERVER_SHUTDOWN_TIMEOUT", "-1s"},
 		{"auth", "SOLTI_AUTH_COOKIE_SECURE", "never"},
 		{"cors", "SOLTI_CORS_ALLOW_ORIGINS", "https://app.example.com/"},

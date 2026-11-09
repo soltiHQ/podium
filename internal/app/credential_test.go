@@ -102,7 +102,7 @@ func TestLegacyRowsConvertedAtStart(t *testing.T) {
 	cfg.Cluster.Standalone.DataDir = dir
 	cfg.Auth.JWTSecret = strings.Repeat("legacy-credential-test-secret", 2)
 	cfg.AgentAuth.EnrollSecret = secret
-	cfg.HTTP.Addr, cfg.HTTPDiscovery.Addr, cfg.GRPC.Addr = "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0"
+	cfg.HTTP.Addr, cfg.HTTPDiscovery.Addr, cfg.GRPC.Addr, cfg.Ops.Addr = "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0"
 	n := &clusterNode{id: "standalone", cfg: cfg, logs: &syncBuffer{}}
 	n.start(t)
 

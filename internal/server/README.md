@@ -12,6 +12,7 @@ server/
 └── runner/
     ├── grpcserver/  gRPC listener → grpc.Server.Serve
     ├── httpserver/  TCP listener  → http.Server.Serve
+    ├── ops/         ops listener: /livez /readyz /leaderz /version, over httpserver
     ├── lifecycle/   periodic agent liveness checks (active → … → deleted)
     └── sync/        periodic rollout reconciliation (push specs to agents)
 ```
@@ -57,7 +58,7 @@ type Runner interface {
 
 | Runner        | Tick-based  | Purpose                                     |
 |---------------|-------------|---------------------------------------------|
-| `httpserver`  | no          | Serve HTTP (UI + REST API)                  |
+| `httpserver`  | no          | Serve HTTP (UI + REST API, discovery, ops)  |
 | `grpcserver`  | no          | Serve gRPC (agent discovery)                |
 | `lifecycle`   | yes         | Transition stale agents through statuses    |
 | `sync`        | yes         | Push pending rollouts to agents via proxy   |
@@ -67,7 +68,9 @@ Both follow the same pattern:
 1. `New` validates config and handler/server
 2. `Start` binds a TCP listener, serves, blocks
 3. `Stop` attempts graceful shutdown, falls back to hard close on timeout
-4. `ready` channel synchronises Stop with listener binding
+4. `ready` channel synchronises Stop with listener binding; `Bound()` is that
+   channel, and `Addr()` the bound address, `""` before it is bound or when
+   the bind failed
 
 ### Tick runners (lifecycle, sync)
 Both follow the same pattern:

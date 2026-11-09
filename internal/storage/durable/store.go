@@ -187,6 +187,16 @@ func Open(dataDir string, opts ...Option) (*Store, error) {
 // of the file made before the migration.
 func (s *Store) Migrated() bool { return s.migrated }
 
+// Failure returns why the store stopped serving after a failed commit, a failed
+// apply or a failed snapshot, the reason every later read and write reports, and
+// nil while the store serves. A closed store has no failure. Failure is cheap and
+// takes no writer, so a probe can call it at any rate.
+func (s *Store) Failure() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.failure
+}
+
 // WithTx runs fn on a transaction over the published state, then appends the
 // operations it recorded to the log as one entry, which bbolt syncs, and applies
 // them to the published state. A transaction that recorded nothing touches no

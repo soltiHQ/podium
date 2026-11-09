@@ -10,6 +10,7 @@ a single [`App`] aggregate with a clean **Build / Run / Shutdown** contract.
 ```text
 app/
 ├── app.go     App struct, New / Run / Shutdown
+├── ready.go   readiness (what /readyz reports) and the gRPC health service
 └── build.go   private builders: cluster, services, handlers, runners
 ```
 
@@ -29,7 +30,8 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   `internal/bootstrap/README.md`. On error `New` releases anything already
   acquired (Raft node, event hub) before returning.
 - `Run` delegates to [`server.Server.Run`] which orchestrates lifecycle of
-  all runners (HTTP, gRPC, sync, lifecycle, history; while agent auth is
+  all runners (HTTP, HTTP discovery, gRPC, the ops listener unless `ops.addr` is
+  empty, sync, lifecycle, history; while agent auth is
   required, agent-credentials, which at each start of standalone and each
   leadership term of a raft node converts the stored agent credentials that the
   enrollment secret derives and logs how many are stored or unusable, see

@@ -47,6 +47,22 @@ func New(cfg Config, logger zerolog.Logger, srv *grpc.Server) (*Runner, error) {
 // Name returns the runner name.
 func (r *Runner) Name() string { return r.cfg.Name }
 
+// Bound returns a channel that closes once Start has tried to bind the listener.
+func (r *Runner) Bound() <-chan struct{} { return r.ready }
+
+// Addr returns the address the listener is bound to, and "" before it is bound
+// or when it could not be.
+func (r *Runner) Addr() string {
+	select {
+	case <-r.ready:
+		if r.ln != nil {
+			return r.ln.Addr().String()
+		}
+	default:
+	}
+	return ""
+}
+
 // Start binds the listener and serves until Stop() shuts it down.
 func (r *Runner) Start(_ context.Context) error {
 	if !r.started.CompareAndSwap(false, true) {

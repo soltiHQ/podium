@@ -86,7 +86,7 @@ func clusterNodesOf(t *testing.T, raft []cluster.Config) []*clusterNode {
 			t.Fatal(err)
 		}
 		listen := net.JoinHostPort(host, "0")
-		cfg.HTTP.Addr, cfg.HTTPDiscovery.Addr, cfg.GRPC.Addr = listen, listen, listen
+		cfg.HTTP.Addr, cfg.HTTPDiscovery.Addr, cfg.GRPC.Addr, cfg.Ops.Addr = listen, listen, listen, listen
 		nodes = append(nodes, &clusterNode{id: r.Raft.NodeID, cfg: cfg, logs: &syncBuffer{}})
 	}
 	return nodes

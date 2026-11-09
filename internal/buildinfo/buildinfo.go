@@ -21,17 +21,17 @@ const unknown = "unknown"
 type Info struct {
 	// Version is the version of the main module: the tag a build from a tag
 	// carries, "dev" for a build the toolchain gave no version ("(devel)").
-	Version string
+	Version string `json:"version"`
 	// Commit is the VCS revision, empty when the build had none.
-	Commit string
+	Commit string `json:"commit,omitempty"`
 	// Modified reports a build from a tree with uncommitted changes.
-	Modified bool
+	Modified bool `json:"modified"`
 	// BuildTime is the time of the commit, zero when the build had none.
-	BuildTime time.Time
+	BuildTime time.Time `json:"build_time,omitzero"`
 	// GoVersion is the toolchain, such as go1.27.3.
-	GoVersion string
+	GoVersion string `json:"go_version"`
 	// Platform is GOOS/GOARCH of the build.
-	Platform string
+	Platform string `json:"platform"`
 }
 
 // Read returns the Info of the running binary.

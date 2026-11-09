@@ -475,3 +475,30 @@ func TestLoadRejectsAnInvalidLogSetting(t *testing.T) {
 		})
 	}
 }
+
+// The ops listener defaults to loopback port 8081; the file and the environment
+// set it, and an empty ops.addr switches the listener off, whichever way it is
+// set.
+func TestLoadOpsSettings(t *testing.T) {
+	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+	t.Setenv("CONFIG_PATH", "")
+	cfg, err := load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Ops.Addr != "127.0.0.1:8081" || cfg.Ops.Name != "ops" {
+		t.Fatalf("default ops settings = %+v, want 127.0.0.1:8081 and ops", cfg.Ops)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("ops:\n  addr: 10.0.0.5:9000\n  name: probes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = load(path); err != nil || cfg.Ops.Addr != "10.0.0.5:9000" || cfg.Ops.Name != "probes" {
+		t.Fatalf("from the file: %+v, %v", cfg.Ops, err)
+	}
+	t.Setenv("SOLTI_OPS_ADDR", "")
+	if cfg, err = load(path); err != nil || cfg.Ops.Enabled() {
+		t.Fatalf("from the environment: %+v, %v; want the listener off over the file", cfg.Ops, err)
+	}
+}

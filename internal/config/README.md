@@ -111,7 +111,8 @@ The top-level setting `trusted_proxies` has no section prefix, so a mistyped
 
 `Config.Validate()` covers every section. Addresses (`http.addr`,
 `http_discovery.addr`, and `grpc.addr` on a TCP network) are non-empty and
-`host:port` with a numeric port. A negative timeout, interval, size or count
+`host:port` with a numeric port; `ops.addr` is that too, or empty, which turns
+the ops listener off. A negative timeout, interval, size or count
 fails in `http`, `http_discovery`, `sync`, `lifecycle`, `server` and
 `streams.subscriber_buffer`; zero keeps the setting's default. Each
 `triggers.*_refresh` is empty (the default) or `every <n>s`, `every <n>m` or
@@ -137,6 +138,42 @@ load is logged by the bootstrap logger and exits 1. Errors that `net/http`
 reports on its own, such as a failed TLS handshake or the panic of a handler,
 are WARN lines with the server's name in `runner`
 (`TestHTTPServerErrorsGoToZerolog`).
+
+### Ops listener
+
+`ops.addr` (env `SOLTI_OPS_ADDR`, default `127.0.0.1:8081`) is a listener of
+its own for the probes of supervisors and load balancers; an empty value turns
+it off. `ops.name` (default `ops`) names its runner in the logs. The listener is
+**plain HTTP** and its routes are **never authenticated**: they sit outside the
+UI's middleware, set no cookie and show no token, secret or state of the
+cluster. Keep it on an internal network: the default binds loopback only, and a
+container that is probed from outside binds `0.0.0.0:8081` and publishes the
+port to the orchestrator alone. Every route answers GET and HEAD, as one line of
+text (`ok`, or the reason) except `/version`:
+
+| Route | Answers |
+| --- | --- |
+| `/livez` | 200 `ok` while the process serves. |
+| `/readyz` | 200 `ok` when the node is ready, and otherwise 503 with the reason, one of `starting`, `storage failed`, `no raft leader`. |
+| `/leaderz` | 200 on the raft leader and on a ready standalone node; otherwise 503, with `not leader` or the reason the node is not ready. |
+| `/version` | The build information as JSON: `version`, `commit`, `modified`, `build_time`, `go_version`, `platform`. |
+
+A node is ready when start-up has finished (every listener, the ops listener
+included, is bound, and the store is open) and the store serves. The store serves when a durable standalone store has not failed
+(`storage failed` is the state in which its reads and writes fail until restart,
+which it also logs as an ERROR) and, on raft, when this node knows a leader. The
+reasons apply in that order. `/livez` stays 200 whatever the store does: a
+restart does not mend a raft cluster without a leader, and a failed durable store
+is for the operator to look at. An in-memory standalone store cannot fail.
+
+The gRPC listener serves `grpc.health.v1.Health` without authentication: the
+overall service (`""`) and `solti.discover.v1.DiscoverService` are `SERVING`
+while `/readyz` answers 200, and `NOT_SERVING` while it does not. A `Check` reads
+the state anew; a client that `Watch`es sees a change within a second.
+
+Tests: `TestReadinessFollowsStore`, `TestReadinessReasonOrder`,
+`TestLeaderProbeOnRaft`, `TestOpsEndpointsNeedNoAuth`,
+`TestOpsListenerDisabledWhenAddrEmpty`, `TestGRPCHealthFollowsReadiness`.
 
 ### Every setting
 
@@ -173,6 +210,8 @@ own default or have no value, as the section on it says.
 | `grpc.name` | `SOLTI_GRPC_NAME` | string | grpc-discovery |
 | `grpc.addr` | `SOLTI_GRPC_ADDR` | string | :50051 |
 | `grpc.network` | `SOLTI_GRPC_NETWORK` | string | tcp |
+| `ops.name` | `SOLTI_OPS_NAME` | string | ops |
+| `ops.addr` | `SOLTI_OPS_ADDR` | string | 127.0.0.1:8081 |
 | `sync.tick_interval` | `SOLTI_SYNC_TICK_INTERVAL` | duration | 10s |
 | `sync.push_timeout` | `SOLTI_SYNC_PUSH_TIMEOUT` | duration | 15s |
 | `sync.max_concurrency` | `SOLTI_SYNC_MAX_CONCURRENCY` | integer | 4 |
@@ -665,10 +704,10 @@ that loses its leadership, or shuts down, as the rotation commits gets the same
 503, and its WARN, `auth refresh outcome unknown`, says that the rotation may
 have taken effect: a retry at `X-Leader` refreshes the browser when it did not,
 and when it did, the browser logs in again. So with rotation on, a raft
-deployment needs leader-sticky routing, and no node offers a leader probe
-without credentials (`GET /api/v1/cluster` needs `cluster:get`), so an
-ordinary balancer cannot route to the leader by itself: keep rotation off in
-raft mode unless such routing is in place. See "Browsers and
+deployment needs leader-sticky routing. The ops listener's `/leaderz` (see "Ops
+listener") answers 200 on the leader only and needs no credentials, so a balancer
+can route to the leader with it: keep rotation off in raft mode unless such
+routing is in place. See "Browsers and
 `auth.rotate_refresh`" in the runbook of `internal/raft/README.md`. Without
 rotation a refresh only reads, and works on every node, as does a request whose
 access token is still valid. Standalone is unaffected.

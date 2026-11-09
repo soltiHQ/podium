@@ -25,6 +25,7 @@ import (
 	historyrunner "github.com/soltiHQ/control-plane/internal/server/runner/history"
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
+	"github.com/soltiHQ/control-plane/internal/server/runner/ops"
 	syncrunner "github.com/soltiHQ/control-plane/internal/server/runner/sync"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/service/history"
@@ -146,6 +147,7 @@ type Config struct {
 	HTTP          httpserver.Config        `yaml:"http"`
 	HTTPDiscovery httpserver.Config        `yaml:"http_discovery"`
 	GRPC          grpcserver.Config        `yaml:"grpc"`
+	Ops           ops.Config               `yaml:"ops"`
 	Sync          syncrunner.Config        `yaml:"sync"`
 	Lifecycle     lifecycle.Config         `yaml:"lifecycle"`
 	Triggers      htmx.Config              `yaml:"triggers"`
@@ -181,6 +183,7 @@ func Default() Config {
 		HTTP:          httpserver.Config{Name: "http", Addr: ":8080"},
 		HTTPDiscovery: httpserver.Config{Name: "http-discovery", Addr: ":8082"},
 		GRPC:          grpcserver.Config{Name: "grpc-discovery", Addr: ":50051"},
+		Ops:           ops.Config{Name: "ops", Addr: "127.0.0.1:8081"},
 		Auth:          auth.Config{CookieSecure: auth.CookieSecureAuto}, // JWTSecret must be supplied externally
 		Cluster:       cluster.DefaultConfig(),
 		Events:        event.DefaultConfig(),
@@ -204,6 +207,9 @@ func (c Config) Validate() error {
 	}
 	if err := c.GRPC.Validate(); err != nil {
 		return fmt.Errorf("config.grpc: %w", err)
+	}
+	if err := c.Ops.Validate(); err != nil {
+		return fmt.Errorf("config.ops: %w", err)
 	}
 	if err := c.Sync.Validate(); err != nil {
 		return fmt.Errorf("config.sync: %w", err)

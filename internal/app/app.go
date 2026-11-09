@@ -12,10 +12,12 @@ import (
 	"github.com/soltiHQ/control-plane/internal/loghub"
 
 	"github.com/rs/zerolog"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	authcred "github.com/soltiHQ/control-plane/internal/auth/credentials"
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
+	"github.com/soltiHQ/control-plane/internal/buildinfo"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
@@ -25,6 +27,7 @@ import (
 	historyrunner "github.com/soltiHQ/control-plane/internal/server/runner/history"
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
+	"github.com/soltiHQ/control-plane/internal/server/runner/ops"
 	syncrunner "github.com/soltiHQ/control-plane/internal/server/runner/sync"
 	clustersvc "github.com/soltiHQ/control-plane/internal/service/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -68,8 +71,19 @@ type App struct {
 	proxyPool    *proxy.Pool
 	authModel    *kit.Auth
 
-	server       *server.Server
-	logHub       *loghub.Hub
+	server     *server.Server
+	logHub     *loghub.Hub
+	ready      *readiness
+	grpcHealth *grpcHealth
+	// listeners are the runners that bind a port: the app is ready once all are
+	// bound. ui and grpc are two of them, which tests dial. ops is the ops runner,
+	// nil when ops.addr is empty; opsHandler, which serves it, takes the handlers
+	// that other parts add to the listener.
+	listeners    []listener
+	ui           *httpserver.Runner
+	grpc         *grpcserver.Runner
+	ops          *httpserver.Runner
+	opsHandler   *ops.Handler
 	shutdownOnce sync.Once
 	shutdownDone chan struct{}
 }
@@ -251,6 +265,12 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		return nil, err
 	}
 
+	// The gRPC health service answers without auth, like the ops routes, on the
+	// gRPC listener. It reports what /readyz does.
+	ready := newReadiness(store, leadership)
+	grpcHealth := newGRPCHealth(ready)
+	healthpb.RegisterHealthServer(grpcSrv, grpcHealth)
+
 	grpcRunner, err := grpcserver.New(cfg.GRPC, logger, grpcSrv)
 	if err != nil {
 		logHub.Close()
@@ -259,7 +279,25 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		return nil, err
 	}
 
+	opsHandler := ops.NewHandler(ops.Probes{
+		Ready:   ready.reason,
+		Leader:  leadership.AmLeader,
+		Version: buildinfo.Read(),
+	})
+	listeners := []listener{httpRunner, httpDiscoveryRunner, grpcRunner}
 	runners := []server.Runner{httpRunner, httpDiscoveryRunner, grpcRunner, lifecycleRunner, syncRunner, historyRunner}
+	var opsRunner *httpserver.Runner
+	if cfg.Ops.Enabled() {
+		opsRunner, err = httpserver.New(cfg.Ops.HTTP(), logger, opsHandler)
+		if err != nil {
+			logHub.Close()
+			_ = proxyPool.Close()
+			closeOnError(raftShutdown, eventHub)
+			return nil, err
+		}
+		listeners = append(listeners, opsRunner)
+		runners = append(runners, opsRunner)
+	}
 	if cfg.AgentAuth.Require {
 		runners = append(runners, credentialSweepRunner(logger, leadership, svc.agent))
 	}
@@ -289,13 +327,45 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		proxyPool:    proxyPool,
 		authModel:    authModel,
 		server:       srv, logHub: logHub, shutdownDone: make(chan struct{}),
+
+		ready: ready, grpcHealth: grpcHealth,
+		listeners: listeners, ui: httpRunner, grpc: grpcRunner, ops: opsRunner, opsHandler: opsHandler,
 	}, nil
+}
+
+// listener is a runner that binds a port.
+type listener interface {
+	// Bound returns a channel that closes once the runner tried to bind.
+	Bound() <-chan struct{}
+	// Addr returns the bound address, "" when the bind failed.
+	Addr() string
 }
 
 // Run starts the server runners and blocks until ctx is cancelled or a runner
 // exits unexpectedly. Returns the first error encountered, if any.
 func (a *App) Run(ctx context.Context) error {
-	return a.server.Run(ctx)
+	runCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	go a.awaitBound(runCtx)
+	go a.grpcHealth.run(runCtx)
+	return a.server.Run(runCtx)
+}
+
+// awaitBound marks the app ready to serve once every listener is bound, unless
+// one fails to bind or ctx ends first.
+func (a *App) awaitBound(ctx context.Context) {
+	for _, l := range a.listeners {
+		select {
+		case <-l.Bound():
+		case <-ctx.Done():
+			return
+		}
+		if l.Addr() == "" {
+			return
+		}
+	}
+	a.ready.bound.Store(true)
+	a.grpcHealth.sync()
 }
 
 // Shutdown releases resources acquired by [New] in reverse order of creation.
