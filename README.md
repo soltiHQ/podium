@@ -662,7 +662,7 @@ the tasks.
 | `task ci/golang/bench` | Runs every benchmark once, as a smoke check, not a performance gate. |
 | `task ci/ui/test` | Runs the UI's Node tests. |
 | `task ci/markdown/fmt`, `task markdown/fix` | Checks, or applies, mdformat on every README. |
-| `task ci/docker/smoke` | Builds the image from `bin/podium-linux-<arch>` for the host's architecture and checks a container of it; it needs curl. |
+| `task ci/docker/smoke` | Builds the image from `bin/podium-linux-<arch>` for the host's architecture and checks a container of it: `/readyz`, `/version`, the three UI assets, the data directory's mode and owner, and the uid of the process; it needs curl and tar. |
 
 To try a build, run it with its state in memory, which logs the generated
 administrator password at WARN:
@@ -683,7 +683,11 @@ check, and need one changelog label: `feature`, `bug`, `docs`, `deps`,
 
 1. Tag a commit of `main` with `vX.Y.Z`, or `vX.Y.Z-<pre-release>` such as
    `v1.2.0-rc.1`: SemVer with a `v` prefix, without `+build` metadata, which an
-   image tag cannot carry. Push the tag:
+   image tag cannot carry, and with a major version of 0 or 1. Go gives v2 and
+   later versions only to a module path that ends in `/v2`, which
+   `github.com/soltiHQ/control-plane` does not, so a binary built at a v2 tag
+   would not report it: verify refuses such a tag, and v2 needs the module path
+   changed first. Push the tag:
 
    ```sh
    git tag vX.Y.Z <commit>
@@ -698,7 +702,9 @@ check, and need one changelog label: `feature`, `bug`, `docs`, `deps`,
      `podium-darwin-arm64` with `task ci/golang/build`, which embeds the checked
      UI assets.
    - **image** builds the image for linux/amd64 and linux/arm64 from the linux
-     binaries, and pushes `ghcr.io/soltihq/podium:vX.Y.Z`, with OCI labels. It
+     binaries, without emulation, as no stage of the Dockerfile runs a program
+     of the target platform, on a BuildKit image pinned by digest, and pushes
+     `ghcr.io/soltihq/podium:vX.Y.Z`, with OCI labels. It
      runs `task ci/docker/smoke` on the pushed digest with `EXPECT_VERSION` set
      to the tag, so `/version` must report the tag; the smoke runs on the
      runner's architecture, amd64, so the arm64 image is built but not smoked.

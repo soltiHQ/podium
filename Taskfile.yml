@@ -252,7 +252,7 @@ tasks:
     vars:
       image: '{{.SMOKE_IMAGE | default "podium-smoke:local"}}'
     preconditions:
-      - sh: 'test -n "{{.SMOKE_IMAGE | default ""}}" || test -f bin/{{.name}}-linux-$(case "$(uname -m)" in x86_64) echo amd64 ;; *) echo arm64 ;; esac)'
+      - sh: 'test -n {{.SMOKE_IMAGE | default "" | shellQuote}} || test -f bin/{{.name}}-linux-$(case "$(uname -m)" in x86_64) echo amd64 ;; *) echo arm64 ;; esac)'
         msg: 'bin/{{.name}}-linux-<arch> is missing: run task ci/golang/build GOOS=linux GOARCH=<arch>'
     cmds:
       - |
@@ -260,8 +260,9 @@ tasks:
         built=
         container=podium-smoke-$$
         cleanup() {
-          docker rm -f "$container" >/dev/null 2>&1 || true
-          if [ -n "$built" ]; then docker rmi -f {{.image}} >/dev/null 2>&1 || true; fi
+          # -v removes the container's anonymous volume, /var/lib/podium, too.
+          docker rm -f -v "$container" >/dev/null 2>&1 || true
+          if [ -n "$built" ]; then docker rmi -f {{.image | shellQuote}} >/dev/null 2>&1 || true; fi
         }
         trap cleanup EXIT
         fail() {
@@ -272,11 +273,11 @@ tasks:
         case "$(uname -m)" in x86_64) arch=amd64 ;; *) arch=arm64 ;; esac
         if [ -z {{.SMOKE_IMAGE | default "" | shellQuote}} ]; then
           built=1
-          docker build --platform "linux/$arch" -t {{.image}} .
+          docker build --platform "linux/$arch" -t {{.image | shellQuote}} .
         fi
         # A generated throwaway secret: never a real one.
         secret=$(head -c 24 /dev/urandom | base64)
-        docker run -d --name "$container" -e SOLTI_AUTH_JWT_SECRET="$secret" -p 127.0.0.1::8080 -p 127.0.0.1::8081 {{.image}} >/dev/null
+        docker run -d --name "$container" -e SOLTI_AUTH_JWT_SECRET="$secret" -p 127.0.0.1::8080 -p 127.0.0.1::8081 {{.image | shellQuote}} >/dev/null
         ops=$(docker port "$container" 8081/tcp | head -n 1) || fail 'docker port 8081 failed'
         web=$(docker port "$container" 8080/tcp | head -n 1) || fail 'docker port 8080 failed'
         [ -n "$ops" ] && [ -n "$web" ] || fail 'no published port'
@@ -293,8 +294,19 @@ tasks:
         printf '%s' "$body" | grep -q '"go_version":"[^"]' || fail "/version has no go_version value: $body"
         want={{.EXPECT_VERSION | default "" | shellQuote}}
         if [ -n "$want" ] && [ "$version" != "$want" ]; then fail "/version is $version, expected $want"; fi
-        code=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' "http://$web/static/js/alpine.min.js") || true
-        [ "$code" = 200 ] || fail "/static/js/alpine.min.js answered $code"
+        # Every asset the UI's pages load, as its root layout links them.
+        for asset in /static/js/alpine.min.js /static/js/htmx.min.js /static/css/tailwindcss.css; do
+          code=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' "http://$web$asset") || true
+          [ "$code" = 200 ] || fail "$asset answered $code"
+        done
+        # The data directory's own entry, read without a shell in the image:
+        # mode 0700, owner and group 65532. --numeric-owner lists the ids, not
+        # names, in GNU tar and bsdtar alike; only the directory's line is kept,
+        # never the files in it.
+        dir=$(docker cp "$container":/var/lib/podium - | tar --numeric-owner -tvf - | awk '$NF == "podium/" || $NF == "podium"') || true
+        [ -n "$dir" ] || fail 'docker cp of /var/lib/podium listed no entry for the directory'
+        printf '%s\n' "$dir" | grep -Eq '^drwx------[[:space:]]+(65532/65532|[0-9]+[[:space:]]+65532[[:space:]]+65532)[[:space:]]' || fail "/var/lib/podium is not mode 0700 with owner and group 65532: $dir"
+        printf 'smoke: /var/lib/podium in the container: %s\n' "$dir"
         # No user name is accepted: docker top runs the host's ps, which names
         # users from the host's passwd. The configured user and the numeric uid
         # of the process must both be 65532; under user-namespace remapping the
@@ -303,10 +315,17 @@ tasks:
         # A busybox ps (Docker Desktop's VM) has no uid column; its user column
         # prints the number when the VM's passwd does not name it. Either way
         # only the number 65532 passes, never a name.
-        uid=$(docker top "$container" -o pid,uid 2>/dev/null | sed 1d | head -n 1 | awk '{ print $2 }')
-        if [ -z "$uid" ]; then uid=$(docker top "$container" -o pid,user | sed 1d | head -n 1 | awk '{ print $2 }'); fi
+        uid=
+        if top=$(docker top "$container" -o pid,uid 2>/dev/null); then
+          uid=$(printf '%s\n' "$top" | sed 1d | head -n 1 | awk '{ print $2 }')
+        fi
+        if [ -z "$uid" ]; then
+          top=$(docker top "$container" -o pid,user 2>&1) || fail "docker top failed, so the uid of the process is unknown: $top"
+          uid=$(printf '%s\n' "$top" | sed 1d | head -n 1 | awk '{ print $2 }')
+        fi
+        [ -n "$uid" ] || fail 'docker top listed no process, so the uid of the process is unknown'
         [ "$uid" = 65532 ] || fail "the process runs as uid $uid, want 65532"
-        printf 'smoke ok: /readyz, /version %s, /static/js/alpine.min.js, uid 65532\n' "$version"
+        printf 'smoke ok: /readyz, /version %s, /static/js/alpine.min.js, /static/js/htmx.min.js, /static/css/tailwindcss.css, /var/lib/podium 0700 65532:65532, uid 65532\n' "$version"
 
   prepare:
     desc: Generate sources and build the UI assets for a local run

@@ -26,8 +26,13 @@ jobs:
         with:
           # SemVer with a v prefix and an optional pre-release suffix. The
           # default pattern also takes +build metadata, which a Docker tag
-          # cannot carry.
-          pattern: '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$'
+          # cannot carry. The major version is 0 or 1: Go gives v2 and later
+          # versions only to a module path that ends in /v2 (or /vN), and
+          # github.com/soltiHQ/control-plane has none, so a binary built at a
+          # v2+ tag would not report the tag as its version, and the smoke
+          # check's EXPECT_VERSION would fail after the image was pushed. For
+          # v2, move the module path to .../v2 and allow major 2 here.
+          pattern: '^v(0|1)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -88,12 +93,18 @@ jobs:
           pattern: podium-linux-*
           path: bin
           merge-multiple: true
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
-        with:
-          platforms: arm64
+      # No QEMU: no stage of the Dockerfile runs a binary of the target
+      # platform. The data stage runs on $BUILDPLATFORM, and the target stage
+      # only copies files, so BuildKit builds linux/arm64 here without
+      # emulation; the smoke check below runs the amd64 image.
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          # The BuildKit daemon runs privileged in this job, which can push
+          # packages: its image is pinned by digest, not the moving
+          # buildx-stable-1 tag. buildx-stable-1 was this index on 2026-11-09
+          # (docker buildx imagetools inspect).
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
