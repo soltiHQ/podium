@@ -3,10 +3,17 @@
 Package config aggregates per-package configuration structs and provides a
 single `Default()` constructor for development use:
 
-- **Config** — top-level struct embedding sub-configs from `httpserver`,
-  `grpcserver`, `lifecycle`, `sync`, `server`, `auth`, and `trigger`.
-- **Default()** — returns safe development defaults. Zero-valued sub-configs
-  inherit package-level defaults via each package's `withDefaults()`.
+- **Config** — top-level struct of every section, each the config struct of its
+  owning package: `history` (`service/history`, `server/runner/history`),
+  `http` and `http_discovery` (`httpserver`), `grpc` (`grpcserver`), `ops`,
+  `sync`, `lifecycle`, `triggers` (`uikit/htmx`), `server`, `auth`, `cors` and
+  `streams` (`transport/http/middleware`), `cluster`, `events` (`event`), `tls`
+  (`transport/tlsconf`), and `agent_auth` and `log`, defined here.
+- **Default()** — returns safe development defaults. A field left at zero takes
+  its package's default where the package has one, when the package reads it
+  (`withDefaults()` in `server`, `httpserver`, `grpcserver`, `lifecycle` and
+  `sync`, `WithDefaults()` in `auth`, `cors` and `history`); "Every setting"
+  lists the value each setting runs with.
 
 ## Adding a new sub-config
 
@@ -20,8 +27,9 @@ single `Default()` constructor for development use:
 `Load(path, log)` reads in priority order: `Default()` → YAML file (`path`,
 which `cmd/main.go` takes from `--config`, or `CONFIG_PATH` when it is empty)
 → env, then enforces `Config.Validate()`. Loading is strict:
-a setting that is misspelled or misplaced stops podium at start, before any
-listener or store opens.
+a YAML key that is misspelled or misplaced, or a mistyped variable under a
+section's prefix (see "Environment variables"), stops podium at start, before
+any listener or store opens.
 
 ### Command line
 
@@ -44,7 +52,11 @@ configuration loads (`TestCLIRefusesUnknownFlagBeforeStarting`):
 - An unknown flag, an unknown subcommand, a flag without its value or an
   argument that belongs to no command prints the error and the usage to stderr
   and exits 2. A subcommand is the first argument: `podium --config f.yaml
-  agent-token x` is an error.
+  agent-token x` is an error. Besides a bare `-h` or `--help`, `podium
+  agent-token` reads only `--generation` and `--` as options: any other
+  argument ends them, so a lone unknown flag,
+  such as `podium agent-token -v`, is taken as the agent ID, and a second
+  argument prints its usage line alone and exits 2.
 
 ### YAML file
 
@@ -65,9 +77,9 @@ the parts joined by `_`: `http.read_header_timeout` is
 `SOLTI_HTTP_READ_HEADER_TIMEOUT`, `cluster.raft.tls.ca_file` is
 `SOLTI_CLUSTER_RAFT_TLS_CA_FILE`. The two settings that only the environment
 may carry keep their own names, `SOLTI_AGENT_AUTH_ENROLL_SECRET` and
-`SOLTI_BOOTSTRAP_ADMIN_PASSWORD`. No other name is read: `HOSTNAME`, `PORT`,
-`DATA_DIR`, `REQUIRE` and the like, without `SOLTI_` and the path, change
-nothing.
+`SOLTI_BOOTSTRAP_ADMIN_PASSWORD`. No other name is read, but `CONFIG_PATH`,
+which names the file: `HOSTNAME`, `PORT`, `DATA_DIR`, `REQUIRE` and the like,
+without `SOLTI_` and the path, change nothing.
 
 A value is read as follows:
 
@@ -88,7 +100,7 @@ expected, never the value, which may be a secret.
 A `SOLTI_` variable that is not a setting is handled by where its name falls:
 
 - Under a section's prefix (`SOLTI_HTTP_`, `SOLTI_HTTP_DISCOVERY_`,
-  `SOLTI_GRPC_`, `SOLTI_SYNC_`, `SOLTI_LIFECYCLE_`, `SOLTI_TRIGGERS_`,
+  `SOLTI_GRPC_`, `SOLTI_OPS_`, `SOLTI_SYNC_`, `SOLTI_LIFECYCLE_`, `SOLTI_TRIGGERS_`,
   `SOLTI_SERVER_`, `SOLTI_AUTH_`, `SOLTI_CORS_`, `SOLTI_CLUSTER_`,
   `SOLTI_EVENTS_`, `SOLTI_STREAMS_`, `SOLTI_TLS_`, `SOLTI_AGENT_AUTH_`,
   `SOLTI_HISTORY_`, `SOLTI_LOG_`): it is a mistyped setting, and loading fails with its name
@@ -130,11 +142,15 @@ colour). Both go to stdout. A value that is none of those fails loading as
 
 The settings apply once the configuration is loaded. Before that podium logs
 JSON on stdout at `info`: the first line of a run (`podium starting`, with
-`version`, `commit`, `modified`, `built`, `go_version` and `platform`), and
+`version`, `commit`, `modified`, `go_version` and `platform`, and `built` when
+the binary carries the commit time), and
 what loading reports, such as the warning about a `SOLTI_` variable that is not
-a setting. After it, every line, the raft library's included (see
-`internal/raft`, "Logging"), follows `log.level` and `log.format`; a failure to
-load is logged by the bootstrap logger and exits 1. Errors that `net/http`
+a setting. After it, every line podium writes, the raft library's included (see
+`internal/raft`, "Logging"), follows `log.level` and `log.format`; a library
+that logs through its own default logger, which podium does not route, such as
+grpc-go's `grpclog` or the standard `log` that `httputil.ReverseProxy` falls
+back to, keeps writing to stderr. A failure to load is logged by the bootstrap
+logger and exits 1. Errors that `net/http`
 reports on its own, such as a failed TLS handshake or the panic of a handler,
 are WARN lines with the server's name in `runner`
 (`TestHTTPServerErrorsGoToZerolog`).
@@ -145,8 +161,11 @@ are WARN lines with the server's name in `runner`
 its own for the probes of supervisors and load balancers; an empty value turns
 it off. `ops.name` (default `ops`) names its runner in the logs. The listener is
 **plain HTTP** and its routes are **never authenticated**: they sit outside the
-UI's middleware, set no cookie and show no token, secret or state of the
-cluster. Keep it on an internal network: the default binds loopback only, and a
+UI's middleware, set no cookie and show no token, secret or stored record.
+What they do tell is the node's health, whether it leads, its build and its
+metrics, which on a raft node include its raft state, term, indexes and peer
+count.
+Keep it on an internal network: the default binds loopback only, and a
 container that is probed from outside binds `0.0.0.0:8081` and publishes the
 port to the orchestrator alone. Every route answers GET and HEAD, as one line of
 text (`ok`, or the reason) except `/version` and `/metrics`:
@@ -163,13 +182,17 @@ A node is ready when start-up has finished (every listener, the ops listener
 included, is bound, and the store is open), the store serves, and the shutdown
 has not begun. The store serves when a durable standalone store has not failed
 (`storage failed` is the state in which its reads and writes fail until restart,
-which it also logs as an ERROR) and, on raft, when this node knows a leader. The
-reasons apply in that order. `/livez` stays 200 whatever the store does: a
+which it also logs as an ERROR) and, on raft, when this node knows a leader.
+`/readyz` gives the first reason that applies, in this order: `shutting down`,
+`starting`, `storage failed`, `no raft leader` (`TestReadinessReasonOrder`).
+`/livez` stays 200 whatever the store does: a
 restart does not mend a raft cluster without a leader, and a failed durable store
 is for the operator to look at. An in-memory standalone store cannot fail.
 
-The gRPC listener serves `grpc.health.v1.Health` without authentication: the
-overall service (`""`) and `solti.discover.v1.DiscoverService` are `SERVING`
+The gRPC listener serves `grpc.health.v1.Health` without authentication,
+though with `tls.server.client_ca_file` set the listener itself still asks
+every client, a health checker included, for a certificate of the agents' CA:
+the overall service (`""`) and `solti.discover.v1.DiscoverService` are `SERVING`
 while `/readyz` answers 200, and `NOT_SERVING` while it does not. A `Check` reads
 the state anew; a client that `Watch`es sees a change within a second, and its
 stream ends when the gRPC listener starts to stop.
@@ -208,8 +231,9 @@ must cover both, and the 30s of step 4. A **second** SIGINT or SIGTERM, while th
 shutdown runs, ends the process at once with status 1, after a WARN line, and
 cleans nothing up. A runner that exits on its own, such as a listener that cannot
 bind, stops the others without the delay, turns readiness and the gRPC health
-service to "shutting down" as they stop (`TestRunnerExitFlipsReadiness`), and
-exits 1. The ops listener stops with
+service to "shutting down" (`TestRunnerExitFlipsReadiness`), and exits 1. The
+turn comes as the UI listener starts to stop, or, when the UI listener never
+bound, once every runner has stopped. The ops listener stops with
 the others, so after step 2 its probes get a refused connection.
 
 Tests: `TestInFlightRequestFinishesAtShutdown`, `TestStopLetsRequestsInFlightFinish`,
@@ -218,7 +242,9 @@ Tests: `TestInFlightRequestFinishesAtShutdown`, `TestStopLetsRequestsInFlightFin
 
 ### Every setting
 
-Default is what the setting holds when neither file nor environment sets it;
+Default is the value podium runs with when neither file nor environment sets
+the setting: the one `Default()` gives, or, where `Default()` leaves the
+setting at zero, the default the package or the runner applies to a zero value;
 for a setting that is empty here the package or the runner may still apply its
 own default or have no value, as the section on it says.
 
@@ -333,12 +359,19 @@ own default or have no value, as the section on it says.
 
 ## TLS
 
-`config.TLS` is one shared block applied to **all** transports (mirrors the SDK's
-`solti-tls`). Both halves are opt-in — empty means plaintext.
+`config.TLS` is one shared block applied to the HTTP, HTTP-discovery and gRPC
+listeners and to podium's outbound calls (mirrors the SDK's `solti-tls`); the
+ops listener is always plain HTTP, and the raft transport has TLS settings of
+its own. Both halves are opt-in: an empty `tls.server` serves plaintext, and
+with an empty `tls.client` podium dials an agent's gRPC or `http://` endpoint in
+plaintext, but an `https://` endpoint, or a leader that serves TLS, over TLS
+against the system roots.
 
 - `tls.server` (`cert_file`, `key_file`, `client_ca_file`) — the CP's serving
   identity for the HTTP, HTTP-discovery and gRPC listeners. Setting
-  `client_ca_file` turns on **mTLS** (client cert required).
+  `client_ca_file` turns on **mTLS** (client cert required) on the
+  HTTP-discovery and gRPC listeners; the HTTP listener of the UI and the API
+  never asks for a client certificate, so browsers keep working.
 - `tls.client` (`ca_file`, `cert_file`, `key_file`) — the CP as a client when
   dialing agents (proxy). `ca_file` verifies agent certs; `cert_file`/`key_file`
   present a client cert for mTLS.
@@ -403,9 +436,10 @@ ID enrolls it and sets the endpoint podium calls, so set
 SOLTI_AGENT_AUTH_ENROLL_SECRET or tls.server.client_ca_file, or keep the
 discovery listeners reachable only from agent networks`.
 
-With `require: true`, a token longer than 1024 bytes is refused before any
-check, with HTTP 400 `Agent token is too long.` / gRPC `InvalidArgument`, and
-nothing is enrolled. The cap applies to what agents send, never to stored
+With `require: true`, a token longer than 1024 bytes is refused before it is
+compared or enrolled, after the payload and the sync rate are checked, with
+HTTP 400 `Agent token is too long.` / gRPC `InvalidArgument`, and nothing is
+enrolled. The cap applies to what agents send, never to stored
 state: a credential an older version stored with a longer token still loads, so
 podium starts, but that agent's syncs are refused with 400, until its credential
 is reset (see "Resetting a credential" below). gRPC discovery caps request
@@ -497,15 +531,15 @@ standalone and each leadership term of a raft node, for every such credential
 (`TestLegacyRowsConvertedAtStart`, in `internal/app`, shows a standalone
 start). A stored token that an earlier secret derived stays stored: it keeps
 working, and whoever holds that earlier secret can derive it. Each such start
-and term then logs, at WARN with `stored_credentials`, how many stored
-credentials are left, `agent credentials: stored tokens are left, kept raw in
+and term then logs, when there are any, at WARN with `stored_credentials`, how
+many stored credentials are left, `agent credentials: stored tokens are left, kept raw in
 podium's state and in its backups: tokens agents chose while no enrollment
 secret was set, and tokens an earlier secret derived, which stay valid and
 which that secret still derives; resetting an agent's credential (POST
 /api/v1/agents/{id}/credential) while an enrollment secret is set moves it to a
 derived credential`, and, at ERROR with `unusable_credentials`, how many
 derived credentials it cannot use, because no secret is set or they derive from
-another one. With `agent_auth.require: false` podium neither converts nor
+another one; a count of none logs nothing. With `agent_auth.require: false` podium neither converts nor
 counts anything.
 
 Upgrading leaves the raw tokens already written where they are: in the
@@ -742,10 +776,14 @@ when the follower knows its leader (see "Leader hint" in
 `auth refresh needs the leader`, with the method and the path, and the access
 log of an API route records a 503 with `X-Leader` as a WARN too, so the refresh
 leaves no ERROR line while the follower knows its leader. A refresh on a leader
-that loses its leadership, or shuts down, as the rotation commits gets the same
-503, and its WARN, `auth refresh outcome unknown`, says that the rotation may
-have taken effect: a retry at `X-Leader` refreshes the browser when it did not,
-and when it did, the browser logs in again. So with rotation on, a raft
+that loses its leadership as the rotation commits gets 503 too, with `X-Leader`
+when the node knows the new leader by then, and its WARN, `auth refresh outcome
+unknown`, says that the rotation may have taken effect: a retry at `X-Leader`
+refreshes the browser when it did not, and when it did, the browser logs in
+again. A refresh on a node that shuts down as the rotation commits has the same
+outcome and WARN, but its 503 carries no `X-Leader`, as the node knows no leader
+any more, so the access log of an API route records it as an ERROR, and a retry
+has to go to another node. So with rotation on, a raft
 deployment needs leader-sticky routing. The ops listener's `/leaderz` (see "Ops
 listener") answers 200 on the leader only and needs no credentials, so a balancer
 can route to the leader with it: keep rotation off in raft mode unless such
@@ -983,7 +1021,9 @@ heartbeat timeouts, in milliseconds; 0 keeps hashicorp/raft's default of 1 s.
 Configuration loading refuses what hashicorp/raft would refuse at the start: a
 timeout under 5 ms, and an election timeout below the heartbeat timeout, the
 default of 1 s counted, so a `heartbeat_timeout_ms` over 1000 needs an
-`election_timeout_ms` at least as long.
+`election_timeout_ms` at least as long. It also refuses a value over
+9223372036854, the most milliseconds a Go duration holds, as too large, naming
+that largest value.
 
 `snapshot_interval`, `snapshot_threshold` and `trailing_logs` set how a node
 compacts its raft log. Every `snapshot_interval` (a duration string such as
@@ -999,7 +1039,8 @@ not `cluster.standalone.snapshot_threshold`, which is the
 standalone store's. hashicorp/raft's own logs, of its elections, snapshots and
 transport, go through podium's logger like any other line, at their own INFO,
 WARN and ERROR levels, with `profile=raft` and `component` (`raft`, `snapshot`
-or `raft-net`); its DEBUG lines are dropped and it writes nothing to stderr. See
+or `raft-net`); its TRACE and DEBUG lines are DEBUG lines, written at
+`log.level: debug` and dropped above it, and it writes nothing to stderr. See
 `internal/raft/README.md`.
 
 Each `discovery.peers` entry is `id=host:port`: a node's `node_id` and the
@@ -1194,12 +1235,19 @@ alone stops the key, as no node accepts a certificate of the old CA any more.
 Re-issuing the removed node's `tls.server` certificate does not: podium checks
 no revocation, so the old certificate keeps passing the followers' check
 against `tls.client.ca_file` until it expires. That matters when a replacement
-reuses the node's host name or IP; then also replace the CA behind
-`tls.client.ca_file` and the CA that agents trust for the server. A compromised
-host holds more than its raft key: its other keys, `auth.jwt_secret`,
-`agent_auth.enroll_secret`, which derives the token of every agent enrolled
-under it, and in `data_dir` the raw tokens of the stored credentials, and the
-password hashes. "A compromised node" in `internal/raft/README.md` lists
+reuses the node's host name or IP; then also issue every node a new
+`tls.server` certificate from a new CA, add that CA to `tls.client.ca_file` and
+to what the agents trust for the server, and take the old CA out of both:
+nothing else stops the old certificate. `tls.client.ca_file` also verifies the
+agents' own endpoints, as one client configuration serves the calls to agents
+and the forwards to the leader, so it keeps the CA of those; a server CA that
+also signed the agents' endpoints can leave only once those are re-issued too.
+A compromised host holds more than its raft key: its other keys,
+`auth.jwt_secret`, `agent_auth.enroll_secret`, which derives the token of every
+agent enrolled under it, and in `data_dir` the raw tokens of the stored
+credentials, the password hashes, and the task specs, with whatever an operator
+put in a task's command or config. "A compromised node" in
+`internal/raft/README.md` lists
 everything podium keeps on a node, with each rotation and its cost; see also
 "Transport security" there.
 

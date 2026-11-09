@@ -260,7 +260,12 @@ every rotation restarts the nodes it touches.
   name or IP, which the old key can still answer for. Rotation: a new CA for
   the `tls.server` certificates, a certificate of it for every node, and the new
   CA in `tls.client.ca_file` on every node and in the agents' trust for podium's
-  server. Cost: every node restarts, and every agent must trust the new CA.
+  server, in place of the old one: the old CA must leave both, as nothing else
+  stops the old key. `tls.client.ca_file` also verifies the agents' own
+  endpoints, as one client configuration serves the calls to agents and the
+  forwards to the leader, so it keeps the CA of those; a server CA that also
+  signed the agents' endpoints can leave only once those are re-issued too.
+  Cost: every node restarts, and every agent must trust the new CA.
 - The `tls.client` key, the certificate podium presents to the agents when they
   ask for one, and to the leader when it asks. With agent mTLS
   (`tls.server.client_ca_file`) it chains to the agents' CA, so it is a valid
@@ -299,7 +304,10 @@ every rotation restarts the nodes it touches.
   keeps working, so one a former secret derived, which an older version
   stored, can still be derived by whoever holds that former secret.
 - The state in `data_dir`, in the raft log and the snapshots. Every node holds
-  all of it, and podium does not encrypt it. Users hold no secret. Passwords
+  all of it, and podium does not encrypt it. The task specs are kept as written,
+  with whatever an operator put in a task's command or config, a credential
+  included, readable on every node; podium rotates nothing in them. Users hold
+  no secret. Passwords
   are stored as bcrypt hashes, which can be guessed at offline, and refresh
   tokens as SHA3-256 hashes of 32 random bytes; session IDs and user IDs are
   stored as they are. A derived credential, of an agent enrolled under the
@@ -474,7 +482,10 @@ The election and heartbeat timeouts must be ones that hashicorp/raft's
 the stores are open and the transport listens: each at 5 ms at least, 0 keeping
 the default of 1 s, and the election timeout no shorter than the heartbeat
 timeout, the defaults counted (`TestRaftTimeoutsConfig` and
-`TestRaftTimeoutLimitsAreHashicorps`, in `internal/cluster`). The lease, which
+`TestRaftTimeoutLimitsAreHashicorps`, in `internal/cluster`). `Validate` also
+refuses a value over 9223372036854 ms, the most milliseconds a Go duration
+holds, as too large: as a duration it would wrap, to a value under 5 ms or to
+one the other checks pass (`TestRaftTimeoutsConfig`). The lease, which
 `New` lowers to the heartbeat timeout when that is shorter, and the snapshot
 interval, 5 ms at least, are then within its limits too; nothing else of it
 depends on the configuration. `New` runs hashicorp/raft's check itself before
@@ -1194,17 +1205,22 @@ rotation of the refresh token is a transaction. On a follower it fails with
 `ErrNotLeader` before it consumes the token: the request answers 503 with
 `X-Leader` when the follower knows its leader, no cookie is set, and the
 follower logs a WARN from `Auth`, `auth refresh needs the leader`, not an
-ERROR. On a leader that loses its leadership, or shuts down, as the rotation
-commits, the rotation fails with `ErrLeadershipLost` and may have taken effect:
-the request answers the same 503, and `Auth`'s WARN says so, `auth refresh
-outcome unknown`, rather than naming a follower. On an API route the access log
+ERROR. On a leader that loses its leadership as the rotation commits, the
+rotation fails with `ErrLeadershipLost` and may have taken effect: the request
+answers 503, with `X-Leader` when the node knows the new leader by then, and
+`Auth`'s WARN says so, `auth refresh outcome unknown`, rather than naming a
+follower. On a node that shuts down as the rotation commits, the outcome and the
+WARN are the same, but the 503 carries no `X-Leader`, as `Shutdown` of
+hashicorp/raft v1.8.0 clears the known leader (see "Browsers and
+`auth.rotate_refresh`"). On an API route the access log
 wraps `Auth` and logs every 5xx at ERROR, except a 503 that carries `X-Leader`,
 which it logs at WARN: that header is set only for a routing condition, so the
 refresh on a follower that knows its leader leaves no ERROR line
 (`TestAccessLogLevelFollowsTheStatus`,
 `TestFollowerRefreshThroughTheAccessLogLogsNoError`), while one on a follower
 that knows no leader answers its 503 without the header, which the access log
-logs at ERROR. The same cookies then refresh at the leader
+logs at ERROR, as it does the 503 of a node that shut down. The same cookies
+then refresh at the leader
 (`TestRotatingRefreshOnAFollowerAsksForTheLeader`, and
 `TestRefreshOnAFollowerAsksForTheLeader` in the middleware package). So with
 `auth.rotate_refresh: true` a raft deployment needs leader-sticky routing, see
