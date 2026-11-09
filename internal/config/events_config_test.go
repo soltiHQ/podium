@@ -38,7 +38,7 @@ func TestLoadEventsCoalesce(t *testing.T) {
 			if tc.env != "" {
 				t.Setenv("SOLTI_EVENTS_COALESCE", tc.env)
 			}
-			cfg, err := load(nil)
+			cfg, err := load("")
 			if tc.errorPath != "" {
 				if !errors.Is(err, event.ErrNegativeCoalesce) || !strings.Contains(err.Error(), tc.errorPath) {
 					t.Fatalf("want a %s error wrapping ErrNegativeCoalesce, got %v", tc.errorPath, err)

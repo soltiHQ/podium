@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -237,5 +238,120 @@ func TestAgentTokenSubcommandRunsBeforeConfigLoading(t *testing.T) {
 	}
 	if want := "ee91297d059304dd88e1c5650d195795e3fa9c921c419a61aced53e41a3c0058\n"; stdout.String() != want {
 		t.Fatalf("stdout %q, want %q", stdout.String(), want)
+	}
+}
+
+// serveSpy stands for the server: it records that it started and with which
+// config path.
+type serveSpy struct {
+	started bool
+	path    string
+}
+
+func (s *serveSpy) serve(path string) int {
+	s.started, s.path = true, path
+	return 0
+}
+
+// A command line that is no command ends with the error and the usage on stderr
+// and exit 2, before the server starts and so before any configuration loads.
+func TestCLIRefusesUnknownFlagBeforeStarting(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string // a part of the error
+	}{
+		{"unknown flag", []string{"--bogus"}, "-bogus"},
+		{"unknown flag after a good one", []string{"--config", "f.yaml", "--bogus"}, "-bogus"},
+		{"unknown subcommand", []string{"serve"}, `unknown subcommand "serve"`},
+		{"extra argument", []string{"--config", "f.yaml", "extra"}, `unexpected argument "extra"`},
+		{"missing value", []string{"--config"}, "needs an argument"},
+		{"subcommand after a flag", []string{"--config", "f.yaml", "agent-token", "agent-1"}, `unexpected argument "agent-token"`},
+		{"version with an argument", []string{"version", "now"}, "version takes no arguments"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var spy serveSpy
+			var stdout, stderr bytes.Buffer
+			code := run(tc.args, &stdout, &stderr, spy.serve)
+			if code != 2 || spy.started || stdout.Len() != 0 {
+				t.Fatalf("exit %d, started %v, stdout %q; want exit 2, nothing started, no stdout", code, spy.started, stdout.String())
+			}
+			if !strings.Contains(stderr.String(), tc.want) || !strings.Contains(stderr.String(), "usage: podium") {
+				t.Fatalf("stderr %q, want the error (%s) and the usage", stderr.String(), tc.want)
+			}
+		})
+	}
+}
+
+// The server starts with the path of --config, in any spelling of the flag, or
+// with none.
+func TestCLIStartsTheServerWithTheConfigPath(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{nil, ""},
+		{[]string{"--config", "a.yaml"}, "a.yaml"},
+		{[]string{"--config=a.yaml"}, "a.yaml"},
+		{[]string{"-config", "a.yaml"}, "a.yaml"},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			var spy serveSpy
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, &stdout, &stderr, spy.serve); code != 0 || !spy.started || spy.path != tc.want || stdout.Len()+stderr.Len() != 0 {
+				t.Fatalf("exit %d, started %v, path %q, output %q %q; want path %q", code, spy.started, spy.path, stdout.String(), stderr.String(), tc.want)
+			}
+		})
+	}
+}
+
+// -h and --help print the usage to stdout and exit 0, with nothing started.
+func TestHelpExitsZero(t *testing.T) {
+	for _, flag := range []string{"-h", "--help"} {
+		t.Run(flag, func(t *testing.T) {
+			var spy serveSpy
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{flag}, &stdout, &stderr, spy.serve); code != 0 || spy.started || stderr.Len() != 0 {
+				t.Fatalf("exit %d, started %v, stderr %q; want exit 0, nothing started, no stderr", code, spy.started, stderr.String())
+			}
+			for _, want := range []string{"usage: podium [--config PATH]", "podium agent-token", "podium version"} {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("stdout %q, want it to hold %q", stdout.String(), want)
+				}
+			}
+		})
+	}
+}
+
+// "podium version" and "podium --version" print the one line and start nothing.
+// A test binary has no VCS stamp, so its commit is unknown.
+func TestVersionCommandPrintsOneLine(t *testing.T) {
+	line := regexp.MustCompile(`^podium \S+ \(commit (unknown|[0-9a-f]{12})(, modified)?, built \S+, go\S+ [a-z0-9]+/[a-z0-9]+\)\n$`)
+	for _, args := range [][]string{{"version"}, {"--version"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var spy serveSpy
+			var stdout, stderr bytes.Buffer
+			if code := run(args, &stdout, &stderr, spy.serve); code != 0 || spy.started || stderr.Len() != 0 {
+				t.Fatalf("exit %d, started %v, stderr %q; want exit 0, nothing started, no stderr", code, spy.started, stderr.String())
+			}
+			if !line.MatchString(stdout.String()) {
+				t.Fatalf("stdout %q is not the version line", stdout.String())
+			}
+		})
+	}
+}
+
+// podium agent-token runs through the grammar with its own behaviour and exit codes.
+func TestCLIRunsAgentToken(t *testing.T) {
+	t.Setenv("SOLTI_AGENT_AUTH_ENROLL_SECRET", enrollSecret)
+	var spy serveSpy
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"agent-token", "agent-1"}, &stdout, &stderr, spy.serve)
+	if want := "ee91297d059304dd88e1c5650d195795e3fa9c921c419a61aced53e41a3c0058\n"; code != 0 || spy.started || stdout.String() != want || stderr.Len() != 0 {
+		t.Fatalf("exit %d, started %v, stdout %q, stderr %q; want the token", code, spy.started, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	if code := run([]string{"agent-token"}, &stdout, &stderr, spy.serve); code != 2 {
+		t.Fatalf("agent-token without an ID: exit %d, want 2", code)
 	}
 }

@@ -57,7 +57,7 @@ func TestUnknownKeyFailsWithPathAndLine(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeConfig(t, tc.body)
-			_, err := load(nil)
+			_, err := load("")
 			if err == nil || err.Error() != strings.Replace(tc.want, "%s", path, 1) {
 				t.Fatalf("error = %v, want %s", err, strings.Replace(tc.want, "%s", path, 1))
 			}
@@ -74,7 +74,7 @@ func TestEnvOnlyKeyInFileFails(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeConfig(t, tc.body)
-			_, err := load(nil)
+			_, err := load("")
 			if err == nil || !strings.Contains(err.Error(), path+":") ||
 				!strings.Contains(err.Error(), tc.key+" is read from "+tc.env+" only; remove it from the file") {
 				t.Fatalf("error = %v, want %s read from %s only", err, tc.key, tc.env)
@@ -96,7 +96,7 @@ func TestEmptyFileFails(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeConfig(t, tc.body)
-			_, err := load(nil)
+			_, err := load("")
 			if want := "config: " + path + " holds no settings"; err == nil || err.Error() != want {
 				t.Fatalf("error = %v, want %q", err, want)
 			}
@@ -191,7 +191,7 @@ func TestEnvNamesFollowYAMLPaths(t *testing.T) {
 func TestBareEnvNamesAreIgnored(t *testing.T) {
 	t.Setenv("CONFIG_PATH", "")
 	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
-	before, err := load(nil)
+	before, err := load("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestBareEnvNamesAreIgnored(t *testing.T) {
 	} {
 		t.Setenv(name, value)
 	}
-	after, err := load(nil)
+	after, err := load("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestUnknownSoltiEnv(t *testing.T) {
 			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
 			t.Setenv(tc.name, value)
 			var logs bytes.Buffer
-			_, err := loadWith(nil, zerolog.New(&logs))
+			_, err := Load("", zerolog.New(&logs))
 			if tc.fails {
 				want := "unknown environment variable " + tc.name
 				if err == nil || !strings.Contains(err.Error(), want) {
@@ -285,7 +285,7 @@ func TestEnvValueErrorsNameTheVariable(t *testing.T) {
 			t.Setenv("CONFIG_PATH", "")
 			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
 			t.Setenv(tc.name, tc.value)
-			_, err := load(nil)
+			_, err := load("")
 			if err == nil || !strings.Contains(err.Error(), tc.name+": "+tc.says) {
 				t.Fatalf("error = %v, want %s: %s", err, tc.name, tc.says)
 			}
@@ -328,7 +328,7 @@ func TestEverySectionValidatedAtLoad(t *testing.T) {
 			t.Setenv("CONFIG_PATH", "")
 			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
 			t.Setenv(tc.env, tc.value)
-			_, err := load(nil)
+			_, err := load("")
 			// A section reports as config.<section>, or config.<section>.<part> when it has parts.
 			if err == nil || !strings.Contains(err.Error(), "config."+tc.section+":") && !strings.Contains(err.Error(), "config."+tc.section+".") {
 				t.Fatalf("error = %v, want one that names config.%s", err, tc.section)

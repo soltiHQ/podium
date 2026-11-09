@@ -17,10 +17,34 @@ single `Default()` constructor for development use:
 
 ## Loading from external sources
 
-`Load()` reads in priority order: `Default()` → YAML file (`--config` /
-`CONFIG_PATH`) → env, then enforces `Config.Validate()`. Loading is strict:
+`Load(path, log)` reads in priority order: `Default()` → YAML file (`path`,
+which `cmd/main.go` takes from `--config`, or `CONFIG_PATH` when it is empty)
+→ env, then enforces `Config.Validate()`. Loading is strict:
 a setting that is misspelled or misplaced stops podium at start, before any
 listener or store opens.
+
+### Command line
+
+The command line is parsed strictly, before anything starts and before any
+configuration loads (`TestCLIRefusesUnknownFlagBeforeStarting`):
+
+- `podium [--config PATH]` runs the server. `--config` may be spelled
+  `-config` or `--config=PATH`.
+- `podium agent-token [--generation N] [--] <agent-id>` prints an agent's token
+  (see "Enrollment secret").
+- `podium version` and `podium --version` print one line, `podium <version>
+  (commit <12 hex>[, modified], built <RFC 3339>, <go version> <os>/<arch>)`
+  (`TestVersionCommandPrintsOneLine`), and start nothing. The version, the
+  commit and the time come from the build information the Go toolchain embeds in
+  the binary, and nothing is injected at link time: `dev` stands for a build that
+  has no module version, and `unknown` for a commit or a time a build without
+  VCS information lacks. The time is the commit's.
+- `-h` and `--help` print the usage to stdout and exit 0
+  (`TestHelpExitsZero`).
+- An unknown flag, an unknown subcommand, a flag without its value or an
+  argument that belongs to no command prints the error and the usage to stderr
+  and exits 2. A subcommand is the first argument: `podium --config f.yaml
+  agent-token x` is an error.
 
 ### YAML file
 

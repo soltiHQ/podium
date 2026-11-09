@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/app"
+	"github.com/soltiHQ/control-plane/internal/buildinfo"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 )
@@ -26,16 +28,92 @@ import (
 const shutdownTimeout = 30 * time.Second
 
 func main() {
-	// The subcommand needs no configuration: it runs before the config loads.
-	if len(os.Args) > 1 && os.Args[1] == "agent-token" {
-		os.Exit(agentToken(os.Args[2:], os.Stdout, os.Stderr))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, serve))
+}
+
+// usage is what -h prints, and what follows an error of the command line.
+const usage = `usage: podium [--config PATH]
+       podium agent-token [--generation N] [--] <agent-id>
+       podium version
+
+podium [--config PATH] runs the server; the config file is PATH, or CONFIG_PATH.
+podium agent-token prints the token of an agent ID, derived from the enrollment secret.
+podium version, or podium --version, prints the version.
+`
+
+// run is podium's command line: it runs the command of args and returns the exit
+// code. serve starts the server with the path of the config file, "" for none.
+// The command line is strict: an unknown flag or subcommand, a flag without its
+// value or an argument that belongs to no command prints the error and the usage
+// to stderr and exits 2, before anything starts or any configuration loads.
+// -h and --help print the usage to stdout and exit 0.
+func run(args []string, stdout, stderr io.Writer, serve func(configPath string) int) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "agent-token":
+			// The subcommand needs no configuration.
+			return agentToken(args[1:], stdout, stderr)
+		case "version":
+			if len(args) > 1 {
+				return usageError(stderr, errors.New("version takes no arguments"))
+			}
+			return printVersion(stdout, stderr)
+		}
 	}
+	var (
+		path    string
+		version bool
+		fs      = flag.NewFlagSet("podium", flag.ContinueOnError)
+	)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&path, "config", "", "")
+	fs.BoolVar(&version, "version", false, "")
+	switch err := fs.Parse(args); {
+	case errors.Is(err, flag.ErrHelp):
+		_, _ = io.WriteString(stdout, usage)
+		return 0
+	case err != nil:
+		return usageError(stderr, err)
+	}
+	if fs.NArg() > 0 {
+		arg := fs.Arg(0)
+		if fs.NArg() == len(args) {
+			return usageError(stderr, fmt.Errorf("unknown subcommand %q", arg))
+		}
+		return usageError(stderr, fmt.Errorf("unexpected argument %q", arg))
+	}
+	if version {
+		return printVersion(stdout, stderr)
+	}
+	return serve(path)
+}
 
-	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+// usageError prints err and the usage to stderr and returns 2.
+func usageError(stderr io.Writer, err error) int {
+	_, _ = fmt.Fprintf(stderr, "podium: %v\n%s", err, usage)
+	return 2
+}
 
-	cfg, err := config.Load()
+// printVersion prints the version line.
+func printVersion(stdout, stderr io.Writer) int {
+	if _, err := fmt.Fprintln(stdout, buildinfo.Read()); err != nil {
+		_, _ = fmt.Fprintf(stderr, "podium: write the version: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// serve runs the server with the config file at configPath ("" for CONFIG_PATH
+// or none) and returns the exit code. Until the config is read it logs through a
+// bootstrap logger: JSON on stdout at info.
+func serve(configPath string) int {
+	logger := zerolog.New(os.Stdout).Level(zerolog.InfoLevel).With().Timestamp().Logger()
+	logStart(logger, buildinfo.Read())
+
+	cfg, err := config.Load(configPath, logger)
 	if err != nil {
-		logger.Fatal().Err(err).Msg("failed to load config")
+		logger.Error().Err(err).Msg("failed to load config")
+		return 1
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -43,7 +121,8 @@ func main() {
 
 	a, err := app.New(ctx, cfg, logger)
 	if err != nil {
-		logger.Fatal().Err(err).Msg("failed to build app")
+		logger.Error().Err(err).Msg("failed to build app")
+		return 1
 	}
 
 	runErr := a.Run(ctx)
@@ -57,9 +136,24 @@ func main() {
 
 	if code := exitCode(runErr, shutdownErr); code != 0 {
 		logger.Error().Err(runErr).Msg("server exited with error")
-		os.Exit(code)
+		return code
 	}
 	logger.Info().Msg("server stopped")
+	return 0
+}
+
+// logStart writes the first line of a run: which podium this is.
+func logStart(logger zerolog.Logger, info buildinfo.Info) {
+	event := logger.Info().
+		Str("version", info.Version).
+		Str("commit", info.Commit).
+		Bool("modified", info.Modified)
+	if !info.BuildTime.IsZero() {
+		event = event.Time("built", info.BuildTime)
+	}
+	event.Str("go_version", info.GoVersion).
+		Str("platform", info.Platform).
+		Msg("podium starting")
 }
 
 // Signal cancellation is a clean shutdown; failed cleanup or runner errors are

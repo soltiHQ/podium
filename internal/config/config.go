@@ -10,7 +10,6 @@ package config
 import (
 	"bytes"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 
@@ -218,23 +217,14 @@ func (c Config) Validate() error {
 }
 
 // Load reads configuration in priority order: defaults → YAML file → ENV.
-// The YAML file comes from the --config flag or CONFIG_PATH.
-// Refuses to return a Config that fails [Config.Validate].
-func Load() (Config, error) {
-	return load(os.Args[1:])
-}
-
-// load is [Load] with the command-line arguments passed in.
-func load(args []string) (Config, error) {
-	return loadWith(args, zerolog.New(os.Stdout).With().Timestamp().Logger())
-}
-
-// loadWith is [load] with the logger of the warnings.
-func loadWith(args []string, log zerolog.Logger) (Config, error) {
-	var (
-		path = configPath(args)
-		cfg  = Default()
-	)
+// The YAML file is path, or CONFIG_PATH when path is empty; the command line is
+// the caller's. Warnings of the load go to log. Refuses to return a Config that
+// fails [Config.Validate].
+func Load(path string, log zerolog.Logger) (Config, error) {
+	var cfg = Default()
+	if path == "" {
+		path = os.Getenv("CONFIG_PATH")
+	}
 	if path != "" {
 		if err := loadYAML(path, &cfg); err != nil {
 			return Config{}, fmt.Errorf("config: %w", err)
@@ -250,20 +240,6 @@ func loadWith(args []string, log zerolog.Logger) (Config, error) {
 		return Config{}, fmt.Errorf("config: %w", err)
 	}
 	return cfg, nil
-}
-
-// configPath returns the config file path from the --config flag in args or the
-// CONFIG_PATH env. A flag error is reported on stderr by the FlagSet itself.
-func configPath(args []string) string {
-	var path string
-	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
-	fs.StringVar(&path, "config", "", "path to YAML config file")
-	_ = fs.Parse(args)
-
-	if path != "" {
-		return path
-	}
-	return os.Getenv("CONFIG_PATH")
 }
 
 // loadYAML reads path into dst. A key that is not a setting, or that only the

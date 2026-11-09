@@ -2,7 +2,6 @@ package config
 
 import (
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog"
 
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
 	"github.com/soltiHQ/control-plane/internal/cluster"
@@ -40,7 +41,7 @@ func TestLoadTrustedProxies(t *testing.T) {
 			if tc.env != "" {
 				t.Setenv("SOLTI_TRUSTED_PROXIES", tc.env)
 			}
-			cfg, err := load(nil)
+			cfg, err := load("")
 			if tc.errorPath != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.errorPath) {
 					t.Fatalf("want a %s error, got %v", tc.errorPath, err)
@@ -57,44 +58,22 @@ func TestLoadTrustedProxies(t *testing.T) {
 	}
 }
 
-func TestLoadReadsTheConfigFlag(t *testing.T) {
+// load is [Load] with its warnings dropped.
+func load(path string) (Config, error) { return Load(path, zerolog.Nop()) }
+
+func TestLoadReadsTheConfigPath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("trusted_proxies:\n  - 10.0.0.9\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("CONFIG_PATH", "")
 	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
-	cfg, err := load([]string{"--config", path})
+	cfg, err := load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := []string{"10.0.0.9"}; !slices.Equal(cfg.TrustedProxies, want) {
 		t.Fatalf("trusted_proxies = %q, want %q from the --config file", cfg.TrustedProxies, want)
-	}
-}
-
-// A mistyped flag is still reported on stderr; the path then comes from CONFIG_PATH.
-func TestMistypedConfigFlagIsReported(t *testing.T) {
-	t.Setenv("CONFIG_PATH", "from-env.yaml")
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = r.Close() }()
-	stderr := os.Stderr
-	os.Stderr = w
-	path := configPath([]string{"--confg", "typo.yaml"})
-	os.Stderr = stderr
-	_ = w.Close()
-	out, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(out), "flag provided but not defined: -confg") {
-		t.Fatalf("stderr = %q, want the unknown flag reported", out)
-	}
-	if path != "from-env.yaml" {
-		t.Fatalf("config path = %q, want CONFIG_PATH", path)
 	}
 }
 
@@ -139,7 +118,7 @@ func TestLoadCookieSecure(t *testing.T) {
 			if tc.set {
 				t.Setenv("SOLTI_AUTH_COOKIE_SECURE", tc.env)
 			}
-			cfg, err := load(nil)
+			cfg, err := load("")
 			if tc.wantErr {
 				if err == nil || !strings.Contains(err.Error(), "config.auth") {
 					t.Fatalf("want a config.auth error, got %v", err)
@@ -163,7 +142,7 @@ func TestLoadRejectsMalformedCORSOrigins(t *testing.T) {
 	}
 	t.Setenv("CONFIG_PATH", path)
 	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
-	if _, err := load(nil); err == nil || !strings.Contains(err.Error(), "config.cors") {
+	if _, err := load(""); err == nil || !strings.Contains(err.Error(), "config.cors") {
 		t.Fatalf("origin with a path: want a config.cors error, got %v", err)
 	}
 }
@@ -174,7 +153,7 @@ func TestLoadBootstrapAdminPasswordFromTheEnvironment(t *testing.T) {
 	t.Setenv("CONFIG_PATH", "")
 	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
 	t.Setenv(bootstrap.AdminPasswordEnv, "from-the-environment")
-	cfg, err := load(nil)
+	cfg, err := load("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +168,7 @@ func TestLoadEnrollSecretFromTheEnvironment(t *testing.T) {
 	t.Setenv("CONFIG_PATH", "")
 	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
 	t.Setenv("SOLTI_AGENT_AUTH_ENROLL_SECRET", "from-the-environment-0123456789abcdef")
-	cfg, err := load(nil)
+	cfg, err := load("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +193,7 @@ func TestEnrollSecretTooShortFailsValidation(t *testing.T) {
 			t.Setenv("CONFIG_PATH", "")
 			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
 			t.Setenv("SOLTI_AGENT_AUTH_ENROLL_SECRET", tc.secret)
-			_, err := load(nil)
+			_, err := load("")
 			if !tc.wantErr {
 				if err != nil {
 					t.Fatal(err)
@@ -260,7 +239,7 @@ func TestEnrollSecretNeedsAgentAuthRequired(t *testing.T) {
 			if tc.require != "" {
 				t.Setenv("SOLTI_AGENT_AUTH_REQUIRE", tc.require)
 			}
-			_, err := load(nil)
+			_, err := load("")
 			if !tc.wantErr {
 				if err != nil {
 					t.Fatal(err)
@@ -396,7 +375,7 @@ func TestLoadRaftCluster(t *testing.T) {
 			for key, value := range tc.env {
 				t.Setenv(key, value)
 			}
-			cfg, err := load(nil)
+			cfg, err := load("")
 			if tc.want != nil {
 				if !errors.Is(err, tc.want) || !strings.Contains(err.Error(), "config.cluster") {
 					t.Fatalf("want a config.cluster error wrapping %v, got %v", tc.want, err)
@@ -434,7 +413,7 @@ func TestLoadRaftClusterWithDNS(t *testing.T) {
 	} {
 		t.Setenv(key, value)
 	}
-	cfg, err := load(nil)
+	cfg, err := load("")
 	if err != nil {
 		t.Fatal(err)
 	}
