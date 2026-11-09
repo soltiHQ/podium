@@ -60,7 +60,9 @@ leader. See [Raft cluster](#raft-cluster).
 Releases and images are published by the release workflow when a tag is pushed,
 and it has not run yet: nothing is published before the first pushed tag, as the
 note in [Release](#release) says. Until then, build a binary with
-`task ci/golang/build` (see [Develop](#develop)), and an image from
+`task ci/golang/build GOOS=linux GOARCH=<arch>` (see [Develop](#develop)):
+without `GOOS` and `GOARCH` it builds linux/amd64, so arm64 needs
+`task ci/golang/build GOOS=linux GOARCH=arm64`. Then build an image from
 `bin/podium-linux-<arch>` with
 `docker build --platform linux/<arch> -t podium:local .`.
 
@@ -101,7 +103,7 @@ umask 077
 printf 'SOLTI_AUTH_JWT_SECRET=%s\n' "$(openssl rand -hex 32)" > podium.env
 printf 'SOLTI_AGENT_AUTH_ENROLL_SECRET=%s\n' "$(openssl rand -hex 32)" >> podium.env
 
-docker run -d --name podium --env-file podium.env \
+docker run -d --name podium --env-file podium.env --stop-timeout 60 \
   -p 8080:8080 -p 8082:8082 -p 50051:50051 -p 127.0.0.1:8081:8081 \
   -v podium-data:/var/lib/podium \
   ghcr.io/soltihq/podium:vX.Y.Z
@@ -109,24 +111,34 @@ docker run -d --name podium --env-file podium.env \
 
 Keep `podium.env`: a changed enrollment secret locks out every agent enrolled
 under the old one, and a changed JWT secret ends every access token and device
-cookie signed with the old one. The ops port is published on the host's loopback
-only, as its routes need no credentials. The image's `/var/lib/podium` belongs
-to uid 65532 with mode 0700, and a new named volume such as `podium-data` starts
-as a copy of it. A bind mount must be a directory that uid 65532 owns, with mode
-0700\. Every setting can go in the container's environment; a configuration file
-passed with `--config` must be readable by uid 65532.
+cookie signed with the old one. `--stop-timeout 60` gives podium 60 seconds from
+SIGTERM to SIGKILL: a graceful stop takes up to `server.shutdown_delay` (0s by
+default), plus `server.shutdown_timeout` (15s), plus the 30 seconds in which the
+hubs, the agent connections and the store close (see [Stop](#stop)): 45 seconds
+with the defaults and 50 with a delay of 5s, where Docker's default of 10
+seconds, and compose's, would kill it in the middle of the shutdown. Raise it
+with the delay or the timeout; in compose it is `stop_grace_period`. The ops
+port is published on the host's loopback only, as its routes need no
+credentials: `docker run -P`, or a compose `ports:` entry such as `8081:8081`,
+publishes it on every interface of the host, and with it the unauthenticated ops
+listener. The image's `/var/lib/podium` belongs to uid 65532 with mode 0700, and
+a new named volume such as `podium-data` starts as a copy of it. A bind mount
+must be a directory that uid 65532 owns, with mode 0700. Every setting can go in
+the container's environment; a configuration file passed with `--config` must be
+readable by uid 65532.
 
 In the image, `SOLTI_OPS_ADDR` (`:8081`) and `SOLTI_CLUSTER_STANDALONE_DATA_DIR`
 (`/var/lib/podium`) come from the image's environment, and the environment wins
 over a file: the `ops.addr` and `cluster.standalone.data_dir` of a configuration
 file have no effect there. Set the variables to change them:
 `-e SOLTI_OPS_ADDR=127.0.0.1:8081`, or `-e SOLTI_OPS_ADDR=` (empty) to turn the
-ops listener off, and `-e SOLTI_CLUSTER_STANDALONE_DATA_DIR=...`, which must name
-a directory that uid 65532 owns, with mode 0700: in the image only
-`/var/lib/podium` is one. Under host networking (`--network host`, or Kubernetes
-`hostNetwork`), `:8081` binds every interface of the host. podium logs one INFO
-line for each setting of the file that a variable overrides, with the setting's
-key and the variable.
+ops listener off, and `-e SOLTI_CLUSTER_STANDALONE_DATA_DIR=...`, which must
+name a directory that uid 65532 owns with mode 0700, as the image's
+`/var/lib/podium` is, or a missing one that podium can create (see
+[Data directory](#data-directory)). Under host networking (`--network host`, or
+Kubernetes `hostNetwork`), `:8081` binds every interface of the host. podium
+logs one INFO line for each setting of the file that a variable overrides, with
+the setting's key and the variable.
 
 ### Data directory
 
@@ -155,10 +167,10 @@ memory instead, and loses it at exit.
 podium reads its settings from its defaults, then a YAML file, then the
 environment, which wins: each setting of the file that a variable overrides is
 logged once at INFO, with its key and the variable, never a value. The file is
-`--config PATH`, or `CONFIG_PATH` when that
-is empty; without either, podium runs on its defaults and the environment. The
-variable of a setting is `SOLTI_` and its YAML path in upper case, joined by
-`_`: `http.addr` is `SOLTI_HTTP_ADDR`, `cluster.raft.tls.ca_file` is
+`--config PATH`, or `CONFIG_PATH` when that is empty; without either, podium
+runs on its defaults and the environment. The variable of a setting is `SOLTI_`
+and its YAML path in upper case, joined by `_`: `http.addr` is
+`SOLTI_HTTP_ADDR`, `cluster.raft.tls.ca_file` is
 `SOLTI_CLUSTER_RAFT_TLS_CA_FILE`. Apart from these and `CONFIG_PATH`, the
 configuration reads no variable: a container's `HOSTNAME`, `PORT` or `DATA_DIR`
 changes nothing.
@@ -695,7 +707,11 @@ check, and need one changelog label: `feature`, `bug`, `docs`, `deps`,
    ```
 
 1. The release workflow, `.github/workflows/release.yml`, runs on the pushed
-   tag. Its runs do not overlap.
+   tag. Its runs do not overlap: they share one concurrency group, without
+   `cancel-in-progress`, and GitHub keeps one run waiting behind the one in
+   progress. A third tag pushed while one run is in progress and another waits
+   cancels the waiting run, whose tag is then not released. Push one release tag
+   at a time.
 
    - **verify** checks the tag's format, and that `main` contains its commit.
    - **build** builds `podium-linux-amd64`, `podium-linux-arm64` and
@@ -704,11 +720,11 @@ check, and need one changelog label: `feature`, `bug`, `docs`, `deps`,
    - **image** builds the image for linux/amd64 and linux/arm64 from the linux
      binaries, without emulation, as no stage of the Dockerfile runs a program
      of the target platform, on a BuildKit image pinned by digest, and pushes
-     `ghcr.io/soltihq/podium:vX.Y.Z`, with OCI labels. It
-     runs `task ci/docker/smoke` on the pushed digest with `EXPECT_VERSION` set
-     to the tag, so `/version` must report the tag; the smoke runs on the
-     runner's architecture, amd64, so the arm64 image is built but not smoked.
-     Then, for a tag without a pre-release suffix, it points
+     `ghcr.io/soltihq/podium:vX.Y.Z`, with OCI labels. It runs
+     `task ci/docker/smoke` on the pushed digest with `EXPECT_VERSION` set to
+     the tag, so `/version` must report the tag; the smoke runs on the runner's
+     architecture, amd64, so the arm64 image is built but not smoked. Then, for
+     a tag without a pre-release suffix, it points
      `ghcr.io/soltihq/podium:latest` at the same digest.
    - **release** creates the GitHub release with generated notes, the three
      binaries and `sha256sums.txt`, marked as a pre-release for a tag with a

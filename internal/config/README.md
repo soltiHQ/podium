@@ -76,9 +76,10 @@ configuration loads (`TestCLIRefusesUnknownFlagBeforeStarting`):
 - An empty file, a file of comments only, `---` or `{}` fails with
   `config: <file> holds no settings`.
 - A setting without a value (`addr:`, `addr: ~` or `addr: null`) fails: yaml.v3
-  would leave it at its default, so `ops:` with an `addr:` that has no value
-  would keep the ops listener on. The error names the line and the path, and
-  what to write: `config: config.yaml:9: ops.addr has no value; write "" or remove the key`,
+  would skip it for a string, a bool, a number or a duration, which keep their
+  default, so `ops:` with an `addr:` that has no value would keep the ops
+  listener on. The error names the line and the path, and what to write:
+  `config: config.yaml:9: ops.addr has no value; write "" or remove the key`,
   `write []` for a list and `write a value` for the other types. A section
   without keys (`ops:` alone) changes nothing (`TestNullSettingFails`).
 - podium reads one YAML document. A later document that holds anything fails
@@ -173,37 +174,38 @@ JSON on stdout at `info`: the first line of a run (`podium starting`, with
 `version`, `commit`, `modified`, `go_version` and `platform`, and `built` when
 the binary carries the commit time), and what loading reports, such as the
 warning about a `SOLTI_` variable that is not a setting and the line of each
-variable that overrides a setting of the file. After it, every line
-podium writes, the raft library's included (see `internal/raft`, "Logging"),
-follows `log.level` and `log.format`; a library that logs through its own
-default logger, which podium does not route, such as grpc-go's `grpclog` or the
-standard `log` that `httputil.ReverseProxy` falls back to, keeps writing to
-stderr. A failure to load is logged by the bootstrap logger and exits 1. Errors
-that `net/http` reports on its own, such as a failed TLS handshake or the panic
-of a handler, are WARN lines with the server's name in `runner`
+variable that overrides a setting of the file. After it, every line podium
+writes, the raft library's included (see `internal/raft`, "Logging"), follows
+`log.level` and `log.format`; a library that logs through its own default
+logger, which podium does not route, such as grpc-go's `grpclog` or the standard
+`log` that `httputil.ReverseProxy` falls back to, keeps writing to stderr. A
+failure to load is logged by the bootstrap logger and exits 1. Errors that
+`net/http` reports on its own, such as a failed TLS handshake or the panic of a
+handler, are WARN lines with the server's name in `runner`
 (`TestHTTPServerErrorsGoToZerolog`).
 
 ### Ops listener
 
 `ops.addr` (env `SOLTI_OPS_ADDR`, default `127.0.0.1:8081`) is a listener of its
 own for the probes of supervisors and load balancers; `ops.addr: ""`, or
-`SOLTI_OPS_ADDR` set but empty, turns it off (`TestEmptyOpsAddrTurnsTheListenerOff`).
-`ops.name` (default `ops`) names its runner in the logs. The listener is
-**plain HTTP** and its routes are **never authenticated**: they sit outside the
-UI's middleware, set no cookie and show no token, secret or stored record. What
-they do tell is the node's health, whether it leads, its build and its metrics,
-which on a raft node include its raft state, term, indexes and peer count. Keep
-it on an internal network: the default binds loopback only, and a container that
-is probed from outside binds `0.0.0.0:8081` and publishes the port to the
-orchestrator alone. podium's image sets `SOLTI_OPS_ADDR=:8081` and
+`SOLTI_OPS_ADDR` set but empty, turns it off
+(`TestEmptyOpsAddrTurnsTheListenerOff`). `ops.name` (default `ops`) names its
+runner in the logs. The listener is **plain HTTP** and its routes are **never
+authenticated**: they sit outside the UI's middleware, set no cookie and show no
+token, secret or stored record. What they do tell is the node's health, whether
+it leads, its build and its metrics, which on a raft node include its raft
+state, term, indexes and peer count. Keep it on an internal network: the default
+binds loopback only, and a container that is probed from outside binds
+`0.0.0.0:8081` and publishes the port to the orchestrator alone. podium's image
+sets `SOLTI_OPS_ADDR=:8081` and
 `SOLTI_CLUSTER_STANDALONE_DATA_DIR=/var/lib/podium` in its environment, which
 override the `ops.addr` and `cluster.standalone.data_dir` of a file passed with
-`--config`: set the variables to change them (`-e SOLTI_OPS_ADDR=127.0.0.1:8081`,
-or empty to turn the listener off; `-e SOLTI_CLUSTER_STANDALONE_DATA_DIR=...`).
-Under host networking `:8081` binds every interface of the host. Loading logs
-each such override at INFO (see "Environment variables"). Every route answers
-GET and HEAD, as one line of text (`ok`,
-or the reason) except `/version` and `/metrics`:
+`--config`: set the variables to change them
+(`-e SOLTI_OPS_ADDR=127.0.0.1:8081`, or empty to turn the listener off;
+`-e SOLTI_CLUSTER_STANDALONE_DATA_DIR=...`). Under host networking `:8081` binds
+every interface of the host. Loading logs each such override at INFO (see
+"Environment variables"). Every route answers GET and HEAD, as one line of text
+(`ok`, or the reason) except `/version` and `/metrics`:
 
 | Route | Answers |
 | -- | -- |
@@ -229,10 +231,15 @@ with `tls.server.client_ca_file` set the listener itself still asks every
 client, a health checker included, for a certificate of the agents' CA: the
 overall service (`""`) and `solti.discover.v1.DiscoverService` are `SERVING`
 while `/readyz` answers 200, and `NOT_SERVING` while it does not. A `Check`
-reads the state anew; a client that `Watch`es sees a change within a second, and
-its stream ends when the gRPC listener starts to stop. The access log records
-each health call at DEBUG, whatever its answer, so probes write nothing at the
-default `info` (see "Request lifecycle" in `internal/transport/README.md`).
+reads the state anew; a client that `Watch`es sees a change within a second.
+Each `Watch` call holds a stream on the agents' listener until its client leaves
+or the gRPC listener starts to stop, and podium caps neither how many it holds
+nor for how long, as grpc-go's own health service does not: without
+`client_ca_file`, any client that reaches the listener can hold up to 256
+streams on each connection it opens (`grpc.MaxConcurrentStreams`). The access
+log records each health call at DEBUG, whatever its answer, so probes write
+nothing at the default `info` (see "Request lifecycle" in
+`internal/transport/README.md`).
 
 Tests: `TestReadinessFollowsStoreAndShutdown`, `TestReadinessReasonOrder`,
 `TestLeaderProbeOnRaft`, `TestOpsEndpointsNeedNoAuth`,
@@ -418,12 +425,19 @@ tls:
   server:
     cert_file: /etc/solti/tls/server.crt
     key_file:  /etc/solti/tls/server.key
-    client_ca_file: /etc/solti/tls/agents-ca.crt   # optional → mTLS
+    client_ca_file: /etc/solti/tls/agents-ca.crt   # optional: agents need a client certificate
   client:
-    ca_file:   /etc/solti/tls/agents-ca.crt
-    cert_file: /etc/solti/tls/cp-client.crt        # optional → mTLS
+    ca_file:   /etc/solti/tls/client-ca.crt        # verifies agents' endpoints; raft: also the nodes' server certificates
+    cert_file: /etc/solti/tls/cp-client.crt        # presented when asked; raft with client_ca_file: required, of the agents' CA
     key_file:  /etc/solti/tls/cp-client.key
 ```
+
+In standalone, `tls.client.ca_file` only verifies the agents' endpoints. In a
+raft cluster it also holds the CA of the nodes' server certificates, and with
+`client_ca_file` set each node needs a `tls.client.cert_file` and `key_file`
+that chain to the agents' CA, or every sync that reaches a follower fails: a
+follower forwards to the leader as a client of `tls.client`, as the paragraphs
+below say.
 
 Env equivalents: `SOLTI_TLS_SERVER_CERT_FILE`, `SOLTI_TLS_CLIENT_CA_FILE`, etc.
 
