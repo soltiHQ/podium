@@ -29,8 +29,13 @@ vars:
   proto_packages: agent discover task raft
   proto_plugins_dir: .cache/proto-plugins
 
+  # The sha256 of the exact file each URL serves. Changing a version means
+  # changing its hash: compare the file with the package in the npm registry
+  # (dist.integrity covers the tarball) before pinning a new one.
   alpinejs_version: '3.13.5'
+  alpinejs_sha256: ca057831ef9be3d8ee47e14078089fd2381dc7820b4bb7fbdb85a490f5b8f68c
   htmx_version: '1.9.12'
+  htmx_sha256: 449317ade7881e949510db614991e195c3a099c4c791c24dacec55f9f4a2a452
   tailwind_version: '4.3.2'
   tailwind_command: |
     case "$(uname -m)" in
@@ -55,6 +60,21 @@ vars:
       mv "$bin.download" "$bin"
     fi
     exec "$bin" --input ui/static/css/app.css --output ui/static/css/tailwindcss.css --minify
+
+  js_assets_command: |
+    fetch() {
+      url=$1 want=$2 out=$3
+      curl -fsSL -o "$out.download" "$url"
+      actual=$(sha256sum "$out.download" | cut -d ' ' -f 1)
+      if [ "$actual" != "$want" ]; then
+        rm -f "$out.download"
+        printf '%s: sha256 %s, expected %s\n' "$out" "$actual" "$want" >&2
+        exit 1
+      fi
+      mv "$out.download" "$out"
+    }
+    fetch "https://cdn.jsdelivr.net/npm/alpinejs@{{.alpinejs_version}}/dist/cdn.min.js" {{.alpinejs_sha256}} ui/static/js/alpine.min.js
+    fetch "https://unpkg.com/htmx.org@{{.htmx_version}}/dist/htmx.min.js" {{.htmx_sha256}} ui/static/js/htmx.min.js
 
   go_paths: api cmd domain internal ui
   markdown_paths: README.md
@@ -138,6 +158,8 @@ tasks:
     desc: Build the binary for GOOS/GOARCH (linux/amd64 by default)
     cmds:
       - task: generate
+      - task: assets
+      - task: assets/check
       - task: golang:build
         vars:
           NAME: '{{.name}}'
@@ -187,11 +209,60 @@ tasks:
   assets:
     desc: Download the JS dependencies and build the Tailwind CSS bundle
     cmds:
-      - curl -fsSL -o ui/static/js/alpine.min.js "https://cdn.jsdelivr.net/npm/alpinejs@{{.alpinejs_version}}/dist/cdn.min.js"
-      - curl -fsSL -o ui/static/js/htmx.min.js "https://unpkg.com/htmx.org@{{.htmx_version}}/dist/htmx.min.js"
+      - task: golang:exec
+        vars:
+          CMD: sh -euc {{.js_assets_command | shellQuote}}
       - task: golang:exec
         vars:
           CMD: sh -euc {{.tailwind_command | shellQuote}}
+
+  assets/check:
+    desc: Fail unless every UI asset the binary embeds exists
+    internal: true
+    preconditions:
+      - sh: 'for f in ui/static/js/alpine.min.js ui/static/js/htmx.min.js ui/static/css/tailwindcss.css; do test -s "$f" || exit 1; done'
+        msg: 'a UI asset is missing: run task assets (ui/static/js/alpine.min.js, htmx.min.js, css/tailwindcss.css)'
+    cmds:
+      - 'true'
+
+  ci/docker/smoke:
+    desc: Build the image from bin/ for the host's linux architecture and check a container of it
+    vars:
+      image: podium-smoke:local
+      container: podium-smoke
+    preconditions:
+      - sh: 'test -f bin/{{.name}}-linux-$(case "$(uname -m)" in x86_64) echo amd64 ;; *) echo arm64 ;; esac)'
+        msg: 'bin/{{.name}}-linux-<arch> is missing: run task ci/golang/build GOOS=linux GOARCH=<arch>'
+    cmds:
+      - defer: docker rm -f {{.container}} >/dev/null 2>&1; docker rmi -f {{.image}} >/dev/null 2>&1; true
+      - |
+        set -eu
+        case "$(uname -m)" in x86_64) arch=amd64 ;; *) arch=arm64 ;; esac
+        docker rm -f {{.container}} >/dev/null 2>&1 || true
+        docker build --platform "linux/$arch" -t {{.image}} .
+        # A generated throwaway secret: never a real one.
+        secret=$(head -c 24 /dev/urandom | base64)
+        docker run -d --name {{.container}} -e SOLTI_AUTH_JWT_SECRET="$secret" -p 127.0.0.1::8080 -p 127.0.0.1::8081 {{.image}} >/dev/null
+        ops=$(docker port {{.container}} 8081/tcp | head -n 1)
+        web=$(docker port {{.container}} 8080/tcp | head -n 1)
+        ready=
+        for _ in $(seq 1 60); do
+          if curl -fs -o /dev/null "http://$ops/readyz"; then ready=1; break; fi
+          sleep 1
+        done
+        if [ -z "$ready" ]; then
+          printf 'smoke: /readyz never answered 200\n' >&2
+          docker logs {{.container}} >&2 || true
+          exit 1
+        fi
+        curl -fsS "http://$ops/version" | grep -q '"go_version"' || { printf 'smoke: /version has no go_version\n' >&2; exit 1; }
+        code=$(curl -s -o /dev/null -w '%{http_code}' "http://$web/static/js/alpine.min.js")
+        [ "$code" = 200 ] || { printf 'smoke: /static/js/alpine.min.js answered %s\n' "$code" >&2; exit 1; }
+        # The image has no shell and ps has no uid column: the user column
+        # shows uid 65532 by its name in the distroless passwd file, nonroot.
+        user=$(docker top {{.container}} -o pid,user | sed 1d | head -n 1 | awk '{ print $2 }')
+        case "$user" in nonroot|65532) ;; *) printf 'smoke: the process runs as %s, want uid 65532 (nonroot)\n' "$user" >&2; exit 1 ;; esac
+        printf 'smoke ok: /readyz, /version, /static/js/alpine.min.js, uid 65532\n'
 
   prepare:
     desc: Generate sources and build the UI assets for a local run
