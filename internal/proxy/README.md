@@ -146,14 +146,18 @@ no budget in all, as the three bounds add up to less.
 
 What the committed tests send, and what a call allocated while it refused it
 (`TotalAlloc` of the whole process during the call, the fake agent included, as
-`go test -v` logs it; each test asserts under 64 MiB, and a call that reads a page of
-4 MiB allocates 8 to 20 MiB by itself). The figures are what the tests logged with
-go 1.27.3 on linux/arm64; they vary with the run (the gRPC `ListTasks` floods by a
-MiB), the platform and the Go version:
+`go test -v` logs it, in whole MiB rounded down; each test asserts under 64 MiB).
+A call that reads a page of 4 MiB allocated 10 MiB over HTTP and 8 MiB over gRPC by
+itself (`TestHTTPListTasksRefusesExtraItemsBeforeDecode`,
+`TestGRPCListTasksRefusesExtraItemsBeforeDecode`). The figures are what the tests
+logged with go 1.27.3 on linux/arm64, in at least four runs each: every figure the
+same in each run but that of the gRPC `ListTasks` flood of a million empty env
+entries, which logged 2, 2, 0 and 2 MiB. Another platform or Go version may
+allocate otherwise:
 
 | Test | What it sends | Allocated |
 |---|---|---|
-| `TestGRPCListTasksRefusesNestedElementFloodBeforeDecode` | to `ListTasks` (limit 1000), over gRPC: one task with 1048576 empty conditions, or empty env entries, or empty args, or labels; 1000 tasks with 1000 empty conditions each; or 1000 tasks with 300 empty env entries each | 1 to 4 MiB |
+| `TestGRPCListTasksRefusesNestedElementFloodBeforeDecode` | to `ListTasks` (limit 1000), over gRPC: one task with 1048576 empty conditions, or empty env entries, or empty args, or labels; 1000 tasks with 1000 empty conditions each; or 1000 tasks with 300 empty env entries each | 4 MiB or less |
 | `TestHTTPListTasksRefusesConditionFlood` | to `ListTasks` (limit 1000), over HTTP: one task with 1048576 empty conditions | 14 MiB |
 | `TestGetTaskRefusesNestedElementFlood` | to `GetTask`: one task with 1048576 empty conditions, over HTTP; the same, and one with 1048576 empty env entries, over gRPC | 6 MiB (HTTP), 4 MiB each (gRPC) |
 | `TestApplyTaskRefusesNestedElementFlood` | to `ApplyTask`: one task with 1048576 empty conditions | 6 MiB (HTTP), 4 MiB (gRPC) |

@@ -55,16 +55,21 @@ func followerRefresh(t *testing.T, err error) (token.Verifier, *session.Service,
 // as the rotation commits, gets 503, with the leader's address in X-Leader when
 // the node knows it, and no cookie; Auth logs one WARN, no ERROR, and never a
 // credential, worded for what happened: a follower that cannot rotate the
-// token, or a rotation whose outcome is unknown. Auth and OptionalAuth alike.
+// token, or a rotation whose outcome is unknown, which says that its 503 names
+// the leader only when the node knows one, as a node that shut down does not.
+// Auth and OptionalAuth alike.
 func TestRefreshOnAFollowerAsksForTheLeader(t *testing.T) {
 	for _, failure := range []struct {
 		name string
-		err  error  // what the transaction fails with; nil for a follower
-		says string // what the WARN says happened
-		not  string // what it must not say
+		err  error    // what the transaction fails with; nil for a follower
+		says []string // what the WARN says happened
+		not  string   // what it must not say
 	}{
-		{"not the leader", nil, "a follower cannot rotate a refresh token", "outcome unknown"},
-		{"leadership lost", fmt.Errorf("raft: apply: %w", cluster.ErrLeadershipLost), "outcome unknown", "a follower"},
+		{"not the leader", nil, []string{"a follower cannot rotate a refresh token"}, "outcome unknown"},
+		{"leadership lost", fmt.Errorf("raft: apply: %w", cluster.ErrLeadershipLost), []string{
+			"auth refresh outcome unknown", "lost its leadership, or shut down",
+			"names that leader in X-Leader when this node knows it, which a node that shut down does not",
+		}, "a follower"},
 	} {
 		verifier, svc, cookies := followerRefresh(t, failure.err)
 		for _, mw := range []struct {
@@ -105,8 +110,13 @@ func TestRefreshOnAFollowerAsksForTheLeader(t *testing.T) {
 						entry.Path != "/ui/specs" || !strings.Contains(entry.Message, "auth.rotate_refresh") {
 						t.Fatalf("log %q, want one WARN line with the method, the path and auth.rotate_refresh", logs.String())
 					}
-					if !strings.Contains(entry.Message, failure.says) || strings.Contains(entry.Message, failure.not) {
-						t.Fatalf("the WARN says %q, want %q and not %q", entry.Message, failure.says, failure.not)
+					for _, says := range failure.says {
+						if !strings.Contains(entry.Message, says) {
+							t.Fatalf("the WARN says %q, want %q", entry.Message, says)
+						}
+					}
+					if strings.Contains(entry.Message, failure.not) {
+						t.Fatalf("the WARN says %q, want not %q", entry.Message, failure.not)
 					}
 					for _, secret := range []string{"test-only-original-refresh", "cookie-session"} {
 						if strings.Contains(logs.String(), secret) {

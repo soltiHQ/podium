@@ -291,8 +291,9 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s,
   over 4096 bytes are refused once decoded, and so is a gRPC task whose `status`
   field the agent split in several occurrences that hold more than 64 conditions
   in all within the budget, which the decoder merges, at the cost of a page the
-  other bounds have capped. The tests measure a refused `ListTasks` flood at 1
-  to 14 MiB allocated in all (what each sends is in the proxy README). The runner
+  other bounds have capped. The tests measure a refused `ListTasks` flood at 14
+  MiB or less allocated in all (what each sends, and what each logged, is in the
+  proxy README). The runner
   counts the tasks of a page again, and refuses a cursor over 4096 bytes itself.
   A listing that would hold more than 65536 task IDs or 32 MiB of them, or take
   more than 1024 calls, refused pages included, stops. A synced rollout whose

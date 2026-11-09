@@ -372,11 +372,12 @@ type listener interface {
 // The values of ctx reach the runners; its cancellation and deadline do not, the
 // shutdown below stops them.
 //
-// The cancellation of ctx starts a graceful shutdown: readiness and the gRPC
-// health service turn to "shutting down" at once, Run waits server.shutdown_delay
-// for the load balancers to notice, and only then do the listeners stop
-// accepting. The requests in flight finish within server.shutdown_timeout, and
-// the streams end as the UI listener starts to shut down.
+// The cancellation of ctx starts a graceful shutdown: readiness turns to
+// "shutting down" and the gRPC health service to NOT_SERVING at once, Run waits
+// server.shutdown_delay for the load balancers to notice, and only then do the
+// listeners stop accepting. The requests in flight finish within
+// server.shutdown_timeout, and the streams end as the UI listener starts to shut
+// down.
 func (a *App) Run(ctx context.Context) error {
 	runCtx, stop := context.WithCancel(context.WithoutCancel(ctx))
 	defer stop()
@@ -440,10 +441,12 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 	}
 }
 
-// Shutdown releases resources acquired by [New] in reverse order of creation.
-// Bounded by ctx — if any step (Raft fsync, hub drain, pool close) hangs
-// past the deadline, Shutdown returns and the process exits dirty. The
-// caller logs that case; subsequent calls are no-ops.
+// Shutdown releases the resources [New] acquired, in this order: the log hub,
+// the proxy pool, the event hub, then a raft node's gRPC sync forwarder, its
+// lookups of the raft hosts' names and the node itself, or the durable store of
+// a standalone node that has one. Bounded by ctx — if any step (Raft fsync, hub
+// drain, pool close) hangs past the deadline, Shutdown returns and the process
+// exits dirty. The caller logs that case; subsequent calls are no-ops.
 //
 // Returns an error if the deadline elapses before cleanup completes.
 func (a *App) Shutdown(ctx context.Context) error {
