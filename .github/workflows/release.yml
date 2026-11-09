@@ -23,6 +23,11 @@ jobs:
     steps:
       - name: Check tag format
         uses: mr-chelyshkin/actions/tag-format-check@577ea5b38e0b2ad2bffe7977574fda5e59657a60 # v2
+        with:
+          # SemVer with a v prefix and an optional pre-release suffix. The
+          # default pattern also takes +build metadata, which a Docker tag
+          # cannot carry.
+          pattern: '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -95,23 +100,10 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Prepare image tags
+      - name: Prepare image metadata
         id: meta
         shell: bash
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          {
-            echo 'tags<<EOF'
-            echo "$IMAGE:$TAG"
-            # A tag with a pre-release suffix (v1.2.3-rc.1) does not move latest.
-            if [[ "$TAG" != *-* ]]; then
-              echo "$IMAGE:latest"
-            fi
-            echo 'EOF'
-            echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          } >> "$GITHUB_OUTPUT"
+        run: echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
       - name: Build and push image
         id: push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -119,7 +111,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
           labels: |
             org.opencontainers.image.title=podium
             org.opencontainers.image.description=Solti control plane
@@ -133,7 +125,15 @@ jobs:
         with:
           task: ci/docker/smoke
           args: |
-            IMAGE=${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
+            SMOKE_IMAGE=${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
+            EXPECT_VERSION=${{ github.ref_name }}
+      - name: Point latest at the smoked image
+        # A tag with a pre-release suffix (v1.2.3-rc.1) does not move latest.
+        if: ${{ !contains(github.ref_name, '-') }}
+        shell: bash
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE@$DIGEST"
 
   release:
     name: Release ${{ github.ref_name }}
@@ -157,7 +157,7 @@ jobs:
           sha256sum podium-* > sha256sums.txt
           cat sha256sums.txt
       - name: Publish the release
-        uses: softprops/action-gh-release@28ab305d0ffa26d60ec4bd614126329e26c7a0ec # v3.0.4
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
