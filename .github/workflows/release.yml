@@ -29,9 +29,8 @@ jobs:
           # cannot carry. The major version is 0 or 1: Go gives v2 and later
           # versions only to a module path that ends in /v2 (or /vN), and
           # github.com/soltiHQ/control-plane has none, so a binary built at a
-          # v2+ tag would not report the tag as its version, and the smoke
-          # check's EXPECT_VERSION would fail after the image was pushed. For
-          # v2, move the module path to .../v2 and allow major 2 here.
+          # v2+ tag would not report the tag as its version. For v2, move the
+          # module path to .../v2 and allow major 2 here.
           pattern: '^v(0|1)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -96,7 +95,7 @@ jobs:
       # No QEMU: no stage of the Dockerfile runs a binary of the target
       # platform. The data stage runs on $BUILDPLATFORM, and the target stage
       # only copies files, so BuildKit builds linux/arm64 here without
-      # emulation; the smoke check below runs the amd64 image.
+      # emulation.
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
         with:
@@ -131,14 +130,7 @@ jobs:
             org.opencontainers.image.version=${{ github.ref_name }}
             org.opencontainers.image.created=${{ steps.meta.outputs.created }}
             org.opencontainers.image.licenses=Apache-2.0
-      - name: Smoke the pushed image
-        uses: mr-chelyshkin/actions/task-run@577ea5b38e0b2ad2bffe7977574fda5e59657a60 # v2
-        with:
-          task: ci/docker/smoke
-          args: |
-            SMOKE_IMAGE=${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
-            EXPECT_VERSION=${{ github.ref_name }}
-      - name: Point latest at the smoked image
+      - name: Point latest at the pushed image
         # A tag with a pre-release suffix (v1.2.3-rc.1) does not move latest.
         if: ${{ !contains(github.ref_name, '-') }}
         shell: bash

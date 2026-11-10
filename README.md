@@ -674,7 +674,6 @@ the tasks.
 | `task ci/golang/bench` | Runs every benchmark once, as a smoke check, not a performance gate. |
 | `task ci/ui/test` | Runs the UI's Node tests. |
 | `task ci/markdown/fmt`, `task markdown/fix` | Checks, or applies, mdformat on every README. |
-| `task ci/docker/smoke` | Builds the image from `bin/podium-linux-<arch>` for the host's architecture and checks a container of it: `/readyz`, `/version`, Alpine, HTMX and the Tailwind CSS, the data directory's mode and owner, and the uid of the process; it needs curl and tar. |
 
 To try a build, run it with its state in memory, which logs the generated
 administrator password at WARN:
@@ -687,9 +686,8 @@ SOLTI_AUTH_JWT_SECRET=$(openssl rand -hex 32) SOLTI_CLUSTER_STANDALONE_EPHEMERAL
 Run one package's tests with
 `task golang:exec CMD='go test -race ./internal/config/'`, once `task generate`
 has run. Pull requests to `main` run the Markdown check, the UI tests, the Go
-checks (fmt, lint, test, audit, bench), the three builds and the image smoke
-check, and need one changelog label: `feature`, `bug`, `docs`, `deps`,
-`tooling`, `other` or `skip`.
+checks (fmt, lint, test, audit, bench) and the three builds, and need one
+changelog label: `feature`, `bug`, `docs`, `deps`, `tooling`, `other` or `skip`.
 
 ## Release
 
@@ -720,30 +718,26 @@ check, and need one changelog label: `feature`, `bug`, `docs`, `deps`,
    - **image** builds the image for linux/amd64 and linux/arm64 from the linux
      binaries, without emulation, as no stage of the Dockerfile runs a program
      of the target platform, on a BuildKit image pinned by digest, and pushes
-     `ghcr.io/soltihq/podium:vX.Y.Z`, with OCI labels. It runs
-     `task ci/docker/smoke` on the pushed digest with `EXPECT_VERSION` set to
-     the tag, so `/version` must report the tag; the smoke runs on the runner's
-     architecture, amd64, so the arm64 image is built but not smoked. Then, for
-     a tag without a pre-release suffix, it points
-     `ghcr.io/soltihq/podium:latest` at the same digest.
+     `ghcr.io/soltihq/podium:vX.Y.Z`, with OCI labels. Then, for a tag without a
+     pre-release suffix, it points `ghcr.io/soltihq/podium:latest` at the same
+     digest. No job starts the image: it is pushed without a run of it.
    - **release** creates the GitHub release with generated notes, the three
      binaries and `sha256sums.txt`, marked as a pre-release for a tag with a
      pre-release suffix. The notes group the pull requests by their changelog
      label, and leave out those labelled `skip`.
 
-1. A failed verify or build publishes nothing. A failed smoke check stops the
-   run after `ghcr.io/soltihq/podium:vX.Y.Z` was pushed: `:latest` stays where
-   it was, and no GitHub release is made. A failed release job, after the image
-   job passed, leaves `ghcr.io/soltihq/podium:vX.Y.Z` pushed, and `:latest`
-   moved to it for a tag without a pre-release suffix, with no GitHub release.
+1. A failed verify or build publishes nothing. An image job that fails after the
+   push leaves `ghcr.io/soltihq/podium:vX.Y.Z` pushed, with `:latest` where it
+   was, and no GitHub release is made. A failed release job, after the image job
+   passed, leaves `ghcr.io/soltihq/podium:vX.Y.Z` pushed, and `:latest` moved to
+   it for a tag without a pre-release suffix, with no GitHub release.
 
-The workflow has not run yet: its first run is the first pushed tag, which also
-shows for the first time that a binary built at a tag reports the tag as its
-version. Before that tag, an owner of the soltiHQ organization must allow this
-repository's workflows to publish packages with `GITHUB_TOKEN`: the image job
-logs in to ghcr.io with it, with `packages: write`. After the first release,
-check the visibility of the `podium` package in the organization's package
-settings: pulling the image without credentials needs it public.
+The workflow has not run yet: its first run is the first pushed tag. Before that
+tag, an owner of the soltiHQ organization must allow this repository's workflows
+to publish packages with `GITHUB_TOKEN`: the image job logs in to ghcr.io with
+it, with `packages: write`. After the first release, check the visibility of the
+`podium` package in the organization's package settings: pulling the image
+without credentials needs it public.
 
 To update Alpine or HTMX, change the version and its sha256 in `Taskfile.yml`
 together: see [Verification](ui/README.md#verification).
