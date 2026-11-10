@@ -44,6 +44,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // apiFixture is the production API wiring over an in-memory store that holds
@@ -109,9 +110,9 @@ func newAPIFixtureLogging(t *testing.T, wrap func(storage.Storage) storage.Stora
 	raft := newClusterAdmin()
 	api := NewAPI(logger,
 		user.New(st, logger),
-		access.New(kit.New(st, auth.Config{JWTSecret: strings.Repeat("k", auth.MinJWTSecretLen)}), st, logger),
+		access.New(kit.New(st, auth.Config{JWTSecret: strings.Repeat("k", auth.MinJWTSecretLen)}, bcrypt.MinCost), st, logger),
 		session.New(st, logger),
-		credential.New(st, logger),
+		credential.New(st, logger, bcrypt.MinCost),
 		agent.New(st, logger, agentOpts...),
 		spec.New(st, logger),
 		archive, pool, hub, logs, streams, allowAccess,

@@ -57,13 +57,18 @@ func StreamRequestID() grpc.StreamServerInterceptor {
 	}
 }
 
-// StreamLogger logs the start and end of every streaming RPC.
+// StreamLogger logs the end of every streaming RPC, at INFO, and a health Watch
+// at DEBUG, as [UnaryLogger] logs a health Check.
 func StreamLogger(logger zerolog.Logger) grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		start := time.Now()
 		err := handler(srv, ss)
 
-		evt := logger.Info().
+		evt := logger.Info()
+		if isHealthProbe(info.FullMethod) {
+			evt = logger.Debug()
+		}
+		evt = evt.
 			Str("method", info.FullMethod).
 			Dur("duration", time.Since(start))
 		if rid, ok := transportctx.RequestID(ss.Context()); ok {

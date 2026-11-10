@@ -38,6 +38,10 @@ const (
 // errForwarderClosed fails the forwards of a Forwarder that Close closed.
 var errForwarderClosed = errors.New("forwarder closed")
 
+// errLeaderUnreachable is the answer to a forward that the leader never answered. forward returns this very
+// value, which UnaryLeader tells from an Unavailable that the leader sent.
+var errLeaderUnreachable = status.Error(codes.Unavailable, "leader unreachable")
+
 // LeaderOptions tunes the [UnaryLeader] and [StreamLeader] interceptors.
 type LeaderOptions struct {
 	// IsWrite decides whether an RPC must run on the leader.
@@ -53,6 +57,11 @@ type LeaderOptions struct {
 
 	// Forwarder, when set, sends the writes it has a ForwardFunc for to the leader instead of refusing them.
 	Forwarder *Forwarder
+
+	// Refused, when set, is called once for each write that UnaryLeader answers itself because it cannot
+	// send it to a leader: "not the leader", and "leader unreachable". A write that it forwards, and the
+	// leader's answer to it, are not refusals, even when that answer is an Unavailable.
+	Refused func()
 }
 
 // UnaryLeader routes the write RPCs that reach a follower, as the HTTP Leader middleware routes writes:
@@ -73,6 +82,10 @@ func UnaryLeader(leadership cluster.Leadership, opts LeaderOptions) grpc.UnarySe
 	if isWrite == nil {
 		isWrite = allWrites
 	}
+	refused := opts.Refused
+	if refused == nil {
+		refused = func() {}
+	}
 	leaderOf := func() string {
 		if leadership.AmLeader() {
 			return ""
@@ -86,8 +99,13 @@ func UnaryLeader(leadership cluster.Leadership, opts LeaderOptions) grpc.UnarySe
 		}
 		leader := cluster.LeaderAddr(leadership.CurrentLeader(), opts.Port)
 		if leader != "" && opts.Forwarder.forwards(info.FullMethod) && !forwarded(ctx) {
-			return opts.Forwarder.forward(ctx, leader, info.FullMethod, req)
+			resp, err := opts.Forwarder.forward(ctx, leader, info.FullMethod, req)
+			if err == errLeaderUnreachable {
+				refused()
+			}
+			return resp, err
 		}
+		refused()
 		hintNotLeader(ctx, leader)
 		return nil, status.Error(codes.Unavailable, "not the leader")
 	}
@@ -218,7 +236,7 @@ func (f *Forwarder) forward(ctx context.Context, leader, method string, req any)
 	// The hint without the not-leader mark: a leader this node cannot reach is a failure, logged at ERROR, as
 	// the HTTP forward logs its 502.
 	setLeaderHint(ctx, leader)
-	return nil, status.Error(codes.Unavailable, "leader unreachable")
+	return nil, errLeaderUnreachable
 }
 
 // conn returns the connection to the leader at addr: the one f keeps when it is for addr, or a new one in its

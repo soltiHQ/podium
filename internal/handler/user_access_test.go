@@ -25,6 +25,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestUserCreationSeparatelyAuthorizesAccessAssignments(t *testing.T) {
@@ -96,7 +97,7 @@ func TestUserEditorCannotResetAdminPassword(t *testing.T) {
 	ctx := context.Background()
 	f.user(t, "user-admin", enum.RoleAdminID)
 	f.user(t, "reader", enum.RoleUserReaderID)
-	creds := credential.New(f.store, zerolog.Nop())
+	creds := credential.New(f.store, zerolog.Nop(), bcrypt.MinCost)
 	if err := creds.SetPassword(ctx, credential.SetPasswordRequest{UserID: "user-admin", Password: "original-admin-password", Cost: 4}); err != nil {
 		t.Fatal(err)
 	}

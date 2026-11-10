@@ -1,6 +1,10 @@
 package sync
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
 
 const (
 	defaultTickInterval = 10 * time.Second
@@ -55,4 +59,27 @@ func (c Config) backoff(attempts int) time.Duration {
 		wait *= 2
 	}
 	return min(wait, maxRetryBackoff)
+}
+
+// ErrNegativeValue indicates a negative interval, timeout or count; zero keeps
+// the default.
+var ErrNegativeValue = errors.New("sync: negative value")
+
+// Validate reports a negative interval, timeout or count (zero keeps the
+// default).
+func (c Config) Validate() error {
+	for _, v := range []struct {
+		key string
+		neg bool
+	}{
+		{"tick_interval", c.TickInterval < 0},
+		{"push_timeout", c.PushTimeout < 0},
+		{"max_concurrency", c.MaxConcurrency < 0},
+		{"max_retries", c.MaxRetries < 0},
+	} {
+		if v.neg {
+			return fmt.Errorf("%w: %s", ErrNegativeValue, v.key)
+		}
+	}
+	return nil
 }

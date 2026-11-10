@@ -2,7 +2,6 @@ package config
 
 import (
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,8 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
 	"github.com/soltiHQ/control-plane/internal/cluster"
+	"github.com/soltiHQ/control-plane/internal/server"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 )
 
@@ -40,7 +42,7 @@ func TestLoadTrustedProxies(t *testing.T) {
 			if tc.env != "" {
 				t.Setenv("SOLTI_TRUSTED_PROXIES", tc.env)
 			}
-			cfg, err := load(nil)
+			cfg, err := load("")
 			if tc.errorPath != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.errorPath) {
 					t.Fatalf("want a %s error, got %v", tc.errorPath, err)
@@ -57,44 +59,22 @@ func TestLoadTrustedProxies(t *testing.T) {
 	}
 }
 
-func TestLoadReadsTheConfigFlag(t *testing.T) {
+// load is [Load] with its warnings dropped.
+func load(path string) (Config, error) { return Load(path, zerolog.Nop()) }
+
+func TestLoadReadsTheConfigPath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("trusted_proxies:\n  - 10.0.0.9\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("CONFIG_PATH", "")
 	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
-	cfg, err := load([]string{"--config", path})
+	cfg, err := load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := []string{"10.0.0.9"}; !slices.Equal(cfg.TrustedProxies, want) {
 		t.Fatalf("trusted_proxies = %q, want %q from the --config file", cfg.TrustedProxies, want)
-	}
-}
-
-// A mistyped flag is still reported on stderr; the path then comes from CONFIG_PATH.
-func TestMistypedConfigFlagIsReported(t *testing.T) {
-	t.Setenv("CONFIG_PATH", "from-env.yaml")
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = r.Close() }()
-	stderr := os.Stderr
-	os.Stderr = w
-	path := configPath([]string{"--confg", "typo.yaml"})
-	os.Stderr = stderr
-	_ = w.Close()
-	out, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(out), "flag provided but not defined: -confg") {
-		t.Fatalf("stderr = %q, want the unknown flag reported", out)
-	}
-	if path != "from-env.yaml" {
-		t.Fatalf("config path = %q, want CONFIG_PATH", path)
 	}
 }
 
@@ -139,7 +119,7 @@ func TestLoadCookieSecure(t *testing.T) {
 			if tc.set {
 				t.Setenv("SOLTI_AUTH_COOKIE_SECURE", tc.env)
 			}
-			cfg, err := load(nil)
+			cfg, err := load("")
 			if tc.wantErr {
 				if err == nil || !strings.Contains(err.Error(), "config.auth") {
 					t.Fatalf("want a config.auth error, got %v", err)
@@ -163,48 +143,18 @@ func TestLoadRejectsMalformedCORSOrigins(t *testing.T) {
 	}
 	t.Setenv("CONFIG_PATH", path)
 	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
-	if _, err := load(nil); err == nil || !strings.Contains(err.Error(), "config.cors") {
+	if _, err := load(""); err == nil || !strings.Contains(err.Error(), "config.cors") {
 		t.Fatalf("origin with a path: want a config.cors error, got %v", err)
 	}
 }
 
-// unsetEnv removes the named variables for the rest of the test. envconfig
-// takes a variable that is set but empty as present and overwrites the field
-// with "", which would hide a value the YAML file had set: t.Setenv(name, "")
-// is not enough. t.Setenv comes first so that its cleanup restores the
-// original value.
-func unsetEnv(t *testing.T, names ...string) {
-	t.Helper()
-	for _, name := range names {
-		t.Setenv(name, "")
-		if err := os.Unsetenv(name); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-// The first administrator's password comes from the environment only: a YAML
-// file cannot carry it.
-func TestLoadBootstrapAdminPasswordIsEnvOnly(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	// bootstrapadminpassword is the key yaml.v3 derives when the field has no tag.
-	body := "bootstrapadminpassword: from-yaml-file\nbootstrap_admin_password: from-yaml-file\nbootstrap:\n  admin_password: from-yaml-file\n"
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("CONFIG_PATH", path)
+// The first administrator's password comes from the environment only; a YAML
+// file that holds it fails loading (TestEnvOnlyKeyInFileFails).
+func TestLoadBootstrapAdminPasswordFromTheEnvironment(t *testing.T) {
+	t.Setenv("CONFIG_PATH", "")
 	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
-	// Only the file may set it here: envconfig reads both names.
-	unsetEnv(t, bootstrap.AdminPasswordEnv, "BOOTSTRAP_ADMIN_PASSWORD")
-	cfg, err := load(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.BootstrapAdminPassword != "" {
-		t.Fatal("the YAML file set the bootstrap admin password")
-	}
 	t.Setenv(bootstrap.AdminPasswordEnv, "from-the-environment")
-	cfg, err = load(nil)
+	cfg, err := load("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,38 +163,13 @@ func TestLoadBootstrapAdminPasswordIsEnvOnly(t *testing.T) {
 	}
 }
 
-// The enrollment secret comes from the environment only: a YAML file cannot
-// carry it, under the key it would naturally have or under the one yaml.v3
-// derives when the field has no tag.
-func TestLoadEnrollSecretIsEnvOnly(t *testing.T) {
-	secret := strings.Repeat("y", 32)
-	for _, key := range []string{
-		"enroll_secret",
-		"enrollsecret", // the key yaml.v3 derives when the field has no tag
-	} {
-		t.Run(key, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "config.yaml")
-			if err := os.WriteFile(path, []byte("agent_auth:\n  "+key+": "+secret+"\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("CONFIG_PATH", path)
-			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
-			// Only the file may set it here: envconfig reads both names.
-			unsetEnv(t, "SOLTI_AGENT_AUTH_ENROLL_SECRET", "ENROLL_SECRET")
-			cfg, err := load(nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if cfg.AgentAuth.EnrollSecret != "" {
-				t.Fatalf("the YAML file set the enrollment secret through agent_auth.%s", key)
-			}
-		})
-	}
-
+// The enrollment secret comes from the environment only; a YAML file that holds
+// it fails loading (TestEnvOnlyKeyInFileFails).
+func TestLoadEnrollSecretFromTheEnvironment(t *testing.T) {
 	t.Setenv("CONFIG_PATH", "")
 	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
 	t.Setenv("SOLTI_AGENT_AUTH_ENROLL_SECRET", "from-the-environment-0123456789abcdef")
-	cfg, err := load(nil)
+	cfg, err := load("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +194,7 @@ func TestEnrollSecretTooShortFailsValidation(t *testing.T) {
 			t.Setenv("CONFIG_PATH", "")
 			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
 			t.Setenv("SOLTI_AGENT_AUTH_ENROLL_SECRET", tc.secret)
-			_, err := load(nil)
+			_, err := load("")
 			if !tc.wantErr {
 				if err != nil {
 					t.Fatal(err)
@@ -315,7 +240,7 @@ func TestEnrollSecretNeedsAgentAuthRequired(t *testing.T) {
 			if tc.require != "" {
 				t.Setenv("SOLTI_AGENT_AUTH_REQUIRE", tc.require)
 			}
-			_, err := load(nil)
+			_, err := load("")
 			if !tc.wantErr {
 				if err != nil {
 					t.Fatal(err)
@@ -451,7 +376,7 @@ func TestLoadRaftCluster(t *testing.T) {
 			for key, value := range tc.env {
 				t.Setenv(key, value)
 			}
-			cfg, err := load(nil)
+			cfg, err := load("")
 			if tc.want != nil {
 				if !errors.Is(err, tc.want) || !strings.Contains(err.Error(), "config.cluster") {
 					t.Fatalf("want a config.cluster error wrapping %v, got %v", tc.want, err)
@@ -489,12 +414,97 @@ func TestLoadRaftClusterWithDNS(t *testing.T) {
 	} {
 		t.Setenv(key, value)
 	}
-	cfg, err := load(nil)
+	cfg, err := load("")
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := cluster.DiscoveryConfig{Driver: cluster.DriverDNS, Hostname: "podium.svc", Port: 7000}
 	if d := cfg.Cluster.Discovery; d.Driver != want.Driver || d.Hostname != want.Hostname || d.Port != want.Port {
 		t.Fatalf("discovery = %+v, want %+v", d, want)
+	}
+}
+
+// The log level defaults to info and the format to json; the file and the
+// environment set them, the environment last.
+func TestLoadLogSettings(t *testing.T) {
+	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+	t.Setenv("CONFIG_PATH", "")
+	cfg, err := load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Log.Level != "info" || cfg.Log.Format != "json" {
+		t.Fatalf("default log settings = %+v, want info and json", cfg.Log)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("log:\n  level: warn\n  format: text\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = load(path); err != nil || cfg.Log.Level != "warn" || cfg.Log.Format != "text" {
+		t.Fatalf("from the file: %+v, %v; want warn and text", cfg.Log, err)
+	}
+	t.Setenv("SOLTI_LOG_LEVEL", "debug")
+	t.Setenv("SOLTI_LOG_FORMAT", "json")
+	if cfg, err = load(path); err != nil || cfg.Log.Level != "debug" || cfg.Log.Format != "json" {
+		t.Fatalf("from the environment: %+v, %v; want debug and json over the file", cfg.Log, err)
+	}
+}
+
+// A level or a format that is not one of the four and the two fails loading,
+// whichever way it is set.
+func TestLoadRejectsAnInvalidLogSetting(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, value string
+		want             error
+	}{
+		{"unknown level", "SOLTI_LOG_LEVEL", "verbose", ErrInvalidLogLevel},
+		{"trace is no level", "SOLTI_LOG_LEVEL", "trace", ErrInvalidLogLevel},
+		{"level in capitals", "SOLTI_LOG_LEVEL", "INFO", ErrInvalidLogLevel},
+		{"empty level", "SOLTI_LOG_LEVEL", "", ErrInvalidLogLevel},
+		{"unknown format", "SOLTI_LOG_FORMAT", "xml", ErrInvalidLogFormat},
+		{"empty format", "SOLTI_LOG_FORMAT", "", ErrInvalidLogFormat},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+			t.Setenv("CONFIG_PATH", "")
+			t.Setenv(tc.env, tc.value)
+			_, err := load("")
+			if !errors.Is(err, tc.want) || !strings.Contains(err.Error(), "config.log") {
+				t.Fatalf("load = %v, want %v under config.log", err, tc.want)
+			}
+		})
+	}
+}
+
+// The ops listener defaults to loopback port 8081 and the shutdown delay to none;
+// the file and the environment set them, and an empty ops.addr switches the
+// listener off, whichever way it is set.
+func TestLoadOpsAndShutdownDelaySettings(t *testing.T) {
+	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+	t.Setenv("CONFIG_PATH", "")
+	cfg, err := load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Ops.Addr != "127.0.0.1:8081" || cfg.Ops.Name != "ops" || cfg.Server.ShutdownDelay != 0 {
+		t.Fatalf("defaults: ops %+v, shutdown delay %v; want 127.0.0.1:8081, ops and 0", cfg.Ops, cfg.Server.ShutdownDelay)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("ops:\n  addr: 10.0.0.5:9000\n  name: probes\nserver:\n  shutdown_delay: 5s\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err = load(path); err != nil || cfg.Ops.Addr != "10.0.0.5:9000" || cfg.Ops.Name != "probes" || cfg.Server.ShutdownDelay != 5*time.Second {
+		t.Fatalf("from the file: %+v, %v, %v", cfg.Ops, cfg.Server.ShutdownDelay, err)
+	}
+	t.Setenv("SOLTI_OPS_ADDR", "")
+	t.Setenv("SOLTI_SERVER_SHUTDOWN_DELAY", "2s")
+	if cfg, err = load(path); err != nil || cfg.Ops.Enabled() || cfg.Server.ShutdownDelay != 2*time.Second {
+		t.Fatalf("from the environment: %+v, %v, %v; want the listener off and 2s over the file", cfg.Ops, cfg.Server.ShutdownDelay, err)
+	}
+	t.Setenv("SOLTI_SERVER_SHUTDOWN_DELAY", "-1s")
+	if _, err = load(path); !errors.Is(err, server.ErrNegativeShutdownDelay) {
+		t.Fatalf("a negative delay: %v, want ErrNegativeShutdownDelay", err)
 	}
 }

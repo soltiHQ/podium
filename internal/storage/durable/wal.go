@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"slices"
+	"time"
 
 	raftv1 "github.com/soltiHQ/control-plane/api/gen/solti/raft/v1"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -271,6 +272,10 @@ func replay(log *bolt.Bucket, index uint64, dst storage.Storage) (last uint64, s
 // state. Nothing is published unless the entry committed. A failed commit or a
 // failed apply of a committed entry fails the store. The caller holds writer.
 func (s *Store) commit(ctx context.Context, ops []*raftv1.Op) error {
+	if s.onCommit != nil {
+		start := time.Now()
+		defer func() { s.onCommit(time.Since(start)) }()
+	}
 	command, err := overlay.EncodeCommand(ops)
 	if err != nil {
 		return fmt.Errorf("%w: durable command: %w", storage.ErrInternal, err)

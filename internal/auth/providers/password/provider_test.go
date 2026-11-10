@@ -122,7 +122,7 @@ func TestProvider_Authenticate_InvalidWiring(t *testing.T) {
 func TestProvider_Authenticate_InvalidRequest(t *testing.T) {
 	ctx := context.Background()
 	store := inmemory.New()
-	p := New(store)
+	p := New(store, testCost)
 
 	t.Run("nil req", func(t *testing.T) {
 		_, err := p.Authenticate(ctx, nil)
@@ -149,7 +149,7 @@ func TestProvider_Authenticate_InvalidRequest(t *testing.T) {
 func TestProvider_Authenticate_InvalidCredentials_Shape(t *testing.T) {
 	ctx := context.Background()
 	store := inmemory.New()
-	p := New(store)
+	p := New(store, testCost)
 
 	t.Run("empty subject", func(t *testing.T) {
 		_, err := p.Authenticate(ctx, Request{Subject: "", Password: "x"})
@@ -231,7 +231,7 @@ func TestProvider_Authenticate_VerifierNotFound(t *testing.T) {
 func TestProvider_Authenticate_BadPassword(t *testing.T) {
 	ctx := context.Background()
 	store := inmemory.New()
-	p := New(store)
+	p := New(store, testCost)
 
 	u := mustUser(t, "user-1", "subj-1", false)
 	mustUpsertUser(t, ctx, store, u)
@@ -246,7 +246,7 @@ func TestProvider_Authenticate_BadPassword(t *testing.T) {
 func TestProvider_Authenticate_Success(t *testing.T) {
 	ctx := context.Background()
 	store := inmemory.New()
-	p := New(store)
+	p := New(store, testCost)
 
 	u := mustUser(t, "user-1", "subj-1", false)
 	mustUpsertUser(t, ctx, store, u)
@@ -275,7 +275,7 @@ func TestProvider_Authenticate_PropagatesStorageErrors(t *testing.T) {
 	base := inmemory.New()
 
 	t.Run("GetUserBySubject returns ErrUnavailable", func(t *testing.T) {
-		p := New(wrapStore{Storage: base, getUserErr: storage.ErrUnavailable})
+		p := New(wrapStore{Storage: base, getUserErr: storage.ErrUnavailable}, testCost)
 		_, err := p.Authenticate(ctx, Request{Subject: "subj-1", Password: "pw"})
 		if !errors.Is(err, storage.ErrUnavailable) {
 			t.Fatalf("expected ErrUnavailable, got %v", err)
@@ -288,7 +288,7 @@ func TestProvider_Authenticate_PropagatesStorageErrors(t *testing.T) {
 			t.Fatalf("UpsertUser: %v", err)
 		}
 
-		p := New(wrapStore{Storage: base, getCredErr: storage.ErrInternal})
+		p := New(wrapStore{Storage: base, getCredErr: storage.ErrInternal}, testCost)
 		_, err := p.Authenticate(ctx, Request{Subject: "subj-1", Password: "pw"})
 		if !errors.Is(err, storage.ErrInternal) {
 			t.Fatalf("expected ErrInternal, got %v", err)
@@ -302,7 +302,7 @@ func TestProvider_Authenticate_PropagatesStorageErrors(t *testing.T) {
 		}
 		_, _ = mustUpsertPasswordMaterial(t, ctx, base, "cred-1", "ver-1", u.ID(), "pw")
 
-		p := New(wrapStore{Storage: base, getVerifierErr: storage.ErrUnavailable})
+		p := New(wrapStore{Storage: base, getVerifierErr: storage.ErrUnavailable}, testCost)
 		_, err := p.Authenticate(ctx, Request{Subject: "subj-1", Password: "pw"})
 		if !errors.Is(err, storage.ErrUnavailable) {
 			t.Fatalf("expected ErrUnavailable, got %v", err)
@@ -409,16 +409,17 @@ func TestProvider_FailuresCompareAgainstTheDummyHash(t *testing.T) {
 	}
 }
 
-// New compares with bcrypt itself, against a dummy hash at the cost new
-// passwords are stored with, so the dummy compare costs as much as a real one.
-func TestNewComparesWithBcryptAtTheStoredCost(t *testing.T) {
-	p := New(inmemory.New())
+// New compares with bcrypt itself, against a dummy hash at the cost it is
+// given, which is the cost new passwords are stored with, so the dummy compare
+// costs as much as a real one.
+func TestNewComparesWithBcryptAtTheGivenCost(t *testing.T) {
+	p := New(inmemory.New(), testCost)
 	hash, err := p.dummyHash()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cost, err := bcrypt.Cost(hash); err != nil || cost != credentials.DefaultBcryptCost {
-		t.Fatalf("dummy hash cost %d (%v), want %d", cost, err, credentials.DefaultBcryptCost)
+	if cost, err := bcrypt.Cost(hash); err != nil || cost != testCost {
+		t.Fatalf("dummy hash cost %d (%v), want %d", cost, err, testCost)
 	}
 	own, err := bcrypt.GenerateFromPassword([]byte("own-password"), bcrypt.MinCost)
 	if err != nil {

@@ -20,16 +20,21 @@ import (
 type Service struct {
 	logger zerolog.Logger
 	store  storage.Storage
+	// cost is the bcrypt cost of a password whose request names none.
+	cost int
 }
 
-// New creates a new credential service.
-func New(store storage.Storage, logger zerolog.Logger) *Service {
+// New creates a new credential service that hashes passwords at the bcrypt
+// cost, unless a request names its own. Production passes
+// authcred.DefaultBcryptCost; a cost of zero means that too.
+func New(store storage.Storage, logger zerolog.Logger, cost int) *Service {
 	if store == nil {
 		panic("credential.Service: store is nil")
 	}
 	return &Service{
 		logger: logger.With().Str("service", "credentials").Logger(),
 		store:  store,
+		cost:   cost,
 	}
 }
 
@@ -155,7 +160,11 @@ func (s *Service) setPassword(ctx context.Context, req SetPasswordRequest, check
 		}
 
 		verifierID := "ver-" + credID
-		ver, err := authcred.NewPasswordVerifier(verifierID, credID, req.Password, req.Cost)
+		cost := req.Cost
+		if cost == 0 {
+			cost = s.cost
+		}
+		ver, err := authcred.NewPasswordVerifier(verifierID, credID, req.Password, cost)
 		if err != nil {
 			return err
 		}

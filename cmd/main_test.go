@@ -7,9 +7,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog"
+
+	"github.com/soltiHQ/control-plane/internal/buildinfo"
+	"github.com/soltiHQ/control-plane/internal/config"
 )
 
 func TestExitCodeReflectsRunAndCleanup(t *testing.T) {
@@ -148,6 +156,33 @@ func TestAgentTokenCommandAcceptsDoubleDash(t *testing.T) {
 	}
 }
 
+// An argument before "--" that starts with "-" and is no option of the command
+// is a usage error: exit 2, nothing on stdout, and one line on stderr that names
+// it, never the secret. It is not taken for the agent ID, which, when it starts
+// with "-", goes after "--" and still gets its token there.
+func TestAgentTokenRefusesUnknownOptions(t *testing.T) {
+	for _, tc := range []struct {
+		args   []string
+		option string // the argument the error names
+	}{
+		{[]string{"-v"}, "-v"},
+		{[]string{"--bogus"}, "--bogus"},
+		{[]string{"-v", "agent-1"}, "-v"},
+		{[]string{"--generation", "1", "-x"}, "-x"},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			code, stdout, stderr := runAgentToken(t, enrollSecret, false, tc.args...)
+			if code != 2 || stdout != "" || strings.Count(stderr, "\n") != 1 || !strings.Contains(stderr, `"`+tc.option+`"`) || strings.Contains(stderr, enrollSecret) {
+				t.Fatalf("exit %d, stdout %q, stderr %q; want exit 2, no stdout and one line on stderr that names %q, without the secret", code, stdout, stderr, tc.option)
+			}
+		})
+	}
+	code, stdout, stderr := runAgentToken(t, enrollSecret, false, "--", "-v")
+	if want := "eb75e08a2239cc99452ff74ab9bc490d7e18a3c6a4c4c9b6caba8a488381f11e\n"; code != 0 || stdout != want || stderr != "" {
+		t.Fatalf("-- -v: exit %d, stdout %q, stderr %q; want exit 0 and the token of agent ID -v, %q", code, stdout, stderr, want)
+	}
+}
+
 // "--generation N" before the agent ID prints the token of that generation,
 // which a credential reset moves an agent to; without it, or with 0, the token
 // is the one podium agent-token printed before generations existed, the token
@@ -237,5 +272,251 @@ func TestAgentTokenSubcommandRunsBeforeConfigLoading(t *testing.T) {
 	}
 	if want := "ee91297d059304dd88e1c5650d195795e3fa9c921c419a61aced53e41a3c0058\n"; stdout.String() != want {
 		t.Fatalf("stdout %q, want %q", stdout.String(), want)
+	}
+}
+
+// serveSpy stands for the server: it records that it started and with which
+// config path.
+type serveSpy struct {
+	started bool
+	path    string
+}
+
+func (s *serveSpy) serve(path string) int {
+	s.started, s.path = true, path
+	return 0
+}
+
+// A command line that is no command ends with the error and the usage on stderr
+// and exit 2, before the server starts and so before any configuration loads.
+func TestCLIRefusesUnknownFlagBeforeStarting(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string // a part of the error
+	}{
+		{"unknown flag", []string{"--bogus"}, "-bogus"},
+		{"unknown flag after a good one", []string{"--config", "f.yaml", "--bogus"}, "-bogus"},
+		{"unknown subcommand", []string{"serve"}, `unknown subcommand "serve"`},
+		{"extra argument", []string{"--config", "f.yaml", "extra"}, `unexpected argument "extra"`},
+		{"missing value", []string{"--config"}, "needs an argument"},
+		{"subcommand after a flag", []string{"--config", "f.yaml", "agent-token", "agent-1"}, `unexpected argument "agent-token"`},
+		{"version with an argument", []string{"version", "now"}, "version takes no arguments"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var spy serveSpy
+			var stdout, stderr bytes.Buffer
+			code := run(tc.args, &stdout, &stderr, spy.serve)
+			if code != 2 || spy.started || stdout.Len() != 0 {
+				t.Fatalf("exit %d, started %v, stdout %q; want exit 2, nothing started, no stdout", code, spy.started, stdout.String())
+			}
+			if !strings.Contains(stderr.String(), tc.want) || !strings.Contains(stderr.String(), "usage: podium") {
+				t.Fatalf("stderr %q, want the error (%s) and the usage", stderr.String(), tc.want)
+			}
+		})
+	}
+}
+
+// The server starts with the path of --config, in any spelling of the flag, or
+// with none.
+func TestCLIStartsTheServerWithTheConfigPath(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{nil, ""},
+		{[]string{"--config", "a.yaml"}, "a.yaml"},
+		{[]string{"--config=a.yaml"}, "a.yaml"},
+		{[]string{"-config", "a.yaml"}, "a.yaml"},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			var spy serveSpy
+			var stdout, stderr bytes.Buffer
+			if code := run(tc.args, &stdout, &stderr, spy.serve); code != 0 || !spy.started || spy.path != tc.want || stdout.Len()+stderr.Len() != 0 {
+				t.Fatalf("exit %d, started %v, path %q, output %q %q; want path %q", code, spy.started, spy.path, stdout.String(), stderr.String(), tc.want)
+			}
+		})
+	}
+}
+
+// -h and --help print the usage to stdout and exit 0, with nothing started.
+func TestHelpExitsZero(t *testing.T) {
+	for _, flag := range []string{"-h", "--help"} {
+		t.Run(flag, func(t *testing.T) {
+			var spy serveSpy
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{flag}, &stdout, &stderr, spy.serve); code != 0 || spy.started || stderr.Len() != 0 {
+				t.Fatalf("exit %d, started %v, stderr %q; want exit 0, nothing started, no stderr", code, spy.started, stderr.String())
+			}
+			for _, want := range []string{"usage: podium [--config PATH]", "podium agent-token", "podium version"} {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatalf("stdout %q, want it to hold %q", stdout.String(), want)
+				}
+			}
+		})
+	}
+}
+
+// "podium version" and "podium --version" print the one line and start nothing.
+// A test binary has no VCS stamp, so its commit is unknown.
+func TestVersionCommandPrintsOneLine(t *testing.T) {
+	line := regexp.MustCompile(`^podium \S+ \(commit (unknown|[0-9a-f]{12})(, modified)?, built \S+, go\S+ [a-z0-9]+/[a-z0-9]+\)\n$`)
+	for _, args := range [][]string{{"version"}, {"--version"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var spy serveSpy
+			var stdout, stderr bytes.Buffer
+			if code := run(args, &stdout, &stderr, spy.serve); code != 0 || spy.started || stderr.Len() != 0 {
+				t.Fatalf("exit %d, started %v, stderr %q; want exit 0, nothing started, no stderr", code, spy.started, stderr.String())
+			}
+			if !line.MatchString(stdout.String()) {
+				t.Fatalf("stdout %q is not the version line", stdout.String())
+			}
+		})
+	}
+}
+
+// podium agent-token runs through the grammar with its own behaviour and exit codes.
+func TestCLIRunsAgentToken(t *testing.T) {
+	t.Setenv("SOLTI_AGENT_AUTH_ENROLL_SECRET", enrollSecret)
+	var spy serveSpy
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"agent-token", "agent-1"}, &stdout, &stderr, spy.serve)
+	if want := "ee91297d059304dd88e1c5650d195795e3fa9c921c419a61aced53e41a3c0058\n"; code != 0 || spy.started || stdout.String() != want || stderr.Len() != 0 {
+		t.Fatalf("exit %d, started %v, stdout %q, stderr %q; want the token", code, spy.started, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	if code := run([]string{"agent-token"}, &stdout, &stderr, spy.serve); code != 2 {
+		t.Fatalf("agent-token without an ID: exit %d, want 2", code)
+	}
+}
+
+// logEvery writes one line at each level of logger.
+func logEvery(logger zerolog.Logger) {
+	logger.Debug().Msg("a-debug")
+	logger.Info().Msg("a-info")
+	logger.Warn().Msg("a-warn")
+	logger.Error().Msg("a-error")
+}
+
+// log.level is the floor: a line below it is not written, and Debug is written
+// at debug only.
+func TestLogLevelFiltersDebug(t *testing.T) {
+	for _, tc := range []struct {
+		level string
+		want  []string
+	}{
+		{"debug", []string{"a-debug", "a-info", "a-warn", "a-error"}},
+		{"info", []string{"a-info", "a-warn", "a-error"}},
+		{"warn", []string{"a-warn", "a-error"}},
+		{"error", []string{"a-error"}},
+	} {
+		t.Run(tc.level, func(t *testing.T) {
+			var out bytes.Buffer
+			logEvery(newLogger(config.LogConfig{Level: tc.level, Format: "json"}, &out))
+			var got []string
+			for _, name := range []string{"a-debug", "a-info", "a-warn", "a-error"} {
+				if strings.Contains(out.String(), `"message":"`+name+`"`) {
+					got = append(got, name)
+				}
+			}
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Fatalf("level %s wrote %v, want %v\n%s", tc.level, got, tc.want, out.String())
+			}
+		})
+	}
+}
+
+// The text format is zerolog's console writer with no colour, one line per
+// event; json is a JSON object per line.
+func TestTextLogFormat(t *testing.T) {
+	var out bytes.Buffer
+	text := newLogger(config.LogConfig{Level: "info", Format: "text"}, &out)
+	text.Info().Str("k", "v").Msg("hello")
+	line := out.String()
+	if strings.Count(line, "\n") != 1 || !strings.Contains(line, "INF") || !strings.Contains(line, "hello") || !strings.Contains(line, "k=v") {
+		t.Fatalf("text line %q, want one console line with the level, the message and k=v", line)
+	}
+	if strings.Contains(line, "\x1b") || strings.HasPrefix(line, "{") {
+		t.Fatalf("text line %q has colour or is JSON", line)
+	}
+
+	out.Reset()
+	json := newLogger(config.LogConfig{Level: "info", Format: "json"}, &out)
+	json.Info().Msg("hello")
+	if !strings.HasPrefix(out.String(), "{") || !strings.Contains(out.String(), `"message":"hello"`) || !strings.Contains(out.String(), `"time"`) {
+		t.Fatalf("json line %q, want a JSON object with a time", out.String())
+	}
+}
+
+// The first line of a run says which podium it is.
+func TestFirstLogLineNamesTheBuild(t *testing.T) {
+	var out bytes.Buffer
+	info := buildinfo.Info{
+		Version: "v1.2.3", Commit: "0123456789ab", Modified: true,
+		BuildTime: time.Date(2026, 11, 5, 10, 20, 30, 0, time.UTC),
+		GoVersion: "go1.27.3", Platform: "linux/amd64",
+	}
+	logStart(zerolog.New(&out), info)
+	for _, want := range []string{`"level":"info"`, `"version":"v1.2.3"`, `"commit":"0123456789ab"`, `"modified":true`, `"built":"2026-11-05T10:20:30Z"`, `"go_version":"go1.27.3"`, `"platform":"linux/amd64"`} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("first line %s lacks %s", out.String(), want)
+		}
+	}
+}
+
+// lockedBuffer is a bytes.Buffer that the test reads while a child process writes.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// The first SIGTERM cancels the context, which starts the graceful shutdown, and
+// exits nothing; a second ends the process at once with status 1 and a WARN. The
+// signals are real: the test sends them to itself.
+func TestSecondSignalExitsAtOnce(t *testing.T) {
+	logs := &lockedBuffer{}
+	exited := make(chan int, 1)
+	ctx, stop := notifyShutdown(zerolog.New(logs), func(code int) { exited <- code })
+	defer stop()
+
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first signal did not cancel the context within 10s")
+	}
+	select {
+	case code := <-exited:
+		t.Fatalf("the first signal exited with status %d, want the graceful shutdown", code)
+	default:
+	}
+
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-exited:
+		if code != 1 {
+			t.Fatalf("the second signal exited with status %d, want 1", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the second signal did not end the process within 10s:\n%s", logs.String())
+	}
+	if out := logs.String(); !strings.Contains(out, `"level":"warn"`) || !strings.Contains(out, "second signal") {
+		t.Fatalf("no WARN line about the second signal:\n%s", out)
 	}
 }

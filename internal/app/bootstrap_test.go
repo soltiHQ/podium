@@ -12,10 +12,13 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/internal/auth"
+	authcred "github.com/soltiHQ/control-plane/internal/auth/credentials"
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/config"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Bootstrap writes the generated password where the selected backend keeps its
@@ -67,7 +70,7 @@ func TestNewWritesAdminPasswordFileOnFirstStart(t *testing.T) {
 	start := func() string {
 		t.Helper()
 		var logs bytes.Buffer
-		a, err := New(context.Background(), cfg, zerolog.New(&logs))
+		a, err := New(context.Background(), cfg, zerolog.New(&logs), WithPasswordCost(bcrypt.MinCost))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -137,7 +140,7 @@ func TestNewRaftRefusesAnAdminPasswordBreakingThePolicy(t *testing.T) {
 			cfg, dir := raftSeedConfig(t)
 			cfg.BootstrapAdminPassword = tc.password
 			var logs bytes.Buffer
-			a, err := New(context.Background(), cfg, zerolog.New(&logs))
+			a, err := New(context.Background(), cfg, zerolog.New(&logs), WithPasswordCost(bcrypt.MinCost))
 			if err == nil {
 				_ = a.Shutdown(context.Background())
 				t.Fatal("New accepted the password")
@@ -162,12 +165,61 @@ func TestNewRaftRefusesAnAdminPasswordBreakingThePolicy(t *testing.T) {
 func TestNewRaftRefusesToStartWithoutADataDirectory(t *testing.T) {
 	cfg, _ := raftSeedConfig(t)
 	cfg.Cluster.Raft.DataDir = ""
-	a, err := New(context.Background(), cfg, zerolog.Nop())
+	a, err := New(context.Background(), cfg, zerolog.Nop(), WithPasswordCost(bcrypt.MinCost))
 	if err == nil {
 		_ = a.Shutdown(context.Background())
 		t.Fatal("New started a raft node without a data directory")
 	}
 	if !errors.Is(err, bootstrap.ErrNoDataDir) {
 		t.Fatalf("New() = %v, want ErrNoDataDir", err)
+	}
+}
+
+// The cost New is given is the cost of the password hashes the services write:
+// the hash of the administrator that a standalone start seeds has it. A New that
+// dropped the option, or passed the services another cost, would hash at the
+// default, 12.
+func TestPasswordCostReachesTheServices(t *testing.T) {
+	const cost = bcrypt.MinCost + 1 // neither the default nor the floor
+	cfg := config.Default()
+	cfg.Cluster.Standalone.Ephemeral = true
+	cfg.Auth.JWTSecret = strings.Repeat("password-cost-test-secret", 2)
+	a, err := New(context.Background(), cfg, zerolog.Nop(), WithPasswordCost(cost))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Shutdown(context.Background()) }()
+	ctx := context.Background()
+	admin, err := a.store.GetUserBySubject(ctx, "admin")
+	if err != nil {
+		t.Fatalf("the seeded administrator: %v", err)
+	}
+	cred, err := a.store.GetCredentialByUserAndAuth(ctx, admin.ID(), enum.Password)
+	if err != nil {
+		t.Fatalf("the administrator's password credential: %v", err)
+	}
+	verifier, err := a.store.GetVerifierByCredential(ctx, cred.ID())
+	if err != nil {
+		t.Fatalf("the administrator's password verifier: %v", err)
+	}
+	hash, ok := verifier.DataGet(authcred.PasswordHashKey)
+	if !ok {
+		t.Fatal("the administrator's verifier holds no password hash")
+	}
+	if got, err := bcrypt.Cost([]byte(hash)); err != nil || got != cost {
+		t.Fatalf("the stored hash has cost %d (%v), want the cost New was given, %d", got, err, cost)
+	}
+}
+
+// A production start hashes passwords at cost 12; only an option, which tests
+// use, lowers it.
+func TestDefaultPasswordCostIsTwelve(t *testing.T) {
+	if got := defaultOptions().passwordCost; got != 12 {
+		t.Fatalf("default password cost = %d, want 12", got)
+	}
+	o := defaultOptions()
+	WithPasswordCost(bcrypt.MinCost)(&o)
+	if o.passwordCost != bcrypt.MinCost {
+		t.Fatalf("WithPasswordCost did not apply: %d", o.passwordCost)
 	}
 }

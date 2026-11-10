@@ -25,6 +25,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -54,6 +55,13 @@ type clusterNode struct {
 	logs *syncBuffer // what the node logs, one JSON object per line
 	app  *App        // nil until the node starts
 	stop func()
+	// runDone is closed once Run has returned; runErr, set before it closes, is
+	// what Run returned.
+	runDone chan struct{}
+	runErr  error
+	// discarded marks a node of an attempt that startWholeNodes gave up: its Run
+	// may have ended on its own, which stop then does not report.
+	discarded bool
 }
 
 // clusterNodes returns one node per ID, none of them started yet, each with the
@@ -78,7 +86,7 @@ func clusterNodesOf(t *testing.T, raft []cluster.Config) []*clusterNode {
 			t.Fatal(err)
 		}
 		listen := net.JoinHostPort(host, "0")
-		cfg.HTTP.Addr, cfg.HTTPDiscovery.Addr, cfg.GRPC.Addr = listen, listen, listen
+		cfg.HTTP.Addr, cfg.HTTPDiscovery.Addr, cfg.GRPC.Addr, cfg.Ops.Addr = listen, listen, listen, listen
 		nodes = append(nodes, &clusterNode{id: r.Raft.NodeID, cfg: cfg, logs: &syncBuffer{}})
 	}
 	return nodes
@@ -89,21 +97,35 @@ func clusterNodesOf(t *testing.T, raft []cluster.Config) []*clusterNode {
 // if stop did not stop it first.
 func (n *clusterNode) start(t *testing.T) {
 	t.Helper()
+	if err := n.tryStart(t); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// tryStart is start that returns what fails New, instead of failing the test.
+func (n *clusterNode) tryStart(t *testing.T) error {
+	t.Helper()
 	begin := time.Now()
-	a, err := New(context.Background(), n.cfg, zerolog.New(n.logs))
+	a, err := New(context.Background(), n.cfg, zerolog.New(n.logs), WithPasswordCost(bcrypt.MinCost))
 	if err != nil {
-		t.Fatalf("start %s: %v", n.id, err)
+		return fmt.Errorf("start %s: %w", n.id, err)
 	}
 	took := time.Since(begin)
 	ctx, cancel := context.WithCancel(context.Background())
 	ran := make(chan error, 1)
-	go func() { ran <- a.Run(ctx) }()
+	n.runDone = make(chan struct{})
+	go func() {
+		err := a.Run(ctx)
+		n.runErr = err
+		close(n.runDone)
+		ran <- err
+	}()
 	n.app = a
 	n.stop = sync.OnceFunc(func() {
 		cancel()
 		select {
 		case err := <-ran:
-			if !errors.Is(err, context.Canceled) {
+			if !errors.Is(err, context.Canceled) && !n.discarded {
 				t.Errorf("%s: Run ended with %v before it was stopped", n.id, err)
 			}
 		case <-time.After(10 * time.Second):
@@ -117,8 +139,9 @@ func (n *clusterNode) start(t *testing.T) {
 	})
 	t.Cleanup(n.stop)
 	if took > newStartLimit {
-		t.Fatalf("New took %s to start %s: it must not wait for a leader", took, n.id)
+		return fmt.Errorf("New took %s to start %s: it must not wait for a leader", took, n.id)
 	}
+	return nil
 }
 
 // logLine is a line that a node logged: its index among the node's lines, and

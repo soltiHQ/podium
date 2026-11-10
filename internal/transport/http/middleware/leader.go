@@ -63,6 +63,13 @@ type LeaderOptions struct {
 	// client certificate presented when the leader asks for one. Nil verifies
 	// the leader against the system roots, with no client certificate.
 	TLSClientConfig *tls.Config
+
+	// Refused, when set, is called once for each write that this node answers
+	// itself with a 502 or 503 because it cannot send it to a leader: no leader
+	// is known, the request was forwarded here already, the leader's address is
+	// unusable, or the leader cannot be reached. A write that it proxies, and
+	// the leader's answer to it, are not refusals. It runs on the request's goroutine.
+	Refused func()
 }
 
 // Leader routes write requests to the cluster leader.
@@ -108,6 +115,10 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 		TLSClientConfig: opts.TLSClientConfig.Clone(),
 	}}
 
+	refused := opts.Refused
+	if refused == nil {
+		refused = func() {}
+	}
 	leader := func() string { return leaderAddress(leadership, opts.ForwardPort) }
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -117,16 +128,19 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 			}
 			leaderAddr := leadership.CurrentLeader()
 			if leaderAddr == "" {
+				refused()
 				http.Error(w, "cluster: no leader", http.StatusServiceUnavailable)
 				return
 			}
 			if opts.ForwardPort == 0 {
 				// No port to forward to, and none to tell the client: the leader's raft address is no HTTP address.
+				refused()
 				http.Error(w, "cluster: not leader", http.StatusServiceUnavailable)
 				return
 			}
 			if len(r.Header.Values(ForwardedHeader)) > 0 {
 				// Forwarded once already, to a node that leads no more, or never did on this port.
+				refused()
 				response.SetLeader(w, leaderHTTPAddr(leaderAddr, opts.ForwardPort))
 				http.Error(w, "cluster: not leader", http.StatusServiceUnavailable)
 				return
@@ -134,6 +148,7 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 
 			target, err := buildTarget(leaderAddr, opts.ForwardPort, opts.TargetTLS)
 			if err != nil {
+				refused()
 				http.Error(w, "cluster: bad leader addr", http.StatusBadGateway)
 				return
 			}
@@ -141,6 +156,7 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 			proxy.Transport = transport
 			proxy.ModifyResponse = dropCORS
 			proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, _ error) {
+				refused()
 				response.SetLeader(w, leaderHTTPAddr(leaderAddr, opts.ForwardPort))
 				http.Error(w, "cluster: leader unreachable", http.StatusBadGateway)
 			}

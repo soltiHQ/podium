@@ -23,6 +23,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const keepaliveFrame = ": keepalive"
@@ -522,7 +523,7 @@ func newStreamViewer(t *testing.T) *streamViewer {
 	if err = v.store.CreateSession(ctx, sess); err != nil {
 		t.Fatal(err)
 	}
-	sessions := kit.New(sessionOutage{Storage: v.store, down: &v.down}, auth.Config{JWTSecret: strings.Repeat("k", auth.MinJWTSecretLen)}).Session
+	sessions := kit.New(sessionOutage{Storage: v.store, down: &v.down}, auth.Config{JWTSecret: strings.Repeat("k", auth.MinJWTSecretLen)}, bcrypt.MinCost).Session
 	v.check = middleware.Recheck(sessions, "", zerolog.Nop())
 	return v
 }

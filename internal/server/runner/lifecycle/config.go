@@ -1,6 +1,10 @@
 package lifecycle
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
 
 const (
 	defaultTickInterval = 10 * time.Second
@@ -61,4 +65,30 @@ func (c Config) withDefaults() Config {
 		c.DeleteMultiplier = c.DisconnectMultiplier + 1
 	}
 	return c
+}
+
+// ErrNegativeValue indicates a negative interval, multiplier or count; zero
+// keeps the default.
+var ErrNegativeValue = errors.New("lifecycle: negative value")
+
+// Validate reports a negative interval, multiplier or count (zero keeps the
+// default).
+func (c Config) Validate() error {
+	for _, v := range []struct {
+		key string
+		neg bool
+	}{
+		{"tick_interval", c.TickInterval < 0},
+		{"default_heartbeat", c.DefaultHeartbeat < 0},
+		{"inactive_multiplier", c.InactiveMultiplier < 0},
+		{"disconnect_multiplier", c.DisconnectMultiplier < 0},
+		{"delete_multiplier", c.DeleteMultiplier < 0},
+		{"delete_after", c.DeleteAfter < 0},
+		{"max_concurrency", c.MaxConcurrency < 0},
+	} {
+		if v.neg {
+			return fmt.Errorf("%w: %s", ErrNegativeValue, v.key)
+		}
+	}
+	return nil
 }

@@ -21,18 +21,18 @@ const (
 
 // Config configures the authentication subsystem.
 type Config struct {
-	JWTSecret     string        `yaml:"jwt_secret"     envconfig:"JWT_SECRET"`
-	Audience      string        `yaml:"audience"       envconfig:"AUDIENCE"`
-	Issuer        string        `yaml:"issuer"         envconfig:"ISSUER"`
-	AccessTTL     time.Duration `yaml:"access_ttl"     envconfig:"ACCESS_TTL"`
-	RefreshTTL    time.Duration `yaml:"refresh_ttl"    envconfig:"REFRESH_TTL"`
-	RateWindow    time.Duration `yaml:"rate_window"    envconfig:"RATE_WINDOW"`
-	RateAttempts  int           `yaml:"rate_attempts"  envconfig:"RATE_ATTEMPTS"`
-	RotateRefresh bool          `yaml:"rotate_refresh" envconfig:"ROTATE_REFRESH"`
+	JWTSecret     string        `yaml:"jwt_secret"`
+	Audience      string        `yaml:"audience"`
+	Issuer        string        `yaml:"issuer"`
+	AccessTTL     time.Duration `yaml:"access_ttl"`
+	RefreshTTL    time.Duration `yaml:"refresh_ttl"`
+	RateWindow    time.Duration `yaml:"rate_window"`
+	RateAttempts  int           `yaml:"rate_attempts"`
+	RotateRefresh bool          `yaml:"rotate_refresh"`
 
 	// CookieSecure decides when the auth and device cookies carry the Secure
 	// attribute: CookieSecureAuto (the default) or CookieSecureAlways.
-	CookieSecure string `yaml:"cookie_secure" envconfig:"COOKIE_SECURE"`
+	CookieSecure string `yaml:"cookie_secure"`
 }
 
 // Values of [Config.CookieSecure].

@@ -26,6 +26,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth/ratelimit"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/event"
+	"github.com/soltiHQ/control-plane/internal/metrics"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -83,6 +84,44 @@ func NewSyncBuckets() *ratelimit.Buckets {
 	})
 }
 
+// SyncObserver is told how each sync ended, with one of the Sync outcomes of
+// package metrics. A nil observer is told nothing.
+type SyncObserver func(outcome string)
+
+// done tells o that a sync ended with outcome.
+func (o SyncObserver) done(outcome string) {
+	if o != nil {
+		o(outcome)
+	}
+}
+
+// authOutcome is the outcome of a sync whose token check failed with err: a token
+// that is too long is an invalid payload, a limit on token failures is a rate
+// limit, a refused enrollment and a wrong or missing token are what they say, and
+// anything else is a store that could not answer.
+func authOutcome(err error) string {
+	switch {
+	case errors.Is(err, agent.ErrTokenTooLong):
+		return metrics.SyncInvalid
+	case errors.Is(err, auth.ErrRateLimited):
+		return metrics.SyncRateLimited
+	case errors.Is(err, agent.ErrEnrollRefused):
+		return metrics.SyncRefused
+	case errors.Is(err, agent.ErrUnauthenticated):
+		return metrics.SyncUnauthenticated
+	}
+	return metrics.SyncUnavailable
+}
+
+// syncDone is the outcome of a sync that wrote the agent: enrolled when no row
+// of the agent existed before (getErr is the error of that read), ok otherwise.
+func syncDone(getErr error) string {
+	if errors.Is(getErr, storage.ErrNotFound) {
+		return metrics.SyncEnrolled
+	}
+	return metrics.SyncOK
+}
+
 // HTTPDiscovery handles agent discovery over HTTP.
 type HTTPDiscovery struct {
 	logger      zerolog.Logger
@@ -93,7 +132,12 @@ type HTTPDiscovery struct {
 	resolver    *clientip.Resolver
 	clock       func() time.Time
 	requireAuth bool
+	observe     SyncObserver
 }
+
+// Observe tells o how each sync ends, from now on. Call it before the handler
+// serves.
+func (h *HTTPDiscovery) Observe(o SyncObserver) { h.observe = o }
 
 // NewHTTPDiscovery creates a new HTTP discovery handler.
 //
@@ -156,28 +200,33 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, MaxSyncBytes+1))
 	if err != nil {
+		h.observe.done(metrics.SyncInvalid)
 		response.BadRequest(w, r, mode)
 		return
 	}
 
 	if len(body) > MaxSyncBytes {
+		h.observe.done(metrics.SyncInvalid)
 		http.Error(w, "discovery request too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 
 	var in discoverv1.SyncRequest
 	if err := discoverySyncUnmarshal.Unmarshal(body, &in); err != nil {
+		h.observe.done(metrics.SyncInvalid)
 		response.BadRequest(w, r, mode)
 		return
 	}
 
 	a, err := agentFromSyncRequest(&in)
 	if err != nil {
+		h.observe.done(metrics.SyncInvalid)
 		response.BadRequestMsg(w, r, mode, "Invalid agent data: "+brokenRule(err)+".")
 		return
 	}
 
 	if syncOverRate(h.logger, h.syncs, h.clock(), in.GetId()) {
+		h.observe.done(metrics.SyncRateLimited)
 		tooManySyncs(w, r, mode)
 		return
 	}
@@ -185,6 +234,7 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 	if h.requireAuth {
 		token := bearerToken(r.Header.Get("Authorization"))
 		if err := verifyAgentToken(r.Context(), h.logger, h.agentSVC, h.limiter, h.resolver.IP(r), in.GetId(), token); err != nil {
+			h.observe.done(authOutcome(err))
 			switch {
 			case errors.Is(err, agent.ErrTokenTooLong):
 				response.BadRequestMsg(w, r, mode, "Agent token is too long.")
@@ -201,6 +251,7 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !chargeSync(h.logger, h.syncs, h.clock(), in.GetId()) {
+		h.observe.done(metrics.SyncRateLimited)
 		tooManySyncs(w, r, mode)
 		return
 	}
@@ -208,11 +259,14 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 	existing, getErr := h.agentSVC.Get(r.Context(), in.GetId())
 	res, err := h.agentSVC.Upsert(r.Context(), a)
 	if err != nil {
+		h.observe.done(metrics.SyncUnavailable)
 		syncFailure(h.logger, err).Str("agent_id", in.GetId()).Msg("upsert failed")
 		response.StoreFailed(w, r, mode, err)
 		return
 	}
 	recordSyncEvents(h.eventHub, in.GetId(), in.GetName(), existing, getErr, res)
+	// The agent is written: the sync is done, whatever the answer below does.
+	h.observe.done(syncDone(getErr))
 
 	resp := &discoverv1.SyncResponse{Success: true}
 	respBytes, err := discoverySyncMarshal.Marshal(resp)
@@ -235,7 +289,12 @@ type GRPCDiscovery struct {
 	resolver    *clientip.Resolver
 	clock       func() time.Time
 	requireAuth bool
+	observe     SyncObserver
 }
+
+// Observe tells o how each sync ends, from now on. Call it before the handler
+// serves.
+func (g *GRPCDiscovery) Observe(o SyncObserver) { g.observe = o }
 
 // NewGRPCDiscovery creates a new gRPC discovery handler.
 //
@@ -277,15 +336,18 @@ func NewGRPCDiscovery(logger zerolog.Logger, agentSVC *agent.Service, hub *event
 func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (*discoverv1.SyncResponse, error) {
 	a, err := agentFromSyncRequest(req)
 	if err != nil {
+		g.observe.done(metrics.SyncInvalid)
 		return nil, status.Errorf(ctx, codes.InvalidArgument, "invalid agent data: %s", brokenRule(err))
 	}
 
 	if syncOverRate(g.logger, g.syncs, g.clock(), req.GetId()) {
+		g.observe.done(metrics.SyncRateLimited)
 		return nil, throttledSync(ctx)
 	}
 
 	if g.requireAuth {
 		if err := verifyAgentToken(ctx, g.logger, g.agentSVC, g.limiter, grpcClientIP(ctx, g.resolver), req.GetId(), grpcBearerToken(ctx)); err != nil {
+			g.observe.done(authOutcome(err))
 			switch {
 			case errors.Is(err, agent.ErrTokenTooLong):
 				return nil, status.Errorf(ctx, codes.InvalidArgument, "agent token is too long")
@@ -301,16 +363,19 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 	}
 
 	if !chargeSync(g.logger, g.syncs, g.clock(), req.GetId()) {
+		g.observe.done(metrics.SyncRateLimited)
 		return nil, throttledSync(ctx)
 	}
 
 	existing, getErr := g.agentSVC.Get(ctx, req.GetId())
 	res, err := g.agentSVC.Upsert(ctx, a)
 	if err != nil {
+		g.observe.done(metrics.SyncUnavailable)
 		syncFailure(g.logger, err).Str("agent_id", req.GetId()).Msg("upsert failed")
 		return nil, grpcSyncFailed(ctx, err)
 	}
 	recordSyncEvents(g.hub, req.GetId(), req.GetName(), existing, getErr, res)
+	g.observe.done(syncDone(getErr))
 	return &discoverv1.SyncResponse{Success: true}, nil
 }
 

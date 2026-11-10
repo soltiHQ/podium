@@ -14,6 +14,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Every way of setting a password applies the policy, the trusted internal
@@ -28,7 +29,7 @@ func TestSetPasswordRejectsWeakPasswords(t *testing.T) {
 	if err := s.UpsertUser(ctx, u); err != nil {
 		t.Fatal(err)
 	}
-	svc := New(s, zerolog.Nop())
+	svc := New(s, zerolog.Nop(), bcrypt.MinCost)
 	self := &identity.Identity{UserID: u.ID()}
 	for _, password := range []string{strings.Repeat("a", 11), strings.Repeat("a", 73)} {
 		req := SetPasswordRequest{UserID: u.ID(), Password: password, Cost: 4}

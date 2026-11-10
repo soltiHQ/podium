@@ -23,6 +23,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/credential"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // gatedPassword is a password provider that holds every check until release
@@ -144,11 +145,11 @@ func TestLoginCountsOnlyCredentialFailures(t *testing.T) {
 			if err := store.UpsertUser(ctx, u); err != nil {
 				t.Fatal(err)
 			}
-			if err := credential.New(store, zerolog.Nop()).SetPassword(ctx, credential.SetPasswordRequest{UserID: u.ID(), Password: "nobody-password", Cost: 4}); err != nil {
+			if err := credential.New(store, zerolog.Nop(), bcrypt.MinCost).SetPassword(ctx, credential.SetPasswordRequest{UserID: u.ID(), Password: "nobody-password", Cost: 4}); err != nil {
 				t.Fatal(err)
 			}
 			cfg := iauth.Config{JWTSecret: strings.Repeat("k", iauth.MinJWTSecretLen)}.WithDefaults()
-			svc := New(kit.New(store, cfg), store, zerolog.Nop())
+			svc := New(kit.New(store, cfg, bcrypt.MinCost), store, zerolog.Nop())
 			login := func(password string) error {
 				_, _, err := svc.Login(ctx, LoginRequest{Subject: "nobody", Password: password, ClientIP: "203.0.113.9"})
 				return err
@@ -187,7 +188,7 @@ func TestLoginCountsOnlyCredentialFailures(t *testing.T) {
 // "login:acct:" key.
 func TestLoginRejectsBlankSubjectOrPassword(t *testing.T) {
 	store := inmemory.New()
-	svc := New(kit.New(store, iauth.Config{JWTSecret: strings.Repeat("k", iauth.MinJWTSecretLen)}), store, zerolog.Nop())
+	svc := New(kit.New(store, iauth.Config{JWTSecret: strings.Repeat("k", iauth.MinJWTSecretLen)}, bcrypt.MinCost), store, zerolog.Nop())
 	for _, req := range []LoginRequest{
 		{Subject: "", Password: "password", ClientIP: "203.0.113.9"},
 		{Subject: " \t\n", Password: "password", ClientIP: "203.0.113.9"},

@@ -11,6 +11,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestPasswordResetInvalidatesAll503Sessions(t *testing.T) {
@@ -22,7 +23,7 @@ func TestPasswordResetInvalidatesAll503Sessions(t *testing.T) {
 		sess, _ := model.NewSession(fmt.Sprintf("s-%d", i), u.ID(), "cred-user", enum.Password, []byte("hash"), time.Now().Add(time.Hour))
 		_ = s.CreateSession(ctx, sess)
 	}
-	svc := New(s, zerolog.New(io.Discard))
+	svc := New(s, zerolog.New(io.Discard), bcrypt.MinCost)
 	if err := svc.SetPassword(ctx, SetPasswordRequest{UserID: u.ID(), Password: "new password", Cost: 4}); err != nil {
 		t.Fatal(err)
 	}

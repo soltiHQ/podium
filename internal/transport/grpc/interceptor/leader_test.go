@@ -172,10 +172,15 @@ func syncForwarder(t *testing.T) *Forwarder {
 }
 
 // followerOf serves a follower of leadership that forwards with forwarder to
-// port, and fails the test when it serves a write itself.
-func followerOf(t *testing.T, leadership *leaderStub, port int, forwarder *Forwarder) *node {
+// port, and fails the test when it serves a write itself. refused, when given,
+// hears each write it refuses.
+func followerOf(t *testing.T, leadership *leaderStub, port int, forwarder *Forwarder, refused ...func()) *node {
 	t.Helper()
-	n := serve(t, nil, UnaryLeader(leadership, LeaderOptions{Port: port, Forwarder: forwarder}))
+	opts := LeaderOptions{Port: port, Forwarder: forwarder}
+	if len(refused) > 0 {
+		opts.Refused = refused[0]
+	}
+	n := serve(t, nil, UnaryLeader(leadership, opts))
 	t.Cleanup(func() {
 		if len(n.discovery.calls) > 0 && !leadership.AmLeader() {
 			t.Error("the follower served a write itself")
@@ -214,7 +219,8 @@ func TestUnaryLeaderForwardsAWriteWithItsMetadata(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			leader := serve(t, tc.answer)
-			follower := followerOf(t, &leaderStub{leader: "127.0.0.1:7000"}, leader.port, syncForwarder(t))
+			follower := followerOf(t, &leaderStub{leader: "127.0.0.1:7000"}, leader.port, syncForwarder(t),
+				func() { t.Error("the follower refused a write it forwards, whatever the leader answered") })
 			ctx := metadata.AppendToOutgoingContext(context.Background(),
 				"authorization", "Bearer agent-token",
 				"x-forwarded-for", "198.51.100.7",
@@ -305,7 +311,8 @@ func TestForwarderKeepsOneConnectionPerLeader(t *testing.T) {
 	leader := serve(t, nil) // the leader, known as 127.0.0.1 first, and then as localhost
 	leadership := &leaderStub{leader: "127.0.0.1:7000"}
 	forwarder := syncForwarder(t)
-	client := followerOf(t, leadership, leader.port, forwarder).client(t)
+	refused := 0
+	client := followerOf(t, leadership, leader.port, forwarder, func() { refused++ }).client(t)
 	ctx := context.Background()
 	sync := func() error {
 		_, err := client.Sync(ctx, syncRequest())
@@ -330,10 +337,16 @@ func TestForwarderKeepsOneConnectionPerLeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitConns(t, leader, 2, 2)
+	if refused != 0 {
+		t.Fatalf("Refused called %d times for the forwards the leader answered", refused)
+	}
 	if err := sync(); status.Code(err) != codes.Unavailable || status.Convert(err).Message() != "leader unreachable" {
 		t.Fatalf("Sync after Close: %v, want Unavailable leader unreachable", err)
 	}
 	waitConns(t, leader, 2, 2)
+	if refused != 1 {
+		t.Fatalf("Refused called %d times for the forward that could not reach the leader, want once", refused)
+	}
 }
 
 // A follower answers a write it does not get an answer to from the leader with
@@ -385,7 +398,8 @@ func TestUnaryLeaderAnswersWithTheLeadersGRPCAddress(t *testing.T) {
 			if tc.forward {
 				forwarder = syncForwarder(t)
 			}
-			opts := LeaderOptions{Port: tc.port, Forwarder: forwarder, IsWrite: func(string) bool { return tc.isWrite }}
+			refused := 0
+			opts := LeaderOptions{Port: tc.port, Forwarder: forwarder, IsWrite: func(string) bool { return tc.isWrite }, Refused: func() { refused++ }}
 			n := serve(t, nil, UnaryLeader(tc.leadership, opts))
 			ctx := context.Background()
 			if tc.incoming != nil {
@@ -401,6 +415,10 @@ func TestUnaryLeaderAnswersWithTheLeadersGRPCAddress(t *testing.T) {
 			}
 			if local := len(n.discovery.calls) == 1; local != (tc.code == codes.OK) {
 				t.Fatalf("the node served the call itself: %v, want %v", local, tc.code == codes.OK)
+			}
+			// Each answer the node gives for itself is one refusal; a call it serves is none.
+			if want := map[bool]int{true: 0, false: 1}[tc.code == codes.OK]; refused != want {
+				t.Fatalf("Refused called %d times, want %d", refused, want)
 			}
 		})
 	}

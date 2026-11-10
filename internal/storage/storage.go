@@ -521,6 +521,21 @@ type Scanner interface {
 	ScanExecutions(ctx context.Context, filter ExecutionFilter) ([]*model.ExecutionRecord, error)
 }
 
+// Counter is an optional capability of a Storage that keeps its rows in process:
+// it counts the agents by status and the rollouts by sync status in one pass of
+// the rows, without copying any, where a Scanner clones every row it returns.
+// CountAgents and CountRollouts use it when the store implements it and scan
+// otherwise, so a store without it is only slower. A status that no row has is
+// absent from the map.
+//
+// Returns, for each method:
+//   - ErrUnavailable if the backend is temporarily unavailable.
+//   - The error of ctx once ctx is done.
+type Counter interface {
+	CountAgents(ctx context.Context) (map[enum.AgentStatus]int, error)
+	CountRollouts(ctx context.Context) (map[enum.SyncStatus]int, error)
+}
+
 // Storage aggregates all storage capabilities for domain entities.
 type Storage interface {
 	ExecutionStore
