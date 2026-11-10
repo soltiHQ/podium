@@ -1,27 +1,32 @@
 // Package config aggregates per-package configuration structs and
 // provides Load / Default constructors:
-//   - Load reads: defaults → YAML file → ENV overrides (SOLTI_ prefix).
+//   - Load reads: defaults → YAML file → ENV overrides (SOLTI_ prefix). A YAML
+//     key or a SOLTI_ variable under a setting's prefix that is not a setting
+//     fails loading; the variable of a setting is SOLTI_ and its YAML path (see
+//     [settings]).
 //   - Default returns safe development defaults without external sources.
 package config
 
 import (
+	"bytes"
 	"errors"
-	"flag"
 	"fmt"
+	"io"
 	"os"
-	"strings"
 
-	"github.com/kelseyhightower/envconfig"
+	"github.com/rs/zerolog"
 	"gopkg.in/yaml.v3"
 
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/cluster"
+	"github.com/soltiHQ/control-plane/internal/config/settings"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/server"
 	"github.com/soltiHQ/control-plane/internal/server/runner/grpcserver"
 	historyrunner "github.com/soltiHQ/control-plane/internal/server/runner/history"
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
+	"github.com/soltiHQ/control-plane/internal/server/runner/ops"
 	syncrunner "github.com/soltiHQ/control-plane/internal/server/runner/sync"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/service/history"
@@ -39,8 +44,8 @@ const (
 // the HTTP and gRPC listeners, and the client identity used when dialing agents.
 // Both are opt-in — empty means plaintext.
 type TLSConfig struct {
-	Server tlsconf.ServerConfig `yaml:"server" envconfig:"SERVER"`
-	Client tlsconf.ClientConfig `yaml:"client" envconfig:"CLIENT"`
+	Server tlsconf.ServerConfig `yaml:"server"`
+	Client tlsconf.ClientConfig `yaml:"client"`
 }
 
 // EnrollSecretEnv is the environment variable that carries
@@ -68,7 +73,7 @@ var ErrEnrollSecretNeedsRequire = errors.New("enroll secret is set while agent_a
 // nor a client CA is set. When false, no token is verified inbound and none is
 // sent outbound, and startup logs a warning. Orthogonal to TLS.
 type AgentAuthConfig struct {
-	Require bool `yaml:"require" envconfig:"REQUIRE"`
+	Require bool `yaml:"require"`
 
 	// EnrollSecret closes enrollment (env SOLTI_AGENT_AUTH_ENROLL_SECRET): an
 	// unknown agent ID then enrolls only with the token derived from the
@@ -78,7 +83,7 @@ type AgentAuthConfig struct {
 	// the secret locks out the agents that hold one. It is never read from
 	// YAML, so config files stay free of it. Empty means enrollment stays trust
 	// on first use.
-	EnrollSecret string `yaml:"-" envconfig:"ENROLL_SECRET"`
+	EnrollSecret string `yaml:"-" env:"SOLTI_AGENT_AUTH_ENROLL_SECRET"`
 }
 
 // Validate reports an error if EnrollSecret is set but unusable: shorter than
@@ -96,40 +101,77 @@ func (c AgentAuthConfig) Validate() error {
 	return nil
 }
 
+// ErrInvalidLogLevel indicates a log.level that is none of debug, info, warn and
+// error.
+var ErrInvalidLogLevel = errors.New("log level is not debug, info, warn or error")
+
+// ErrInvalidLogFormat indicates a log.format that is neither json nor text.
+var ErrInvalidLogFormat = errors.New("log format is not json or text")
+
+// LogConfig sets what podium logs and how. It applies once the configuration is
+// loaded; until then, and for what loading itself reports, podium logs JSON at
+// info.
+type LogConfig struct {
+	// Level is the lowest level written: debug, info, warn or error. The raft
+	// library's lines follow it.
+	Level string `yaml:"level"`
+
+	// Format is json, one object per line, or text, one console line per event
+	// without colour. Both go to stdout.
+	Format string `yaml:"format"`
+}
+
+// Validate reports a level or a format that is not one of the values above.
+func (c LogConfig) Validate() error {
+	switch c.Level {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("%w: %q", ErrInvalidLogLevel, c.Level)
+	}
+	switch c.Format {
+	case "json", "text":
+	default:
+		return fmt.Errorf("%w: %q", ErrInvalidLogFormat, c.Format)
+	}
+	return nil
+}
+
 // HistoryConfig separates durable retention from bounded collection.
 type HistoryConfig struct {
-	Archive   history.Config       `yaml:"archive" envconfig:"ARCHIVE"`
-	Collector historyrunner.Config `yaml:"collector" envconfig:"COLLECTOR"`
+	Archive   history.Config       `yaml:"archive"`
+	Collector historyrunner.Config `yaml:"collector"`
 }
 
 // Config holds the full application configuration.
 type Config struct {
-	History       HistoryConfig            `yaml:"history" envconfig:"HISTORY"`
-	HTTP          httpserver.Config        `yaml:"http"           envconfig:"HTTP"`
-	HTTPDiscovery httpserver.Config        `yaml:"http_discovery" envconfig:"HTTP_DISCOVERY"`
-	GRPC          grpcserver.Config        `yaml:"grpc"           envconfig:"GRPC"`
-	Sync          syncrunner.Config        `yaml:"sync"           envconfig:"SYNC"`
-	Lifecycle     lifecycle.Config         `yaml:"lifecycle"      envconfig:"LIFECYCLE"`
-	Triggers      htmx.Config              `yaml:"triggers"       envconfig:"TRIGGERS"`
-	Server        server.Config            `yaml:"server"         envconfig:"SERVER"`
-	Auth          auth.Config              `yaml:"auth"           envconfig:"AUTH"`
-	CORS          middleware.CORSConfig    `yaml:"cors"           envconfig:"CORS"`
-	Cluster       cluster.Config           `yaml:"cluster"        envconfig:"CLUSTER"`
-	Events        event.Config             `yaml:"events"         envconfig:"EVENTS"`
-	Streams       middleware.StreamsConfig `yaml:"streams"        envconfig:"STREAMS"`
-	TLS           TLSConfig                `yaml:"tls"            envconfig:"TLS"`
-	AgentAuth     AgentAuthConfig          `yaml:"agent_auth"     envconfig:"AGENT_AUTH"`
+	History       HistoryConfig            `yaml:"history"`
+	HTTP          httpserver.Config        `yaml:"http"`
+	HTTPDiscovery httpserver.Config        `yaml:"http_discovery"`
+	GRPC          grpcserver.Config        `yaml:"grpc"`
+	Ops           ops.Config               `yaml:"ops"`
+	Sync          syncrunner.Config        `yaml:"sync"`
+	Lifecycle     lifecycle.Config         `yaml:"lifecycle"`
+	Triggers      htmx.Config              `yaml:"triggers"`
+	Server        server.Config            `yaml:"server"`
+	Auth          auth.Config              `yaml:"auth"`
+	CORS          middleware.CORSConfig    `yaml:"cors"`
+	Cluster       cluster.Config           `yaml:"cluster"`
+	Events        event.Config             `yaml:"events"`
+	Streams       middleware.StreamsConfig `yaml:"streams"`
+	TLS           TLSConfig                `yaml:"tls"`
+	AgentAuth     AgentAuthConfig          `yaml:"agent_auth"`
+	Log           LogConfig                `yaml:"log"`
 
 	// TrustedProxies lists the reverse proxies (IP addresses or CIDR prefixes)
 	// whose X-Forwarded-For and X-Forwarded-Proto headers are believed.
 	// Empty by default: the TCP peer is the client.
-	TrustedProxies []string `yaml:"trusted_proxies" envconfig:"TRUSTED_PROXIES"`
+	TrustedProxies []string `yaml:"trusted_proxies"`
 
 	// BootstrapAdminPassword is the initial password of the administrator the
 	// first start creates (env SOLTI_BOOTSTRAP_ADMIN_PASSWORD). It is never read
 	// from YAML, so config files stay free of it. Empty means bootstrap
 	// generates a password.
-	BootstrapAdminPassword string `yaml:"-" envconfig:"BOOTSTRAP_ADMIN_PASSWORD"`
+	BootstrapAdminPassword string `yaml:"-" env:"SOLTI_BOOTSTRAP_ADMIN_PASSWORD"`
 }
 
 // Default returns the default development configuration.
@@ -142,6 +184,7 @@ func Default() Config {
 		HTTP:          httpserver.Config{Name: "http", Addr: ":8080"},
 		HTTPDiscovery: httpserver.Config{Name: "http-discovery", Addr: ":8082"},
 		GRPC:          grpcserver.Config{Name: "grpc-discovery", Addr: ":50051"},
+		Ops:           ops.Config{Name: "ops", Addr: "127.0.0.1:8081"},
 		Auth:          auth.Config{CookieSecure: auth.CookieSecureAuto}, // JWTSecret must be supplied externally
 		Cluster:       cluster.DefaultConfig(),
 		Events:        event.DefaultConfig(),
@@ -151,11 +194,39 @@ func Default() Config {
 			SubscriberBuffer: 64,
 		},
 		AgentAuth: AgentAuthConfig{Require: true},
+		Log:       LogConfig{Level: "info", Format: "json"},
 	}
 }
 
 // Validate reports an error if any sub-config has invalid or unsafe values.
 func (c Config) Validate() error {
+	if err := c.HTTP.Validate(); err != nil {
+		return fmt.Errorf("config.http: %w", err)
+	}
+	if err := c.HTTPDiscovery.Validate(); err != nil {
+		return fmt.Errorf("config.http_discovery: %w", err)
+	}
+	if err := c.GRPC.Validate(); err != nil {
+		return fmt.Errorf("config.grpc: %w", err)
+	}
+	if err := c.Ops.Validate(); err != nil {
+		return fmt.Errorf("config.ops: %w", err)
+	}
+	if err := c.Sync.Validate(); err != nil {
+		return fmt.Errorf("config.sync: %w", err)
+	}
+	if err := c.Lifecycle.Validate(); err != nil {
+		return fmt.Errorf("config.lifecycle: %w", err)
+	}
+	if err := c.Triggers.Validate(); err != nil {
+		return fmt.Errorf("config.triggers: %w", err)
+	}
+	if err := c.Server.Validate(); err != nil {
+		return fmt.Errorf("config.server: %w", err)
+	}
+	if err := c.Streams.Validate(); err != nil {
+		return fmt.Errorf("config.streams: %w", err)
+	}
 	if err := c.History.Archive.Validate(); err != nil {
 		return fmt.Errorf("config.history.archive: %w", err)
 	}
@@ -174,6 +245,9 @@ func (c Config) Validate() error {
 	if err := c.AgentAuth.Validate(); err != nil {
 		return fmt.Errorf("config.agent_auth: %w", err)
 	}
+	if err := c.Log.Validate(); err != nil {
+		return fmt.Errorf("config.log: %w", err)
+	}
 	if err := c.CORS.Validate(); err != nil {
 		return fmt.Errorf("config.cors: %w", err)
 	}
@@ -190,60 +264,79 @@ func (c Config) Validate() error {
 }
 
 // Load reads configuration in priority order: defaults → YAML file → ENV.
-// The YAML file comes from the --config flag or CONFIG_PATH.
-// Refuses to return a Config that fails [Config.Validate].
-func Load() (Config, error) {
-	return load(os.Args[1:])
-}
-
-// load is [Load] with the command-line arguments passed in.
-func load(args []string) (Config, error) {
-	var (
-		path = configPath(args)
-		cfg  = Default()
-	)
+// The YAML file is path, or CONFIG_PATH when path is empty; the command line is
+// the caller's. Warnings of the load go to log, and so does one INFO line for
+// each setting of the file that a variable overrides. Refuses to return a Config
+// that fails [Config.Validate].
+func Load(path string, log zerolog.Logger) (Config, error) {
+	cfg := Default()
+	if path == "" {
+		path = os.Getenv("CONFIG_PATH")
+	}
+	var fileKeys map[string]bool
 	if path != "" {
-		if err := loadYAML(path, &cfg); err != nil {
+		keys, err := loadYAML(path, &cfg)
+		if err != nil {
 			return Config{}, fmt.Errorf("config: %w", err)
 		}
+		fileKeys = keys
 	}
-	if err := envconfig.Process(envPrefix, &cfg); err != nil {
+	if err := checkEnv(&cfg, os.Environ(), log); err != nil {
+		return Config{}, fmt.Errorf("config: %w", err)
+	}
+	if err := applyEnv(&cfg); err != nil {
 		return Config{}, fmt.Errorf("config: env: %w", err)
 	}
-	// The env value is split on commas only, so "10.0.0.1, 10.0.0.2" leaves a space.
-	for i, proxy := range cfg.TrustedProxies {
-		cfg.TrustedProxies[i] = strings.TrimSpace(proxy)
-	}
+	logOverrides(&cfg, fileKeys, os.LookupEnv, log)
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("config: %w", err)
 	}
 	return cfg, nil
 }
 
-// configPath returns the config file path from the --config flag in args or the
-// CONFIG_PATH env. A flag error is reported on stderr by the FlagSet itself.
-func configPath(args []string) string {
-	var path string
-	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
-	fs.StringVar(&path, "config", "", "path to YAML config file")
-	_ = fs.Parse(args)
-
-	if path != "" {
-		return path
+// loadYAML reads path into dst, and returns the keys of the settings the file
+// sets. A key that is not a setting, or that only the environment may carry,
+// fails with its line, and so does a setting without a value; so does a file
+// without a setting, and a second document that holds anything.
+func loadYAML(path string, dst *Config) (map[string]bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	return os.Getenv("CONFIG_PATH")
+	var doc yaml.Node
+	if err = yaml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", path, err)
+	}
+	if len(doc.Content) == 0 || isEmpty(doc.Content[0]) {
+		return nil, fmt.Errorf("%s holds no settings", path)
+	}
+	if err = settings.CheckYAML(path, envPrefix, doc.Content[0], dst); err != nil {
+		return nil, err
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err = dec.Decode(dst); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", path, err)
+	}
+	// Unmarshal and Decode each read the first document only, so the keys of a
+	// later one would go unread: one that holds anything fails, and an empty one
+	// (a trailing ---) is let through.
+	for {
+		var next yaml.Node
+		switch err = dec.Decode(&next); {
+		case errors.Is(err, io.EOF):
+			return settings.Keys(doc.Content[0]), nil
+		case err != nil:
+			return nil, fmt.Errorf("decode %s: %w", path, err)
+		case len(next.Content) > 0 && !isEmpty(next.Content[0]):
+			return nil, fmt.Errorf("%s:%d: a second YAML document; podium reads one document", path, next.Line)
+		}
+	}
 }
 
-// loadYAML reads and unmarshals a YAML file into dst.
-func loadYAML(path string, dst *Config) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
-
-	if err = yaml.NewDecoder(f).Decode(dst); err != nil {
-		return fmt.Errorf("decode %s: %w", path, err)
-	}
-	return nil
+// isEmpty reports whether a document's root holds no setting: null or an empty
+// mapping.
+func isEmpty(n *yaml.Node) bool {
+	return n.Kind == yaml.MappingNode && len(n.Content) == 0 ||
+		n.Kind == yaml.ScalarNode && n.Tag == "!!null"
 }

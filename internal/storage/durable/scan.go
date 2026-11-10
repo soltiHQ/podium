@@ -3,6 +3,7 @@ package durable
 import (
 	"context"
 
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
@@ -30,4 +31,14 @@ func (d *Store) ScanExecutions(ctx context.Context, filter storage.ExecutionFilt
 	return readState(ctx, d, func(inner *inmemory.Store) ([]*model.ExecutionRecord, error) {
 		return inner.ScanExecutions(ctx, filter)
 	})
+}
+
+var _ storage.Counter = (*Store)(nil)
+
+func (d *Store) CountAgents(ctx context.Context) (map[enum.AgentStatus]int, error) {
+	return readState(ctx, d, func(inner *inmemory.Store) (map[enum.AgentStatus]int, error) { return inner.CountAgents(ctx) })
+}
+
+func (d *Store) CountRollouts(ctx context.Context) (map[enum.SyncStatus]int, error) {
+	return readState(ctx, d, func(inner *inmemory.Store) (map[enum.SyncStatus]int, error) { return inner.CountRollouts(ctx) })
 }

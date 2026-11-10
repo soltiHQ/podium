@@ -23,6 +23,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Exercise the composition root, including persisted-session authorization and
@@ -38,8 +39,8 @@ func TestAuthenticatedEventAndTaskLogStreamsShareLimitAndRelease(t *testing.T) {
 	cfg.Streams.MaxPerIP = 2
 	cfg.Streams.SubscriberBuffer = 4
 	store := inmemory.New()
-	authModel := kit.New(store, cfg.Auth)
-	svc, err := initServices(store, authModel, cfg.History.Archive, cfg.AgentAuth, logger)
+	authModel := kit.New(store, cfg.Auth, bcrypt.MinCost)
+	svc, err := initServices(store, authModel, cfg.History.Archive, cfg.AgentAuth, logger, bcrypt.MinCost)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +98,7 @@ func TestAuthenticatedEventAndTaskLogStreamsShareLimitAndRelease(t *testing.T) {
 	defer func() { _ = pool.Close() }()
 	events := event.NewHub(logger)
 	defer events.Close()
-	handler, logs := buildMainHandler(cfg, logger, svc, authModel, pool, events, standalone.NewLeadership(), nil, nil)
+	handler, logs := buildMainHandler(cfg, logger, svc, authModel, pool, events, standalone.NewLeadership(), nil, nil, nil)
 	defer logs.Close()
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -208,7 +209,7 @@ func TestStreamChecksMatchTheirRoutes(t *testing.T) {
 	cfg := config.Default()
 	cfg.Auth.JWTSecret = strings.Repeat("stream-test-only-secret", 2)
 	store := inmemory.New()
-	authModel := kit.New(store, cfg.Auth)
+	authModel := kit.New(store, cfg.Auth, bcrypt.MinCost)
 	viewer, err := model.NewUser("viewer", "viewer")
 	if err != nil {
 		t.Fatal(err)

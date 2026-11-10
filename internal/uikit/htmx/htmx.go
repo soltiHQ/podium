@@ -1,7 +1,10 @@
 package htmx
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
+	"regexp"
 
 	"github.com/soltiHQ/control-plane/internal/event"
 )
@@ -37,6 +40,33 @@ type Config struct {
 	AgentTasksRefresh   string `yaml:"agent_tasks_refresh"`
 	SpecsRefresh        string `yaml:"specs_refresh"`
 	SpecDetailRefresh   string `yaml:"spec_detail_refresh"`
+}
+
+// ErrInvalidRefresh indicates a polling interval that is not "every <n>s", "every
+// <n>m" or "every <n>ms" (n may have decimals).
+var ErrInvalidRefresh = errors.New("htmx: polling interval is not of the form \"every 30s\"")
+
+var refreshPattern = regexp.MustCompile(`^every [0-9]+(\.[0-9]+)?(ms|s|m)$`)
+
+// Validate reports a polling interval that hx-trigger would not read as one.
+// An empty field is valid: it keeps its default.
+func (c Config) Validate() error {
+	for _, v := range []struct{ key, value string }{
+		{"dashboard_refresh", c.DashboardRefresh},
+		{"users_refresh", c.UsersRefresh},
+		{"user_detail_refresh", c.UserDetailRefresh},
+		{"user_sessions_refresh", c.UserSessionsRefresh},
+		{"agents_refresh", c.AgentsRefresh},
+		{"agent_detail_refresh", c.AgentDetailRefresh},
+		{"agent_tasks_refresh", c.AgentTasksRefresh},
+		{"specs_refresh", c.SpecsRefresh},
+		{"spec_detail_refresh", c.SpecDetailRefresh},
+	} {
+		if v.value != "" && !refreshPattern.MatchString(v.value) {
+			return fmt.Errorf("%w: %s = %q", ErrInvalidRefresh, v.key, v.value)
+		}
+	}
+	return nil
 }
 
 // cfg is a process-wide singleton holding the active polling intervals.

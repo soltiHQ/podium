@@ -8,22 +8,28 @@ import (
 	"context"
 	"crypto/x509"
 	"sync"
+	"time"
 
 	"github.com/soltiHQ/control-plane/internal/loghub"
 
 	"github.com/rs/zerolog"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
+	authcred "github.com/soltiHQ/control-plane/internal/auth/credentials"
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
+	"github.com/soltiHQ/control-plane/internal/buildinfo"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
+	"github.com/soltiHQ/control-plane/internal/metrics"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/server"
 	"github.com/soltiHQ/control-plane/internal/server/runner/grpcserver"
 	historyrunner "github.com/soltiHQ/control-plane/internal/server/runner/history"
 	"github.com/soltiHQ/control-plane/internal/server/runner/httpserver"
 	"github.com/soltiHQ/control-plane/internal/server/runner/lifecycle"
+	"github.com/soltiHQ/control-plane/internal/server/runner/ops"
 	syncrunner "github.com/soltiHQ/control-plane/internal/server/runner/sync"
 	clustersvc "github.com/soltiHQ/control-plane/internal/service/cluster"
 	"github.com/soltiHQ/control-plane/internal/storage"
@@ -34,6 +40,26 @@ import (
 
 	pageSystem "github.com/soltiHQ/control-plane/ui/templates/page/system"
 )
+
+// options are the settings of [New] that production never changes.
+type options struct {
+	passwordCost int
+}
+
+// defaultOptions are the production settings.
+func defaultOptions() options {
+	return options{passwordCost: authcred.DefaultBcryptCost}
+}
+
+// Option changes how [New] assembles the App.
+type Option func(*options)
+
+// WithPasswordCost sets the bcrypt cost of stored passwords and of the login
+// dummy hash. The cost is 12 and operators cannot change it; this option is
+// for tests, which pass bcrypt.MinCost to keep logins fast.
+func WithPasswordCost(cost int) Option {
+	return func(o *options) { o.passwordCost = cost }
+}
 
 // App is the fully wired control-plane runtime.
 type App struct {
@@ -47,8 +73,22 @@ type App struct {
 	proxyPool    *proxy.Pool
 	authModel    *kit.Auth
 
-	server       *server.Server
-	logHub       *loghub.Hub
+	server        *server.Server
+	logHub        *loghub.Hub
+	ready         *readiness
+	grpcHealth    *grpcHealth
+	shutdownDelay time.Duration
+	// sleep waits d, or until ctx ends; New sets it, and a test replaces it.
+	sleep func(ctx context.Context, d time.Duration)
+	// listeners are the runners that bind a port: the app is ready once all are
+	// bound. ui and grpc are two of them, which tests dial. ops is the ops runner,
+	// nil when ops.addr is empty; opsHandler, which serves it, takes the handlers
+	// that other parts add to the listener.
+	listeners    []listener
+	ui           *httpserver.Runner
+	grpc         *grpcserver.Runner
+	ops          *httpserver.Runner
+	opsHandler   *ops.Handler
 	shutdownOnce sync.Once
 	shutdownDone chan struct{}
 }
@@ -58,9 +98,15 @@ type App struct {
 // seeds at the start of each of its leadership terms (see [seedingRunner]).
 // Returned [App] is ready to [Run]. Caller must call [Shutdown] to release
 // deferred resources (Raft node, proxy pool, event hub).
-func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, error) {
+func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...Option) (*App, error) {
+	o := defaultOptions()
+	for _, opt := range opts {
+		opt(&o)
+	}
 	raftMode := cfg.Cluster.Backend == cluster.BackendRaft
-	clusterOpts := []clusterOption{withHubOptions(hubOptions(cfg)...)}
+	var hooks probeHooks
+	m := metrics.New(buildinfo.Read())
+	clusterOpts := []clusterOption{withHubOptions(hubOptions(cfg)...), withProbes(&hooks), withMetrics(m)}
 	// A raft node digests the settings that every replica must share, answers
 	// its peers' configuration requests with the digests, and checks them
 	// against its leader's (raftpkg.Admin.ConfigCheck). Standalone does neither.
@@ -95,8 +141,9 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	authModel := kit.New(store, cfg.Auth)
-	svc, err := initServices(store, authModel, cfg.History.Archive, cfg.AgentAuth, logger)
+	m.Inventory(store)
+	authModel := kit.New(store, cfg.Auth, o.passwordCost)
+	svc, err := initServices(store, authModel, cfg.History.Archive, cfg.AgentAuth, logger, o.passwordCost)
 	if err != nil {
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
@@ -191,6 +238,8 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
+	syncRunner.ObserveTurns(m.SyncTurn)
+
 	historyRunner, err := historyrunner.New(cfg.History.Collector, logger, store, proxyPool, svc.agent, svc.history, leadership)
 	if err != nil {
 		_ = proxyPool.Close()
@@ -198,9 +247,25 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	mainHandler, logHub := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership, resolver, clientTLS)
+	// What /readyz and the gRPC health service report; the health service is
+	// registered on the gRPC listener below, without auth like the ops routes.
+	ready := newReadiness(hooks)
+	grpcHealth := newGRPCHealth(ready)
+	// The gauge reads the hook that /readyz reads.
+	m.StoreFailed(func() bool { return ready.failure != nil && ready.failure() != nil })
+
+	mainHandler, logHub := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership, resolver, clientTLS, m)
 	httpCfg := cfg.HTTP
 	httpCfg.TLSConfig = uiServerTLS
+	// The streams end as the UI listener starts to shut down, so that one that
+	// stays open cannot hold the requests in flight until the timeout. A listener
+	// that stops without a signal, because a runner exited, is not ready either.
+	httpCfg.OnShutdown = func() {
+		ready.shuttingDown.Store(true)
+		grpcHealth.sync()
+		eventHub.Close()
+		logHub.Close()
+	}
 	httpRunner, err := httpserver.New(httpCfg, logger, mainHandler)
 	if err != nil {
 		logHub.Close()
@@ -215,7 +280,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 	if forwarder != nil {
 		raftShutdown = before(func() { _ = forwarder.Close() }, raftShutdown)
 	}
-	discoveryHandler, grpcSrv := buildDiscoveryListeners(logger, svc.agent, eventHub, leadership, cfg, resolver, serverTLS, clientTLS, forwarder)
+	discoveryHandler, grpcSrv := buildDiscoveryListeners(logger, svc.agent, eventHub, leadership, cfg, resolver, serverTLS, clientTLS, forwarder, m)
 	discoveryCfg := cfg.HTTPDiscovery
 	discoveryCfg.TLSConfig = serverTLS
 	httpDiscoveryRunner, err := httpserver.New(discoveryCfg, logger, discoveryHandler)
@@ -226,7 +291,11 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
-	grpcRunner, err := grpcserver.New(cfg.GRPC, logger, grpcSrv)
+	healthpb.RegisterHealthServer(grpcSrv, grpcHealth)
+
+	grpcCfg := cfg.GRPC
+	grpcCfg.OnShutdown = grpcHealth.end
+	grpcRunner, err := grpcserver.New(grpcCfg, logger, grpcSrv)
 	if err != nil {
 		logHub.Close()
 		_ = proxyPool.Close()
@@ -234,7 +303,26 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		return nil, err
 	}
 
+	opsHandler := ops.NewHandler(ops.Probes{
+		Ready:   ready.reason,
+		Leader:  func() string { return ready.leaderReason(leadership.AmLeader) },
+		Version: buildinfo.Read(),
+	})
+	opsHandler.Handle("GET /metrics", m.Handler())
+	listeners := []listener{httpRunner, httpDiscoveryRunner, grpcRunner}
 	runners := []server.Runner{httpRunner, httpDiscoveryRunner, grpcRunner, lifecycleRunner, syncRunner, historyRunner}
+	var opsRunner *httpserver.Runner
+	if cfg.Ops.Enabled() {
+		opsRunner, err = httpserver.New(cfg.Ops.HTTP(), logger, opsHandler)
+		if err != nil {
+			logHub.Close()
+			_ = proxyPool.Close()
+			closeOnError(raftShutdown, eventHub)
+			return nil, err
+		}
+		listeners = append(listeners, opsRunner)
+		runners = append(runners, opsRunner)
+	}
 	if cfg.AgentAuth.Require {
 		runners = append(runners, credentialSweepRunner(logger, leadership, svc.agent))
 	}
@@ -264,19 +352,103 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*App, e
 		proxyPool:    proxyPool,
 		authModel:    authModel,
 		server:       srv, logHub: logHub, shutdownDone: make(chan struct{}),
+
+		ready: ready, grpcHealth: grpcHealth, shutdownDelay: cfg.Server.ShutdownDelay, sleep: sleepCtx,
+		listeners: listeners, ui: httpRunner, grpc: grpcRunner, ops: opsRunner, opsHandler: opsHandler,
 	}, nil
+}
+
+// listener is a runner that binds a port.
+type listener interface {
+	// Bound returns a channel that closes once the runner tried to bind, or once
+	// a Stop that came before Start has run.
+	Bound() <-chan struct{}
+	// Addr returns the bound address, "" before the bind, when it failed, or
+	// after a Stop that came before Start.
+	Addr() string
 }
 
 // Run starts the server runners and blocks until ctx is cancelled or a runner
 // exits unexpectedly. Returns the first error encountered, if any.
+//
+// The values of ctx reach the runners; its cancellation and deadline do not, the
+// shutdown below stops them.
+//
+// The cancellation of ctx starts a graceful shutdown: readiness turns to
+// "shutting down" and the gRPC health service to NOT_SERVING at once, Run waits
+// server.shutdown_delay for the load balancers to notice, and only then do the
+// listeners stop accepting. The requests in flight finish within
+// server.shutdown_timeout, and the streams end as the UI listener starts to shut
+// down.
 func (a *App) Run(ctx context.Context) error {
-	return a.server.Run(ctx)
+	runCtx, stop := context.WithCancel(context.WithoutCancel(ctx))
+	defer stop()
+	// However Run ends, the node is not ready: a runner that exited on its own
+	// ends it without the signal.
+	defer func() {
+		a.ready.shuttingDown.Store(true)
+		a.grpcHealth.sync()
+	}()
+	go a.awaitBound(runCtx)
+	go a.grpcHealth.run(runCtx)
+	go a.drain(ctx, runCtx, stop)
+	return a.server.Run(runCtx)
 }
 
-// Shutdown releases resources acquired by [New] in reverse order of creation.
-// Bounded by ctx — if any step (Raft fsync, hub drain, pool close) hangs
-// past the deadline, Shutdown returns and the process exits dirty. The
-// caller logs that case; subsequent calls are no-ops.
+// awaitBound marks the app ready to serve once every listener is bound, unless
+// one fails to bind or ctx ends first.
+func (a *App) awaitBound(ctx context.Context) {
+	for _, l := range a.listeners {
+		select {
+		case <-l.Bound():
+		case <-ctx.Done():
+			return
+		}
+		if l.Addr() == "" {
+			return
+		}
+	}
+	a.ready.bound.Store(true)
+	a.grpcHealth.sync()
+}
+
+// drain waits for ctx, the shutdown signal, and then reports "not ready" and
+// waits out the shutdown delay before it calls stop, which stops the listeners.
+// It ends at once when runCtx does, which happens when a runner exits on its own.
+func (a *App) drain(ctx, runCtx context.Context, stop context.CancelFunc) {
+	select {
+	case <-ctx.Done():
+	case <-runCtx.Done():
+		return
+	}
+	a.ready.shuttingDown.Store(true)
+	a.grpcHealth.sync()
+	a.logger.Info().Dur("shutdown_delay", a.shutdownDelay).Msg("shutdown started: not ready, listeners stop after the shutdown delay")
+	if a.shutdownDelay > 0 {
+		a.sleep(runCtx, a.shutdownDelay)
+		if runCtx.Err() != nil {
+			return
+		}
+	}
+	stop()
+}
+
+// sleepCtx waits d, or until ctx ends.
+func sleepCtx(ctx context.Context, d time.Duration) {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+}
+
+// Shutdown releases the resources [New] acquired, in this order: the log hub,
+// the proxy pool, the event hub, then a raft node's gRPC sync forwarder, its
+// lookups of the raft hosts' names and the node itself, or the durable store of
+// a standalone node that has one. Bounded by ctx — if any step (Raft fsync, hub
+// drain, pool close) hangs past the deadline, Shutdown returns and the process
+// exits dirty. The caller logs that case; subsequent calls are no-ops.
 //
 // Returns an error if the deadline elapses before cleanup completes.
 func (a *App) Shutdown(ctx context.Context) error {

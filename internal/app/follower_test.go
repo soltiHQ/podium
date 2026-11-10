@@ -6,13 +6,11 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +37,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/tlsconf"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // raftTimeoutMs is the election and heartbeat timeout of the nodes raftCluster
@@ -208,7 +207,7 @@ func newNodeDiscovery(t *testing.T, cfg config.Config, n *raftNode) nodeDiscover
 	forwarder := syncForwarder(cfg, n.leadership, clientTLS)
 	t.Cleanup(func() { _ = forwarder.Close() })
 	agents := agent.New(n.store, logger)
-	h, srv := buildDiscoveryListeners(logger, agents, n.hub, n.leadership, cfg, resolver, serverTLS, clientTLS, forwarder)
+	h, srv := buildDiscoveryListeners(logger, agents, n.hub, n.leadership, cfg, resolver, serverTLS, clientTLS, forwarder, nil)
 	// Before the forwarder closes: cleanups run last in, first out.
 	t.Cleanup(srv.Stop)
 	return nodeDiscovery{http: h, grpc: srv, agents: agents}
@@ -351,12 +350,22 @@ func TestFollowerForwardsGRPCSync(t *testing.T) {
 	}
 }
 
+// handedOutPorts are the ports sharedPorts has returned in this test binary,
+// which it never returns again: two nodes of one test, or of tests that run at
+// once, never get the same port from it.
+var (
+	handedOutMu    sync.Mutex
+	handedOutPorts = map[string]bool{}
+)
+
 // sharedPorts returns count distinct ports, each of which every one of hosts
-// could bind when it returns: a listener on each host holds each port until
-// then. Another process may take one before a node binds it, a race tests
-// accept.
+// could bind when it returns, and none of which it returned before: a listener
+// on each host holds each port until then. Another process may still take one
+// before a node binds it; startWholeNodes starts the nodes again then.
 func sharedPorts(t *testing.T, hosts []string, count int) []string {
 	t.Helper()
+	handedOutMu.Lock()
+	defer handedOutMu.Unlock()
 	var held []net.Listener
 	defer func() {
 		for _, l := range held {
@@ -377,8 +386,11 @@ func sharedPorts(t *testing.T, hosts []string, count int) []string {
 		if err != nil {
 			t.Fatal(err)
 		}
-		free := true
+		free := !handedOutPorts[port]
 		for _, host := range hosts[1:] {
+			if !free {
+				break
+			}
 			l, err := net.Listen("tcp", net.JoinHostPort(host, port))
 			if err != nil {
 				free = false
@@ -387,6 +399,7 @@ func sharedPorts(t *testing.T, hosts []string, count int) []string {
 			held = append(held, l)
 		}
 		if free {
+			handedOutPorts[port] = true
 			ports = append(ports, port)
 		}
 	}
@@ -425,41 +438,7 @@ func readyNodes(t *testing.T, nodes []*clusterNode) (leader *clusterNode, follow
 // skips on another system, and fails on Linux when either cannot be bound, so
 // that the gate, which runs on Linux, never loses it.
 func TestFollowerHTTPAndGRPCWritesLand(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skipf("each node needs a loopback IP of its own, which Linux gives every host (127.0.0.0/8) and %s may not", runtime.GOOS)
-	}
-	hosts := []string{"127.0.0.1", "127.0.0.2", "127.0.0.3"}
-	for _, host := range hosts[1:] {
-		l, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
-		if err != nil {
-			t.Fatalf("each node needs a loopback IP of its own, and %s cannot be bound on Linux: %v", host, err)
-		}
-		_ = l.Close()
-	}
-	ports := sharedPorts(t, hosts, 4) // raft, HTTP, HTTP discovery and gRPC
-	raftAddrs := make([]string, 0, len(hosts))
-	for _, host := range hosts {
-		raftAddrs = append(raftAddrs, net.JoinHostPort(host, ports[0]))
-	}
-	nodes := clusterNodesOf(t, raftConfigsAt(t, raftAddrs, "n1", "n2", "n3"))
-	for i, n := range nodes {
-		n.cfg.HTTP.Addr = net.JoinHostPort(hosts[i], ports[1])
-		n.cfg.HTTPDiscovery.Addr = net.JoinHostPort(hosts[i], ports[2])
-		n.cfg.GRPC.Addr = net.JoinHostPort(hosts[i], ports[3])
-		n.start(t)
-	}
-	// Run serves the listeners once New has returned.
-	for _, n := range nodes {
-		for _, addr := range []string{n.cfg.HTTP.Addr, n.cfg.HTTPDiscovery.Addr, n.cfg.GRPC.Addr} {
-			waitFor(t, 10*time.Second, n.id+" serves "+addr, func() bool {
-				conn, err := net.Dial("tcp", addr)
-				if err == nil {
-					_ = conn.Close()
-				}
-				return err == nil
-			})
-		}
-	}
+	nodes := startWholeNodes(t, loopbackIPs(t, 3), 3, nil, "n1", "n2", "n3")
 	leader, followers := readyNodes(t, nodes)
 	ctx := context.Background()
 	// landed waits until every node holds what found finds.
@@ -490,37 +469,9 @@ func TestFollowerHTTPAndGRPCWritesLand(t *testing.T) {
 	})
 
 	via = followers[1]
-	client := &http.Client{
-		Timeout:       10 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-	// send posts body to target with the bearer token, when set, and cookies.
-	send := func(target, contentType, body, token string, cookies []*http.Cookie) (*http.Response, string) {
-		t.Helper()
-		r, err := http.NewRequest(http.MethodPost, target, strings.NewReader(body))
-		if err != nil {
-			t.Fatal(err)
-		}
-		r.Header.Set("Content-Type", contentType)
-		if token != "" {
-			r.Header.Set("Authorization", "Bearer "+token)
-		}
-		for _, c := range cookies {
-			r.AddCookie(c)
-		}
-		w, err := client.Do(r)
-		if err != nil {
-			t.Fatalf("POST %s: %v", target, err)
-		}
-		defer func() { _ = w.Body.Close() }()
-		answer, err := io.ReadAll(w.Body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return w, string(answer)
-	}
+	client := httpClient()
 
-	httpSync, body := send("http://"+via.cfg.HTTPDiscovery.Addr+"/api/v1/discovery/sync", jsonType,
+	httpSync, body := send(t, client, http.MethodPost, "http://"+via.cfg.HTTPDiscovery.Addr+"/api/v1/discovery/sync", jsonType,
 		`{"id":"agent-http","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1}`, "token-of-agent-http", nil)
 	if httpSync.StatusCode != http.StatusOK {
 		t.Fatalf("sync through %s over HTTP: %d %q, want the leader's 200", via.id, httpSync.StatusCode, body)
@@ -540,10 +491,10 @@ func TestFollowerHTTPAndGRPCWritesLand(t *testing.T) {
 	if err := leader.app.store.UpsertUser(ctx, writer); err != nil {
 		t.Fatal(err)
 	}
-	if err := credential.New(leader.app.store, zerolog.Nop()).SetPassword(ctx, credential.SetPasswordRequest{UserID: writer.ID(), Password: browserPassword, Cost: 4}); err != nil {
+	if err := credential.New(leader.app.store, zerolog.Nop(), bcrypt.MinCost).SetPassword(ctx, credential.SetPasswordRequest{UserID: writer.ID(), Password: browserPassword, Cost: 4}); err != nil {
 		t.Fatal(err)
 	}
-	login, body := send("http://"+via.cfg.HTTP.Addr+"/login", formType, loginForm("writer"), "", nil)
+	login, body := send(t, client, http.MethodPost, "http://"+via.cfg.HTTP.Addr+"/login", formType, loginForm("writer"), "", nil)
 	if login.StatusCode != http.StatusFound {
 		t.Fatalf("login through %s: %d %q, want the leader's 302", via.id, login.StatusCode, body)
 	}
@@ -561,7 +512,7 @@ func TestFollowerHTTPAndGRPCWritesLand(t *testing.T) {
 		_, err := s.GetSession(ctx, session)
 		return err == nil
 	})
-	created, body := send("http://"+via.cfg.HTTP.Addr+"/api/v1/users", jsonType, `{"subject":"landed-over-http"}`, "", login.Cookies())
+	created, body := send(t, client, http.MethodPost, "http://"+via.cfg.HTTP.Addr+"/api/v1/users", jsonType, `{"subject":"landed-over-http"}`, "", login.Cookies())
 	if created.StatusCode != http.StatusNoContent {
 		t.Fatalf("user created through %s: %d %q, want the leader's 204", via.id, created.StatusCode, body)
 	}
@@ -932,7 +883,7 @@ func TestUntrustedForwardedHeaderIgnored(t *testing.T) {
 			// A user of its own per attempt, so that only the client IP key counts,
 			// each with a cheap hash: an unknown user costs a compare at the full cost.
 			ctx := context.Background()
-			creds := credential.New(leader.store, zerolog.Nop())
+			creds := credential.New(leader.store, zerolog.Nop(), bcrypt.MinCost)
 			for i := range 6 {
 				user, err := model.NewUser(fmt.Sprintf("user-%d", i), fmt.Sprintf("user-%d", i))
 				if err != nil {
@@ -983,5 +934,19 @@ func TestUntrustedForwardedHeaderIgnored(t *testing.T) {
 				t.Fatalf("attempt %d, as %s after five failures as other addresses: %s, want %s: the forged header counted", n, forged(n), got, limited)
 			}
 		})
+	}
+}
+
+// A port that sharedPorts returned, even one it released, is never returned
+// again in this test binary.
+func TestSharedPortsNeverRepeat(t *testing.T) {
+	seen := map[string]bool{}
+	for range 25 {
+		for _, port := range sharedPorts(t, []string{"127.0.0.1"}, 4) {
+			if seen[port] {
+				t.Fatalf("port %s handed out twice", port)
+			}
+			seen[port] = true
+		}
 	}
 }

@@ -97,6 +97,21 @@ type Config struct {
 	ConfigDigests *cluster.Digests
 }
 
+// Option changes how [New] builds the node.
+type Option func(*options)
+
+type options struct {
+	onCommit func(time.Duration)
+}
+
+// WithCommitObserver sets a function that is told how long each write this node
+// proposes took to commit and apply, as the leader does: from the proposal to the
+// answer of raft, a failed write included. It runs on the goroutine of the write,
+// which holds the store's transaction lock, so it must not call the store.
+func WithCommitObserver(fn func(time.Duration)) Option {
+	return func(o *options) { o.onCommit = fn }
+}
+
 // ErrDataDirNotPrivate indicates a data directory, or a snapshots directory in
 // it, that its group or others can enter, or that is not a directory but a
 // symlink or another file.
@@ -150,7 +165,11 @@ type Profile struct {
 // automatically, without asking disco, join or not; the node checks that its
 // stored configuration holds it as NodeID at its advertise address, and logs an
 // ERROR when not (checkIdentity).
-func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discovery, logger zerolog.Logger) (*Profile, error) {
+func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discovery, logger zerolog.Logger, opts ...Option) (*Profile, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	if cfg.NodeID == "" {
 		return nil, fmt.Errorf("raft: NodeID is required")
 	}
@@ -310,6 +329,7 @@ func New(cfg Config, inner storage.Storage, hub *event.Hub, disco cluster.Discov
 		leadership: NewLeadership(r, logger),
 	}
 	p.store = NewStore(inner, r)
+	p.store.onCommit = o.onCommit
 	// Plug the event-writer so hub mutations replicate through Raft. From
 	// this point Notify/Record/DeleteIssues on any replica go via the log;
 	// the FSM fires ApplyLocal* on every node.

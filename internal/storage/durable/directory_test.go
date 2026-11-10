@@ -1,12 +1,15 @@
 package durable
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
+// An open directory is refused with its mode named, and a symlink as one: an
+// operator who reads the error knows which of the two to fix.
 func TestInsecureAndSymlinkDirectoriesAreRejected(t *testing.T) {
 	for _, mode := range []os.FileMode{0o755, 0o777} {
 		dir := filepath.Join(t.TempDir(), "unsafe")
@@ -17,9 +20,13 @@ func TestInsecureAndSymlinkDirectoriesAreRejected(t *testing.T) {
 		if err := os.Chmod(dir, mode); err != nil {
 			t.Fatal(err)
 		}
-		if s, err := Open(dir); err == nil {
+		s, err := Open(dir)
+		if err == nil {
 			_ = s.Close()
 			t.Fatalf("insecure directory %o accepted", mode)
+		}
+		if want := fmt.Sprintf("%s has mode %04o", dir, mode); !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("Open(%o): %v, want it to say %q and not to name a symlink", mode, err, want)
 		}
 		if _, err := os.Stat(filepath.Join(dir, FileName)); !os.IsNotExist(err) {
 			t.Fatal("unsafe directory modified")
@@ -35,9 +42,13 @@ func TestInsecureAndSymlinkDirectoriesAreRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{link, link + string(os.PathSeparator)} {
-		if s, err := Open(path); err == nil {
+		s, err := Open(path)
+		if err == nil {
 			_ = s.Close()
 			t.Fatal("symlink directory accepted")
+		}
+		if want := link + " must be a directory, not a symlink"; !strings.Contains(err.Error(), want) {
+			t.Fatalf("Open(%s): %v, want it to say %q", path, err, want)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(target, FileName)); !os.IsNotExist(err) {

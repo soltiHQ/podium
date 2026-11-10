@@ -104,11 +104,17 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		e = ctx.Err()
 	case ex := <-exitCh:
-		if ex.err == nil {
+		switch {
+		case ex.err == nil && ctx.Err() != nil:
+			// The runner ended because the signal cancelled its context, and
+			// select took its return over the signal, both being ready: it did
+			// not exit on its own.
+			e = ctx.Err()
+		case ex.err == nil:
 			e = &RunnerExitedError{Runner: ex.name}
-		} else if errors.Is(ex.err, context.Canceled) {
+		case errors.Is(ex.err, context.Canceled):
 			e = ex.err
-		} else {
+		default:
 			e = &RunnerError{Runner: ex.name, Phase: "start", Err: ex.err}
 		}
 	}

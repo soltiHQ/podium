@@ -30,6 +30,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/handler"
 	"github.com/soltiHQ/control-plane/internal/loghub"
+	"github.com/soltiHQ/control-plane/internal/metrics"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	raftpkg "github.com/soltiHQ/control-plane/internal/raft"
 	"github.com/soltiHQ/control-plane/internal/server/runner/base"
@@ -67,10 +68,11 @@ type services struct {
 	cluster *clustersvc.Service
 }
 
-// initServices constructs the domain services. agentAuth gives the agent
+// initServices constructs the domain services. passwordCost is the bcrypt cost
+// of the passwords the credential service stores. agentAuth gives the agent
 // service the enrollment secret that closes discovery to unknown agent IDs and
 // that derived credentials derive from, and tells it when agent auth is off.
-func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history.Config, agentAuth config.AgentAuthConfig, logger zerolog.Logger) (services, error) {
+func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history.Config, agentAuth config.AgentAuthConfig, logger zerolog.Logger, passwordCost int) (services, error) {
 	historySVC, err := history.New(store, historyCfg)
 	if err != nil {
 		return services{}, err
@@ -82,7 +84,7 @@ func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history
 	return services{
 		history:    historySVC,
 		access:     access.New(authModel, store, logger),
-		credential: credential.New(store, logger),
+		credential: credential.New(store, logger, passwordCost),
 		session:    session.New(store, logger),
 		agent:      agent.New(store, logger, agentOpts...),
 		spec:       spec.New(store, logger),
@@ -106,6 +108,11 @@ type clusterOptions struct {
 	// raft node answers its peers' configuration requests with and checks
 	// against its leader's; nil leaves a raft node without either.
 	digests *cluster.Digests
+	// probes, when set, is filled with the hooks of the backend that is built.
+	probes *probeHooks
+	// metrics, when set, times the commits of the backend and, for a raft node,
+	// registers the node's raft metrics.
+	metrics *metrics.Metrics
 }
 
 // clusterOption is an option of buildCluster.
@@ -115,6 +122,12 @@ type clusterOption func(*clusterOptions)
 // apply the first event to it.
 func withHubOptions(opts ...event.Option) clusterOption {
 	return func(o *clusterOptions) { o.hub = append(o.hub, opts...) }
+}
+
+// withMetrics makes buildCluster record the store commits of the backend it builds
+// into m, and register a raft node's own metrics there.
+func withMetrics(m *metrics.Metrics) clusterOption {
+	return func(o *clusterOptions) { o.metrics = m }
 }
 
 // withConfigDigests gives a raft node d, the digests of the settings every
@@ -147,13 +160,17 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger, opts ...clusterOpti
 			logger.Warn().Msg("standalone.ephemeral=true: control-plane state will be lost on restart")
 			return inner, standalone.NewLeadership(), hub, nil, nil, nil
 		}
-		store, err := durable.Open(cfg.Standalone.DataDir,
+		durableOpts := []durable.Option{
 			durable.WithSnapshotThreshold(cfg.Standalone.SnapshotThreshold),
 			durable.WithFailureHandler(func(err error) {
 				logger.Error().Err(err).Str("data_dir", cfg.Standalone.DataDir).
 					Msg("standalone durable storage failed: reads and writes fail until restart")
 			}),
-		)
+		}
+		if o.metrics != nil {
+			durableOpts = append(durableOpts, durable.WithCommitObserver(o.metrics.StoreCommit("durable")))
+		}
+		store, err := durable.Open(cfg.Standalone.DataDir, durableOpts...)
 		if err != nil {
 			hub.Close()
 			return nil, nil, nil, nil, nil, err
@@ -164,6 +181,9 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger, opts ...clusterOpti
 				Msgf("standalone durable storage migrated %s from single-blob to format 2: older versions refuse the migrated file, so rolling back needs a copy made before this start", durable.FileName)
 		}
 		logger.Info().Str("data_dir", cfg.Standalone.DataDir).Msg("standalone durable storage restored")
+		if o.probes != nil {
+			o.probes.failure = store.Failure
+		}
 		return store, standalone.NewLeadership(), hub, func() {
 			if err := store.Close(); err != nil {
 				logger.Error().Err(err).Msg("close standalone storage")
@@ -176,9 +196,17 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger, opts ...clusterOpti
 		}
 		node := raftNodeConfig(cfg.Raft)
 		node.ConfigDigests = o.digests
-		p, err := raftpkg.New(node, inner, hub, disco, logger)
+		var raftOpts []raftpkg.Option
+		if o.metrics != nil {
+			raftOpts = append(raftOpts, raftpkg.WithCommitObserver(o.metrics.StoreCommit("raft")))
+		}
+		p, err := raftpkg.New(node, inner, hub, disco, logger, raftOpts...)
 		if err != nil {
 			return nil, nil, nil, nil, nil, err
+		}
+		o.metrics.Register(p.Collector())
+		if o.probes != nil {
+			o.probes.leader = p.Leadership().CurrentLeader
 		}
 		return p.Store(), p.Leadership(), hub, func() { _ = p.Shutdown() }, p.Admin(), nil
 	default:
@@ -365,8 +393,10 @@ func logCredentialSweep(logger zerolog.Logger, res agent.CredentialSweep, secret
 // and on a follower before the Leader middleware forwards anything to the
 // leader, so a refused request never crosses nodes. A follower forwards writes
 // to the leader with forwardTLS, see [leaderOptions]. The cluster routes exist
-// only with a cluster service, which a raft node alone has.
-func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership, resolver *clientip.Resolver, forwardTLS *tls.Config) (http.Handler, *loghub.Hub) {
+// only with a cluster service, which a raft node alone has. m counts and times
+// every request the listener answers, outside the other middleware, and counts
+// the logins; nil records nothing.
+func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership, resolver *clientip.Resolver, forwardTLS *tls.Config, m *metrics.Metrics) (http.Handler, *loghub.Hub) {
 	var apiOpts []handler.APIOption
 	if svc.cluster != nil {
 		apiOpts = append(apiOpts, handler.WithCluster(svc.cluster))
@@ -389,20 +419,23 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 			return middleware.RequirePermission(p)
 		})
 	)
+	uiHandler.ObserveLogins(m.Login)
 	apiHandler.Routes(mux, authMW, permMW, ridMW, logMW)
 	uiHandler.Routes(mux, authMW, optAuthMW, permMW)
 	staticHandler.Routes(mux)
 
 	route.HandleFunc(mux, routepath.ApiEventStream, eventHub.SSEHandler(eventAccess), ridMW, logMW, authMW, middleware.StreamLimit(streamLimit))
 
-	// Outermost first: Recovery, CORS, Negotiate, CrossOrigin, Leader. CrossOrigin
-	// answers through the Responder that Negotiate picks, and runs before Leader.
-	var h http.Handler = mux
+	// Outermost first: metrics, Recovery, CORS, Negotiate, CrossOrigin, Leader.
+	// CrossOrigin answers through the Responder that Negotiate picks, and runs
+	// before Leader. The metrics take the route from the mux, which Route wraps.
+	h := metrics.Route(mux)
 	h = middleware.Leader(leadership, leaderOptions(addrPort(cfg.HTTP.Addr), cfg.TLS.Server.Enabled(), forwardTLS))(h)
 	h = middleware.CrossOrigin(cfg.CORS, logger)(h)
 	h = middleware.Negotiate(responder.NewJSON(), responder.NewHTML())(h)
 	h = middleware.CORS(cfg.CORS)(h)
 	h = middleware.Recovery(logger)(h)
+	h = m.HTTP("ui")(h)
 	return h, logHub
 }
 
@@ -469,35 +502,42 @@ func warnForwarding(logger zerolog.Logger, cfg config.Config) {
 // so an agent has one budget of each whichever transport it uses. resolver gives
 // both the client IP; gRPC discovery reads it from x-forwarded-for only in raft
 // mode, where a follower forwards its syncs to the leader with forwarder, while
-// standalone keeps the peer address, as before.
-func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, cfg config.Config, resolver *clientip.Resolver, serverTLS, forwardTLS *tls.Config, forwarder *interceptor.Forwarder) (http.Handler, *grpc.Server) {
+// standalone keeps the peer address, as before. m counts and times the calls of
+// both listeners and the outcome of each sync; nil records nothing.
+func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, cfg config.Config, resolver *clientip.Resolver, serverTLS, forwardTLS *tls.Config, forwarder *interceptor.Forwarder, m *metrics.Metrics) (http.Handler, *grpc.Server) {
 	limiter := kit.NewLimiter(cfg.Auth)
 	syncs := handler.NewSyncBuckets()
 	var grpcClients *clientip.Resolver
 	if _, raft := leadership.(cluster.Membership); raft {
 		grpcClients = resolver
 	}
-	return buildDiscoveryHandler(logger, agentSVC, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), limiter, syncs, resolver, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled(), forwardTLS),
-		buildGRPCServer(logger, agentSVC, eventHub, leadership, limiter, syncs, grpcClients, serverTLS, cfg.AgentAuth.Require, addrPort(cfg.GRPC.Addr), forwarder)
+	return buildDiscoveryHandler(logger, agentSVC, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), limiter, syncs, resolver, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled(), forwardTLS, m),
+		buildGRPCServer(logger, agentSVC, eventHub, leadership, limiter, syncs, grpcClients, serverTLS, cfg.AgentAuth.Require, addrPort(cfg.GRPC.Addr), forwarder, m)
 }
 
 // buildDiscoveryHandler wires the HTTP discovery listener. It has no per-IP
 // limit: the handler counts authentication failures per (client IP, agent ID)
 // in limiter, so agents behind one egress IP never block each other, and charges
 // each sync to the bucket of its agent ID in syncs. A follower forwards syncs to
-// the leader with forwardTLS, see [leaderOptions].
-func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, requireAuth bool, targetTLS bool, forwardTLS *tls.Config) http.Handler {
+// the leader with forwardTLS, see [leaderOptions]. m counts and times every
+// request, outside the other middleware, and the outcome of every sync, among
+// them the writes that a follower cannot send to a leader and refuses itself.
+func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, requireAuth bool, targetTLS bool, forwardTLS *tls.Config, m *metrics.Metrics) http.Handler {
 	var (
 		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC, eventHub, limiter, syncs, resolver, requireAuth)
 		mux           = http.NewServeMux()
 	)
+	httpDiscovery.Observe(func(outcome string) { m.Sync(metrics.TransportHTTP, outcome) })
 	mux.HandleFunc("/api/v1/discovery/sync", httpDiscovery.Sync)
 
-	var h http.Handler = mux
-	h = middleware.Leader(leadership, leaderOptions(httpPort, targetTLS, forwardTLS))(h)
+	leaderOpts := leaderOptions(httpPort, targetTLS, forwardTLS)
+	leaderOpts.Refused = func() { m.Sync(metrics.TransportHTTP, metrics.SyncUnavailable) }
+	h := metrics.Route(mux)
+	h = middleware.Leader(leadership, leaderOpts)(h)
 	h = middleware.Recovery(logger)(h)
 	h = middleware.Logger(logger)(h)
 	h = middleware.RequestID()(h)
+	h = m.HTTP("discovery")(h)
 	return h
 }
 
@@ -562,15 +602,19 @@ func addrPort(addr string) int {
 // agent ID in syncs. On a follower, forwarder sends a Sync to the leader's gRPC
 // listener, at the host of the leader's raft address and port, which every
 // replica is assumed to serve it on; a write it does not forward answers
-// Unavailable with that address in the x-leader hint.
-func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, serverTLS *tls.Config, requireAuth bool, port int, forwarder *interceptor.Forwarder) *grpc.Server {
+// Unavailable with that address in the x-leader hint. m counts and times the
+// calls, first in the chain, and counts the outcome of each sync.
+func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, serverTLS *tls.Config, requireAuth bool, port int, forwarder *interceptor.Forwarder, m *metrics.Metrics) *grpc.Server {
 	// Write methods (must run on leader). Sync is the only agent-facing
 	// mutation; everything else is pure read.
 	writeMethods := map[string]struct{}{
 		discoverv1.DiscoverService_Sync_FullMethodName: {},
 	}
 	isWrite := func(full string) bool { _, ok := writeMethods[full]; return ok }
-	leaderOpts := interceptor.LeaderOptions{IsWrite: isWrite, Port: port, Forwarder: forwarder}
+	leaderOpts := interceptor.LeaderOptions{
+		IsWrite: isWrite, Port: port, Forwarder: forwarder,
+		Refused: func() { m.Sync(metrics.TransportGRPC, metrics.SyncUnavailable) },
+	}
 
 	opts := []grpc.ServerOption{
 		// Same message and header caps as the HTTP sync; bounded streams, pings and idle connections.
@@ -580,12 +624,14 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *e
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second}),
 		grpc.KeepaliveParams(keepalive.ServerParameters{MaxConnectionIdle: 5 * time.Minute}),
 		grpc.ChainUnaryInterceptor(
+			m.UnaryInterceptor(),
 			interceptor.UnaryRecovery(logger),
 			interceptor.UnaryRequestID(),
 			interceptor.UnaryLogger(logger),
 			interceptor.UnaryLeader(leadership, leaderOpts),
 		),
 		grpc.ChainStreamInterceptor(
+			m.StreamInterceptor(),
 			interceptor.StreamRecovery(logger),
 			interceptor.StreamRequestID(),
 			interceptor.StreamLogger(logger),
@@ -600,6 +646,7 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *e
 		srv           = grpc.NewServer(opts...)
 		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC, eventHub, limiter, syncs, resolver, requireAuth)
 	)
+	grpcDiscovery.Observe(func(outcome string) { m.Sync(metrics.TransportGRPC, outcome) })
 	discoverv1.RegisterDiscoverServiceServer(srv, grpcDiscovery)
 	return srv
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
 	"github.com/soltiHQ/control-plane/internal/event"
+	"github.com/soltiHQ/control-plane/internal/metrics"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/service/access"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
@@ -48,6 +49,21 @@ type UI struct {
 	resolver  *clientip.Resolver
 	secure    func(*http.Request) bool
 	logger    zerolog.Logger
+	// observe is told how each login attempt ended, nil for none.
+	observe func(outcome string)
+}
+
+// ObserveLogins tells o how each login attempt that reached the credential check
+// ends, with one of the Login outcomes of package metrics: failed is a wrong
+// subject or password, a user without permissions, and any other error, limited
+// an attempt the login limiter refused. Call it before the handler serves.
+func (u *UI) ObserveLogins(o func(outcome string)) { u.observe = o }
+
+// loginDone tells the observer how a login attempt ended.
+func (u *UI) loginDone(outcome string) {
+	if u.observe != nil {
+		u.observe(outcome)
+	}
 }
 
 // NewUI creates a new UI handler.
@@ -168,6 +184,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, auth.ErrRateLimited):
+			u.loginDone(metrics.LoginLimited)
 			response.AuthRateLimit(w, r, mode)
 			return
 		case errors.Is(err, auth.ErrInvalidCredentials),
@@ -175,6 +192,7 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 			errors.Is(err, auth.ErrUnauthorized):
 			// A user without permissions (ErrUnauthorized) gets the answer to a
 			// wrong password, which tells nothing about the password.
+			u.loginDone(metrics.LoginFailed)
 			if errors.Is(err, auth.ErrUnauthorized) {
 				u.logger.Warn().Str("subject", account).Msg("login refused: the user has no permissions")
 			}
@@ -182,12 +200,14 @@ func (u *UI) Login(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, routepath.PageLogin+"?error=Invalid+username+or+password&redirect="+url.QueryEscape(redirect), http.StatusSeeOther)
 			return
 		default:
+			u.loginDone(metrics.LoginFailed)
 			u.logger.Error().Err(err).Str("subject", account).Msg("login error")
 			http.Redirect(w, r, routepath.PageLogin+"?error=Something+went+wrong", http.StatusFound)
 			return
 		}
 	}
 
+	u.loginDone(metrics.LoginOK)
 	u.logger.Info().Str("subject", account).Msg("login success")
 	u.hub.Record(event.SessionCreated, event.Payload{
 		ID: id.UserID, Name: id.Name, By: "auth",

@@ -783,3 +783,34 @@ func TestSnapshotTriggers(t *testing.T) {
 		})
 	}
 }
+
+// Failure is nil while the store serves, and after a failed commit it is the reason
+// that reads and writes report; a closed store has no failure.
+func TestFailureNamesWhyTheStoreStopped(t *testing.T) {
+	closed, _ := newTestStore(t)
+	if err := closed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := closed.Failure(); err != nil {
+		t.Fatalf("Failure of a closed store: %v, want none", err)
+	}
+	s, _ := newTestStore(t)
+	populate(t, s)
+	if err := s.Failure(); err != nil {
+		t.Fatalf("Failure of a store that serves: %v", err)
+	}
+	// A closed bbolt handle fails the next bbolt transaction.
+	if err := s.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	a, err := model.NewAgent("a2", "agent-a2", "http://a2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.UpsertAgent(context.Background(), a); !errors.Is(err, storage.ErrInternal) {
+		t.Fatalf("failed commit: %v, want ErrInternal", err)
+	}
+	if err = s.Failure(); !errors.Is(err, storage.ErrInternal) || !strings.Contains(err.Error(), "durable commit of log entry 2") {
+		t.Fatalf("Failure after a failed commit: %v, want ErrInternal naming the commit", err)
+	}
+}

@@ -29,8 +29,13 @@ vars:
   proto_packages: agent discover task raft
   proto_plugins_dir: .cache/proto-plugins
 
+  # The sha256 of the exact file each URL serves. Changing a version means
+  # changing its hash: compare the file with the package in the npm registry
+  # (dist.integrity covers the tarball) before pinning a new one.
   alpinejs_version: '3.13.5'
+  alpinejs_sha256: ca057831ef9be3d8ee47e14078089fd2381dc7820b4bb7fbdb85a490f5b8f68c
   htmx_version: '1.9.12'
+  htmx_sha256: 449317ade7881e949510db614991e195c3a099c4c791c24dacec55f9f4a2a452
   tailwind_version: '4.3.2'
   tailwind_command: |
     case "$(uname -m)" in
@@ -56,8 +61,44 @@ vars:
     fi
     exec "$bin" --input ui/static/css/app.css --output ui/static/css/tailwindcss.css --minify
 
+  js_assets_command: |
+    fetch() {
+      url=$1 want=$2 out=$3
+      # A failed download must not leave $out.download in ui/static/js, which
+      # ui/embed.go would embed.
+      trap 'rm -f "$out.download"' EXIT
+      rm -f "$out.download"
+      curl -fsSL --retry 3 --max-time 120 -o "$out.download" "$url"
+      actual=$(sha256sum "$out.download" | cut -d ' ' -f 1)
+      if [ "$actual" != "$want" ]; then
+        printf '%s: sha256 %s, expected %s\n' "$out" "$actual" "$want" >&2
+        exit 1
+      fi
+      mv "$out.download" "$out"
+    }
+    fetch "https://cdn.jsdelivr.net/npm/alpinejs@{{.alpinejs_version}}/dist/cdn.min.js" {{.alpinejs_sha256}} ui/static/js/alpine.min.js
+    fetch "https://unpkg.com/htmx.org@{{.htmx_version}}/dist/htmx.min.js" {{.htmx_sha256}} ui/static/js/htmx.min.js
+
   go_paths: api cmd domain internal ui
-  markdown_paths: README.md
+  # Every tracked README: a new one is added here.
+  markdown_paths: >-
+    README.md
+    internal/app/README.md
+    internal/auth/README.md
+    internal/bootstrap/README.md
+    internal/config/README.md
+    internal/event/README.md
+    internal/handler/README.md
+    internal/proxy/README.md
+    internal/raft/README.md
+    internal/server/README.md
+    internal/service/README.md
+    internal/storage/README.md
+    internal/storage/durable/README.md
+    internal/transport/README.md
+    internal/transportctx/README.md
+    internal/uikit/README.md
+    ui/README.md
 
 tasks:
   ci/markdown/fmt:
@@ -138,6 +179,8 @@ tasks:
     desc: Build the binary for GOOS/GOARCH (linux/amd64 by default)
     cmds:
       - task: generate
+      - task: assets
+      - task: assets/check
       - task: golang:build
         vars:
           NAME: '{{.name}}'
@@ -187,11 +230,22 @@ tasks:
   assets:
     desc: Download the JS dependencies and build the Tailwind CSS bundle
     cmds:
-      - curl -fsSL -o ui/static/js/alpine.min.js "https://cdn.jsdelivr.net/npm/alpinejs@{{.alpinejs_version}}/dist/cdn.min.js"
-      - curl -fsSL -o ui/static/js/htmx.min.js "https://unpkg.com/htmx.org@{{.htmx_version}}/dist/htmx.min.js"
+      - task: golang:exec
+        vars:
+          CMD: sh -euc {{.js_assets_command | shellQuote}}
       - task: golang:exec
         vars:
           CMD: sh -euc {{.tailwind_command | shellQuote}}
+
+  # A task of its own because a precondition is the one way to fail with a
+  # message before a build starts; ci/golang/build runs it after assets.
+  assets/check:
+    desc: Fail unless every UI asset the binary embeds exists
+    preconditions:
+      - sh: 'for f in ui/static/js/alpine.min.js ui/static/js/htmx.min.js ui/static/css/tailwindcss.css; do test -s "$f" || exit 1; done'
+        msg: 'a UI asset is missing: run task assets (ui/static/js/alpine.min.js, htmx.min.js, css/tailwindcss.css)'
+    cmds:
+      - 'true'
 
   prepare:
     desc: Generate sources and build the UI assets for a local run

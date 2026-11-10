@@ -139,9 +139,13 @@ func TestLeaderAnswersCarryTheLeadersHTTPAddressOrNone(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("a write reached the handler of a follower") })
 			w := httptest.NewRecorder()
-			Leader(tt.leadership, LeaderOptions{ForwardPort: tt.port})(next).ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/", nil))
+			refused := 0
+			Leader(tt.leadership, LeaderOptions{ForwardPort: tt.port, Refused: func() { refused++ }})(next).ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/", nil))
 			if w.Code != tt.status {
 				t.Fatalf("status = %d, want %d", w.Code, tt.status)
+			}
+			if refused != 1 {
+				t.Fatalf("Refused called %d times for the refusal, want once", refused)
 			}
 			if _, set := w.Header()[response.LeaderHeader]; set != (tt.leader != "") || w.Header().Get(response.LeaderHeader) != tt.leader {
 				t.Fatalf("%s = %q, want %q", response.LeaderHeader, w.Header().Get(response.LeaderHeader), tt.leader)

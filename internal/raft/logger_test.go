@@ -37,8 +37,8 @@ func logLines(t *testing.T, logs *logBuffer) []map[string]any {
 	return lines
 }
 
-// hashicorp/raft logs INFO, WARN and ERROR lines at their own level and drops
-// what is below INFO.
+// At log level info, hashicorp/raft logs INFO, WARN and ERROR lines at their own
+// level and drops what is below INFO.
 func TestHCLogAdapterKeepsLevelsFromInfo(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -64,7 +64,7 @@ func TestHCLogAdapterKeepsLevelsFromInfo(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logs := &logBuffer{}
-			tc.log(newHCLog(zerolog.New(logs), "raft"))
+			tc.log(newHCLog(zerolog.New(logs).Level(zerolog.InfoLevel), "raft"))
 			lines := logLines(t, logs)
 			switch {
 			case tc.want == "" && len(lines) != 0:
@@ -74,7 +74,7 @@ func TestHCLogAdapterKeepsLevelsFromInfo(t *testing.T) {
 			}
 		})
 	}
-	l := newHCLog(zerolog.New(&logBuffer{}), "raft")
+	l := newHCLog(zerolog.New(&logBuffer{}).Level(zerolog.InfoLevel), "raft")
 	if l.IsTrace() || l.IsDebug() || !l.IsInfo() || !l.IsWarn() || !l.IsError() || l.GetLevel() != hclog.Info {
 		t.Fatal("the adapter does not report INFO as its floor")
 	}
@@ -306,5 +306,42 @@ func TestRaftLogsGoThroughTheNodeLogger(t *testing.T) {
 	}
 	if written := stopStderr(); written != "" {
 		t.Fatalf("hashicorp/raft wrote to stderr: %s", written)
+	}
+}
+
+// The adapter follows the level of the logger it writes to, which is log.level:
+// TRACE and DEBUG lines are zerolog DEBUG lines at debug and dropped above it,
+// and GetLevel and the Is methods report the level.
+func TestHCLogFollowsLevel(t *testing.T) {
+	for _, tc := range []struct {
+		level      zerolog.Level
+		debug      bool
+		wantHCLog  hclog.Level
+		wantLevels []string // of Trace, Debug, Info, Warn, Error, in order
+	}{
+		{zerolog.DebugLevel, true, hclog.Debug, []string{"debug", "debug", "info", "warn", "error"}},
+		{zerolog.InfoLevel, false, hclog.Info, []string{"info", "warn", "error"}},
+		{zerolog.WarnLevel, false, hclog.Warn, []string{"warn", "error"}},
+		{zerolog.ErrorLevel, false, hclog.Error, []string{"error"}},
+	} {
+		t.Run(tc.level.String(), func(t *testing.T) {
+			logs := &logBuffer{}
+			l := newHCLog(zerolog.New(logs).Level(tc.level), "raft")
+			l.Trace("m")
+			l.Debug("m")
+			l.Info("m")
+			l.Warn("m")
+			l.Error("m")
+			var got []string
+			for _, line := range logLines(t, logs) {
+				got = append(got, line["level"].(string))
+			}
+			if strings.Join(got, " ") != strings.Join(tc.wantLevels, " ") {
+				t.Fatalf("logged %v, want %v", got, tc.wantLevels)
+			}
+			if l.IsTrace() != tc.debug || l.IsDebug() != tc.debug || l.GetLevel() != tc.wantHCLog {
+				t.Fatalf("IsTrace %v, IsDebug %v, GetLevel %v; want %v, %v, %v", l.IsTrace(), l.IsDebug(), l.GetLevel(), tc.debug, tc.debug, tc.wantHCLog)
+			}
+		})
 	}
 }

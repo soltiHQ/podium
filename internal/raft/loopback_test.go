@@ -190,10 +190,11 @@ func (n *loopbackNode) open(disco cluster.Discovery, opts ...func(*Config)) erro
 }
 
 // capture makes n log into a buffer, which the test reads while the node runs.
-// Call it before the node starts.
+// Call it before the node starts. The node logs at info, podium's default
+// log.level.
 func (n *loopbackNode) capture() *logBuffer {
 	logs := &logBuffer{}
-	n.logger = zerolog.New(logs)
+	n.logger = zerolog.New(logs).Level(zerolog.InfoLevel)
 	return logs
 }
 

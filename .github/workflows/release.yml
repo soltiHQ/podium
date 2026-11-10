@@ -1,0 +1,170 @@
+name: Release flow
+
+on:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  IMAGE: ghcr.io/soltihq/podium
+
+jobs:
+  verify:
+    name: Verify ${{ github.ref_name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check tag format
+        uses: mr-chelyshkin/actions/tag-format-check@577ea5b38e0b2ad2bffe7977574fda5e59657a60 # v2
+        with:
+          # SemVer with a v prefix and an optional pre-release suffix. The
+          # default pattern also takes +build metadata, which a Docker tag
+          # cannot carry. The major version is 0 or 1: Go gives v2 and later
+          # versions only to a module path that ends in /v2 (or /vN), and
+          # github.com/soltiHQ/control-plane has none, so a binary built at a
+          # v2+ tag would not report the tag as its version. For v2, move the
+          # module path to .../v2 and allow major 2 here.
+          pattern: '^v(0|1)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check that the tag is on main
+        uses: mr-chelyshkin/actions/tag-branch-check@577ea5b38e0b2ad2bffe7977574fda5e59657a60 # v2
+        with:
+          branch: main
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build binary
+        uses: mr-chelyshkin/actions/task-run@577ea5b38e0b2ad2bffe7977574fda5e59657a60 # v2
+        with:
+          task: ci/golang/build
+          args: |
+            GOOS=${{ matrix.goos }}
+            GOARCH=${{ matrix.goarch }}
+      - name: Keep the binary
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: podium-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: bin/podium-${{ matrix.goos }}-${{ matrix.goarch }}
+          if-no-files-found: error
+          retention-days: 7
+
+  image:
+    name: Image ${{ github.ref_name }}
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Fetch the linux binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: podium-linux-*
+          path: bin
+          merge-multiple: true
+      # No QEMU: no stage of the Dockerfile runs a binary of the target
+      # platform. The data stage runs on $BUILDPLATFORM, and the target stage
+      # only copies files, so BuildKit builds linux/arm64 here without
+      # emulation.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          # The BuildKit daemon runs privileged in this job, which can push
+          # packages: its image is pinned by digest, not the moving
+          # buildx-stable-1 tag. buildx-stable-1 was this index on 2026-11-09
+          # (docker buildx imagetools inspect).
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prepare image metadata
+        id: meta
+        shell: bash
+        run: echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+      - name: Build and push image
+        id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
+          labels: |
+            org.opencontainers.image.title=podium
+            org.opencontainers.image.description=Solti control plane
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.created }}
+            org.opencontainers.image.licenses=Apache-2.0
+      - name: Point latest at the pushed image
+        # A tag with a pre-release suffix (v1.2.3-rc.1) does not move latest.
+        if: ${{ !contains(github.ref_name, '-') }}
+        shell: bash
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE@$DIGEST"
+
+  release:
+    name: Release ${{ github.ref_name }}
+    needs: [build, image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Fetch the binaries
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: podium-*
+          path: dist
+          merge-multiple: true
+      - name: Write checksums
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum podium-* > sha256sums.txt
+          cat sha256sums.txt
+      - name: Publish the release
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
+        with:
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/podium-*
+            dist/sha256sums.txt

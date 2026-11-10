@@ -24,8 +24,10 @@ const redacted = "[redacted]"
 //
 //   - INFO, WARN and ERROR keep their level; hashicorp's own level for a line
 //     is not changed.
-//   - TRACE and DEBUG lines are dropped: INFO is the floor, and SetLevel does not
-//     move it. Raft's elections and its replication chatter log at DEBUG.
+//   - TRACE and DEBUG lines become zerolog DEBUG lines, so they are written at
+//     log level debug and dropped above it. Raft's elections and its replication
+//     chatter log at DEBUG. The level is that of the logger the adapter writes
+//     to (log.level); SetLevel does not move it.
 //
 // Each key and value pair of a line becomes a field of the event, and the name
 // of the logger (raft, snapshot, raft-net) the field "component". A key that
@@ -52,6 +54,8 @@ func newHCLog(logger zerolog.Logger, name string) hclog.Logger {
 func (a *hclogAdapter) Log(level hclog.Level, msg string, args ...any) {
 	var event *zerolog.Event
 	switch level {
+	case hclog.Trace, hclog.Debug:
+		event = a.logger.Debug()
 	case hclog.NoLevel, hclog.Info:
 		event = a.logger.Info()
 	case hclog.Warn:
@@ -166,11 +170,11 @@ func formatted(f hclog.Format) string {
 	return fmt.Sprint([]any(f)...)
 }
 
-// Trace implements hclog.Logger. The adapter logs nothing below INFO.
-func (a *hclogAdapter) Trace(string, ...any) {}
+// Trace implements hclog.Logger. It logs at zerolog DEBUG.
+func (a *hclogAdapter) Trace(msg string, args ...any) { a.Log(hclog.Trace, msg, args...) }
 
-// Debug implements hclog.Logger. The adapter logs nothing below INFO.
-func (a *hclogAdapter) Debug(string, ...any) {}
+// Debug implements hclog.Logger.
+func (a *hclogAdapter) Debug(msg string, args ...any) { a.Log(hclog.Debug, msg, args...) }
 
 // Info implements hclog.Logger.
 func (a *hclogAdapter) Info(msg string, args ...any) { a.Log(hclog.Info, msg, args...) }
@@ -181,11 +185,12 @@ func (a *hclogAdapter) Warn(msg string, args ...any) { a.Log(hclog.Warn, msg, ar
 // Error implements hclog.Logger.
 func (a *hclogAdapter) Error(msg string, args ...any) { a.Log(hclog.Error, msg, args...) }
 
-// IsTrace implements hclog.Logger.
-func (a *hclogAdapter) IsTrace() bool { return false }
+// IsTrace implements hclog.Logger. A TRACE line is a DEBUG line, so it is
+// written when DEBUG is.
+func (a *hclogAdapter) IsTrace() bool { return a.logger.GetLevel() <= zerolog.DebugLevel }
 
 // IsDebug implements hclog.Logger.
-func (a *hclogAdapter) IsDebug() bool { return false }
+func (a *hclogAdapter) IsDebug() bool { return a.logger.GetLevel() <= zerolog.DebugLevel }
 
 // IsInfo implements hclog.Logger.
 func (a *hclogAdapter) IsInfo() bool { return a.logger.GetLevel() <= zerolog.InfoLevel }
@@ -227,11 +232,26 @@ func (a *hclogAdapter) ResetNamed(name string) hclog.Logger {
 	return &sub
 }
 
-// SetLevel implements hclog.Logger. It does nothing: the floor stays at INFO.
+// SetLevel implements hclog.Logger. It does nothing: the level is that of the
+// logger, set by log.level.
 func (a *hclogAdapter) SetLevel(hclog.Level) {}
 
-// GetLevel implements hclog.Logger.
-func (a *hclogAdapter) GetLevel() hclog.Level { return hclog.Info }
+// GetLevel implements hclog.Logger: the level of the logger, DEBUG for a logger
+// that writes DEBUG or below.
+func (a *hclogAdapter) GetLevel() hclog.Level {
+	switch level := a.logger.GetLevel(); {
+	case level <= zerolog.DebugLevel:
+		return hclog.Debug
+	case level == zerolog.InfoLevel:
+		return hclog.Info
+	case level == zerolog.WarnLevel:
+		return hclog.Warn
+	case level == zerolog.ErrorLevel:
+		return hclog.Error
+	default:
+		return hclog.Off
+	}
+}
 
 // StandardLogger implements hclog.Logger.
 func (a *hclogAdapter) StandardLogger(opts *hclog.StandardLoggerOptions) *log.Logger {

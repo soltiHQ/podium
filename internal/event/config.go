@@ -16,7 +16,7 @@ type Config struct {
 	// Coalesce is the window of [WithCoalesce]: a refresh pulse of one kind
 	// reaches the clients at most once per window. Zero keeps DefaultCoalesce; a
 	// negative value is invalid.
-	Coalesce time.Duration `yaml:"coalesce" envconfig:"COALESCE"`
+	Coalesce time.Duration `yaml:"coalesce"`
 }
 
 // DefaultConfig returns the default configuration.

@@ -68,22 +68,27 @@ func OptionalAuth(verifier token.Verifier, sessionSvc *session.Service, secure f
 // (cluster.IsLeadershipError), which only a refresh with auth.rotate_refresh
 // on can, as the rotation of the refresh token is a write. That is the
 // deployment's routing, not a failure of this node, so it is logged at WARN,
-// worded for what happened, and the 503 carries the leader's address in
-// X-Leader (response.FromError), which makes the access log (Logger) a WARN as
-// well:
+// worded for what happened, and answered by response.FromError: the 503
+// carries the leader's address in X-Leader when this node knows the leader as
+// it answers (httpctx.Leader), and on an API route, whose access log (Logger)
+// wraps Auth, that header makes the access log line a WARN as well. A node
+// that knows no leader answers the 503 without X-Leader, which that access log
+// logs at ERROR. A node that shut down is one: hashicorp/raft clears the known
+// leader at its shutdown.
 //
-//   - cluster.ErrNotLeader: the node does not lead, as every follower, and
-//     could not rotate the token, so nothing changed;
+//   - cluster.ErrNotLeader: the node does not lead, as every follower and a
+//     node that shut down, and could not rotate the token, so nothing changed;
 //   - cluster.ErrLeadershipLost: the node lost its leadership, or shut down,
-//     while the rotation was committing, which may have taken effect. The hint
-//     stays: a retry at the leader refreshes the browser when the rotation did
-//     not commit, and when it did, the browser's refresh token no longer
-//     matches, and it logs in again.
+//     while the rotation was committing, which may have taken effect. A node
+//     that lost its leadership names the new leader when it knows it by then: a
+//     retry there refreshes the browser when the rotation did not commit, and
+//     when it did, the browser's refresh token no longer matches, and it logs
+//     in again. A node that shut down names no leader.
 func checkFailed(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, logger zerolog.Logger, err error) {
 	if cluster.IsLeadershipError(err) {
-		message := "auth refresh needs the leader: a follower cannot rotate a refresh token, so with auth.rotate_refresh route browsers to the leader (X-Leader), or turn rotation off"
+		message := "auth refresh needs the leader: with auth.rotate_refresh only the leader rotates a refresh token, and this node does not lead, as a follower or a node that shut down, so nothing changed: route browsers to the leader, which the 503 names in X-Leader when this node knows it, which a node that shut down does not, or turn rotation off"
 		if errors.Is(err, cluster.ErrLeadershipLost) {
-			message = "auth refresh outcome unknown: with auth.rotate_refresh, this node lost its leadership, or shut down, while the rotation of the refresh token committed, which may have taken effect: a retry at the leader (X-Leader) refreshes the browser unless it did, and then the browser logs in again"
+			message = "auth refresh outcome unknown: with auth.rotate_refresh, this node lost its leadership, or shut down, while the rotation of the refresh token committed, which may have taken effect: a retry at the current leader refreshes the browser unless it did, and then the browser logs in again; the 503 names that leader in X-Leader when this node knows it, which a node that shut down does not"
 		}
 		logger.Warn().Err(err).Str("method", r.Method).Str("path", r.URL.Path).Msg(message)
 		response.FromError(w, r, mode, err)

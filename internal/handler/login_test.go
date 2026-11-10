@@ -26,6 +26,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/spec"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/uikit/routepath"
+	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -74,7 +75,7 @@ func newLoginFixtureWith(t *testing.T, cfg auth.Config) *loginFixture {
 	f.hub = event.NewHub(logger)
 	t.Cleanup(f.hub.Close)
 	cfg.JWTSecret = loginSecret
-	authModel := kit.New(store, cfg)
+	authModel := kit.New(store, cfg, bcrypt.MinCost)
 	f.ui = NewUI(zerolog.New(f.logs), access.New(authModel, store, logger), spec.New(store, logger), f.hub, nil, func(*http.Request) bool { return f.secure })
 	return f
 }
@@ -82,7 +83,7 @@ func newLoginFixtureWith(t *testing.T, cfg auth.Config) *loginFixture {
 // setPassword gives alice the password.
 func (f *loginFixture) setPassword(t *testing.T, password string) {
 	t.Helper()
-	if err := credential.New(f.store, zerolog.Nop()).SetPassword(context.Background(), credential.SetPasswordRequest{UserID: "user-alice", Password: password, Cost: 4}); err != nil {
+	if err := credential.New(f.store, zerolog.Nop(), bcrypt.MinCost).SetPassword(context.Background(), credential.SetPasswordRequest{UserID: "user-alice", Password: password, Cost: 4}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -492,5 +493,24 @@ func TestLoginWithoutPermissionsLooksLikeWrongPassword(t *testing.T) {
 	}
 	if !warned {
 		t.Fatalf("no WARN line naming alice:\n%s", f.logs.String())
+	}
+}
+
+// ObserveLogins hears how each attempt that reached the credential check ended:
+// ok, failed for a wrong password, and limited once the limiter refuses; never the
+// subject.
+func TestLoginOutcomesObserved(t *testing.T) {
+	f := newLoginFixture(t)
+	var got []string
+	f.ui.ObserveLogins(func(outcome string) { got = append(got, outcome) })
+
+	f.login(loginSubject, loginPassword, loginIP)
+	for range 5 {
+		f.login(loginSubject, "wrong-password", loginIP)
+	}
+	f.login(loginSubject, "wrong-password", loginIP)
+	want := []string{"ok", "failed", "failed", "failed", "failed", "failed", "limited"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("login outcomes %v, want %v", got, want)
 	}
 }

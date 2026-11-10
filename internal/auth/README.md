@@ -1,7 +1,9 @@
 # internal/auth
+
 Authentication, authorization, and session management subsystem.
 
 ## Package map
+
 ```text
 auth/
 ├── config.go             Config: JWT secret, TTLs, rate limits, cookie_secure
@@ -22,8 +24,10 @@ auth/
 ```
 
 ## Login flow
-access.Service.Login → model.NormalizeSubject → Devices.Verify(device cookie) → Limiter.Reserve(known device, or
-account + client IP); see "Login rate limiting"
+
+access.Service.Login → model.NormalizeSubject → Devices.Verify(device cookie) →
+Limiter.Reserve(known device, or account + client IP); see "Login rate limiting"
+
 ```text
   handler
     │
@@ -51,6 +55,7 @@ account + client IP); see "Login rate limiting"
 ```
 
 ## Refresh flow
+
 ```text
   Refresh(ctx, sessionID, refreshRaw)
     │
@@ -59,19 +64,25 @@ account + client IP); see "Login rate limiting"
     ├─ constant-time hash comparison     (subtle.ConstantTimeCompare)
     ├─ check: user not disabled
     ├─ RBAC permission resolution
-    ├─ rotate refresh token (if enabled)
-    └─ issue new access token
+    ├─ re-check session and user, issue new access token
+    └─ rotate refresh token (if enabled; one transaction with the re-check
+       and the signing, so a signing failure does not consume the token)
 ```
-A session or user that is gone, expired, revoked or disabled is an auth error (`ErrInvalidRefresh`, `ErrRevoked`); a
-failed lookup (storage or RBAC) is returned as it is, so `middleware.Auth` answers 503, not 401, logs the error at ERROR
-with the method and path (never a credential), and logout does not clear the cookies of a session it could not check.
-With `rotate_refresh` the refresh is a write: in raft mode a follower cannot make it (`cluster.ErrNotLeader`), and `middleware.Auth`
-answers 503, with the leader's address in `X-Leader` when the node knows its leader (see "Leader hint" in
-`internal/transport/README.md`), and logs a WARN, not an ERROR; the access log of an API route records a 503 with `X-Leader`
-as a WARN too. See "Browsers and `auth.rotate_refresh`" in `internal/raft/README.md` for the leader-sticky routing it
-needs.
+
+A session or user that is gone, expired, revoked or disabled is an auth error
+(`ErrInvalidRefresh`, `ErrRevoked`); a failed lookup (storage or RBAC) is
+returned as it is, so `middleware.Auth` answers 503, not 401, logs the error at
+ERROR with the method and path (never a credential), and logout does not clear
+the cookies of a session it could not check. With `rotate_refresh` the refresh
+is a write: in raft mode a follower cannot make it (`cluster.ErrNotLeader`), and
+`middleware.Auth` answers 503, with the leader's address in `X-Leader` when the
+node knows its leader (see "Leader hint" in `internal/transport/README.md`), and
+logs a WARN, not an ERROR; the access log of an API route records a 503 with
+`X-Leader` as a WARN too. See "Browsers and `auth.rotate_refresh`" in
+`internal/raft/README.md` for the leader-sticky routing it needs.
 
 ## Dependency graph
+
 ```text
   kit.New()                              ← composition root
     │
@@ -100,88 +111,110 @@ needs.
 
 ## Key types
 
-| Package        | Type        | Purpose                                                       |
-|----------------|-------------|---------------------------------------------------------------|
-| `identity`     | `Identity`  | authenticated principal with permissions                      |
-| `session`      | `Service`   | login / refresh / revoke orchestration                        |
-| `session`      | `TokenPair` | access + refresh token pair                                   |
-| `session`      | `Config`    | TTL, issuer, audience, rotation flag                          |
-| `providers`    | `Provider`  | interface: `Kind()` + `Authenticate()`                        |
-| `token`        | `Issuer`    | interface: `Issue(ctx, identity) → string`                    |
-| `token`        | `Verifier`  | interface: `Verify(ctx, raw) → identity`                      |
-| `token`        | `Clock`     | interface: `Now()` — testability                              |
-| `ratelimit`    | `Limiter`   | thread-safe in-memory attempt tracker                         |
-| `ratelimit`    | `Buckets`   | thread-safe in-memory token buckets per key; discovery's sync rate |
-| `devicecookie` | `Signer`    | issues and checks device cookies                              |
-| `rbac`         | `Resolver`  | user + role permission union                                  |
-| `kit`          | `Auth`      | composition root (Clock, Limiter, Devices, Session, Verifier) |
+| Package | Type | Purpose |
+| -- | -- | -- |
+| `identity` | `Identity` | authenticated principal with permissions |
+| `session` | `Service` | login / refresh / revoke orchestration |
+| `session` | `TokenPair` | access + refresh token pair |
+| `session` | `Config` | TTL, issuer, audience, rotation flag |
+| `providers` | `Provider` | interface: `Kind()` + `Authenticate()` |
+| `token` | `Issuer` | interface: `Issue(ctx, identity) → string` |
+| `token` | `Verifier` | interface: `Verify(ctx, raw) → identity` |
+| `token` | `Clock` | interface: `Now()` — testability |
+| `ratelimit` | `Limiter` | thread-safe in-memory attempt tracker |
+| `ratelimit` | `Buckets` | thread-safe in-memory token buckets per key; discovery's sync rate |
+| `devicecookie` | `Signer` | issues and checks device cookies |
+| `rbac` | `Resolver` | user + role permission union |
+| `kit` | `Auth` | composition root (Clock, Limiter, Devices, Session, Verifier) |
 
 ## Security model
 
-| Concern              | Implementation                                                         |
-|----------------------|------------------------------------------------------------------------|
-| Password hashing     | bcrypt, cost 12 (clamped to `[bcrypt.MinCost, 31]`)                    |
-| Password policy      | 12 to 72 characters when set (below)                                   |
-| Token signing        | HMAC-SHA256 (HS256)                                                    |
-| Access token         | `exp` required; `exp` and `nbf` allow 30 s of clock skew               |
-| Refresh token        | 32-byte `crypto/rand`, base64 raw URL encoded                          |
-| Refresh validation   | SHA3-256 hash, `subtle.ConstantTimeCompare`                            |
-| Session ID           | 16-byte `crypto/rand`, hex encoded; not in the access log              |
-| Auth cookies         | HttpOnly, SameSite Lax (refresh: Strict), Secure per `cookie_secure`   |
-| Device cookie        | HMAC-SHA256, bound to the account, 90 days; HttpOnly, Strict, `/login` |
-| Cross-site requests  | main listener refuses cross-origin browser mutations (403)             |
-| Rate limiting        | per account + client IP, or per known device; bounded, in memory       |
-| Error masking        | generic errors hide which field failed                                 |
-| Login timing         | unknown and disabled subjects pay one bcrypt compare (dummy hash)      |
+| Concern | Implementation |
+| -- | -- |
+| Password hashing | bcrypt, cost 12, not configurable |
+| Password policy | 12 to 72 characters when set (below) |
+| Token signing | HMAC-SHA256 (HS256) |
+| Access token | `exp` required; `exp` and `nbf` allow 30 s of clock skew |
+| Refresh token | 32-byte `crypto/rand`, base64 raw URL encoded |
+| Refresh validation | SHA3-256 hash, `subtle.ConstantTimeCompare` |
+| Session ID | 16-byte `crypto/rand`, hex encoded; not in the access log |
+| Auth cookies | HttpOnly, SameSite Lax (refresh: Strict), Secure per `cookie_secure` |
+| Device cookie | HMAC-SHA256, bound to the account, 90 days; HttpOnly, Strict, `/login` |
+| Cross-site requests | main listener refuses cross-origin browser mutations (403) |
+| Rate limiting | per account + client IP, or per known device; bounded, in memory |
+| Error masking | generic errors hide which field failed |
+| Login timing | unknown and disabled subjects pay one bcrypt compare (dummy hash) |
 
 ## Passwords
-`credentials.CheckPasswordPolicy` accepts a new password of `MinPasswordLength` (12) characters or more, counted as
-runes, and of at most `MaxPasswordBytes` (72) bytes, the most bcrypt reads. Every way of setting a password applies it:
-`credential.Service.SetPassword` (bootstrap) and `SetPasswordAs` (`POST /api/v1/users/{id}/password`, which answers
-400 `Password must be 12-72 characters.`). Login does not apply it, so a shorter password set earlier still works; a
-login password over 72 bytes is a wrong password, since bcrypt would compare only its first 72 bytes.
+
+`credentials.CheckPasswordPolicy` accepts a new password of `MinPasswordLength`
+(12) characters or more, counted as runes, and of at most `MaxPasswordBytes`
+(72) bytes, the most bcrypt reads. Every way of setting a password applies it:
+`credential.Service.SetPassword` (bootstrap) and `SetPasswordAs`
+(`POST /api/v1/users/{id}/password`, which answers 400
+`Password must be 12-72 characters.`). Login does not apply it, so a shorter
+password set earlier still works; a login password over 72 bytes is a wrong
+password, since bcrypt would compare only its first 72 bytes.
 
 ## Login rate limiting
-Before authenticating, `access.Service.Login` normalizes the subject once (`model.NormalizeSubject`, trimmed and
-lower-cased like user storage) and checks the device cookie of the request (`kit.Auth.Devices`, below). It then
-reserves one slot on each key of the attempt in `kit.Auth.Limiter`, all at once (`Limiter.Reserve`):
 
-- a known device, one whose device cookie is valid for the subject: `login:dev:<device ID>` alone;
-- any other client: `login:acct:<subject>` and `login:ip:<client IP>` (IPv6 counted by its /64, IPv4-mapped
-  addresses unmapped).
+Before authenticating, `access.Service.Login` normalizes the subject once
+(`model.NormalizeSubject`, trimmed and lower-cased like user storage) and checks
+the device cookie of the request (`kit.Auth.Devices`, below). It then reserves
+one slot on each key of the attempt in `kit.Auth.Limiter`, all at once
+(`Limiter.Reserve`):
+
+- a known device, one whose device cookie is valid for the subject:
+  `login:dev:<device ID>` alone;
+- any other client: `login:acct:<subject>` and `login:ip:<client IP>` (IPv6
+  counted by its /64, IPv4-mapped addresses unmapped).
 
 Then:
 
-- An attempt is refused with `ErrRateLimited` (HTTP 429) while, for any of its keys, failures plus attempts in flight
-  reach `auth.rate_attempts`; a refused attempt reserves nothing. A burst of parallel attempts therefore gets at
-  most `auth.rate_attempts` password checks per key.
-- A wrong subject or password (`ErrInvalidCredentials`) turns the slot into a failure on each key (`Attempt.Fail`), and
-  so does the right password of a user without permissions (`ErrUnauthorized`): the UI answers both alike, so neither
-  the answer nor the limiter tells a right password apart. `auth.rate_attempts` failures, each within
-  `auth.rate_window` of the previous one, block a key for `auth.rate_window`. Any other error (storage outage, token
-  issue) releases the slots and counts nothing.
-- The failure that blocks a key, a device key included, returns its usual error joined with `ErrRateLimitReached`;
-  the UI answers it like any failed login and records one `rate_limited` event.
-- A successful login releases the slots (`Attempt.Release`) and resets the device key of a known device, or else the
-  account key. Nothing resets a client IP key. It also returns a new device cookie, which the UI sets.
-- The User-Agent plays no part. The limiter keeps at most 100 000 keys and evicts the least recently updated one;
-  a key with an attempt in flight is neither evicted nor forgotten.
+- An attempt is refused with `ErrRateLimited` (HTTP 429) while, for any of its
+  keys, failures plus attempts in flight reach `auth.rate_attempts`; a refused
+  attempt reserves nothing. A burst of parallel attempts therefore gets at most
+  `auth.rate_attempts` password checks per key.
+- A wrong subject or password (`ErrInvalidCredentials`) turns the slot into a
+  failure on each key (`Attempt.Fail`), and so does the right password of a user
+  without permissions (`ErrUnauthorized`): the UI answers both alike, so neither
+  the answer nor the limiter tells a right password apart. `auth.rate_attempts`
+  failures, each within `auth.rate_window` of the previous one, block a key for
+  `auth.rate_window`. Any other error (storage outage, token issue) releases the
+  slots and counts nothing.
+- The failure that blocks a key, a device key included, returns its usual error
+  joined with `ErrRateLimitReached`; the UI answers it like any failed login and
+  records one `rate_limited` event.
+- A successful login releases the slots (`Attempt.Release`) and resets the
+  device key of a known device, or else the account key. Nothing resets a client
+  IP key. It also returns a new device cookie, which the UI sets.
+- The User-Agent plays no part. The limiter keeps at most 100 000 keys and
+  evicts the least recently updated one; a key with an attempt in flight is
+  neither evicted nor forgotten.
 
-The account lockout therefore applies only to clients podium does not recognize. Anyone can block an account, the
-public `admin` included, with wrong passwords from any IPs, but a browser that logged in as that account within the
-last 90 days keeps its own counter and still gets in. To end a lockout early, restart podium: the limiter lives in
-memory, so a restart clears it. Behind a reverse proxy, `trusted_proxies` must list the proxy; otherwise every client
-shares the proxy's IP key.
+The account lockout therefore applies only to clients podium does not recognize.
+Anyone can block an account, the public `admin` included, with wrong passwords
+from any IPs, but a browser that logged in as that account within the last 90
+days keeps its own counter and still gets in. To end a lockout early, restart
+podium: the limiter lives in memory, so a restart clears it. Behind a reverse
+proxy, `trusted_proxies` must list the proxy; otherwise every client shares the
+proxy's IP key.
 
 ## Device cookies
-`devicecookie.Signer` implements the OWASP device cookie. A value reads `v1.<deviceID>.<issuedUnix>.<mac>`: 16 bytes
-from `crypto/rand` (base64url) as the device ID, the issue time in Unix seconds, and
-`mac` = base64url(HMAC-SHA256(key, `v1.<deviceID>.<issuedUnix>.<subject>`)) over the normalized subject. The key is
-HMAC-SHA256(`auth.jwt_secret`, `podium device cookie v1`), derived once in `kit.New`, so changing the JWT secret
-retires every device cookie. A cookie counts only for the subject it was signed for, and only while its issue time
-lies at most 90 days in the past and at most a minute in the future; any other value is ignored, and the attempt
+
+`devicecookie.Signer` implements the OWASP device cookie. A value reads
+`v1.<deviceID>.<issuedUnix>.<mac>`: 16 bytes from `crypto/rand` (base64url) as
+the device ID, the issue time in Unix seconds, and `mac` =
+base64url(HMAC-SHA256(key, `v1.<deviceID>.<issuedUnix>.<subject>`)) over the
+normalized subject. The key is HMAC-SHA256(`auth.jwt_secret`,
+`podium device cookie v1`), derived once in `kit.New`, so changing the JWT
+secret retires every device cookie. A cookie counts only for the subject it was
+signed for, and only while its issue time lies at most 90 days in the past and
+at most a minute in the future; any other value is ignored, and the attempt
 counts as one from an unrecognized client.
 
-Every successful login issues a new cookie with a new device ID, which replaces the old one in the browser:
-`device_token` (`httpcookie.SetDevice`), HttpOnly, SameSite Strict, `Path=/login`, `Max-Age` 90 days, Secure per
-`cookie_secure`. A stolen cookie gives `auth.rate_attempts` guesses per `auth.rate_window`, on its own key only.
+Every successful login issues a new cookie with a new device ID, which replaces
+the old one in the browser: `device_token` (`httpcookie.SetDevice`), HttpOnly,
+SameSite Strict, `Path=/login`, `Max-Age` 90 days, Secure per `cookie_secure`. A
+stolen cookie gives `auth.rate_attempts` guesses per `auth.rate_window`, on its
+own key only.

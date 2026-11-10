@@ -57,8 +57,10 @@ func NewLimiter(cfg auth.Config) *ratelimit.Limiter {
 	})
 }
 
-// New constructs a fully wired authentication stack.
-func New(store storage.Storage, cfg auth.Config) *Auth {
+// New constructs a fully wired authentication stack. passwordCost is the
+// bcrypt cost of the password provider's dummy hash; it must match the cost
+// passwords are stored with, so production passes credentials.DefaultBcryptCost.
+func New(store storage.Storage, cfg auth.Config, passwordCost int) *Auth {
 	cfg = cfg.WithDefaults()
 
 	var (
@@ -87,7 +89,7 @@ func New(store storage.Storage, cfg auth.Config) *Auth {
 			sesCfg,
 			resolver,
 			map[enum.Auth]providers.Provider{
-				enum.Password: passwordprovider.New(store),
+				enum.Password: passwordprovider.New(store, passwordCost),
 			},
 		),
 		Limiter: NewLimiter(cfg),

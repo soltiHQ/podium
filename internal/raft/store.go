@@ -66,6 +66,9 @@ type Store struct {
 	// stopped is closed once raft shuts down, which ends the wait for a write
 	// (awaitWrite).
 	stopped <-chan struct{}
+	// onCommit is told how long each proposed write took (WithCommitObserver),
+	// nil for none; New sets it before the store is used.
+	onCommit func(time.Duration)
 
 	txMu sync.Mutex // single in-flight WithTx at a time
 	// readyTerm is the term of the last barrier that succeeded while this node
@@ -105,6 +108,10 @@ func (s *Store) apply(ops []*raftv1.Op) error {
 	}
 	if err := refuseStopped(s.stopped); err != nil {
 		return fmt.Errorf("raft: apply: %w", err)
+	}
+	if s.onCommit != nil {
+		start := time.Now()
+		defer func() { s.onCommit(time.Since(start)) }()
 	}
 	f := s.propose(data, applyTimeout)
 	if err := awaitWrite(f, s.stopped); err != nil {

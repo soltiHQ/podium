@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/app"
+	"github.com/soltiHQ/control-plane/internal/buildinfo"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 )
@@ -26,24 +29,104 @@ import (
 const shutdownTimeout = 30 * time.Second
 
 func main() {
-	// The subcommand needs no configuration: it runs before the config loads.
-	if len(os.Args) > 1 && os.Args[1] == "agent-token" {
-		os.Exit(agentToken(os.Args[2:], os.Stdout, os.Stderr))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, serve))
+}
+
+// usage is what -h prints, and what follows an error of the command line.
+const usage = `usage: podium [--config PATH]
+       podium agent-token [--generation N] [--] <agent-id>
+       podium version
+
+podium [--config PATH] runs the server; the config file is PATH, or CONFIG_PATH.
+podium agent-token prints the token of an agent ID, derived from the enrollment secret.
+podium version, or podium --version, prints the version.
+`
+
+// run is podium's command line: it runs the command of args and returns the exit
+// code. serve starts the server with the path of the config file, "" for none.
+// The command line is strict: an unknown flag or subcommand, a flag without its
+// value or an argument that belongs to no command prints the error and the usage
+// to stderr and exits 2, before anything starts or any configuration loads.
+// -h and --help print the usage to stdout and exit 0.
+func run(args []string, stdout, stderr io.Writer, serve func(configPath string) int) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "agent-token":
+			// The subcommand needs no configuration.
+			return agentToken(args[1:], stdout, stderr)
+		case "version":
+			if len(args) > 1 {
+				return usageError(stderr, errors.New("version takes no arguments"))
+			}
+			return printVersion(stdout, stderr)
+		}
 	}
+	var (
+		path    string
+		version bool
+		fs      = flag.NewFlagSet("podium", flag.ContinueOnError)
+	)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&path, "config", "", "")
+	fs.BoolVar(&version, "version", false, "")
+	switch err := fs.Parse(args); {
+	case errors.Is(err, flag.ErrHelp):
+		_, _ = io.WriteString(stdout, usage)
+		return 0
+	case err != nil:
+		return usageError(stderr, err)
+	}
+	if fs.NArg() > 0 {
+		arg := fs.Arg(0)
+		if fs.NArg() == len(args) {
+			return usageError(stderr, fmt.Errorf("unknown subcommand %q", arg))
+		}
+		return usageError(stderr, fmt.Errorf("unexpected argument %q", arg))
+	}
+	if version {
+		return printVersion(stdout, stderr)
+	}
+	return serve(path)
+}
 
-	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+// usageError prints err and the usage to stderr and returns 2.
+func usageError(stderr io.Writer, err error) int {
+	_, _ = fmt.Fprintf(stderr, "podium: %v\n%s", err, usage)
+	return 2
+}
 
-	cfg, err := config.Load()
+// printVersion prints the version line.
+func printVersion(stdout, stderr io.Writer) int {
+	if _, err := fmt.Fprintln(stdout, buildinfo.Read()); err != nil {
+		_, _ = fmt.Fprintf(stderr, "podium: write the version: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// serve runs the server with the config file at configPath ("" for CONFIG_PATH
+// or none) and returns the exit code. Until the config is read it logs through a
+// bootstrap logger: JSON on stdout at info; then it logs as log.level and
+// log.format say.
+func serve(configPath string) int {
+	bootstrap := zerolog.New(os.Stdout).Level(zerolog.InfoLevel).With().Timestamp().Logger()
+	logStart(bootstrap, buildinfo.Read())
+
+	cfg, err := config.Load(configPath, bootstrap)
 	if err != nil {
-		logger.Fatal().Err(err).Msg("failed to load config")
+		bootstrap.Error().Err(err).Msg("failed to load config")
+		return 1
 	}
+	// From here on podium logs as log.level and log.format say.
+	logger := newLogger(cfg.Log, os.Stdout)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := notifyShutdown(logger, os.Exit)
 	defer stop()
 
 	a, err := app.New(ctx, cfg, logger)
 	if err != nil {
-		logger.Fatal().Err(err).Msg("failed to build app")
+		logger.Error().Err(err).Msg("failed to build app")
+		return 1
 	}
 
 	runErr := a.Run(ctx)
@@ -57,9 +140,70 @@ func main() {
 
 	if code := exitCode(runErr, shutdownErr); code != 0 {
 		logger.Error().Err(runErr).Msg("server exited with error")
-		os.Exit(code)
+		return code
 	}
 	logger.Info().Msg("server stopped")
+	return 0
+}
+
+// notifyShutdown returns a context that the first SIGINT or SIGTERM cancels, which
+// starts the graceful shutdown, and the function that stops listening for signals
+// and cancels it too. A second signal while the shutdown runs ends the process at
+// once with status 1, after a WARN: the supervisor that sends it has lost its
+// patience, and nothing is cleaned up. exit is os.Exit, which tests replace.
+func notifyShutdown(logger zerolog.Logger, exit func(int)) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	done := make(chan struct{})
+	go func() {
+		for range 2 {
+			select {
+			case sig := <-signals:
+				if ctx.Err() != nil {
+					logger.Warn().Str("signal", sig.String()).Msg("second signal: exiting at once without finishing the shutdown")
+					exit(1)
+				}
+				logger.Info().Str("signal", sig.String()).Msg("signal received: shutting down")
+				cancel()
+			case <-done:
+				return
+			}
+		}
+	}()
+	return ctx, sync.OnceFunc(func() {
+		signal.Stop(signals)
+		close(done)
+		cancel()
+	})
+}
+
+// newLogger builds the logger of a run from the log settings, which
+// [config.LogConfig.Validate] has checked: json is zerolog's JSON, text its
+// console writer without colour.
+func newLogger(cfg config.LogConfig, w io.Writer) zerolog.Logger {
+	level, err := zerolog.ParseLevel(cfg.Level)
+	if err != nil {
+		level = zerolog.InfoLevel
+	}
+	if cfg.Format == "text" {
+		w = zerolog.ConsoleWriter{Out: w, NoColor: true, TimeFormat: time.RFC3339}
+	}
+	return zerolog.New(w).Level(level).With().Timestamp().Logger()
+}
+
+// logStart writes the first line of a run: which podium this is.
+func logStart(logger zerolog.Logger, info buildinfo.Info) {
+	event := logger.Info().
+		Str("version", info.Version).
+		Str("commit", info.Commit).
+		Bool("modified", info.Modified)
+	if !info.BuildTime.IsZero() {
+		event = event.Time("built", info.BuildTime)
+	}
+	event.Str("go_version", info.GoVersion).
+		Str("platform", info.Platform).
+		Msg("podium starting")
 }
 
 // Signal cancellation is a clean shutdown; failed cleanup or runner errors are
@@ -88,7 +232,8 @@ const agentTokenUsage = "usage: podium agent-token [--generation N] [--] <agent-
 // and nothing to stdout. A bare -h or --help prints the usage to stdout.
 // --generation N, or --generation=N, comes before the agent ID, N a whole
 // number from 0 to 4294967295. "--" ends the options, for an agent ID that
-// starts with "-".
+// starts with "-": before it, any other argument that starts with "-" is an
+// unknown option, a usage error (exit 2).
 func agentToken(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		_, _ = fmt.Fprintf(stdout, "%s\nPrints the token of <agent-id> at generation N (default 0, the token it enrolls with), derived from %s.\n", agentTokenUsage, config.EnrollSecretEnv)
@@ -125,8 +270,10 @@ func agentToken(args []string, stdout, stderr io.Writer) int {
 }
 
 // agentTokenOptions reads the options of "podium agent-token" off the front of
-// args: --generation N or --generation=N, and "--", which ends them. It returns
-// the generation, 0 when none is given, and the arguments after the options.
+// args: --generation N or --generation=N, and "--", which ends them. Any other
+// argument that starts with "-" before "--" is an unknown option, an error: an
+// agent ID that starts with "-" goes after "--". It returns the generation, 0
+// when none is given, and the arguments after the options.
 func agentTokenOptions(args []string) (uint32, []string, error) {
 	var generation uint32
 	for len(args) > 0 {
@@ -141,6 +288,8 @@ func agentTokenOptions(args []string) (uint32, []string, error) {
 			value, args = args[1], args[2:]
 		case strings.HasPrefix(arg, "--generation="):
 			value, args = strings.TrimPrefix(arg, "--generation="), args[1:]
+		case strings.HasPrefix(arg, "-"):
+			return 0, nil, fmt.Errorf("unknown option %q: an agent ID that starts with - goes after --", arg)
 		default:
 			return generation, args, nil
 		}

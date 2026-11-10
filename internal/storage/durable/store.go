@@ -55,6 +55,8 @@ type Store struct {
 	reported bool
 	// onFailure is the failure handler of WithFailureHandler, or nil.
 	onFailure func(error)
+	// onCommit is the observer of WithCommitObserver, or nil.
+	onCommit func(time.Duration)
 	// migrated is whether Open migrated a single-blob file. Open sets it before it
 	// returns, and nothing changes it.
 	migrated bool
@@ -75,6 +77,7 @@ type Option func(*options)
 type options struct {
 	snapshotThreshold int
 	onFailure         func(error)
+	onCommit          func(time.Duration)
 	hooks             hooks
 }
 
@@ -93,6 +96,15 @@ func WithSnapshotThreshold(n int) Option {
 // call WithTx, a write method or Close, which would wait for that writer.
 func WithFailureHandler(fn func(error)) Option {
 	return func(o *options) { o.onFailure = fn }
+}
+
+// WithCommitObserver sets a function that is told how long each commit took: the
+// append to the log, with its sync, and the apply to the published state; the wait
+// for the writer and the transaction's callback are not part of it. It runs on the
+// goroutine that committed, while that transaction still holds the writer, so it
+// must not call WithTx, a write method or Close, and also for a commit that failed.
+func WithCommitObserver(fn func(time.Duration)) Option {
+	return func(o *options) { o.onCommit = fn }
 }
 
 // hooks are the seams tests stall the store or end the process at. Production
@@ -136,8 +148,11 @@ func Open(dataDir string, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("durable: stat directory: %w", err)
 	}
-	if !dirInfo.IsDir() || dirInfo.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("durable: data directory must be a private regular directory, not a symlink")
+	switch perm := dirInfo.Mode().Perm(); {
+	case !dirInfo.IsDir():
+		return nil, fmt.Errorf("durable: data directory %s must be a directory, not a symlink or a file", dataDir)
+	case perm&0o077 != 0:
+		return nil, fmt.Errorf("durable: data directory %s has mode %04o, which lets its group or others in: it must be 0700", dataDir, perm)
 	}
 	path := filepath.Join(dataDir, FileName)
 	info, err := os.Lstat(path)
@@ -162,6 +177,7 @@ func Open(dataDir string, opts ...Option) (*Store, error) {
 		db:        db,
 		threshold: o.snapshotThreshold,
 		onFailure: o.onFailure,
+		onCommit:  o.onCommit,
 		hooks:     o.hooks,
 	}
 	created, err := s.restore()
@@ -186,6 +202,16 @@ func Open(dataDir string, opts ...Option) (*Store, error) {
 // file, so a caller that is told it was should say so: rolling back needs a copy
 // of the file made before the migration.
 func (s *Store) Migrated() bool { return s.migrated }
+
+// Failure returns why the store stopped serving after a failed commit, a failed
+// apply or a failed snapshot, the reason every later read and write reports, and
+// nil while the store serves. A closed store has no failure. Failure is cheap and
+// takes no writer, so a probe can call it at any rate.
+func (s *Store) Failure() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.failure
+}
 
 // WithTx runs fn on a transaction over the published state, then appends the
 // operations it recorded to the log as one entry, which bbolt syncs, and applies

@@ -25,13 +25,14 @@ type Provider struct {
 	compare func(hash, password []byte) error
 }
 
-// New creates a new password provider. Its dummy hash has
-// credentials.DefaultBcryptCost, the cost passwords are stored with.
-func New(store storage.Storage) *Provider {
-	return newProvider(store, credentials.DefaultBcryptCost)
+// New creates a new password provider. Its dummy hash has the given bcrypt
+// cost, which should be the cost passwords are stored with
+// (credentials.DefaultBcryptCost).
+func New(store storage.Storage, cost int) *Provider {
+	return newProvider(store, cost)
 }
 
-// newProvider is New with the bcrypt cost of the dummy hash.
+// newProvider builds the provider with the bcrypt cost of the dummy hash.
 func newProvider(store storage.Storage, cost int) *Provider {
 	return &Provider{
 		store: store,

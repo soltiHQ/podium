@@ -10,9 +10,9 @@ import (
 // agent reported, which may be off by a clock.
 // MaxBytes charges ExecutionRecord.SizeBytes; it is not disk or RSS accounting.
 type Config struct {
-	Retention  time.Duration `yaml:"retention" envconfig:"RETENTION"`
-	MaxRecords int           `yaml:"max_records" envconfig:"MAX_RECORDS"`
-	MaxBytes   int64         `yaml:"max_bytes" envconfig:"MAX_BYTES"`
+	Retention  time.Duration `yaml:"retention"`
+	MaxRecords int           `yaml:"max_records"`
+	MaxBytes   int64         `yaml:"max_bytes"`
 }
 
 func DefaultConfig() Config {

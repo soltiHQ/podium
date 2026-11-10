@@ -3,6 +3,7 @@ package cluster
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"slices"
 	"strconv"
@@ -25,10 +26,10 @@ const (
 
 // Config is the top-level cluster configuration.
 type Config struct {
-	Standalone StandaloneConfig `yaml:"standalone" envconfig:"STANDALONE"`
-	Backend    Backend          `yaml:"backend"   envconfig:"BACKEND"`
-	Raft       RaftConfig       `yaml:"raft"      envconfig:"RAFT"`
-	Discovery  DiscoveryConfig  `yaml:"discovery" envconfig:"DISCOVERY"`
+	Standalone StandaloneConfig `yaml:"standalone"`
+	Backend    Backend          `yaml:"backend"`
+	Raft       RaftConfig       `yaml:"raft"`
+	Discovery  DiscoveryConfig  `yaml:"discovery"`
 }
 
 // DefaultStandaloneDataDir is relative to the process working directory.
@@ -43,9 +44,9 @@ const DefaultStandaloneSnapshotThreshold = 4096
 // SnapshotThreshold is the number of log entries that starts a snapshot; zero
 // keeps the default.
 type StandaloneConfig struct {
-	Ephemeral         bool   `yaml:"ephemeral" envconfig:"EPHEMERAL"`
-	DataDir           string `yaml:"data_dir" envconfig:"DATA_DIR"`
-	SnapshotThreshold int    `yaml:"snapshot_threshold" envconfig:"SNAPSHOT_THRESHOLD"`
+	Ephemeral         bool   `yaml:"ephemeral"`
+	DataDir           string `yaml:"data_dir"`
+	SnapshotThreshold int    `yaml:"snapshot_threshold"`
 }
 
 // The defaults of the raft log compaction settings of [RaftConfig]: they are
@@ -100,20 +101,20 @@ const (
 // node and may be empty. A node with raft state rejoins its cluster from its
 // own log whatever Join says.
 type RaftConfig struct {
-	NodeID             string `yaml:"node_id"           envconfig:"NODE_ID"`
-	BindAddr           string `yaml:"bind_addr"         envconfig:"BIND_ADDR"`
-	AdvertiseAddr      string `yaml:"advertise_addr"    envconfig:"ADVERTISE_ADDR"`
-	DataDir            string `yaml:"data_dir"          envconfig:"DATA_DIR"`
-	Join               bool   `yaml:"join"              envconfig:"JOIN"`
-	ElectionTimeoutMs  int    `yaml:"election_timeout_ms" envconfig:"ELECTION_TIMEOUT_MS"`
-	HeartbeatTimeoutMs int    `yaml:"heartbeat_timeout_ms" envconfig:"HEARTBEAT_TIMEOUT_MS"`
+	NodeID             string `yaml:"node_id"`
+	BindAddr           string `yaml:"bind_addr"`
+	AdvertiseAddr      string `yaml:"advertise_addr"`
+	DataDir            string `yaml:"data_dir"`
+	Join               bool   `yaml:"join"`
+	ElectionTimeoutMs  int    `yaml:"election_timeout_ms"`
+	HeartbeatTimeoutMs int    `yaml:"heartbeat_timeout_ms"`
 
-	SnapshotInterval  time.Duration `yaml:"snapshot_interval"  envconfig:"SNAPSHOT_INTERVAL"`
-	SnapshotThreshold int           `yaml:"snapshot_threshold" envconfig:"SNAPSHOT_THRESHOLD"`
-	TrailingLogs      int           `yaml:"trailing_logs"      envconfig:"TRAILING_LOGS"`
+	SnapshotInterval  time.Duration `yaml:"snapshot_interval"`
+	SnapshotThreshold int           `yaml:"snapshot_threshold"`
+	TrailingLogs      int           `yaml:"trailing_logs"`
 
-	TLS                    RaftTLSConfig `yaml:"tls"                      envconfig:"TLS"`
-	AllowInsecureTransport bool          `yaml:"allow_insecure_transport" envconfig:"ALLOW_INSECURE_TRANSPORT"`
+	TLS                    RaftTLSConfig `yaml:"tls"`
+	AllowInsecureTransport bool          `yaml:"allow_insecure_transport"`
 }
 
 // RaftTLSConfig names the PEM files of mutual TLS between raft nodes. A node
@@ -123,9 +124,9 @@ type RaftConfig struct {
 // present a certificate for the host it dials: the host of the peer's address
 // as the peers list it, as an IP or DNS subject alternative name.
 type RaftTLSConfig struct {
-	CertFile string `yaml:"cert_file" envconfig:"CERT_FILE"`
-	KeyFile  string `yaml:"key_file"  envconfig:"KEY_FILE"`
-	CAFile   string `yaml:"ca_file"   envconfig:"CA_FILE"`
+	CertFile string `yaml:"cert_file"`
+	KeyFile  string `yaml:"key_file"`
+	CAFile   string `yaml:"ca_file"`
 }
 
 // Enabled reports whether any file of t is set, which asks for mutual TLS.
@@ -172,10 +173,10 @@ func (r RaftConfig) advertise() string {
 // DiscoveryConfig picks the Discovery driver a raft node bootstraps from, and
 // its parameters; no other backend reads it.
 type DiscoveryConfig struct {
-	Driver   string   `yaml:"driver"   envconfig:"DRIVER"`   // "static" or "dns"
-	Peers    []string `yaml:"peers"    envconfig:"PEERS"`    // for "static": id=host:port or host:port
-	Hostname string   `yaml:"hostname" envconfig:"HOSTNAME"` // for "dns"
-	Port     int      `yaml:"port"     envconfig:"PORT"`     // for "dns": every node's raft port
+	Driver   string   `yaml:"driver"`   // "static" or "dns"
+	Peers    []string `yaml:"peers"`    // for "static": id=host:port or host:port
+	Hostname string   `yaml:"hostname"` // for "dns"
+	Port     int      `yaml:"port"`     // for "dns": every node's raft port
 }
 
 // Discovery drivers of [DiscoveryConfig.Driver]. An empty driver is static.
@@ -405,6 +406,15 @@ func (c Config) validateRaft() error {
 	return c.Discovery.validate(r.NodeID, r.advertise())
 }
 
+// maxRaftTimeoutMs is the largest election or heartbeat timeout, in
+// milliseconds, that a node accepts: half the most whole milliseconds a
+// time.Duration holds. hashicorp/raft's follower heartbeat timer and candidate
+// election timer wait the timeout plus a random part of it, up to twice the
+// timeout, summed in a time.Duration (randomTimeout in v1.8.0), so a longer
+// timeout could wrap that sum negative, a wait that ends at once. Podium itself
+// only converts the timeout and lowers the lease to it, adding nothing.
+const maxRaftTimeoutMs = math.MaxInt64 / 2 / int64(time.Millisecond)
+
 // validateTimeouts refuses the election and heartbeat timeouts that
 // hashicorp/raft refuses when the node starts, in BootstrapCluster or NewRaft,
 // once the stores are open and the transport listens: each, a value of 0 or
@@ -412,11 +422,19 @@ func (c Config) validateRaft() error {
 // timeout no shorter than the heartbeat timeout. The lease, which the node
 // lowers to the heartbeat timeout when that is shorter, is then within
 // hashicorp/raft's limits as well, and nothing else of its ValidateConfig
-// depends on the configuration but node_id and the snapshot interval.
+// depends on the configuration but node_id and the snapshot interval. A value
+// over maxRaftTimeoutMs is refused first, as too large: hashicorp/raft's timers
+// would wrap on it, and over twice maxRaftTimeoutMs the node's own conversion
+// to a time.Duration wraps already, to a value that the other rules would
+// misjudge.
 func (r RaftConfig) validateTimeouts() error {
 	election := raftTimeout(r.ElectionTimeoutMs, DefaultRaftElectionTimeout)
 	heartbeat := raftTimeout(r.HeartbeatTimeoutMs, DefaultRaftHeartbeatTimeout)
 	switch {
+	case int64(r.ElectionTimeoutMs) > maxRaftTimeoutMs:
+		return fmt.Errorf("raft.election_timeout_ms %d is too large: the largest a node accepts is %d, as hashicorp/raft's timers wait up to twice the timeout", r.ElectionTimeoutMs, maxRaftTimeoutMs)
+	case int64(r.HeartbeatTimeoutMs) > maxRaftTimeoutMs:
+		return fmt.Errorf("raft.heartbeat_timeout_ms %d is too large: the largest a node accepts is %d, as hashicorp/raft's timers wait up to twice the timeout", r.HeartbeatTimeoutMs, maxRaftTimeoutMs)
 	case election < MinRaftTimeout:
 		return fmt.Errorf("raft.election_timeout_ms %d is under the %s that hashicorp/raft accepts", r.ElectionTimeoutMs, MinRaftTimeout)
 	case heartbeat < MinRaftTimeout:
@@ -428,7 +446,9 @@ func (r RaftConfig) validateTimeouts() error {
 }
 
 // raftTimeout is the timeout of ms milliseconds that a node runs with, or def
-// for 0 or less, as the node gives hashicorp/raft no value then.
+// for 0 or less, as the node gives hashicorp/raft no value then. It wraps for
+// ms over twice maxRaftTimeoutMs; validateTimeouts refuses those, and every ms
+// over maxRaftTimeoutMs, before it compares the result.
 func raftTimeout(ms int, def time.Duration) time.Duration {
 	if ms <= 0 {
 		return def

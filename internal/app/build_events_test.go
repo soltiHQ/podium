@@ -11,6 +11,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // burst sends 5 refresh pulses at once and returns what the client got
@@ -59,7 +60,7 @@ func TestNewWiresTheConfiguredEventCoalesceWindow(t *testing.T) {
 	cfg.Cluster.Standalone.Ephemeral = true
 	cfg.Auth.JWTSecret = strings.Repeat("event-coalesce-test-secret", 2)
 	cfg.Events.Coalesce = window
-	a, err := New(context.Background(), cfg, zerolog.Nop())
+	a, err := New(context.Background(), cfg, zerolog.Nop(), WithPasswordCost(bcrypt.MinCost))
 	if err != nil {
 		t.Fatal(err)
 	}

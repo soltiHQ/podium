@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
@@ -27,4 +28,17 @@ func (s *Store) ScanSpecs(ctx context.Context, filter storage.SpecFilter) ([]*mo
 
 func (s *Store) ScanExecutions(ctx context.Context, filter storage.ExecutionFilter) ([]*model.ExecutionRecord, error) {
 	return storage.AllExecutions(ctx, s.inner, filter)
+}
+
+var _ storage.Counter = (*Store)(nil)
+
+// Counts read the local state too, from the inner store's own count when it is a
+// Counter.
+
+func (s *Store) CountAgents(ctx context.Context) (map[enum.AgentStatus]int, error) {
+	return storage.CountAgents(ctx, s.inner)
+}
+
+func (s *Store) CountRollouts(ctx context.Context) (map[enum.SyncStatus]int, error) {
+	return storage.CountRollouts(ctx, s.inner)
 }
