@@ -148,8 +148,11 @@ func Open(dataDir string, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("durable: stat directory: %w", err)
 	}
-	if !dirInfo.IsDir() || dirInfo.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("durable: data directory must be a private regular directory, not a symlink")
+	switch perm := dirInfo.Mode().Perm(); {
+	case !dirInfo.IsDir():
+		return nil, fmt.Errorf("durable: data directory %s must be a directory, not a symlink or a file", dataDir)
+	case perm&0o077 != 0:
+		return nil, fmt.Errorf("durable: data directory %s has mode %04o, which lets its group or others in: it must be 0700", dataDir, perm)
 	}
 	path := filepath.Join(dataDir, FileName)
 	info, err := os.Lstat(path)
