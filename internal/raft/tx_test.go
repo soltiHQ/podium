@@ -59,9 +59,10 @@ func deleteThenWrite(t *testing.T, s storage.Storage, marker string, del func(co
 
 // TestRaftDeleteOfAbsentRowMatchesMemory deletes, in a transaction, a row the
 // transaction does not see, and goes on to write another. The in-memory store
-// answers the delete with ErrNotFound, changes nothing for it and commits the write; Raft must
-// do the same, rather than record the delete and fail the whole command when the
-// state machine applies it. A bulk delete that matches nothing succeeds on both.
+// answers the delete with ErrNotFound, changes nothing for it and commits the
+// write; Raft must do the same, rather than record the delete and fail the whole
+// command when the state machine applies it. A bulk delete that matches nothing
+// succeeds on both.
 func TestRaftDeleteOfAbsentRowMatchesMemory(t *testing.T) {
 	memory := inmemory.New()
 	replicated := newSingleNode(t).Store()

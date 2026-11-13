@@ -125,8 +125,8 @@ func TestSeedIsDeterministic(t *testing.T) {
 	}
 }
 
-// The raft README quotes about 900 B per agent in a snapshot, the shape its
-// baseline table was measured on.
+// Fixture's doc comment quotes about 900 B per agent in a snapshot, the shape
+// the benchmarks' recorded baselines were measured on.
 func TestSeedAgentSize(t *testing.T) {
 	small := len(snapshotOf(t, seeded(t, Fixture{Agents: 100})))
 	large := len(snapshotOf(t, seeded(t, Fixture{Agents: 1000})))

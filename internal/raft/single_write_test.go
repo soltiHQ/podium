@@ -36,11 +36,12 @@ func commandsAfter(t *testing.T, n *loopbackNode, after uint64) int {
 	return commands
 }
 
-// A single-operation write is a transaction of one operation, as on the in-memory store: the overlay checks it against the state, as the FSM will check it when
-// it applies it, before anything is proposed. So the delete of a row that is
-// absent gives its caller ErrNotFound with no command in the log, and no replica
-// has a failed command to log. A bulk delete that matches nothing is no write at
-// all. A write that is valid still goes through the log, once.
+// A single-operation write is a transaction of one operation, as on the
+// in-memory store: the overlay checks it against the state, as the FSM will
+// check it when it applies it, before anything is proposed. So the delete of a
+// row that is absent gives its caller ErrNotFound with no command in the log,
+// and no replica has a failed command to log. A bulk delete that matches
+// nothing is no write at all. A valid write still goes through the log, once.
 func TestSingleWritesAreValidatedBeforeTheyAreProposed(t *testing.T) {
 	c := loopbackNodes(t, "n1", "n2", "n3")
 	logs := make(map[string]*logBuffer, len(c.nodes))

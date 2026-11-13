@@ -73,8 +73,8 @@ type SpecQueryCriteria struct {
 type AgentQueryCriteria struct {
 	// Query is a case-insensitive substring of the agent ID, name or endpoint.
 	Query string
-	// StaleAtBefore bounds the staleness deadline: an agent matches when its deadline is before it,
-	// or was never set. Zero: no bound.
+	// StaleAtBefore bounds the staleness deadline: an agent matches when its
+	// deadline is before it, or was never set. Zero: no bound.
 	StaleAtBefore time.Time
 }
 

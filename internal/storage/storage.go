@@ -350,9 +350,11 @@ type RoleStore interface {
 	//   - ErrInternal for unexpected storage failures.
 	GetRole(ctx context.Context, id string) (*model.Role, error)
 
-	// GetRoles retrieves roles by their IDs.
+	// GetRoles retrieves roles by their IDs: one role per ID asked for, in the
+	// order asked, repeats included.
 	//
 	// Returns:
+	//   - ErrNotFound if one of the IDs has no role.
 	//   - ErrInvalidArgument if ids are empty or contain empty elements.
 	//   - ErrUnavailable if the backend is temporarily unavailable.
 	//   - ErrInternal for unexpected storage failures.

@@ -144,21 +144,29 @@ replicates what it recorded:
 ## Filter pattern
 
 Filters are **backend-specific**. The storage package declares empty marker
-interfaces (`AgentFilter`, `RolloutFilter` …).\
-Each backend provides concrete types with builder methods:
+interfaces (`AgentFilter`, `RolloutFilter` …) and backend-agnostic criteria
+(`AgentQueryCriteria`, `RolloutQueryCriteria` …). Code outside
+`internal/storage` builds a filter from criteria through the store's
+`FilterFactory`, and never names a backend:
 
 ```text
-  inmemory.NewAgentFilter().
-      ByPlatform("linux").
-      ByLabel("env", "prod").
-      Query("web-")                ──→  implements storage.AgentFilter
+  store.BuildAgentFilter(storage.AgentQueryCriteria{
+      Query:         "web-",
+      StaleAtBefore: now,
+  })                                    ──→  this store's storage.AgentFilter
 
-  inmemory.NewRolloutFilter().
-      BySpecID("spec-42").
-      ByStatus(enum.SyncStatusPending)  ──→  implements storage.RolloutFilter
+  store.BuildRolloutFilter(storage.RolloutQueryCriteria{
+      SpecID:   "spec-42",
+      Statuses: []enum.SyncStatus{enum.SyncStatusPending},
+  })                                    ──→  this store's storage.RolloutFilter
 ```
 
-Passing a filter from a wrong backend returns `ErrInvalidArgument`.
+A backend implements only the factory. The builder chains of `inmemory`
+(`NewAgentFilter().ByLabel(…)`, `NewRolloutFilter().BySpecID(…)` …) belong to
+the in-memory store, whose factory composes them, and to its tests.
+
+Passing a filter of another backend, or one the factory built for another
+listing, returns `ErrInvalidArgument`.
 
 ## Contract suite
 
@@ -177,22 +185,27 @@ func TestContract(t *testing.T) {
 It pins:
 
 - the round trip: every field of every entity written, read back through each
-  read that returns it, times compared as instants
+  read that returns it, times compared as instants; for a full row, and for a
+  minimal one whose zero values (no exit code, zero times) come back zero
 - the rows a store refuses (`ValidateEntity`: nil, no ID, no creation time),
-  `ErrNotFound` for a missing ID, and an upsert that replaces the whole row
-- the listing order `(CreatedAt DESC, ID ASC)` to the nanosecond, the limits
-  (default 100, at most 500), a cursor that is a place in that order and drains
-  every row once, a malformed or foreign cursor refused, and an empty page that
-  is an empty list
-- each criteria field of the filter factory, and a filter of another backend or
-  of another listing refused
+  `ErrNotFound` for a missing ID, and an upsert that replaces the whole row, its
+  creation time included
+- the listing order `(CreatedAt DESC, ID ASC)` to the nanosecond, IDs compared
+  as bytes, the limits (default 100, at most 500), a cursor that is a place in
+  that order and drains every row once, of a filtered listing too, a malformed
+  or foreign cursor refused, and an empty page that is an empty list
+- each criteria field of the filter factory, a query matched as a literal
+  substring (`%`, `_` and a backslash included) in any case, beyond ASCII too,
+  and a filter of another backend or of another listing refused
 - the lookups by subject, role name, user and auth kind, and credential: exact,
-  and `ErrInternal` when two rows match
+  and `ErrInternal` when two rows match; the listings by user, which return
+  every row, more than a page holds included
 - `GetRoles`, the bulk deletes, the execution record kept as first written, and
   the rotation and revocation of sessions
 - `WithTx`: it reads its own writes, rolls every write back on a callback error
-  or on a context done before the commit, runs its callback once and nests
-  without a savepoint; its handle rotates sessions at the caller's time
+  or on a context done before the commit, runs its callback once, nests without
+  a savepoint and goes on after a write it refuses; its handle rotates sessions
+  at the caller's time
 - `Scan*` against the drained listing and `Count*` by status, in a transaction
   too
 

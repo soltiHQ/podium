@@ -35,7 +35,8 @@ const applyTimeout = 5 * time.Second
 //     each write as an op, then submits the ops as one multi-op Command for
 //     atomic replication. fn reads its own writes everywhere: point reads,
 //     index lookups, listings and scans.
-//   - Every single mutation method is a WithTx of that one write, as in the in-memory store. The overlay checks the write as the FSM will check the
+//   - Every single mutation method is a WithTx of that one write, as in the
+//     in-memory store. The overlay checks the write as the FSM will check the
 //     op when it applies it, before anything is proposed: the delete of an
 //     absent row gives ErrNotFound to its caller and no command is proposed.
 //     So a command that fails to apply is a corrupted log entry or a version

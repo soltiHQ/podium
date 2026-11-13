@@ -121,17 +121,18 @@ func reportCommits(b *testing.B, leader *loopbackNode, first uint64) {
 	b.ReportMetric(float64(commands)/float64(b.N), "commands/op")
 }
 
-// BenchmarkThreeNodeHeartbeat is the heartbeat benchmark on the store of a leader of three nodes with mutual TLS on loopback: the heartbeat
-// of an enrolled agent as discovery runs it. Verify the token, a transaction
-// that writes nothing while the token matches, and so commits nothing, but asks
-// a quorum whether the leader still leads, a round trip of heartbeats; read
-// the stored agent, which is local; then upsert the agent, one command. Only
-// the first transaction of the leader's term commits a barrier, and the seed of
-// benchCluster is that one, so a heartbeat commits one entry here. The entry is replicated to a quorum and synced by the
-// leader and a follower before it is acknowledged. The leader's store is the
-// one measured. The followers apply every entry in the same process, so the
-// allocations that the framework counts would be the three nodes', and the
-// benchmark does not ask for them.
+// BenchmarkThreeNodeHeartbeat measures, on the store of a leader of three nodes
+// with mutual TLS on loopback, the heartbeat of an enrolled agent as discovery
+// runs it. Verify the token, a transaction that writes nothing while the token
+// matches, and so commits nothing, but asks a quorum whether the leader still
+// leads, a round trip of heartbeats; read the stored agent, which is local;
+// then upsert the agent, one command. Only the first transaction of the
+// leader's term commits a barrier, and the seed of benchCluster is that one, so
+// a heartbeat commits one entry here. The entry is replicated to a quorum and
+// synced by the leader and a follower before it is acknowledged. The leader's
+// store is the one measured. The followers apply every entry in the same
+// process, so the allocations that the framework counts would be the three
+// nodes', and the benchmark does not ask for them.
 //
 // It reports the entries that a heartbeat commits (commits/op) and how many of
 // them are barriers and commands, as reportCommits does, and how many heartbeats

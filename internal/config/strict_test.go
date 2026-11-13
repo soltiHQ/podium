@@ -528,7 +528,7 @@ func TestStandaloneSettingsRefused(t *testing.T) {
 	}
 }
 
-// The variable of a removed file store setting fails loading under the cluster prefix.
+// A removed file store variable, under the cluster prefix, fails loading.
 func TestStandaloneVariablesRefused(t *testing.T) {
 	t.Setenv("CONFIG_PATH", "")
 	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))

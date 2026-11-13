@@ -130,7 +130,7 @@ func withMetrics(m *metrics.Metrics) clusterOption {
 }
 
 // withConfigDigests gives a raft node d, the digests of the settings every
-// replica must share (raftpkg.Config.ConfigDigests). The memory backend ignores them.
+// replica must share (raftpkg.Config.ConfigDigests), which memory ignores.
 func withConfigDigests(d cluster.Digests) clusterOption {
 	return func(o *clusterOptions) { o.digests = &d }
 }
@@ -219,7 +219,8 @@ func entries(n int) uint64 {
 // agentCAs reads the agents' CA bundle, tls.server.client_ca_file, as
 // tlsconf.ServerConfig.Build reads it, and fails as Build fails on it, with its
 // error: a bundle that cannot be read, or holds no certificate, fails the start
-// of a raft node here, before the node starts, as it fails a memory start in Build. It gives no certificates while the discovery listeners require no
+// of a raft node here, before the node starts, as it fails a memory start in
+// Build. It gives no certificates while the discovery listeners require no
 // client certificate. A raft node reads the bundle once, with this, and both
 // digests it (sharedSettings) and builds the discovery listeners' pool from
 // what it read (agentListenerTLS), so the node's digest names the very

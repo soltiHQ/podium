@@ -257,20 +257,28 @@ the write came in on.
 
 On the first start, while there is no user, podium creates the administrator
 `admin`. Its password is `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` when that is set,
-which podium writes to no file and no log. Otherwise podium generates one and
-writes it to `bootstrap-admin-password` in the data directory, mode 0600, and
-its log names the file. From the container above:
+which podium writes to no file and no log. Otherwise podium generates one; log
+in on port 8080 with it and change it.
+
+On the `memory` backend, which has no data directory, the generated password is
+in one log line, at WARN, and nowhere else. From the container above:
 
 ```sh
-docker cp podium:/var/lib/podium/bootstrap-admin-password - | tar -xO
+docker logs podium 2>&1 | grep "admin password generated"
 ```
 
-Log in on port 8080, change the password, and delete the file. Remove
-`SOLTI_BOOTSTRAP_ADMIN_PASSWORD` once users exist: podium ignores it then, and
-warns about it at each start, or at each leadership term of a raft node. In raft
-mode the file is on the node whose leadership term seeded the administrator, the
-one that logged `admin password generated`. In ephemeral mode the generated
-password is logged once, at WARN. See
+The state is lost at exit, the administrator with it: each start of a memory
+node seeds the administrator again, and a password changed in the UI lasts until
+the process exits. Keep `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` set for one password
+across restarts.
+
+A raft node writes the generated password to `bootstrap-admin-password`, mode
+0600, in its `cluster.raft.data_dir`, and logs the file's path, never the
+password. The file is on the node whose leadership term seeded the
+administrator, the one that logged `admin password generated`; delete it once
+you changed the password. Remove `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` once users
+exist: podium ignores it then, and a raft node warns about it at each of its
+leadership terms. See
 [First administrator](internal/config/README.md#first-administrator) and
 [First-start bootstrap](internal/bootstrap/README.md).
 

@@ -93,11 +93,11 @@ type App struct {
 	shutdownDone chan struct{}
 }
 
-// New assembles all dependencies. The memory backend seeds the initial data here. A
-// raft node waits for no leader: it checks what a seed needs, and once it runs,
-// seeds at the start of each of its leadership terms (see [seedingRunner]).
-// Returned [App] is ready to [Run]. Caller must call [Shutdown] to release
-// deferred resources (Raft node, proxy pool, event hub).
+// New assembles all dependencies. The memory backend seeds the initial data
+// here. A raft node waits for no leader: it checks what a seed needs, and once
+// it runs, seeds at the start of each of its leadership terms (see
+// [seedingRunner]). Returned [App] is ready to [Run]. Caller must call
+// [Shutdown] to release deferred resources (Raft node, proxy pool, event hub).
 func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...Option) (*App, error) {
 	o := defaultOptions()
 	for _, opt := range opts {
@@ -109,7 +109,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 	clusterOpts := []clusterOption{withHubOptions(hubOptions(cfg)...), withProbes(&hooks), withMetrics(m)}
 	// A raft node digests the settings that every replica must share, answers
 	// its peers' configuration requests with the digests, and checks them
-	// against its leader's (raftpkg.Admin.ConfigCheck). The memory backend does neither.
+	// against its leader's (raftpkg.Admin.ConfigCheck); memory does neither.
 	var (
 		digests cluster.Digests
 		// clientCAs is the agents' CA bundle that a raft node reads once, for its
@@ -156,9 +156,9 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 	}
 
 	// Default users/roles/credentials seeding must run through the store, on the
-	// leader. The memory backend always leads: it seeds here, and a seed that fails fails
-	// the start. A raft node leads in some terms only; its seeding runner seeds
-	// at the start of each, and the seed replicates to the other nodes.
+	// leader. The memory backend always leads: it seeds here, and a seed that
+	// fails fails the start. A raft node leads in some terms only; its seeding
+	// runner seeds at the start of each, and the seed replicates to the others.
 	if !raftMode {
 		if err = bootstrap.Run(ctx, logger, bootstrapOptions(cfg), svc.role, svc.user, svc.credential); err != nil {
 			closeOnError(raftShutdown, eventHub)
@@ -443,9 +443,10 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 
 // Shutdown releases the resources [New] acquired, in this order: the log hub,
 // the proxy pool, the event hub, then a raft node's gRPC sync forwarder, its
-// lookups of the raft hosts' names and the node itself. Bounded by ctx — if any step (Raft fsync, hub
-// drain, pool close) hangs past the deadline, Shutdown returns and the process
-// exits dirty. The caller logs that case; subsequent calls are no-ops.
+// lookups of the raft hosts' names and the node itself. Bounded by ctx — if
+// any step (Raft fsync, hub drain, pool close) hangs past the deadline,
+// Shutdown returns and the process exits dirty. The caller logs that case;
+// subsequent calls are no-ops.
 //
 // Returns an error if the deadline elapses before cleanup completes.
 func (a *App) Shutdown(ctx context.Context) error {

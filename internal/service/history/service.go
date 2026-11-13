@@ -73,8 +73,7 @@ type Service struct {
 	// gate orders each retention decision and each write with the counters they
 	// read and move. A write holds it across its transaction, as the stores run one
 	// transaction at a time anyway. A caller waits for it as long as its ctx lasts,
-	// so a capture on a deadline gives
-	// up on a stuck commit and changes nothing.
+	// so a capture on a deadline gives up on a stuck commit and changes nothing.
 	gate  *semaphore.Weighted
 	usage usage
 	exact bool // usage is what the store holds

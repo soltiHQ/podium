@@ -509,7 +509,7 @@ func TestUserEditModalOffersOnlyGrantableAccess(t *testing.T) {
 		roles, permissions []string
 	}{
 		{editor, []string{"012", "013"}, []string{"users:add", "users:edit", "users:get"}},
-		// The cluster permissions exist on the memory backend too, where they guard nothing.
+		// The cluster permissions exist in memory mode too, where they guard nothing.
 		{admin, []string{"001", "002", "003", "011", "012", "013", "021", "022", "023", "031", "032"}, []string{
 			"agents:delete", "agents:edit", "agents:get", "agents:reset", "cluster:get", "cluster:manage",
 			"taskspecs:add", "taskspecs:delete", "taskspecs:deploy", "taskspecs:edit", "taskspecs:get",
