@@ -54,7 +54,11 @@ func counter(t *testing.T, newStore storeFunc) {
 		)
 	})
 
-	t.Run("the transaction handle counts the transaction", func(t *testing.T) {
+	// A transaction handle need not implement storage.Counter (a store without
+	// it is only slower): the counts inside a transaction come from
+	// storage.CountAgents and CountRollouts, which fall back to a scan, and a
+	// handle that is a Counter must give the same answer.
+	t.Run("the counts inside a transaction are the transaction's", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
 		active := fullAgent(t, "agent-a", 0, minute(0))
 		active.SetStatus(enum.AgentStatusActive)
@@ -62,10 +66,6 @@ func counter(t *testing.T, newStore storeFunc) {
 		must(t, errors.Join(s.UpsertAgent(ctx, active), s.UpsertRollout(ctx, synced)))
 
 		err := s.WithTx(ctx, func(tx storage.Storage) error {
-			c, ok := tx.(storage.Counter)
-			if !ok {
-				return errors.New("the transaction handle does not implement storage.Counter, as the store does")
-			}
 			if err := errors.Join(
 				tx.DeleteAgent(ctx, active.ID()),
 				tx.UpsertAgent(ctx, fullAgent(t, "agent-b", 1, minute(1))),
@@ -74,10 +74,18 @@ func counter(t *testing.T, newStore storeFunc) {
 			); err != nil {
 				return err
 			}
-			agents, err := c.CountAgents(ctx)
-			sameCounts(t, "CountAgents inside the transaction", agents, err, map[enum.AgentStatus]int{enum.AgentStatusDisconnected: 1})
-			rollouts, err := c.CountRollouts(ctx)
-			sameCounts(t, "CountRollouts inside the transaction", rollouts, err, map[enum.SyncStatus]int{enum.SyncStatusPending: 1})
+			wantAgents := map[enum.AgentStatus]int{enum.AgentStatusDisconnected: 1}
+			wantRollouts := map[enum.SyncStatus]int{enum.SyncStatusPending: 1}
+			agents, err := storage.CountAgents(ctx, tx)
+			sameCounts(t, "CountAgents inside the transaction", agents, err, wantAgents)
+			rollouts, err := storage.CountRollouts(ctx, tx)
+			sameCounts(t, "CountRollouts inside the transaction", rollouts, err, wantRollouts)
+			if c, ok := tx.(storage.Counter); ok {
+				agents, err = c.CountAgents(ctx)
+				sameCounts(t, "the handle's own CountAgents", agents, err, wantAgents)
+				rollouts, err = c.CountRollouts(ctx)
+				sameCounts(t, "the handle's own CountRollouts", rollouts, err, wantRollouts)
+			}
 			return errRollback
 		})
 		expect(t, outcome{"WithTx", err, errRollback})

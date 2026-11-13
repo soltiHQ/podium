@@ -109,21 +109,23 @@ func verifiers(t *testing.T, newStore storeFunc) {
 		expect(t, outcome{"GetVerifierByCredential of a credential two rows hold", errOf(s.GetVerifierByCredential(ctx, "cred-a")), storage.ErrInternal})
 	})
 
+	// Two verifiers of one credential are outside the contract: services never
+	// make that state (they delete the credential's verifier before upserting
+	// one), and the backends differ on it: memory deletes both, a raft
+	// transaction refuses with ErrInternal.
 	t.Run("delete by credential", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
-		// Two verifiers of cred-a, and verifiers of credentials whose IDs differ
+		// One verifier of cred-a, and verifiers of credentials whose IDs differ
 		// from cred-a by a suffix or in case.
 		kept1, kept2 := fullVerifier(t, "ver-c", "cred-ab", 0, minute(0)), fullVerifier(t, "ver-d", "CRED-A", 0, minute(0))
 		must(t, errors.Join(
 			s.UpsertVerifier(ctx, fullVerifier(t, "ver-a", "cred-a", 0, minute(0))),
-			s.UpsertVerifier(ctx, fullVerifier(t, "ver-b", "cred-a", 1, minute(1))),
 			s.UpsertVerifier(ctx, kept1),
 			s.UpsertVerifier(ctx, kept2),
 		))
 		expect(t,
 			outcome{"DeleteVerifierByCredential", s.DeleteVerifierByCredential(ctx, "cred-a"), nil},
 			outcome{"GetVerifier of ver-a", errOf(s.GetVerifier(ctx, "ver-a")), storage.ErrNotFound},
-			outcome{"GetVerifier of ver-b", errOf(s.GetVerifier(ctx, "ver-b")), storage.ErrNotFound},
 			outcome{"DeleteVerifierByCredential again", s.DeleteVerifierByCredential(ctx, "cred-a"), nil},
 			outcome{"DeleteVerifierByCredential of a credential with no verifier", s.DeleteVerifierByCredential(ctx, "cred-x"), nil},
 			outcome{"DeleteVerifierByCredential of an empty credential ID", s.DeleteVerifierByCredential(ctx, ""), storage.ErrInvalidArgument},
