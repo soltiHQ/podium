@@ -1,6 +1,7 @@
 package inmemory
 
 import (
+	"slices"
 	"strings"
 	"time"
 
@@ -100,6 +101,20 @@ func agentPredicate(filter storage.AgentFilter) (func(*model.Agent) bool, error)
 		return nil, nil
 	}
 	f, ok := filter.(*AgentFilter)
+	if !ok || f == nil {
+		return nil, storage.ErrInvalidArgument
+	}
+	return f.Matches, nil
+}
+
+// userPredicate resolves the filter of a listing to its predicate. A nil filter
+// accepts every user; one built by another backend, or a nil *UserFilter, is
+// rejected.
+func userPredicate(filter storage.UserFilter) (func(*model.User) bool, error) {
+	if filter == nil {
+		return nil, nil
+	}
+	f, ok := filter.(*UserFilter)
 	if !ok || f == nil {
 		return nil, storage.ErrInvalidArgument
 	}
@@ -210,6 +225,20 @@ func (f *RoleFilter) Matches(r *model.Role) bool {
 	return true
 }
 
+// rolePredicate resolves the filter of a listing to its predicate. A nil filter
+// accepts every role; one built by another backend, or a nil *RoleFilter, is
+// rejected.
+func rolePredicate(filter storage.RoleFilter) (func(*model.Role) bool, error) {
+	if filter == nil {
+		return nil, nil
+	}
+	f, ok := filter.(*RoleFilter)
+	if !ok || f == nil {
+		return nil, storage.ErrInvalidArgument
+	}
+	return f.Matches, nil
+}
+
 // SpecFilter provides predicate-based filtering for in-memory task spec queries.
 type SpecFilter struct {
 	predicates []func(*model.Spec) bool
@@ -296,7 +325,10 @@ func (f *RolloutFilter) ByStatus(s enum.SyncStatus) *RolloutFilter {
 }
 
 // ByStatuses matches rollouts whose status is any of the provided values (OR).
+// The filter keeps its own copy of statuses: a caller that changes its slice
+// later does not change the filter.
 func (f *RolloutFilter) ByStatuses(statuses ...enum.SyncStatus) *RolloutFilter {
+	statuses = slices.Clone(statuses)
 	f.predicates = append(f.predicates, func(ss *model.Rollout) bool {
 		for _, s := range statuses {
 			if ss.Status() == s {

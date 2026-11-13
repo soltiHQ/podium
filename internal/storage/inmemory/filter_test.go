@@ -257,7 +257,9 @@ func TestBuildAgentFilterMatchesBuilders(t *testing.T) {
 		{"query endpoint", storage.AgentQueryCriteria{Query: "gamma"}, func() *AgentFilter { return NewAgentFilter().Query("gamma") }, []string{"a3"}},
 		{"query no match", storage.AgentQueryCriteria{Query: "zzz"}, func() *AgentFilter { return NewAgentFilter().Query("zzz") }, nil},
 		{"stale bound", storage.AgentQueryCriteria{StaleAtBefore: now}, func() *AgentFilter { return NewAgentFilter().StaleAtBefore(now) }, []string{"alpha-id", "a3", "a4"}},
-		{"both", storage.AgentQueryCriteria{Query: "a", StaleAtBefore: now}, func() *AgentFilter { return NewAgentFilter().Query("a").StaleAtBefore(now) }, []string{"alpha-id", "a3", "a4"}},
+		// "e" is in the names of alpha-id, a2 and a3 only: the stale bound drops a2
+		// and the query drops a4, so a factory that dropped either gives another set.
+		{"both", storage.AgentQueryCriteria{Query: "e", StaleAtBefore: now}, func() *AgentFilter { return NewAgentFilter().Query("e").StaleAtBefore(now) }, []string{"alpha-id", "a3"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -325,4 +327,82 @@ func TestBuildUserFilterMatchesBuilders(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRolloutFilter_ByStatusesOwnsItsStatuses pins that a filter does not alias
+// the slice it was built from: a caller that changes the slice afterwards does
+// not change what the filter matches.
+func TestRolloutFilter_ByStatusesOwnsItsStatuses(t *testing.T) {
+	t.Parallel()
+
+	pending, err := model.NewRollout("spec-a", "agent-a", 1)
+	requireNoErr(t, err)
+	synced, err := model.NewRollout("spec-a", "agent-b", 1)
+	requireNoErr(t, err)
+	synced.MarkSynced(1)
+	if pending.Status() == synced.Status() {
+		t.Fatalf("both rollouts have status %v; the fixture does not tell them apart", pending.Status())
+	}
+
+	builders := []struct {
+		name  string
+		build func(statuses []enum.SyncStatus) *RolloutFilter
+	}{
+		{"BuildRolloutFilter", func(statuses []enum.SyncStatus) *RolloutFilter {
+			f, ok := New().BuildRolloutFilter(storage.RolloutQueryCriteria{Statuses: statuses}).(*RolloutFilter)
+			if !ok {
+				t.Fatalf("BuildRolloutFilter returned %T, want *RolloutFilter", f)
+			}
+			return f
+		}},
+		{"ByStatuses", func(statuses []enum.SyncStatus) *RolloutFilter {
+			return NewRolloutFilter().ByStatuses(statuses...)
+		}},
+	}
+	for _, b := range builders {
+		t.Run(b.name, func(t *testing.T) {
+			t.Parallel()
+
+			statuses := []enum.SyncStatus{pending.Status()}
+			f := b.build(statuses)
+			if !f.Matches(pending) || f.Matches(synced) {
+				t.Fatalf("before the change: pending %v, synced %v, want true, false", f.Matches(pending), f.Matches(synced))
+			}
+			statuses[0] = synced.Status()
+			if !f.Matches(pending) || f.Matches(synced) {
+				t.Fatalf("after the caller changed its slice: pending %v, synced %v, want true, false", f.Matches(pending), f.Matches(synced))
+			}
+		})
+	}
+}
+
+// TestStore_List_TypedNilFilter pins that a nil *UserFilter or *RoleFilter in
+// the interface is refused as the listings of agents and specs refuse theirs,
+// with ErrInvalidArgument, not a panic.
+func TestStore_List_TypedNilFilter(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s := New()
+	requireNoErr(t, s.UpsertUser(ctx, mkUser(t, "u1", "sub-1")))
+	requireNoErr(t, s.UpsertRole(ctx, mkRole(t, "r1", "admin")))
+
+	t.Run("ListUsers", func(t *testing.T) {
+		t.Parallel()
+
+		var f *UserFilter
+		_, err := s.ListUsers(ctx, f, storage.ListOptions{})
+		if !errors.Is(err, storage.ErrInvalidArgument) {
+			t.Fatalf("expected ErrInvalidArgument, err=%v", err)
+		}
+	})
+	t.Run("ListRoles", func(t *testing.T) {
+		t.Parallel()
+
+		var f *RoleFilter
+		_, err := s.ListRoles(ctx, f, storage.ListOptions{})
+		if !errors.Is(err, storage.ErrInvalidArgument) {
+			t.Fatalf("expected ErrInvalidArgument, err=%v", err)
+		}
+	})
 }
