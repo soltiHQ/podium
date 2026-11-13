@@ -189,8 +189,7 @@ func TestMetricsExposition(t *testing.T) {
 	m.Sync(TransportHTTP, SyncOK)
 	m.Login(LoginOK)
 	m.SyncTurn(TurnAnswered, 20*time.Millisecond)
-	m.StoreCommit("durable")(2 * time.Millisecond)
-	m.StoreFailed(func() bool { return false })
+	m.StoreCommit("raft")(2 * time.Millisecond)
 
 	store := inmemory.New()
 	a, err := model.NewAgent("agent-1", "agent-1", "http://10.0.0.1:8085")
@@ -216,7 +215,6 @@ func TestMetricsExposition(t *testing.T) {
 		"podium_sync_turns_total":              {"counter", "outcome"},
 		"podium_sync_turn_duration_seconds":    {"histogram", ""},
 		"podium_store_commit_duration_seconds": {"histogram", "backend"},
-		"podium_store_failed":                  {"gauge", ""},
 	}
 	for name, w := range want {
 		if e.types[name] != w.typ {
@@ -390,23 +388,10 @@ func (failingStore) CountRollouts(context.Context) (map[enum.SyncStatus]int, err
 	return nil, errors.New("store failed")
 }
 
-// podium_store_failed follows the function it is given, at each scrape.
-func TestStoreFailedGaugeFollowsTheFunction(t *testing.T) {
-	m := New(buildinfo.Info{})
-	failed := false
-	m.StoreFailed(func() bool { return failed })
-	for _, want := range []float64{0, 1, 0} {
-		failed = want == 1
-		if v, ok := scrape(t, m).value("podium_store_failed", map[string]string{}); !ok || v != want {
-			t.Fatalf("podium_store_failed %v, %v; want %v", v, ok, want)
-		}
-	}
-}
-
 // The store commit histogram runs from 0.5 ms to 1 s.
 func TestStoreCommitBuckets(t *testing.T) {
 	m := New(buildinfo.Info{})
-	m.StoreCommit("durable")(time.Millisecond)
+	m.StoreCommit("raft")(time.Millisecond)
 	var bounds []string
 	for _, s := range scrape(t, m).family("podium_store_commit_duration_seconds") {
 		if s.name == "podium_store_commit_duration_seconds_bucket" {
@@ -425,8 +410,7 @@ func TestNilMetricsIsInert(t *testing.T) {
 	m.Sync(TransportHTTP, SyncOK)
 	m.Login(LoginOK)
 	m.SyncTurn(TurnAnswered, time.Second)
-	m.StoreCommit("durable")(time.Second)
-	m.StoreFailed(func() bool { return true })
+	m.StoreCommit("raft")(time.Second)
 	m.Inventory(inmemory.New())
 	w := httptest.NewRecorder()
 	h := m.HTTP("ui")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) }))

@@ -94,7 +94,6 @@ vars:
     internal/server/README.md
     internal/service/README.md
     internal/storage/README.md
-    internal/storage/durable/README.md
     internal/transport/README.md
     internal/transportctx/README.md
     internal/uikit/README.md

@@ -317,7 +317,7 @@ func (s *Service) Refresh(ctx context.Context, sessionID, refreshRaw string) (*T
 		err = s.store.WithTx(ctx, issueCurrent)
 	} else {
 		// Without a mutation, retain read-only refresh instead of rewriting the
-		// complete durable snapshot. HTTP admission rechecks current authorization.
+		// complete stored snapshot. HTTP admission rechecks current authorization.
 		err = issueCurrent(s.store)
 	}
 	if err != nil {

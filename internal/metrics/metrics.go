@@ -122,7 +122,7 @@ func New(info buildinfo.Info) *Metrics {
 		}),
 		storeCommit: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "podium_store_commit_duration_seconds",
-			Help:    "Duration of a store commit by backend: the durable commit, or the raft apply on the leader.",
+			Help:    "Duration of a store commit by backend: the raft apply on the leader.",
 			Buckets: commitBuckets,
 		}, []string{"backend"}),
 	}
@@ -201,29 +201,11 @@ func (m *Metrics) SyncTurn(outcome string, d time.Duration) {
 	m.turnDuration.Observe(d.Seconds())
 }
 
-// StoreCommit returns what records the duration of a commit of backend, "durable"
-// or "raft".
+// StoreCommit returns what records the duration of a commit of backend, "raft".
 func (m *Metrics) StoreCommit(backend string) func(time.Duration) {
 	if m == nil {
 		return func(time.Duration) {}
 	}
 	h := m.storeCommit.WithLabelValues(backend)
 	return func(d time.Duration) { h.Observe(d.Seconds()) }
-}
-
-// StoreFailed registers podium_store_failed, which is 1 at a scrape where failed
-// returns true and 0 otherwise.
-func (m *Metrics) StoreFailed(failed func() bool) {
-	if m == nil {
-		return
-	}
-	m.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "podium_store_failed",
-		Help: "1 while the store has failed and serves nothing, as /readyz reports it, otherwise 0.",
-	}, func() float64 {
-		if failed() {
-			return 1
-		}
-		return 0
-	}))
 }

@@ -59,7 +59,7 @@ type API struct {
 	logHub        *loghub.Hub
 	streamLimit   *middleware.StreamLimiter
 	logAccess     func(*http.Request) error
-	// clusterSVC serves the cluster routes; nil, as in standalone, registers none.
+	// clusterSVC serves the cluster routes; nil, as in memory, registers none.
 	clusterSVC *clustersvc.Service
 
 	logger zerolog.Logger
@@ -70,7 +70,7 @@ type APIOption func(*API)
 
 // WithCluster serves the cluster routes with svc: GET /api/v1/cluster, POST
 // /api/v1/cluster/members and DELETE /api/v1/cluster/members/{id}. Only a raft
-// node has a cluster service. Without one, as in standalone, the routes are not
+// node has a cluster service. Without one, as in memory, the routes are not
 // registered, and their paths answer as any other unknown path.
 func WithCluster(svc *clustersvc.Service) APIOption {
 	return func(a *API) { a.clusterSVC = svc }

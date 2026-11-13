@@ -11,7 +11,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/soltiHQ/control-plane/internal/cluster/standalone"
+	"github.com/soltiHQ/control-plane/internal/cluster/memory"
 	"github.com/soltiHQ/control-plane/internal/server/runner/base"
 )
 
@@ -19,7 +19,7 @@ func discardLogger() zerolog.Logger { return zerolog.New(io.Discard) }
 
 func TestTicksWhileLeaderAndStopDrains(t *testing.T) {
 	var ticks atomic.Int64
-	r := base.New("test", time.Millisecond, standalone.NewLeadership(), discardLogger(),
+	r := base.New("test", time.Millisecond, memory.NewLeadership(), discardLogger(),
 		func(context.Context) { ticks.Add(1) })
 
 	errCh := make(chan error, 1)
@@ -51,7 +51,7 @@ func TestStopHonorsDeadlineWhenTickStuck(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{})
 	var startOnce sync.Once
-	r := base.New("test", time.Millisecond, standalone.NewLeadership(), discardLogger(),
+	r := base.New("test", time.Millisecond, memory.NewLeadership(), discardLogger(),
 		func(context.Context) {
 			startOnce.Do(func() { close(started) })
 			<-release
@@ -77,7 +77,7 @@ func TestStopHonorsDeadlineWhenTickStuck(t *testing.T) {
 }
 
 func TestStopIdempotent(t *testing.T) {
-	r := base.New("test", time.Millisecond, standalone.NewLeadership(), discardLogger(),
+	r := base.New("test", time.Millisecond, memory.NewLeadership(), discardLogger(),
 		func(context.Context) {})
 
 	if err := r.Stop(context.Background()); err != nil {
@@ -96,7 +96,7 @@ func TestStopIdempotent(t *testing.T) {
 }
 
 func TestStartTwice(t *testing.T) {
-	r := base.New("test", time.Second, standalone.NewLeadership(), discardLogger(),
+	r := base.New("test", time.Second, memory.NewLeadership(), discardLogger(),
 		func(context.Context) {})
 
 	go func() { _ = r.Start(context.Background()) }()

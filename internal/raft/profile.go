@@ -435,8 +435,7 @@ func (p *Profile) Shutdown() error {
 // file snapshot store keeps its snapshots in.
 const snapshotsDir = "snapshots"
 
-// privateDir makes dir 0700 when it is missing and, as the durable store does,
-// refuses it when it is not a directory, a symlink included, or its group or
+// privateDir makes dir 0700 when it is missing and refuses it when it is not a directory, a symlink included, or its group or
 // others have any permission on it. The path is cleaned first: with a
 // trailing slash, Lstat would follow a symlink. It checks no file: BoltDB makes
 // its files 0600, and the snapshot store makes its own private.

@@ -26,8 +26,7 @@
 //     without one is let through), no rollout is judged and the next tick lists again from the first page,
 //     at 1000. So every synced rollout of an agent is observed each tick when, after the turn's pushes, its
 //     task list can be listed within those bounds, with the last page starting inside PushTimeout. The
-//     reinstalls queued after a complete listing are store writes, not agent calls: about 1 ms each on the
-//     durable store, and in raft mode each is a replicated commit. They are not bounded by PushTimeout. The
+//     reinstalls queued after a complete listing are store writes, not agent calls: quick on the memory backend, and in raft mode each is a replicated commit. They are not bounded by PushTimeout. The
 //     runner logs when the listing stops being complete, with the cause, and when it is complete again, naming
 //     the latest cause, not on every tick: an agent that flips between the two logs a pair of lines for each
 //     flip.

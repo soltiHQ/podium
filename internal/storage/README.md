@@ -32,8 +32,7 @@ storage/
 │   ├── command.go   EncodeCommand / DecodeCommand — the SOLTI-CMD framing of the ops
 │   └── agent.go …   the Storage methods of Tx, one file per entity group
 │
-├── durable/         the standalone store on disk, see its README
-├── snapshot/        the versioned state codec of raft compaction and the durable store
+├── snapshot/        the versioned state codec of raft compaction and restore
 └── storagetest/     the fixture and the measurement the storage and service benchmarks share
 ```
 
@@ -108,11 +107,10 @@ process implements the optional `Scanner` interface, and the helpers use it:
   order, as clones the caller owns
 - The filter runs once per row, not once per row per page
 - The rows are one consistent state, not one state per page
-- `inmemory.Store` and its transaction handle, `durable.Store`, `raft.Store` and
-  the `overlay.Tx` that `raft.Store.WithTx` and `durable.Store.WithTx` hand out
-  are Scanners. A wrapper that embeds `storage.Storage` hides the interface and
-  gets the paged path too: forward the four `Scan*` methods to keep the single
-  pass
+- `inmemory.Store` and its transaction handle, `raft.Store` and the `overlay.Tx`
+  that `raft.Store.WithTx` hands out are Scanners. A wrapper that embeds
+  `storage.Storage` hides the interface and gets the paged path too: forward the
+  four `Scan*` methods to keep the single pass
 - A page asked for with `Limit` and `Cursor`, as the API and the UI do, is
   unchanged
 
@@ -120,14 +118,13 @@ process implements the optional `Scanner` interface, and the helpers use it:
 
 `overlay.Tx` holds a transaction in memory over a base store that does not
 change while it runs. `raft.Store.WithTx` runs its callback on one and
-replicates what it recorded; `durable.Store.WithTx` logs it to disk, then
-applies it to the state its readers see:
+replicates what it recorded:
 
 ```text
   tx := overlay.New(base)      writes land in tx; every read of tx sees them over the base
   tx.UpsertAgent(ctx, a)       checked as the state machine will apply it, recorded as a SOLTI-CMD op
   tx.Ops(), tx.Empty()         the recorded ops in write order; nothing to commit when empty
-  overlay.EncodeCommand(ops)   the SOLTI-CMD command Raft replicates and the durable store logs
+  overlay.EncodeCommand(ops)   the SOLTI-CMD command Raft replicates
   overlay.ApplyOps(ctx, s, …)  applies the ops to s, as the Raft state machine does on commit
 ```
 

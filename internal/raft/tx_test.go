@@ -8,7 +8,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/storage/durable"
+	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
 
 // deleteOutcome is what a store made of a transaction that deleted a row and then,
@@ -57,17 +57,13 @@ func deleteThenWrite(t *testing.T, s storage.Storage, marker string, del func(co
 	return got
 }
 
-// TestRaftDeleteOfAbsentRowMatchesStandalone deletes, in a transaction, a row the
-// transaction does not see, and goes on to write another. Standalone answers the
-// delete with ErrNotFound, changes nothing for it and commits the write; Raft must
+// TestRaftDeleteOfAbsentRowMatchesMemory deletes, in a transaction, a row the
+// transaction does not see, and goes on to write another. The in-memory store
+// answers the delete with ErrNotFound, changes nothing for it and commits the write; Raft must
 // do the same, rather than record the delete and fail the whole command when the
 // state machine applies it. A bulk delete that matches nothing succeeds on both.
-func TestRaftDeleteOfAbsentRowMatchesStandalone(t *testing.T) {
-	standalone, err := durable.Open(filepath.Join(t.TempDir(), "state"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = standalone.Close() })
+func TestRaftDeleteOfAbsentRowMatchesMemory(t *testing.T) {
+	memory := inmemory.New()
 	replicated := newSingleNode(t).Store()
 
 	for _, tc := range []struct {
@@ -123,11 +119,11 @@ func TestRaftDeleteOfAbsentRowMatchesStandalone(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			marker := "marker-" + filepath.Base(t.Name())
 			want := deleteOutcome{deleted: tc.deleted, committed: "ok", written: true}
-			if got := deleteThenWrite(t, standalone, marker, tc.del); got != want {
-				t.Fatalf("standalone: %+v, want %+v", got, want)
+			if got := deleteThenWrite(t, memory, marker, tc.del); got != want {
+				t.Fatalf("memory: %+v, want %+v", got, want)
 			}
 			if got := deleteThenWrite(t, replicated, marker, tc.del); got != want {
-				t.Fatalf("raft: %+v, want what standalone made of it, %+v", got, want)
+				t.Fatalf("raft: %+v, want what memory made of it, %+v", got, want)
 			}
 		})
 	}

@@ -58,7 +58,7 @@ func (w *EventWriter) DeleteIssues(kind, id string) int {
 	}}}
 	// Count returned by Raft-backed path is not meaningful across replicas
 	// (count is per-replica ring). Return the local count after the
-	// replicated apply — same contract as standalone.
+	// replicated apply — same contract as the memory backend.
 	_ = w.submit(op)
 	return w.hub.ApplyLocalDeleteIssues(kind, id)
 }

@@ -335,8 +335,8 @@ func TestSteadyStateSilenceRunsFromTheLastSync(t *testing.T) {
 	}
 }
 
-// A scanned agent with nothing due must not open a transaction: on the durable store each one clones, marshals and
-// fsyncs the whole state under the lock that sync's Upsert shares.
+// A scanned agent with nothing due must not open a transaction: on a store each one is a write that takes the
+// lock that sync's Upsert shares.
 func TestTickOpensNoTransactionForAgentsWithNothingDue(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

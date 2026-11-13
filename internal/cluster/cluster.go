@@ -15,7 +15,7 @@
 // Storage atomicity is part of [storage.TxStore.WithTx], not this package.
 //
 // Drivers live in sub-packages: internal/cluster/discovery,
-// internal/cluster/standalone, internal/cluster/raft.
+// internal/cluster/memory, internal/cluster/raft.
 package cluster
 
 import (
@@ -78,7 +78,7 @@ type Leadership interface {
 	// error. How often fn runs differs between drivers: raft calls fn again
 	// whenever it returns nil while the node still leads, after another
 	// barrier, so fn must return only once its context ends, or it runs again
-	// and again; standalone, which always leads, calls fn once and returns
+	// and again; memory, which always leads, calls fn once and returns
 	// what it returns.
 	WhenLeader(ctx context.Context, fn func(context.Context) error) error
 }
@@ -91,7 +91,7 @@ type LeaderReadiness interface {
 }
 
 // Membership is implemented by drivers whose leadership knows the members of
-// its cluster: raft, from its configuration. Standalone has none.
+// its cluster: raft, from its configuration. The memory backend has none.
 type Membership interface {
 	// Members returns the members of the latest configuration, committed or
 	// not, each with the address the others reach it at, as written. Every

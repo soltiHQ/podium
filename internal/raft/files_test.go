@@ -153,7 +153,7 @@ func entries(t *testing.T, dir string) []string {
 
 // A node refuses a data directory, or a snapshots directory in it, that its
 // group or others can enter, or that is a symlink, written with a trailing
-// slash or not, as the durable store does: before it opens anything there, a
+// slash or not: before it opens anything there, a
 // log it holds already included, and without changing its mode.
 func TestRaftRefusesLooseDataDir(t *testing.T) {
 	ca := newTestCA(t)

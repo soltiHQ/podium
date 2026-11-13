@@ -333,17 +333,17 @@ Every event kind maps to a subject (`event.SubjectOf`):
 | DELETE | `/api/v1/cluster/members/{id}` | `ClusterManage` |
 
 Only a raft node registers these routes: `app` gives the API its cluster service
-(`internal/service/cluster`, which holds the rules) with `WithCluster`.
-Standalone registers none, so its cluster paths answer as any path that the UI's
-catch-all page route takes: 404 to an authenticated GET, 405 to an authenticated
-POST or DELETE, and 401 without credentials, as before raft mode had them
-(`TestClusterRoutesAbsentInStandalone`). `cluster:get` and `cluster:manage`
+(`internal/service/cluster`, which holds the rules) with `WithCluster`. The
+memory backend registers none, so its cluster paths answer as any path that the
+UI's catch-all page route takes: 404 to an authenticated GET, 405 to an
+authenticated POST or DELETE, and 401 without credentials, as before raft mode
+had them (`TestClusterRoutesAbsentInMemory`). `cluster:get` and `cluster:manage`
 exist in both modes, and appear in both among the permissions a user may be
 given, but they guard only these raft-mode routes. Of the built-in roles only
 Admin holds them, as it holds `enum.All` (`TestClusterRoutesNeedPermission`).
 Bootstrap resets a stored Admin role that differs to its definition
 (`TestBuiltinRolesReconciled` in `internal/bootstrap`), which it runs at a
-standalone start and at each raft leadership term (see
+memory start and at each raft leadership term (see
 `internal/bootstrap/README.md`).
 
 `GET /api/v1/cluster` is a read, so the node that gets it answers it itself, a
@@ -520,7 +520,8 @@ behind one egress IP (NAT, Kubernetes) never block each other. HTTP takes the
 client IP from `trusted_proxies`, and in raft mode from the hosts of the raft
 configuration too. gRPC takes it from the `x-forwarded-for` metadata of those
 hosts in raft mode, where a follower forwards a sync to the leader with the
-agent's address in it (`grpcClientIP`), and uses the peer address in standalone.
+agent's address in it (`grpcClientIP`), and uses the peer address on the memory
+backend.
 
 A sync whose token check or upsert fails on the store is answered 503 / with the
 error's gRPC code, and logged at ERROR, but for a leadership error

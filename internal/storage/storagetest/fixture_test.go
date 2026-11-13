@@ -125,7 +125,7 @@ func TestSeedIsDeterministic(t *testing.T) {
 	}
 }
 
-// The durable README quotes about 900 B per agent in a snapshot, the shape its
+// The raft README quotes about 900 B per agent in a snapshot, the shape its
 // baseline table was measured on.
 func TestSeedAgentSize(t *testing.T) {
 	small := len(snapshotOf(t, seeded(t, Fixture{Agents: 100})))

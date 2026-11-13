@@ -1,17 +1,18 @@
 # First-start bootstrap
 
-Bootstrap reconciles the built-in roles and seeds the first administrator.
-Standalone runs it once per start, inside `app.New`: a seed that fails fails the
-start, and a generated password is in its file when `New` returns. A raft node
-runs it at the start of each of its leadership terms, see "Raft mode" below.
+Bootstrap reconciles the built-in roles and seeds the first administrator. The
+memory backend runs it once per start, inside `app.New`: a seed that fails fails
+the start, and a generated password is in the log when `New` returns. A raft
+node runs it at the start of each of its leadership terms, see "Raft mode"
+below.
 
 ## Built-in roles
 
-The roles of `enum.BuiltinRoles` are reconciled on every standalone start, and
-in raft mode at the start of every leadership term, to the code definitions of
-the node that leads. A missing role is created. A role whose name or permission
-set differs from the code definition is reset to it, keeping its creation time.
-A role that already matches is not written, and a custom role is never touched.
+The roles of `enum.BuiltinRoles` are reconciled on every memory start, and in
+raft mode at the start of every leadership term, to the code definitions of the
+node that leads. A missing role is created. A role whose name or permission set
+differs from the code definition is reset to it, keeping its creation time. A
+role that already matches is not written, and a custom role is never touched.
 Nothing edits roles at runtime, so a difference comes from a new version of the
 definitions, and a new permission reaches the administrator on upgrade. During a
 rolling upgrade of a raft cluster the roles follow whichever version leads: a
@@ -46,8 +47,8 @@ In order:
      unset.
    - It must pass the password policy (12 characters at least, 72 bytes at
      most). Otherwise startup fails with an error that names the variable and
-     never shows the value, and nothing is seeded. Standalone checks it when a
-     seed is due. A raft node checks it at start, before anything starts,
+     never shows the value, and nothing is seeded. The memory backend checks it
+     when a seed is due. A raft node checks it at start, before anything starts,
      whatever the user table holds: it cannot know then whether a term of its
      own will seed.
    - It is never written to a file or a log. The log only says that the password
@@ -57,25 +58,24 @@ In order:
      it once the new password is stored, never before, and logs the path. A file
      that cannot be removed only warns.
    - Once users exist the variable is ignored. One WARN says so, without the
-     value, on every standalone start, even for a value the policy would have
+     value, on every memory start, even for a value the policy would have
      refused, and at the start of every leadership term of a raft node, which
      refuses such a value at start. Remove it from the environment after the
      first start.
 1. A generated password: 24 random bytes as 32 URL-safe characters, set through
    `credential.Service.SetPassword`, like any password.
-   - **Persistent state** (every mode but ephemeral): it is written to
-     `bootstrap-admin-password` in the data directory of the active backend,
-     `cluster.standalone.data_dir` or `cluster.raft.data_dir`. The file holds
-     the password on one line and has mode 0600. It goes to a temporary file in
-     the same directory, which is synced and renamed over the target, so the
-     file is never half written and a stale one from an earlier install is
-     replaced whole. The log names only the absolute path:
+   - **A data directory** (a raft node): it is written to
+     `bootstrap-admin-password` in `cluster.raft.data_dir`. The file holds the
+     password on one line and has mode 0600. It goes to a temporary file in the
+     same directory, which is synced and renamed over the target, so the file is
+     never half written and a stale one from an earlier install is replaced
+     whole. The log names only the absolute path:
      `bootstrap: admin password generated: read it from the file, log in and change it`,
      with `login` and `path`, and in raft mode the `node_id` of the node that
      wrote the file.
-   - **Ephemeral mode** (`Options.Ephemeral`, which the app sets from
-     `cluster.standalone.ephemeral: true`; there is no data directory): the
-     password is logged once, at WARN, as
+   - **Ephemeral mode** (`Options.Ephemeral`, which the app sets for
+     `cluster.backend: memory`; there is no data directory): the password is
+     logged once, at WARN, as
      `ephemeral mode: admin password generated: change it after first login`,
      with the `password` field. No other mode ever logs a password.
    - **Neither**: bootstrap does not guess ephemeral mode from an empty data

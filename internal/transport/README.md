@@ -138,7 +138,7 @@ RFC 7239 `Forwarded` is not supported. The login limiter,
 `middleware.StreamLimit` and HTTP discovery take the client IP from the
 resolver. gRPC discovery does too in raft mode, from the peer and its
 `x-forwarded-for` metadata, which a follower sets when it forwards a sync;
-standalone gRPC discovery uses the peer address, whatever metadata the call
+memory-backend gRPC discovery uses the peer address, whatever metadata the call
 carries.
 
 ## Rate limits

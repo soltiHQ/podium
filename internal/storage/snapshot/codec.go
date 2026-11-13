@@ -1,5 +1,5 @@
 // Package snapshot owns the versioned control-plane state codec shared by
-// Raft compaction and standalone durable storage. A failed decode never changes
+// Raft compaction and restore. A failed decode never changes
 // the live store; callers publish the returned state only after success.
 package snapshot
 

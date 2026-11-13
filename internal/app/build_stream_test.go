@@ -17,7 +17,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
 	"github.com/soltiHQ/control-plane/internal/auth/token/jwt"
-	"github.com/soltiHQ/control-plane/internal/cluster/standalone"
+	"github.com/soltiHQ/control-plane/internal/cluster/memory"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
@@ -98,7 +98,7 @@ func TestAuthenticatedEventAndTaskLogStreamsShareLimitAndRelease(t *testing.T) {
 	defer func() { _ = pool.Close() }()
 	events := event.NewHub(logger)
 	defer events.Close()
-	handler, logs := buildMainHandler(cfg, logger, svc, authModel, pool, events, standalone.NewLeadership(), nil, nil, nil)
+	handler, logs := buildMainHandler(cfg, logger, svc, authModel, pool, events, memory.NewLeadership(), nil, nil, nil)
 	defer logs.Close()
 	server := httptest.NewServer(handler)
 	defer server.Close()

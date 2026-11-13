@@ -15,7 +15,6 @@ import (
 // The reasons /readyz gives for a node that is not ready.
 const (
 	reasonStarting     = "starting"
-	reasonStorage      = "storage failed"
 	reasonNoLeader     = "no raft leader"
 	reasonShuttingDown = "shutting down"
 	// reasonNotLeader is what /leaderz says of a node that serves but does not lead.
@@ -34,20 +33,16 @@ type readiness struct {
 	bound atomic.Bool
 	// shuttingDown is set at the first shutdown signal and never cleared.
 	shuttingDown atomic.Bool
-	// failure returns why the store stopped serving, nil while it serves; nil for
-	// a store that cannot fail.
-	failure func() error
 	// leader returns the address of the leader this node knows, "" for none; nil
-	// when the node needs no leader, which is standalone.
+	// when the node needs no leader, which is memory.
 	leader func() string
 }
 
-// probeHooks are what buildCluster tells of the store it built, where its type
-// is known: a durable store can fail, and a raft node needs to know a leader. A
-// hook that the backend does not have stays nil.
+// probeHooks are what buildCluster tells of the backend it built, where its type
+// is known: a raft node needs to know a leader. A hook that the backend does not
+// have stays nil.
 type probeHooks struct {
-	failure func() error
-	leader  func() string
+	leader func() string
 }
 
 // withProbes makes buildCluster fill p with the hooks of the backend it builds.
@@ -57,7 +52,7 @@ func withProbes(p *probeHooks) clusterOption {
 
 // newReadiness returns the readiness of a node over the hooks of its store.
 func newReadiness(h probeHooks) *readiness {
-	return &readiness{failure: h.failure, leader: h.leader}
+	return &readiness{leader: h.leader}
 }
 
 // reason returns "" while the node is ready, and otherwise why it is not, one of
@@ -68,8 +63,6 @@ func (r *readiness) reason() string {
 		return reasonShuttingDown
 	case !r.bound.Load():
 		return reasonStarting
-	case r.failure != nil && r.failure() != nil:
-		return reasonStorage
 	case r.leader != nil && r.leader() == "":
 		return reasonNoLeader
 	}
@@ -79,7 +72,7 @@ func (r *readiness) reason() string {
 // leaderReason returns "" while this node is the leader that /leaderz routes to,
 // and otherwise why it is not. A raft node is the leader once start-up has
 // finished and it leads, whatever the store does and also while the shutdown
-// delay runs, when it still serves; a standalone node, which has no leader to
+// delay runs, when it still serves; a memory node, which has no leader to
 // find, is the leader while it is ready.
 func (r *readiness) leaderReason(amLeader func() bool) string {
 	switch {

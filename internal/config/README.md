@@ -197,34 +197,28 @@ it leads, its build and its metrics, which on a raft node include its raft
 state, term, indexes and peer count. Keep it on an internal network: the default
 binds loopback only, and a container that is probed from outside binds
 `0.0.0.0:8081` and publishes the port to the orchestrator alone. podium's image
-sets `SOLTI_OPS_ADDR=:8081` and
-`SOLTI_CLUSTER_STANDALONE_DATA_DIR=/var/lib/podium` in its environment, which
-override the `ops.addr` and `cluster.standalone.data_dir` of a file passed with
-`--config`: set the variables to change them
-(`-e SOLTI_OPS_ADDR=127.0.0.1:8081`, or empty to turn the listener off;
-`-e SOLTI_CLUSTER_STANDALONE_DATA_DIR=...`). Under host networking `:8081` binds
-every interface of the host. Loading logs each such override at INFO (see
-"Environment variables"). Every route answers GET and HEAD, as one line of text
-(`ok`, or the reason) except `/version` and `/metrics`:
+sets `SOLTI_OPS_ADDR=:8081` in its environment, which overrides the `ops.addr`
+of a file passed with `--config`: set the variable to change it
+(`-e SOLTI_OPS_ADDR=127.0.0.1:8081`, or empty to turn the listener off). Under
+host networking `:8081` binds every interface of the host. Loading logs each
+such override at INFO (see "Environment variables"). Every route answers GET and
+HEAD, as one line of text (`ok`, or the reason) except `/version` and
+`/metrics`:
 
 | Route | Answers |
 | -- | -- |
 | `/livez` | 200 `ok` while the process serves. |
-| `/readyz` | 200 `ok` when the node is ready, and otherwise 503 with the reason, one of `starting`, `storage failed`, `no raft leader`, `shutting down`. |
-| `/leaderz` | 200 on the raft leader once start-up has finished, whatever the store does and also during the shutdown delay, while the node still serves; on a standalone node, 200 while it is ready. Otherwise 503, with `starting`, `not leader`, or, on a standalone node, the reason it is not ready. |
+| `/readyz` | 200 `ok` when the node is ready, and otherwise 503 with the reason, one of `starting`, `no raft leader`, `shutting down`. |
+| `/leaderz` | 200 on the raft leader once start-up has finished, also during the shutdown delay, while the node still serves; on a memory node, 200 while it is ready. Otherwise 503, with `starting`, `not leader`, or, on a memory node, the reason it is not ready. |
 | `/metrics` | The Prometheus exposition of the node's metrics, in the text format; see "Metrics" in `internal/server/README.md`. |
 | `/version` | The build information as JSON: `version`, `modified`, `go_version` and `platform` always, `commit` when the binary carries a VCS revision, `build_time` (the commit time, RFC 3339; the start-up log line calls it `built`) when it carries one. |
 
 A node is ready when start-up has finished (every listener, the ops listener
-included, is bound, and the store is open), the store serves, and the shutdown
-has not begun. The store serves when a durable standalone store has not failed
-(`storage failed` is the state in which its reads and writes fail until restart,
-which it also logs as an ERROR) and, on raft, when this node knows a leader.
-`/readyz` gives the first reason that applies, in this order: `shutting down`,
-`starting`, `storage failed`, `no raft leader` (`TestReadinessReasonOrder`).
-`/livez` stays 200 whatever the store does: a restart does not mend a raft
-cluster without a leader, and a failed durable store is for the operator to look
-at. An in-memory standalone store cannot fail.
+included, is bound, and the store is open), the shutdown has not begun and, on
+raft, this node knows a leader. `/readyz` gives the first reason that applies,
+in this order: `shutting down`, `starting`, `no raft leader`
+(`TestReadinessReasonOrder`). `/livez` stays 200 while the process serves: a
+restart does not mend a raft cluster without a leader.
 
 The gRPC listener serves `grpc.health.v1.Health` without authentication, though
 with `tls.server.client_ca_file` set the listener itself still asks every
@@ -241,7 +235,7 @@ log records each health call at DEBUG, whatever its answer, so probes write
 nothing at the default `info` (see "Request lifecycle" in
 `internal/transport/README.md`).
 
-Tests: `TestReadinessFollowsStoreAndShutdown`, `TestReadinessReasonOrder`,
+Tests: `TestReadinessFollowsShutdown`, `TestReadinessReasonOrder`,
 `TestLeaderProbeOnRaft`, `TestOpsEndpointsNeedNoAuth`,
 `TestOpsListenerDisabledWhenAddrEmpty`, `TestGRPCHealthFollowsReadiness`.
 
@@ -363,10 +357,7 @@ default or have no value, as the section on it says.
 | `cors.expose_headers` | `SOLTI_CORS_EXPOSE_HEADERS` | list | X-Request-Id, ETag |
 | `cors.allow_credentials` | `SOLTI_CORS_ALLOW_CREDENTIALS` | bool | false |
 | `cors.max_age` | `SOLTI_CORS_MAX_AGE` | duration | 12h |
-| `cluster.standalone.ephemeral` | `SOLTI_CLUSTER_STANDALONE_EPHEMERAL` | bool | false |
-| `cluster.standalone.data_dir` | `SOLTI_CLUSTER_STANDALONE_DATA_DIR` | string | data/podium |
-| `cluster.standalone.snapshot_threshold` | `SOLTI_CLUSTER_STANDALONE_SNAPSHOT_THRESHOLD` | integer | 4096 |
-| `cluster.backend` | `SOLTI_CLUSTER_BACKEND` | string | standalone |
+| `cluster.backend` | `SOLTI_CLUSTER_BACKEND` | string | memory |
 | `cluster.raft.node_id` | `SOLTI_CLUSTER_RAFT_NODE_ID` | string | empty |
 | `cluster.raft.bind_addr` | `SOLTI_CLUSTER_RAFT_BIND_ADDR` | string | empty |
 | `cluster.raft.advertise_addr` | `SOLTI_CLUSTER_RAFT_ADVERTISE_ADDR` | string | empty |
@@ -432,12 +423,12 @@ tls:
     key_file:  /etc/solti/tls/cp-client.key
 ```
 
-In standalone, `tls.client.ca_file` only verifies the agents' endpoints. In a
-raft cluster it also holds the CA of the nodes' server certificates, and with
-`client_ca_file` set each node needs a `tls.client.cert_file` and `key_file`
-that chain to the agents' CA, or every sync that reaches a follower fails: a
-follower forwards to the leader as a client of `tls.client`, as the paragraphs
-below say.
+On the memory backend, `tls.client.ca_file` only verifies the agents' endpoints.
+In a raft cluster it also holds the CA of the nodes' server certificates, and
+with `client_ca_file` set each node needs a `tls.client.cert_file` and
+`key_file` that chain to the agents' CA, or every sync that reaches a follower
+fails: a follower forwards to the leader as a client of `tls.client`, as the
+paragraphs below say.
 
 Env equivalents: `SOLTI_TLS_SERVER_CERT_FILE`, `SOLTI_TLS_CLIENT_CA_FILE`, etc.
 
@@ -465,7 +456,7 @@ follower that forwards a sync too, so each node's `tls.client.cert_file` and
 sync that reaches a follower fails, 502 over HTTP and `leader unreachable` over
 gRPC, and each raft node logs one WARN at start that says so. A follower dials
 the leader directly, never through the proxy that `HTTP_PROXY` or `HTTPS_PROXY`
-names. Standalone forwards nothing, and logs neither WARN.
+names. The memory backend forwards nothing, and logs neither WARN.
 
 ## Agent authentication
 
@@ -563,23 +554,22 @@ byte, which the message of every token after generation 0 holds, so the ID is
 part of no agent's token. It tells two secrets apart and no token follows from
 it, though, like any token, it would confirm a guess of a weak secret offline.
 Podium derives the token again from the secret, the agent ID and the generation
-to check each sync and to call the agent, so with the secret set no file in the
-data directory holds the token of an agent enrolled under it, after a snapshot
-too (`TestDerivedCredentialStoresNoToken`, in `internal/storage/durable` and
-`internal/raft`). An agent that enrolls without the secret gets a stored
-credential, which holds the token it chose, and every credential an older
-version enrolled is a stored one too, as it stored every token, one derived from
-a secret included. A stored token is compared as it always was, whether a secret
-is set or not. A stored token that is the generation-0 token of its agent ID
-under the current secret, as `podium agent-token` printed it for agents
-provisioned before this version, becomes a derived credential: at the agent's
-next sync, in the transaction that checks it, and at each start of standalone
-and each leadership term of a raft node, for every such credential
-(`TestLegacyRowsConvertedAtStart`, in `internal/app`, shows a standalone start).
-A stored token that an earlier secret derived stays stored: it keeps working,
-and whoever holds that earlier secret can derive it. Each such start and term
-then logs, when there are any, at WARN with `stored_credentials`, how many
-stored credentials are left,
+to check each sync and to call the agent, so with the secret set no file in a
+raft node's data directory holds the token of an agent enrolled under it, after
+a snapshot too (`TestDerivedCredentialStoresNoToken`, in `internal/raft`). An
+agent that enrolls without the secret gets a stored credential, which holds the
+token it chose, and every credential an older version enrolled is a stored one
+too, as it stored every token, one derived from a secret included. A stored
+token is compared as it always was, whether a secret is set or not. A stored
+token that is the generation-0 token of its agent ID under the current secret,
+as `podium agent-token` printed it for agents provisioned before this version,
+becomes a derived credential: at the agent's next sync, in the transaction that
+checks it, and at each start of a memory node and each leadership term of a raft
+node, for every such credential (`TestSweepCredentials`, in
+`internal/service/agent`). A stored token that an earlier secret derived stays
+stored: it keeps working, and whoever holds that earlier secret can derive it.
+Each such start and term then logs, when there are any, at WARN with
+`stored_credentials`, how many stored credentials are left,
 `agent credentials: stored tokens are left, kept raw in podium's state and in its backups: tokens agents chose while no enrollment secret was set, and tokens an earlier secret derived, which stay valid and which that secret still derives; resetting an agent's credential (POST /api/v1/agents/{id}/credential) while an enrollment secret is set moves it to a derived credential`,
 and, at ERROR with `unusable_credentials`, how many derived credentials it
 cannot use, because no secret is set or they derive from another one; a count of
@@ -589,10 +579,9 @@ counts anything.
 Upgrading leaves the raw tokens already written where they are: in the backups
 taken before the upgrade; in the snapshot and the log entries written before it,
 until the store compacts them; and in the freed pages of the database files that
-held them, until bbolt writes over those. Standalone compacts at its next
-snapshot (see "Standalone storage"). A raft node drops log entries at a snapshot
-but keeps the last `cluster.raft.trailing_logs` of them, and keeps its two
-latest snapshots (see "Log compaction" in `internal/raft/README.md`). Take a
+held them, until bbolt writes over those. A raft node drops log entries at a
+snapshot but keeps the last `cluster.raft.trailing_logs` of them, and keeps its
+two latest snapshots (see "Log compaction" in `internal/raft/README.md`). Take a
 fresh backup once the store has compacted past the upgrade, and drop the older
 ones; a copy of a database file copies its freed pages too, which may still hold
 some of those bytes.
@@ -790,7 +779,8 @@ its own IP. See "Forwarding and trusted hosts" in `internal/raft/README.md`.
 
 gRPC discovery reads the client IP from the `x-forwarded-for` metadata of a
 trusted host only in raft mode, where a follower sets it when it forwards a
-sync. In standalone it ignores this setting and always uses the peer address.
+sync. On the memory backend it ignores this setting and always uses the peer
+address.
 
 ## Browser sessions
 
@@ -831,8 +821,8 @@ listener") answers 200 on the leader only and needs no credentials, so a
 balancer can route to the leader with it: keep rotation off in raft mode unless
 such routing is in place. See "Browsers and `auth.rotate_refresh`" in the
 runbook of `internal/raft/README.md`. Without rotation a refresh only reads, and
-works on every node, as does a request whose access token is still valid.
-Standalone is unaffected.
+works on every node, as does a request whose access token is still valid. The
+memory backend is unaffected.
 
 In raft mode every node checks an access token, and refreshes a session without
 rotation, against its own store, which follows the leader's with a lag: a
@@ -970,15 +960,13 @@ When the user table is empty, the first start creates the administrator
   never written to a file or a log. When podium stores it, a
   `bootstrap-admin-password` file left by an earlier generated seed is removed
   and its path logged.
-- Without it podium generates a password and writes it, on one line with mode
-  0600, to `bootstrap-admin-password` in the data directory of the selected
-  backend: `cluster.standalone.data_dir` (default `data/podium`), or
-  `cluster.raft.data_dir` in raft mode, where the file sits on the node whose
-  leadership term seeded, the node whose log line gives its `node_id`. The log
-  names only that path, made absolute.
-- In ephemeral mode (`cluster.standalone.ephemeral: true`) there is no data
-  directory, so the generated password is logged once, at WARN, with the prefix
-  `ephemeral mode:`. No other mode logs a password.
+- Without it, a raft node generates a password and writes it, on one line with
+  mode 0600, to `bootstrap-admin-password` in `cluster.raft.data_dir`, where the
+  file sits on the node whose leadership term seeded, the node whose log line
+  gives its `node_id`. The log names only that path, made absolute.
+- On the memory backend there is no data directory, so the generated password is
+  logged once, at WARN, with the prefix `ephemeral mode:`. No other mode logs a
+  password.
 
 Once users exist the variable is ignored, with one WARN per start: remove it
 from the environment after the first start. A raft node seeds at the start of
@@ -987,36 +975,35 @@ for a leader at start. It refuses a value that breaks the policy at start, even
 with users present, and logs the WARN about an ignored value at every term. See
 `internal/bootstrap/README.md`.
 
-## Standalone storage
+## Memory backend
 
 ```yaml
 cluster:
-  standalone:
-    data_dir: /var/lib/solti/podium   # default data/podium
-    snapshot_threshold: 4096          # log entries that start a snapshot
+  backend: memory   # the default
 ```
 
-The standalone backend keeps its state in `podium.db` under
-`cluster.standalone.data_dir` (env `SOLTI_CLUSTER_STANDALONE_DATA_DIR`), unless
-`cluster.standalone.ephemeral: true` keeps it in memory. A blank `data_dir`
-without that flag fails configuration loading.
-
-`cluster.standalone.snapshot_threshold` (env
-`SOLTI_CLUSTER_STANDALONE_SNAPSHOT_THRESHOLD`, default 4096) is the number of
-log entries after which the store writes its state as a snapshot and truncates
-the log; 16 MiB of entries does the same. Zero keeps the default; a negative
-value fails configuration loading. See `internal/storage/durable/README.md`.
+The `memory` backend keeps the state of one node in memory, and loses it when
+the process stops: podium writes nothing of its own state to a file, and no
+setting of it asks for a directory. It logs one WARN at start that says so. The
+file store that the earlier `standalone` backend kept in `podium.db`, and its
+settings `cluster.standalone.data_dir`, `cluster.standalone.ephemeral` and
+`cluster.standalone.snapshot_threshold`, are gone: a file that holds any of
+them, or a variable such as `SOLTI_CLUSTER_STANDALONE_DATA_DIR`, fails loading,
+and so does `cluster.backend: standalone`, whose error names the two backends
+there are, `memory, raft`. Moving to a cluster that keeps its state on disk is
+`cluster.backend: raft`, whose node keeps its log and snapshots in
+`cluster.raft.data_dir`.
 
 ## Cluster
 
 `cluster.backend: raft` runs podium as one node of a raft cluster. Only that
-backend reads `cluster.raft` and `cluster.discovery`: standalone ignores them,
-valid or not. To set up and run a cluster, follow "Runbook: a three-node
-cluster" in `internal/raft/README.md`: certificates, network, the first start,
-restarts and failover, adding and removing members, the routing of browsers, and
-upgrades. Every node serves reads from its own store, which can lag the
-leader's: "Reads on a follower" there says what a lagging, cut-off or joining
-node serves, revocations included.
+backend reads `cluster.raft` and `cluster.discovery`: memory ignores them, valid
+or not. To set up and run a cluster, follow "Runbook: a three-node cluster" in
+`internal/raft/README.md`: certificates, network, the first start, restarts and
+failover, adding and removing members, the routing of browsers, and upgrades.
+Every node serves reads from its own store, which can lag the leader's: "Reads
+on a follower" there says what a lagging, cut-off or joining node serves,
+revocations included.
 
 ```yaml
 cluster:
@@ -1079,7 +1066,6 @@ of the whole state, not from log entries. The defaults are hashicorp/raft's:
 `120s`, 8192 and 10240. Zero keeps the default; a negative value fails
 configuration loading, and so does an interval under 5 ms, the least that
 hashicorp/raft accepts, which has no other limit on the three settings. They are
-not `cluster.standalone.snapshot_threshold`, which is the standalone store's.
 hashicorp/raft's own logs, of its elections, snapshots and transport, go through
 podium's logger like any other line, at their own INFO, WARN and ERROR levels,
 with `profile=raft` and `component` (`raft`, `snapshot` or `raft-net`); its
@@ -1193,7 +1179,7 @@ and its default, and the same CA bundle at another path. Overlapping proxy
 prefixes are not merged, though: write the lists alike on every node. A raft
 node reads `tls.server.client_ca_file` before it starts: a bundle it cannot
 read, or that holds no certificate, fails the start with the same error as it
-does in standalone.
+does on the memory backend.
 
 Whoever reads the fingerprint and knows the other settings can confirm a guess
 of a weak `jwt_secret` or `enroll_secret` offline, as the fingerprint of every
@@ -1312,13 +1298,13 @@ configuration loading fails.
 `data_dir` nor anything in it may carry group or other permission bits. A node
 makes a missing `data_dir` and its `snapshots` directory with mode 0700, and
 refuses to start, before it opens anything there, when either is open to its
-group or others or is a symlink, written with a trailing slash or not, as the
-standalone store refuses its directory. The BoltDB files are 0600. Each snapshot
-directory is made 0700 and its files 0600 as soon as hashicorp/raft creates
-them, before any state is written into them, and they stay so once the snapshot
-is in place, a snapshot a leader installs on the node included; snapshots
-already there, such as an earlier version's, are made private at start. Volume
-settings that add group permissions to `data_dir` make the node refuse to start.
+group or others or is a symlink, written with a trailing slash or not. The
+BoltDB files are 0600. Each snapshot directory is made 0700 and its files 0600
+as soon as hashicorp/raft creates them, before any state is written into them,
+and they stay so once the snapshot is in place, a snapshot a leader installs on
+the node included; snapshots already there, such as an earlier version's, are
+made private at start. Volume settings that add group permissions to `data_dir`
+make the node refuse to start.
 
 ### Upgrading a raft node
 
@@ -1363,16 +1349,16 @@ Earlier versions also ran the transport on plain TCP and made `data_dir` and
   directory that is still open to the group or others; it makes the snapshots in
   it private by itself at its next start.
 
-This version also adds the permissions `cluster:get` and `cluster:manage`, in
-standalone too, which the Admin role gets when bootstrap reconciles it, and a
-user who holds every permission directly, not through the Admin role, needs the
-two new permissions to keep counting as an administrator.
+This version also adds the permissions `cluster:get` and `cluster:manage`, on
+the memory backend too, which the Admin role gets when bootstrap reconciles it,
+and a user who holds every permission directly, not through the Admin role,
+needs the two new permissions to keep counting as an administrator.
 
 Versions from the one with the credential reset and the agent delete add the
-permissions `agents:reset` and `agents:delete` the same way, in standalone too:
-the Admin role gets them when bootstrap reconciles it, no other built-in role
-holds them, and a user who holds every permission directly, not through the
-Admin role, does not gain them and needs both to keep counting as an
+permissions `agents:reset` and `agents:delete` the same way, on the memory
+backend too: the Admin role gets them when bootstrap reconciles it, no other
+built-in role holds them, and a user who holds every permission directly, not
+through the Admin role, does not gain them and needs both to keep counting as an
 administrator.
 
 This version's nodes check their settings against the leader's (see "Settings

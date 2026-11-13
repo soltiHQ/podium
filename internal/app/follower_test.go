@@ -29,7 +29,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/httpcookie"
 	"github.com/soltiHQ/control-plane/internal/cluster"
-	"github.com/soltiHQ/control-plane/internal/cluster/standalone"
+	"github.com/soltiHQ/control-plane/internal/cluster/memory"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
@@ -759,7 +759,7 @@ func TestForwardedWriteCarriesTheCORSHeadersOnce(t *testing.T) {
 	cfg := config.Default()
 	cfg.CORS.AllowOrigins = []string{origin}
 	cfg.CORS.AllowCredentials = true
-	leader := httptest.NewServer(mainHandlerOf(t, cfg, inmemory.New(), zerolog.Nop(), standalone.NewLeadership(), nil))
+	leader := httptest.NewServer(mainHandlerOf(t, cfg, inmemory.New(), zerolog.Nop(), memory.NewLeadership(), nil))
 	t.Cleanup(leader.Close)
 	_, port, err := net.SplitHostPort(leader.Listener.Addr().String())
 	if err != nil {

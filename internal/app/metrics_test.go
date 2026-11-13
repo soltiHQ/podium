@@ -5,15 +5,12 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -149,7 +146,6 @@ func TestMetricsExposition(t *testing.T) {
 		`podium_agents{status="active"} 1`,
 		`podium_agents{status="inactive"} 0`,
 		`podium_rollouts{status="pending"} 0`,
-		`podium_store_failed 0`,
 		`podium_http_requests_total{code="200",method="GET",route="/login",server="ui"} 1`,
 		`podium_http_requests_total{code="200",method="POST",route="/api/v1/discovery/sync",server="discovery"} 1`,
 		`podium_grpc_requests_total{code="OK",method="/solti.discover.v1.DiscoverService/Sync"} 1`,
@@ -162,7 +158,7 @@ func TestMetricsExposition(t *testing.T) {
 	}
 	for _, absent := range []string{"podium_raft_"} {
 		if strings.Contains(body, absent) {
-			t.Errorf("a standalone node exposes %s", absent)
+			t.Errorf("a memory node exposes %s", absent)
 		}
 	}
 	// The build info names this binary, and the exposition holds no secret.
@@ -421,32 +417,5 @@ func TestRaftMetricsOnLeaderAndFollower(t *testing.T) {
 		if n != leader && commits != 0 {
 			t.Errorf("%s: a follower timed %v raft commits, want 0", n.id, commits)
 		}
-	}
-}
-
-// The failed-store gauge follows the hook that /readyz reads, at each scrape, and a
-// durable store's commits are timed, those of the seed at start included.
-func TestStoreFailedGauge(t *testing.T) {
-	var broken atomic.Bool
-	r := startApp(t, func(c *config.Config) {
-		c.Cluster.Standalone.Ephemeral = false
-		c.Cluster.Standalone.DataDir = filepath.Join(t.TempDir(), "state")
-	}, func(a *App) {
-		a.ready.failure = func() error {
-			if broken.Load() {
-				return errors.New("injected durable failure")
-			}
-			return nil
-		}
-	})
-	waitFor(t, 10*time.Second, "the ops listener binds", func() bool { return r.app.ops.Addr() != "" })
-	for _, want := range []float64{0, 1, 0} {
-		broken.Store(want == 1)
-		if v, ok := series(scrapeOps(t, r.app.ops.Addr()), "podium_store_failed"); !ok || v != want {
-			t.Fatalf("podium_store_failed = %v, %v; want %v", v, ok, want)
-		}
-	}
-	if v, _ := series(scrapeOps(t, r.app.ops.Addr()), `podium_store_commit_duration_seconds_count{backend="durable"}`); v < 1 {
-		t.Fatalf("durable commits timed: %v, want the commits of the seed at least", v)
 	}
 }

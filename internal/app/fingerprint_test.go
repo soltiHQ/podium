@@ -227,7 +227,7 @@ func TestFingerprintChangesWithEachSetting(t *testing.T) {
 
 // A raft node reads the agents' CA bundle as the discovery listeners build
 // their pool from it, so a bundle that cannot be read, or holds no
-// certificate, fails the start as it does in standalone: with the error of
+// certificate, fails the start as it does in memory: with the error of
 // tlsconf, which names the bundle. In raft mode New fails before the raft node
 // starts.
 func TestUnreadableAgentCABundleFailsTheStart(t *testing.T) {
@@ -273,7 +273,7 @@ func TestUnreadableAgentCABundleFailsTheStart(t *testing.T) {
 // digests, and builds the pool of its agent-facing listeners from the
 // certificates it read: however the file changes after that read, the
 // listeners verify agents against the certificates the node's digest names.
-// Standalone builds the pool from the file, as it always did.
+// Memory builds the pool from the file, as it always did.
 func TestRaftNodeReadsTheAgentCABundleOnce(t *testing.T) {
 	files := newSharedFiles(t)
 	cfg := sharedBase(files)
@@ -306,6 +306,6 @@ func TestRaftNodeReadsTheAgentCABundleOnce(t *testing.T) {
 		t.Fatal("the raft node's listeners do not verify agents against the certificates it read")
 	}
 	if _, err := agentListenerTLS(cfg, false, nil); err == nil || !strings.Contains(err.Error(), "no such file") {
-		t.Fatalf("standalone's listener TLS once the bundle is gone = %v, want the error of the file it reads", err)
+		t.Fatalf("memory's listener TLS once the bundle is gone = %v, want the error of the file it reads", err)
 	}
 }

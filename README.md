@@ -4,8 +4,9 @@ podium is the control plane of solti. Agents built with the
 [solti SDK](https://github.com/soltiHQ/sdk) register with it and report what
 they can run; operators use its web UI and REST API to write task specs, deploy
 them to the agents they target, and follow the tasks and their runs. A podium
-node runs standalone, on a durable store in one file, or as a node of a
-[hashicorp/raft](https://github.com/hashicorp/raft) cluster.
+node keeps its state in memory, on its own, or runs as a node of a
+[hashicorp/raft](https://github.com/hashicorp/raft) cluster, which keeps a log
+on disk.
 
 This is the operator's guide: install, configure, run, observe, back up,
 upgrade, secure, develop and release. Each section is short and links to the
@@ -19,7 +20,7 @@ agents over HTTP       --->  :8082   discovery             \
 agents over gRPC       --->  :50051  discovery              >--  podium  --->  each agent's endpoint
 probes, Prometheus     --->  :8081   ops                   /       |           (gRPC or HTTP)
                                                                    |
-                                    state: podium.db (standalone) or a raft cluster
+                                    state: memory, or a raft cluster
 ```
 
 - **Discovery.** Each agent syncs with podium over HTTP
@@ -49,11 +50,13 @@ probes, Prometheus     --->  :8081   ops                   /       |           (
   decide what each of them may read and change. The first start creates the
   administrator `admin`.
 
-`cluster.backend: standalone`, the default, keeps the state in one bbolt file,
-`podium.db`, in `cluster.standalone.data_dir`. `cluster.backend: raft` runs the
-node as a member of a raft cluster: every node holds the whole state and serves
-reads from its own copy, and a follower forwards the writes it gets to the
-leader. See [Raft cluster](#raft-cluster).
+`cluster.backend: memory`, the default, keeps the state in memory of one node
+and loses it when the process stops: podium writes nothing of its own state to a
+file. `cluster.backend: raft` runs the node as a member of a raft cluster: every
+node holds the whole state in memory and serves reads from its own copy, a
+follower forwards the writes it gets to the leader, and the raft log and
+snapshots are kept in `cluster.raft.data_dir`. See
+[Raft cluster](#raft-cluster).
 
 ## Install
 
@@ -85,18 +88,21 @@ sudo mv "$ASSET" /usr/local/bin/podium
 podium version
 ```
 
-The binary embeds the web UI. Unless configured otherwise it keeps its state in
-`data/podium` under its working directory, so a service sets an absolute
-`cluster.standalone.data_dir` (see [Data directory](#data-directory)).
+The binary embeds the web UI. Unless configured otherwise it runs on the
+`memory` backend, which keeps its state in memory and loses it at exit; a
+service that must keep its state runs a raft node, with an absolute
+`cluster.raft.data_dir` (see [Data directory](#data-directory)).
 
 ### Container image
 
 `ghcr.io/soltihq/podium:vX.Y.Z` is built for linux/amd64 and linux/arm64, and
 each release without a pre-release suffix also moves
 `ghcr.io/soltihq/podium:latest` to its image. The image is distroless, without a
-shell. It runs `/podium` as uid 65532, sets
-`SOLTI_CLUSTER_STANDALONE_DATA_DIR=/var/lib/podium`, which is a volume, and
-`SOLTI_OPS_ADDR=:8081`, and exposes 8080, 8081, 8082 and 50051.
+shell. It runs `/podium` as uid 65532, sets `SOLTI_OPS_ADDR=:8081`, and exposes
+8080, 8081, 8082 and 50051. It declares no volume: on the default `memory`
+backend the state is lost with the container. A raft node's
+`cluster.raft.data_dir` is a directory it mounts, such as the image's
+`/var/lib/podium`.
 
 ```sh
 umask 077
@@ -105,7 +111,6 @@ printf 'SOLTI_AGENT_AUTH_ENROLL_SECRET=%s\n' "$(openssl rand -hex 32)" >> podium
 
 docker run -d --name podium --env-file podium.env --stop-timeout 60 \
   -p 8080:8080 -p 8082:8082 -p 50051:50051 -p 127.0.0.1:8081:8081 \
-  -v podium-data:/var/lib/podium \
   ghcr.io/soltihq/podium:vX.Y.Z
 ```
 
@@ -114,53 +119,42 @@ under the old one, and a changed JWT secret ends every access token and device
 cookie signed with the old one. `--stop-timeout 60` gives podium 60 seconds from
 SIGTERM to SIGKILL: a graceful stop takes up to `server.shutdown_delay` (0s by
 default), plus `server.shutdown_timeout` (15s), plus the 30 seconds in which the
-hubs, the agent connections and the store close (see [Stop](#stop)): 45 seconds
-with the defaults and 50 with a delay of 5s, where Docker's default of 10
-seconds, and compose's, would kill it in the middle of the shutdown. Raise it
+hubs, the agent connections and the raft node close (see [Stop](#stop)): 45
+seconds with the defaults and 50 with a delay of 5s, where Docker's default of
+10 seconds, and compose's, would kill it in the middle of the shutdown. Raise it
 with the delay or the timeout; in compose it is `stop_grace_period`. The ops
 port is published on the host's loopback only, as its routes need no
 credentials: `docker run -P`, or a compose `ports:` entry such as `8081:8081`,
 publishes it on every interface of the host, and with it the unauthenticated ops
 listener. The image's `/var/lib/podium` belongs to uid 65532 with mode 0700, and
-a new named volume such as `podium-data` starts as a copy of it. A bind mount
-must be a directory that uid 65532 owns, with mode 0700. Every setting can go in
-the container's environment; a configuration file passed with `--config` must be
+a new named volume such as `podium-data` mounted there starts as a copy of it,
+which a raft node can use as its `cluster.raft.data_dir`. A bind mount must be a
+directory that uid 65532 owns, with mode 0700. Every setting can go in the
+container's environment; a configuration file passed with `--config` must be
 readable by uid 65532.
 
-In the image, `SOLTI_OPS_ADDR` (`:8081`) and `SOLTI_CLUSTER_STANDALONE_DATA_DIR`
-(`/var/lib/podium`) come from the image's environment, and the environment wins
-over a file: the `ops.addr` and `cluster.standalone.data_dir` of a configuration
-file have no effect there. Set the variables to change them:
-`-e SOLTI_OPS_ADDR=127.0.0.1:8081`, or `-e SOLTI_OPS_ADDR=` (empty) to turn the
-ops listener off, and `-e SOLTI_CLUSTER_STANDALONE_DATA_DIR=...`, which must
-name a directory that uid 65532 owns with mode 0700, as the image's
-`/var/lib/podium` is, or a missing one that podium can create (see
-[Data directory](#data-directory)). Under host networking (`--network host`, or
-Kubernetes `hostNetwork`), `:8081` binds every interface of the host. podium
-logs one INFO line for each setting of the file that a variable overrides, with
-the setting's key and the variable.
+In the image, `SOLTI_OPS_ADDR` (`:8081`) comes from the image's environment, and
+the environment wins over a file: the `ops.addr` of a configuration file has no
+effect there. Set the variable to change it: `-e SOLTI_OPS_ADDR=127.0.0.1:8081`,
+or `-e SOLTI_OPS_ADDR=` (empty) to turn the ops listener off. Under host
+networking (`--network host`, or Kubernetes `hostNetwork`), `:8081` binds every
+interface of the host. podium logs one INFO line for each setting of the file
+that a variable overrides, with the setting's key and the variable.
 
 ### Data directory
 
-podium keeps all its state in its data directory: `cluster.standalone.data_dir`
-in standalone, `data/podium` under the working directory by default, and
-`cluster.raft.data_dir` in raft mode. It makes a missing directory with mode
+On the `memory` backend podium writes nothing of its own state to a file. A raft
+node keeps its log, its stable store and its snapshots in
+`cluster.raft.data_dir`, which it needs: it makes a missing directory with mode
 0700, and refuses to start on one that its group or others may access, or that
 is a symlink: volume settings that add group permissions keep podium from
-starting. Create the `/var/lib/podium` of the minimal configuration below before
-the first start, mode 0700 and owned by the user that runs podium: podium makes
-a missing directory only where its user may create one. The files in it are
-0600: `podium.db` in standalone; in raft mode the raft log and stable store,
+starting. Create the directory before the first start, mode 0700 and owned by
+the user that runs podium: podium makes a missing directory only where its user
+may create one. The files in it are 0600: the raft log and stable store,
 `raft-log.bolt` and `raft-stable.bolt`, next to a `snapshots` directory, 0700. A
 generated administrator password stays in `bootstrap-admin-password`, also 0600,
 until you delete it. Keep the directory across restarts and give each node its
-own: never share a standalone directory between replicas, nor reuse it as a raft
-`data_dir`. A lock on `podium.db` keeps a second process off it. See
-[Durable standalone storage](internal/storage/durable/README.md) and
-[Raft data directory](internal/config/README.md#raft-data-directory).
-
-For development only, `cluster.standalone.ephemeral: true` keeps the state in
-memory instead, and loses it at exit.
+own. See [Raft data directory](internal/config/README.md#raft-data-directory).
 
 ## Configure
 
@@ -197,14 +191,12 @@ its variable and its default.
 Generate the two secrets with `openssl rand -hex 32` and keep them: every node
 of a raft cluster needs the same two values.
 
-### A minimal standalone configuration
+### A minimal configuration
 
 ```yaml
 # podium.yaml
 cluster:
-  backend: standalone            # the default
-  standalone:
-    data_dir: /var/lib/podium    # default data/podium, under the working directory
+  backend: memory                # the default: one node, its state in memory
 ops:
   addr: 127.0.0.1:8081           # the default; "" turns the ops listener off
 log:
@@ -221,8 +213,8 @@ podium --config podium.yaml
 
 | Setting | Default | Notes |
 | -- | -- | -- |
-| `cluster.backend` | `standalone` | `raft` for a cluster: see [Raft cluster](#raft-cluster). |
-| `cluster.standalone.data_dir` | `data/podium` | The standalone state: see [Data directory](#data-directory). |
+| `cluster.backend` | `memory` | `raft` for a cluster: see [Raft cluster](#raft-cluster). |
+| `cluster.raft.data_dir` | none | A raft node's log and snapshots: see [Data directory](#data-directory). |
 | `tls.server.cert_file`, `tls.server.key_file`, `tls.server.client_ca_file` | empty | TLS on 8080, 8082 and 50051, and client certificates for agents: see [TLS](#tls). |
 | `trusted_proxies` | empty | The reverse proxies whose `X-Forwarded-For` and `X-Forwarded-Proto` podium believes. |
 | `auth.cookie_secure` | `auto` | `always` when the proxy that terminates TLS cannot be listed in `trusted_proxies`. |
@@ -293,8 +285,8 @@ The first SIGTERM or SIGINT starts a graceful shutdown:
 1. The listeners stop accepting. The requests in flight finish within
    `server.shutdown_timeout`, 15s by default, and a request still running then
    is cut; the event and log streams end.
-1. The hubs, the agent connections and the store or the raft node close, within
-   30 seconds, which is not configurable.
+1. The hubs, the agent connections and the raft node close, within 30 seconds,
+   which is not configurable.
 
 A termination grace period must cover the delay, the timeout and those 30
 seconds. A second signal during the shutdown ends the process at once, with
@@ -408,29 +400,20 @@ log stream sends a keepalive only after 15 seconds. A raft cluster also needs
 
 ## Back up and restore
 
-### Standalone
+### Memory
 
-A backup is a cold copy of the data directory: stop podium cleanly and copy the
-directory, whose state is `podium.db`. To restore, stop podium and put the copy
-back as its data directory, the directory 0700 and `podium.db` 0600, owned by
-the user podium runs as, uid 65532 in the image. Never copy `podium.db` while
-podium runs, and never delete it to get past a failed start: keep the failing
-file and restore a verified backup. See
-[Durable standalone storage](internal/storage/durable/README.md#log-and-snapshots).
-
-```sh
-# podium is stopped; its data_dir is /var/lib/podium
-cp -a /var/lib/podium "/var/backups/podium-$(date +%F)"
-```
+A node on the `memory` backend has nothing to back up: its state is lost when
+the process stops, and a new start begins with an empty one, the first
+administrator included.
 
 ### Raft
 
 Each node keeps the whole state in its own `cluster.raft.data_dir`: the raft log
-and the stable store, which are bbolt files like `podium.db`, and the snapshots.
-Copy a node's `data_dir` only while that node is stopped: as with `podium.db`, a
-live bbolt file is never copied. Copies of the nodes taken at different times
-are not one consistent point to roll back to. Rolling back an upgrade needs a
-copy of every node's `data_dir` taken before the upgrade
+and the stable store, which are bbolt files, and the snapshots. Copy a node's
+`data_dir` only while that node is stopped: a live bbolt file is never copied.
+Copies of the nodes taken at different times are not one consistent point to
+roll back to. Rolling back an upgrade needs a copy of every node's `data_dir`
+taken before the upgrade
 ([Rolling upgrade](internal/raft/README.md#rolling-upgrade)), and no procedure
 to restore a cluster from such copies is documented. A node whose `data_dir` was
 lost or wiped rejoins as a new node: remove it from the cluster, start it with
@@ -481,12 +464,8 @@ snapshot and command codecs, which every earlier version refuses from the first
 write after the upgrade. The way back is the copy taken before the upgrade,
 without what was written since.
 
-- **Standalone.** Stop podium, take a cold copy of the data directory, replace
-  the binary or the image tag, and start. The first start of a version may
-  migrate the file, once, and log a warning. If the new version refuses to
-  start, keep the failing file; to go back, restore the copy and start the
-  earlier version. See
-  [Upgrading](internal/storage/durable/README.md#upgrading).
+- **Memory.** Replace the binary or the image tag and start: the state of the
+  old process is lost, and there is nothing to migrate or to go back to.
 - **Raft.** Read [Rolling upgrade](internal/raft/README.md#rolling-upgrade)
   first. Upgrade one node at a time, and the next only once the last one follows
   the leader again (`GET /api/v1/cluster`), unless the new version writes a
@@ -495,8 +474,8 @@ without what was written since.
   no write. An upgrade from an earlier version also has prerequisites:
   [Upgrading a raft node](internal/config/README.md#upgrading-a-raft-node).
 - **New permissions.** A version that adds permissions gives them to the
-  built-in Admin role, which bootstrap reconciles at each standalone start and
-  at each raft leadership term. A user who holds every permission directly, not
+  built-in Admin role, which bootstrap reconciles at each memory start and at
+  each raft leadership term. A user who holds every permission directly, not
   through the Admin role, does not gain them, and needs them to keep counting as
   an administrator.
 
@@ -510,12 +489,12 @@ answers GET and HEAD with one line of text, but for `/version` and `/metrics`:
 | Route | Answers |
 | -- | -- |
 | `/livez` | 200 `ok` while the process serves. |
-| `/readyz` | 200 `ok` when the node is ready; otherwise 503 with the first reason that applies: `shutting down`, `starting`, `storage failed` or `no raft leader`. |
-| `/leaderz` | 200 on the raft leader once its start-up has finished, also during the shutdown delay, and on a standalone node while it is ready; otherwise 503. |
+| `/readyz` | 200 `ok` when the node is ready; otherwise 503 with the first reason that applies: `shutting down`, `starting` or `no raft leader`. |
+| `/leaderz` | 200 on the raft leader once its start-up has finished, also during the shutdown delay, and on a memory node while it is ready; otherwise 503. |
 | `/version` | The build information as JSON: `version`, `modified`, `go_version` and `platform`, and `commit` and `build_time` when the binary carries them. |
 | `/metrics` | The Prometheus text exposition, below. |
 
-Probe liveness with `/livez`, which stays 200 whatever the store does, and
+Probe liveness with `/livez`, which stays 200 while the process serves, and
 readiness with `/readyz`. A load balancer that must reach the raft leader
 health-checks `/leaderz`. The gRPC listener serves `grpc.health.v1.Health`
 without authentication: the overall service and
@@ -544,8 +523,7 @@ No label carries an agent, user, spec, task or session ID, or a token.
 | `podium_rollouts` | gauge | `status` (`pending`, `synced`, `drift`, `failed`, `unknown`) | Rollouts in this node's store, counted at scrape. |
 | `podium_sync_turns_total` | counter | `outcome` (`answered`, `unanswered`, `local`) | Agent turns of the sync runner, which runs on the leader only. |
 | `podium_sync_turn_duration_seconds` | histogram | none | Their duration. |
-| `podium_store_commit_duration_seconds` | histogram | `backend` (`durable`, `raft`) | A durable commit, or a raft write from its proposal to its answer, which only the leader makes. |
-| `podium_store_failed` | gauge | none | 1 while the store has failed, which `/readyz` reports as `storage failed`. |
+| `podium_store_commit_duration_seconds` | histogram | `backend` (`raft`) | A raft write from its proposal to its answer, which only the leader makes. |
 | `podium_raft_state` | gauge | `state` (`follower`, `candidate`, `leader`, `shutdown`) | Raft nodes only: 1 for the node's state. |
 | `podium_raft_term` | gauge | none | The node's current term. |
 | `podium_raft_last_index` | gauge | none | The index of the last entry in its log. |
@@ -675,12 +653,12 @@ the tasks.
 | `task ci/ui/test` | Runs the UI's Node tests. |
 | `task ci/markdown/fmt`, `task markdown/fix` | Checks, or applies, mdformat on every README. |
 
-To try a build, run it with its state in memory, which logs the generated
+To try a build, run it on the default `memory` backend, which logs the generated
 administrator password at WARN:
 
 ```sh
 task ci/golang/build GOOS=darwin GOARCH=arm64
-SOLTI_AUTH_JWT_SECRET=$(openssl rand -hex 32) SOLTI_CLUSTER_STANDALONE_EPHEMERAL=true ./bin/podium-darwin-arm64
+SOLTI_AUTH_JWT_SECRET=$(openssl rand -hex 32) ./bin/podium-darwin-arm64
 ```
 
 Run one package's tests with
@@ -748,7 +726,6 @@ together: see [Verification](ui/README.md#verification).
 | -- | -- |
 | [internal/config](internal/config/README.md) | Every setting and its variable, the command line, logging, the ops listener, shutdown, TLS, agent authentication and enrollment, trusted proxies, browser sessions, rate limits, storage and cluster settings, and upgrading a raft node. |
 | [internal/raft](internal/raft/README.md) | The runbook of a three-node cluster, transport security, membership, configuration drift, follower reads and writes, and a raft node's metrics and logs. |
-| [internal/storage/durable](internal/storage/durable/README.md) | The standalone store: its file, upgrades, crash safety, backups and performance. |
 | [internal/bootstrap](internal/bootstrap/README.md) | The built-in roles and the first administrator. |
 | [internal/auth](internal/auth/README.md) | Logins, sessions, passwords, login rate limiting and device cookies. |
 | [internal/handler](internal/handler/README.md) | The REST API's routes and permissions, discovery, and the cluster API. |
