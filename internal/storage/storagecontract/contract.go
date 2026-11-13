@@ -133,6 +133,9 @@ func idsOf[T row](rows []T) []string {
 }
 
 // fields compares the fields of a row read back with those of the row written.
+// Every accessor the suite compares returns a nil and an empty slice or map
+// alike, so no comparison normalises them; a nil exit code and a zero time stay
+// apart from 0 and the Unix epoch.
 type fields struct {
 	t    *testing.T
 	what string // the read, named in a failure
@@ -179,7 +182,8 @@ func equalRows[T row](t *testing.T, what string, got, want []T, equal func(*test
 }
 
 // sameIDs fails t unless a read returned the rows want names. The rows of a
-// check that uses it are created at one time, so they list in ID order.
+// check that uses it are created at one time, so they list in the byte order of
+// their IDs.
 func sameIDs[T row](t *testing.T, what string, got []T, err error, want ...string) {
 	t.Helper()
 	if err != nil {

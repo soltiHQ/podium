@@ -11,13 +11,24 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
-// verifiers checks the verifier rows: the round trip, replacement, the rows a
-// store refuses, deletion, the lookup by credential and the deletion of a
-// credential's verifiers.
+// verifiers checks the verifier rows: the round trip of a full and of a
+// minimal row, replacement, the rows a store refuses, deletion, the lookup by
+// credential and the deletion of a credential's verifiers.
 func verifiers(t *testing.T, newStore storeFunc) {
 	t.Run("round trip", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
 		want := fullVerifier(t, "ver-a", "cred-a", 0, minute(0))
+		must(t, s.UpsertVerifier(ctx, want))
+
+		got, err := s.GetVerifier(ctx, want.ID())
+		gotRow(t, "GetVerifier", got, err, want, equalVerifier)
+		got, err = s.GetVerifierByCredential(ctx, want.CredentialID())
+		gotRow(t, "GetVerifierByCredential", got, err, want, equalVerifier)
+	})
+
+	t.Run("round trip of a minimal row", func(t *testing.T) {
+		s, ctx := newStore(t), t.Context()
+		want := minimalVerifier(t, "ver-a", "cred-a", minute(0))
 		must(t, s.UpsertVerifier(ctx, want))
 
 		got, err := s.GetVerifier(ctx, want.ID())
@@ -31,7 +42,8 @@ func verifiers(t *testing.T, newStore storeFunc) {
 		must(t, s.UpsertVerifier(ctx, fullVerifier(t, "ver-a", "cred-a", 0, minute(0))))
 
 		// Every field changes, the credential too: the lookup finds the row by its
-		// new credential alone.
+		// new credential alone. That CreatedAt never changes is a rule for
+		// callers, not the store, which keeps no earlier one.
 		want := fullVerifier(t, "ver-a", "cred-b", 1, minute(5))
 		must(t, s.UpsertVerifier(ctx, want))
 		got, err := s.GetVerifier(ctx, want.ID())
@@ -136,6 +148,20 @@ func fullVerifier(t *testing.T, id, credentialID string, v int, created time.Tim
 	))
 	vf.SetCreatedAt(created)
 	vf.SetUpdatedAt(created.Add(time.Duration(v+1) * time.Minute))
+	return vf
+}
+
+// minimalVerifier is verifier id of credentialID as its constructor builds it,
+// with the auth kind it takes, created at created: no data, and no
+// modification time.
+func minimalVerifier(t *testing.T, id, credentialID string, created time.Time) *model.Verifier {
+	t.Helper()
+	vf, err := model.NewVerifier(id, credentialID, enum.Password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vf.SetCreatedAt(created)
+	vf.SetUpdatedAt(time.Time{})
 	return vf
 }
 

@@ -12,7 +12,8 @@ import (
 )
 
 // agentCredentials checks the agent credential rows, keyed by agent ID: the
-// round trip of both kinds, replacement, the rows a store refuses and deletion.
+// round trip of both kinds, full and minimal, replacement, the rows a store
+// refuses and deletion.
 func agentCredentials(t *testing.T, newStore storeFunc) {
 	t.Run("round trip", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
@@ -30,13 +31,38 @@ func agentCredentials(t *testing.T, newStore storeFunc) {
 		equalRows(t, "ListAgentCredentials", listed, []*model.AgentCredential{stored, derived}, equalAgentCredential)
 	})
 
+	t.Run("round trip of a minimal row", func(t *testing.T) {
+		s, ctx := newStore(t), t.Context()
+		// Each kind as its constructor builds it from the least it takes: the
+		// derived one at generation 0, and both with a zero modification time.
+		stored, err := model.NewStoredAgentCredential("agent-a", "t")
+		must(t, err)
+		derived, err := model.NewDerivedAgentCredential("agent-b", 0, []byte{0})
+		must(t, err)
+		for _, c := range []*model.AgentCredential{stored, derived} {
+			c.SetCreatedAt(minute(0))
+			c.SetUpdatedAt(time.Time{})
+			must(t, s.UpsertAgentCredential(ctx, c))
+		}
+
+		for _, want := range []*model.AgentCredential{stored, derived} {
+			got, err := s.GetAgentCredential(ctx, want.ID())
+			gotRow(t, "GetAgentCredential", got, err, want, equalAgentCredential)
+		}
+		listed, err := listedAgentCredentials(ctx, s)
+		must(t, err)
+		equalRows(t, "ListAgentCredentials", listed, []*model.AgentCredential{stored, derived}, equalAgentCredential)
+	})
+
 	t.Run("upsert replaces", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
 		other := storedAgentCredential(t, "agent-b", 0, minute(3))
 		must(t, errors.Join(s.UpsertAgentCredential(ctx, storedAgentCredential(t, "agent-a", 0, minute(0))), s.UpsertAgentCredential(ctx, other)))
 
 		// A reset replaces a stored credential by a derived one: every field
-		// changes, the creation time too, and the row lists at its new one.
+		// changes, the creation time too, and the row lists at its new one. That
+		// CreatedAt never changes is a rule for callers, not the store, which
+		// keeps no earlier one.
 		want := derivedAgentCredential(t, "agent-a", 1, minute(5))
 		must(t, s.UpsertAgentCredential(ctx, want))
 		got, err := s.GetAgentCredential(ctx, want.ID())

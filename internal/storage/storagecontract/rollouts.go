@@ -12,13 +12,25 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
-// rollouts checks the rollout rows, keyed by spec and agent: the round trip,
-// replacement, the rows a store refuses, deletion, the filter the factory builds
-// and the deletion of a spec's rollouts.
+// rollouts checks the rollout rows, keyed by spec and agent: the round trip of
+// a full and of a minimal row, replacement, the rows a store refuses, deletion,
+// the filter the factory builds and the deletion of a spec's rollouts.
 func rollouts(t *testing.T, newStore storeFunc) {
 	t.Run("round trip", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
 		want := fullRollout(t, "spec-a", "agent-a", 0, minute(0))
+		must(t, s.UpsertRollout(ctx, want))
+
+		got, err := s.GetRollout(ctx, want.ID())
+		gotRow(t, "GetRollout", got, err, want, equalRollout)
+		listed, err := listedRollouts(ctx, s, nil)
+		must(t, err)
+		equalRows(t, "ListRollouts", listed, []*model.Rollout{want}, equalRollout)
+	})
+
+	t.Run("round trip of a minimal row", func(t *testing.T) {
+		s, ctx := newStore(t), t.Context()
+		want := minimalRollout(t, "spec-a", "agent-a", minute(0))
 		must(t, s.UpsertRollout(ctx, want))
 
 		got, err := s.GetRollout(ctx, want.ID())
@@ -34,7 +46,9 @@ func rollouts(t *testing.T, newStore storeFunc) {
 		must(t, errors.Join(s.UpsertRollout(ctx, first), s.UpsertRollout(ctx, other)))
 
 		// Every field but the keys changes, the creation time too: the row lists at
-		// its new one, and the filter sees its new status, not the old.
+		// its new one, and the filter sees its new status, not the old. That
+		// CreatedAt never changes is a rule for callers, not the store, which keeps
+		// no earlier one.
 		want := fullRollout(t, "spec-a", "agent-a", 1, minute(5))
 		must(t, s.UpsertRollout(ctx, want))
 		got, err := s.GetRollout(ctx, want.ID())
@@ -89,9 +103,16 @@ func rollouts(t *testing.T, newStore storeFunc) {
 			failed  = rolloutIn(t, "spec-b", "agent-a", enum.SyncStatusFailed)
 			// Its spec ID has spec-a's as a prefix: an exact comparison tells them apart.
 			longer = rolloutIn(t, "spec-ab", "agent-a", enum.SyncStatusSynced)
+			// Agent IDs that differ from agent-a by a suffix or in case: an exact
+			// comparison tells them apart.
+			longerAgent = rolloutIn(t, "spec-c", "agent-ab", enum.SyncStatusPending)
+			upperAgent  = rolloutIn(t, "spec-c", "AGENT-A", enum.SyncStatusPending)
 		)
-		every := []string{pending.ID(), synced.ID(), failed.ID(), longer.ID()}
-		must(t, errors.Join(s.UpsertRollout(ctx, pending), s.UpsertRollout(ctx, synced), s.UpsertRollout(ctx, failed), s.UpsertRollout(ctx, longer)))
+		every := []string{pending.ID(), synced.ID(), failed.ID(), longer.ID(), longerAgent.ID(), upperAgent.ID()}
+		must(t, errors.Join(
+			s.UpsertRollout(ctx, pending), s.UpsertRollout(ctx, synced), s.UpsertRollout(ctx, failed),
+			s.UpsertRollout(ctx, longer), s.UpsertRollout(ctx, longerAgent), s.UpsertRollout(ctx, upperAgent),
+		))
 		listed, err := listedRollouts(ctx, s, nil)
 		sameIDs(t, "ListRollouts with no filter", listed, err, every...)
 		for _, tc := range []struct {
@@ -103,10 +124,12 @@ func rollouts(t *testing.T, newStore storeFunc) {
 			{"spec", storage.RolloutQueryCriteria{SpecID: "spec-a"}, []string{pending.ID(), synced.ID()}},
 			{"agent", storage.RolloutQueryCriteria{AgentID: "agent-a"}, []string{pending.ID(), failed.ID(), longer.ID()}},
 			{"one status", storage.RolloutQueryCriteria{Statuses: []enum.SyncStatus{enum.SyncStatusSynced}}, []string{synced.ID(), longer.ID()}},
-			{"statuses, any of them", storage.RolloutQueryCriteria{Statuses: []enum.SyncStatus{enum.SyncStatusPending, enum.SyncStatusFailed}}, []string{pending.ID(), failed.ID()}},
+			{"statuses, any of them", storage.RolloutQueryCriteria{Statuses: []enum.SyncStatus{enum.SyncStatusPending, enum.SyncStatusFailed}}, []string{pending.ID(), failed.ID(), longerAgent.ID(), upperAgent.ID()}},
 			{"spec and agent", storage.RolloutQueryCriteria{SpecID: "spec-a", AgentID: "agent-a"}, []string{pending.ID()}},
 			{"spec and status", storage.RolloutQueryCriteria{SpecID: "spec-a", Statuses: []enum.SyncStatus{enum.SyncStatusSynced}}, []string{synced.ID()}},
 			{"a spec ID in another case", storage.RolloutQueryCriteria{SpecID: "SPEC-A"}, nil},
+			{"an agent ID in another case", storage.RolloutQueryCriteria{AgentID: "AGENT-A"}, []string{upperAgent.ID()}},
+			{"an agent ID with a prefix of another's", storage.RolloutQueryCriteria{AgentID: "agent-ab"}, []string{longerAgent.ID()}},
 			{"a status no row has", storage.RolloutQueryCriteria{Statuses: []enum.SyncStatus{enum.SyncStatusDrift}}, nil},
 		} {
 			listed, err := listedRollouts(ctx, s, s.BuildRolloutFilter(tc.c))
@@ -171,6 +194,20 @@ func fullRollout(t *testing.T, specID, agentID string, v int, created time.Time)
 	)
 	r.SetCreatedAt(created)
 	r.SetUpdatedAt(created.Add(time.Duration(v+3) * time.Minute))
+	return r
+}
+
+// minimalRollout is the rollout of specID on agentID as its constructor builds
+// it, at desired generation 0, created at created: every other field zero or
+// the constructor's default, its push, sync and modification times zero.
+func minimalRollout(t *testing.T, specID, agentID string, created time.Time) *model.Rollout {
+	t.Helper()
+	r, err := model.NewRollout(specID, agentID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SetCreatedAt(created)
+	r.SetUpdatedAt(time.Time{})
 	return r
 }
 

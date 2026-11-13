@@ -12,12 +12,25 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
-// agents checks the agent rows: the round trip, replacement, the rows a store
-// refuses, deletion and the filter the factory builds.
+// agents checks the agent rows: the round trip of a full and of a minimal row,
+// replacement, the rows a store refuses, deletion and the filter the factory
+// builds.
 func agents(t *testing.T, newStore storeFunc) {
 	t.Run("round trip", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
 		want := fullAgent(t, "agent-a", 0, minute(0))
+		must(t, s.UpsertAgent(ctx, want))
+
+		got, err := s.GetAgent(ctx, want.ID())
+		gotRow(t, "GetAgent", got, err, want, equalAgent)
+		listed, err := listedAgents(ctx, s, nil)
+		must(t, err)
+		equalRows(t, "ListAgents", listed, []*model.Agent{want}, equalAgent)
+	})
+
+	t.Run("round trip of a minimal row", func(t *testing.T) {
+		s, ctx := newStore(t), t.Context()
+		want := minimalAgent(t, "agent-a", minute(0))
 		must(t, s.UpsertAgent(ctx, want))
 
 		got, err := s.GetAgent(ctx, want.ID())
@@ -33,7 +46,8 @@ func agents(t *testing.T, newStore storeFunc) {
 		must(t, errors.Join(s.UpsertAgent(ctx, first), s.UpsertAgent(ctx, other)))
 
 		// Every field changes, the creation time too: the row lists at its new one,
-		// and the filter sees its new name, not the old.
+		// and the filter sees its new name, not the old. That CreatedAt never
+		// changes is a rule for callers, not the store, which keeps no earlier one.
 		want := fullAgent(t, "agent-a", 1, minute(5))
 		must(t, s.UpsertAgent(ctx, want))
 		got, err := s.GetAgent(ctx, want.ID())
@@ -90,6 +104,10 @@ func agents(t *testing.T, newStore storeFunc) {
 			{"agent-oscar", "papa_quebec", "https://romeo.zone1.example.net:8443", bound},
 			{"agent-sierra", "tango 100%", "https://uniform.zone2.example.net:8443", time.Time{}},
 			{"agent-victor", "papaxquebec", "https://whiskey.zone2.example.net:8443", bound.Add(time.Minute)},
+			{"agent-xray", "Ärzte", "https://yankee.zone3.example.net:8443", bound.Add(time.Minute)},
+			{"agent-zulu", `share a\b`, "https://alfa.zone3.example.net:8443", bound.Add(time.Minute)},
+			// Its name holds a\b without the backslash.
+			{"agent-bravo", "slab", "https://charlie.zone3.example.net:8443", bound.Add(time.Minute)},
 		} {
 			p := agentParams(r.id, 0)
 			p.Name, p.Endpoint = r.name, r.endpoint
@@ -97,7 +115,7 @@ func agents(t *testing.T, newStore storeFunc) {
 			a.SetStaleAt(r.staleAt)
 			must(t, s.UpsertAgent(ctx, a))
 		}
-		every := []string{"agent-kilo", "agent-oscar", "agent-sierra", "agent-victor"}
+		every := []string{"agent-bravo", "agent-kilo", "agent-oscar", "agent-sierra", "agent-victor", "agent-xray", "agent-zulu"}
 		listed, err := listedAgents(ctx, s, nil)
 		sameIDs(t, "ListAgents with no filter", listed, err, every...)
 		for _, tc := range []struct {
@@ -117,6 +135,12 @@ func agents(t *testing.T, newStore storeFunc) {
 			{"query on a field not searched", storage.AgentQueryCriteria{Query: "linux"}, nil},
 			{"query with an underscore, matched as one", storage.AgentQueryCriteria{Query: "papa_q"}, []string{"agent-oscar"}},
 			{"query with a percent sign, matched as one", storage.AgentQueryCriteria{Query: "%"}, []string{"agent-sierra"}},
+			// The spec is silent on case beyond ASCII and on a backslash: the
+			// in-memory store folds case as strings.ToLower does and matches a
+			// backslash as itself, a query that ends in one included.
+			{"query in another case, beyond ASCII", storage.AgentQueryCriteria{Query: "äRZTE"}, []string{"agent-xray"}},
+			{"query with a backslash, matched as one", storage.AgentQueryCriteria{Query: `a\b`}, []string{"agent-zulu"}},
+			{"query that ends in a backslash, matched as one", storage.AgentQueryCriteria{Query: `a\`}, []string{"agent-zulu"}},
 			// A deadline before the bound, by a nanosecond, matches, and so does one
 			// never set; one at the bound or after it does not.
 			{"stale before", storage.AgentQueryCriteria{StaleAtBefore: bound}, []string{"agent-kilo", "agent-sierra"}},
@@ -204,6 +228,21 @@ func newAgent(t *testing.T, p model.AgentParams, v int, created time.Time) *mode
 func fullAgent(t *testing.T, id string, v int, created time.Time) *model.Agent {
 	t.Helper()
 	return newAgent(t, agentParams(id, v), v, created)
+}
+
+// minimalAgent is agent id as its constructor builds it from the ID alone,
+// created at created: every other field zero or the constructor's default, its
+// other times, the last sync and the staleness deadline among them, zero.
+func minimalAgent(t *testing.T, id string, created time.Time) *model.Agent {
+	t.Helper()
+	a, err := model.NewAgent(id, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetCreatedAt(created)
+	a.SetUpdatedAt(time.Time{})
+	a.SetLastSeenAt(time.Time{})
+	return a
 }
 
 // equalAgent compares every accessor of an agent read back with the agent written.

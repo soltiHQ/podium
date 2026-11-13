@@ -12,12 +12,27 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
-// users checks the user rows: the round trip, replacement, the rows a store
-// refuses, deletion, the lookup by subject and the filter the factory builds.
+// users checks the user rows: the round trip of a full and of a minimal row,
+// replacement, the rows a store refuses, deletion, the lookup by subject and
+// the filter the factory builds.
 func users(t *testing.T, newStore storeFunc) {
 	t.Run("round trip", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
 		want := fullUser(t, "user-a", "sub-a", 0, minute(0))
+		must(t, s.UpsertUser(ctx, want))
+
+		got, err := s.GetUser(ctx, want.ID())
+		gotRow(t, "GetUser", got, err, want, equalUser)
+		got, err = s.GetUserBySubject(ctx, want.Subject())
+		gotRow(t, "GetUserBySubject", got, err, want, equalUser)
+		listed, err := listedUsers(ctx, s, nil)
+		must(t, err)
+		equalRows(t, "ListUsers", listed, []*model.User{want}, equalUser)
+	})
+
+	t.Run("round trip of a minimal row", func(t *testing.T) {
+		s, ctx := newStore(t), t.Context()
+		want := minimalUser(t, "user-a", "sub-a", minute(0))
 		must(t, s.UpsertUser(ctx, want))
 
 		got, err := s.GetUser(ctx, want.ID())
@@ -35,7 +50,9 @@ func users(t *testing.T, newStore storeFunc) {
 		must(t, errors.Join(s.UpsertUser(ctx, first), s.UpsertUser(ctx, other)))
 
 		// Every field changes, the subject and the creation time too: the row lists
-		// at its new time, and the lookup finds it by its new subject alone.
+		// at its new time, and the lookup finds it by its new subject alone. That
+		// CreatedAt never changes is a rule for callers, not the store, which keeps
+		// no earlier one.
 		want := fullUser(t, "user-a", "sub-z", 1, minute(5))
 		must(t, s.UpsertUser(ctx, want))
 		got, err := s.GetUser(ctx, want.ID())
@@ -111,6 +128,10 @@ func users(t *testing.T, newStore storeFunc) {
 			{"user-oscar", "sub-papa_quebec", "Romeo Zone1", "sierra@example.net"},
 			{"user-tango", "sub-uniform", "Victor 100%", "whiskey@example.net"},
 			{"user-xray", "sub-papaxquebec", "Yankee", "zulu@example.net"},
+			{"user-alfa", "sub-bravo", "Ärzte", "charlie@example.net"},
+			{"user-delta", "sub-echo", `share a\b`, "foxtrot@example.net"},
+			// Its name holds a\b without the backslash.
+			{"user-golf", "sub-hotel", "slab", "india@example.net"},
 		} {
 			u := fullUser(t, r.id, r.subject, 0, minute(0))
 			u.SetName(r.name)
@@ -118,7 +139,7 @@ func users(t *testing.T, newStore storeFunc) {
 			u.SetUpdatedAt(minute(1))
 			must(t, s.UpsertUser(ctx, u))
 		}
-		every := []string{"user-kilo", "user-oscar", "user-tango", "user-xray"}
+		every := []string{"user-alfa", "user-delta", "user-golf", "user-kilo", "user-oscar", "user-tango", "user-xray"}
 		listed, err := listedUsers(ctx, s, nil)
 		sameIDs(t, "ListUsers with no filter", listed, err, every...)
 		for _, tc := range []struct {
@@ -138,6 +159,12 @@ func users(t *testing.T, newStore storeFunc) {
 			{"query of spaces", storage.UserQueryCriteria{Query: "   "}, every},
 			{"query with an underscore, matched as one", storage.UserQueryCriteria{Query: "papa_q"}, []string{"user-oscar"}},
 			{"query with a percent sign, matched as one", storage.UserQueryCriteria{Query: "%"}, []string{"user-tango"}},
+			// The spec is silent on case beyond ASCII and on a backslash: the
+			// in-memory store folds case as strings.ToLower does and matches a
+			// backslash as itself, a query that ends in one included.
+			{"query in another case, beyond ASCII", storage.UserQueryCriteria{Query: "äRZTE"}, []string{"user-alfa"}},
+			{"query with a backslash, matched as one", storage.UserQueryCriteria{Query: `a\b`}, []string{"user-delta"}},
+			{"query that ends in a backslash, matched as one", storage.UserQueryCriteria{Query: `a\`}, []string{"user-delta"}},
 		} {
 			listed, err := listedUsers(ctx, s, s.BuildUserFilter(tc.c))
 			sameIDs(t, "ListUsers, "+tc.name, listed, err, tc.want...)
@@ -178,6 +205,19 @@ func fullUser(t *testing.T, id, subject string, v int, created time.Time) *model
 	}
 	u.SetCreatedAt(created)
 	u.SetUpdatedAt(created.Add(time.Duration(v+1) * time.Minute))
+	return u
+}
+
+// minimalUser is user id of subject as its constructor builds it, created at
+// created: every other field zero, and no modification time.
+func minimalUser(t *testing.T, id, subject string, created time.Time) *model.User {
+	t.Helper()
+	u, err := model.NewUser(id, subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.SetCreatedAt(created)
+	u.SetUpdatedAt(time.Time{})
 	return u
 }
 

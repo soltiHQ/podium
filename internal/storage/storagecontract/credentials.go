@@ -12,13 +12,27 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
-// credentials checks the credential rows: the round trip, replacement, the rows
-// a store refuses, deletion, the lookup by user and auth kind and the listing
-// of a user's credentials.
+// credentials checks the credential rows: the round trip of a full and of a
+// minimal row, replacement, the rows a store refuses, deletion, the lookup by
+// user and auth kind, and the listing of a user's credentials, past a page.
 func credentials(t *testing.T, newStore storeFunc) {
 	t.Run("round trip", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
 		want := fullCredential(t, "cred-a", "user-a", enum.Password, 0, minute(0))
+		must(t, s.UpsertCredential(ctx, want))
+
+		got, err := s.GetCredential(ctx, want.ID())
+		gotRow(t, "GetCredential", got, err, want, equalCredential)
+		got, err = s.GetCredentialByUserAndAuth(ctx, want.UserID(), want.AuthKind())
+		gotRow(t, "GetCredentialByUserAndAuth", got, err, want, equalCredential)
+		listed, err := s.ListCredentialsByUser(ctx, want.UserID())
+		must(t, err)
+		equalRows(t, "ListCredentialsByUser", listed, []*model.Credential{want}, equalCredential)
+	})
+
+	t.Run("round trip of a minimal row", func(t *testing.T) {
+		s, ctx := newStore(t), t.Context()
+		want := minimalCredential(t, "cred-a", "user-a", minute(0))
 		must(t, s.UpsertCredential(ctx, want))
 
 		got, err := s.GetCredential(ctx, want.ID())
@@ -35,7 +49,8 @@ func credentials(t *testing.T, newStore storeFunc) {
 		must(t, s.UpsertCredential(ctx, fullCredential(t, "cred-a", "user-a", enum.Password, 0, minute(0))))
 
 		// Every field changes, the user and the auth kind too: the lookups find
-		// the row by its new keys alone.
+		// the row by its new keys alone. That CreatedAt never changes is a rule
+		// for callers, not the store, which keeps no earlier one.
 		want := fullCredential(t, "cred-a", "user-b", enum.APIKey, 1, minute(5))
 		must(t, s.UpsertCredential(ctx, want))
 		got, err := s.GetCredential(ctx, want.ID())
@@ -142,6 +157,29 @@ func credentials(t *testing.T, newStore storeFunc) {
 		}
 		expect(t, outcome{"ListCredentialsByUser of an empty user ID", errOf(s.ListCredentialsByUser(ctx, "")), storage.ErrInvalidArgument})
 	})
+
+	t.Run("listing by user beyond a page", func(t *testing.T) {
+		s, ctx := newStore(t), t.Context()
+		// More credentials of one user than the largest page holds, written in one
+		// transaction: the listing is not a page, it returns them all, so a store
+		// that answers with one page, of the default size or the largest, fails.
+		var rows []written
+		must(t, s.WithTx(ctx, func(tx storage.Storage) error {
+			for i := range storage.MaxListLimit + 1 {
+				c := fullCredential(t, fmt.Sprintf("cred-%03d", i), "user-a", enum.Password, 0, minute(i))
+				if err := tx.UpsertCredential(ctx, c); err != nil {
+					return err
+				}
+				rows = append(rows, written{c.ID(), c.CreatedAt()})
+			}
+			return nil
+		}))
+		got, err := s.ListCredentialsByUser(ctx, "user-a")
+		must(t, err)
+		if ids, want := idsOf(got), listed(rows); !slices.Equal(ids, want) {
+			t.Errorf("ListCredentialsByUser: %d rows, want all %d in the listing order", len(ids), len(want))
+		}
+	})
 }
 
 // fullCredential is credential id of userID and auth with every other field set
@@ -158,6 +196,20 @@ func fullCredential(t *testing.T, id, userID string, auth enum.Auth, v int, crea
 	))
 	c.SetCreatedAt(created)
 	c.SetUpdatedAt(created.Add(time.Duration(v+1) * time.Minute))
+	return c
+}
+
+// minimalCredential is credential id of userID as its constructor builds it
+// from those alone, created at created: no auth kind, no secret, and no
+// modification time.
+func minimalCredential(t *testing.T, id, userID string, created time.Time) *model.Credential {
+	t.Helper()
+	c, err := model.NewCredential(id, userID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetCreatedAt(created)
+	c.SetUpdatedAt(time.Time{})
 	return c
 }
 

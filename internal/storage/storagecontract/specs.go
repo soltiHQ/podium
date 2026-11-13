@@ -12,12 +12,25 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
-// specs checks the spec rows: the round trip, replacement, the rows a store
-// refuses, deletion and the filter the factory builds.
+// specs checks the spec rows: the round trip of a full and of a minimal row,
+// replacement, the rows a store refuses, deletion and the filter the factory
+// builds.
 func specs(t *testing.T, newStore storeFunc) {
 	t.Run("round trip", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
 		want := fullSpec(t, "spec-a", 0, minute(0))
+		must(t, s.UpsertSpec(ctx, want))
+
+		got, err := s.GetSpec(ctx, want.ID())
+		gotRow(t, "GetSpec", got, err, want, equalSpec)
+		listed, err := listedSpecs(ctx, s, nil)
+		must(t, err)
+		equalRows(t, "ListSpecs", listed, []*model.Spec{want}, equalSpec)
+	})
+
+	t.Run("round trip of a minimal row", func(t *testing.T) {
+		s, ctx := newStore(t), t.Context()
+		want := minimalSpec(t, "spec-a", minute(0))
 		must(t, s.UpsertSpec(ctx, want))
 
 		got, err := s.GetSpec(ctx, want.ID())
@@ -33,7 +46,8 @@ func specs(t *testing.T, newStore storeFunc) {
 		must(t, errors.Join(s.UpsertSpec(ctx, first), s.UpsertSpec(ctx, other)))
 
 		// Every field changes, the creation time too: the row lists at its new one,
-		// and the filter sees its new name, not the old.
+		// and the filter sees its new name, not the old. That CreatedAt never
+		// changes is a rule for callers, not the store, which keeps no earlier one.
 		want := fullSpec(t, "spec-a", 1, minute(5))
 		must(t, s.UpsertSpec(ctx, want))
 		got, err := s.GetSpec(ctx, want.ID())
@@ -86,10 +100,14 @@ func specs(t *testing.T, newStore storeFunc) {
 			{"spec-oscar", "papa_quebec", "romeo-zone1"},
 			{"spec-sierra", "tango 100%", "uniform-zone2"},
 			{"spec-victor", "papaxquebec", "whiskey-zone2"},
+			{"spec-xray", "Ärzte", "yankee-zone3"},
+			{"spec-zulu", `share a\b`, "alfa-zone3"},
+			// Its name holds a\b without the backslash.
+			{"spec-bravo", "slab", "charlie-zone3"},
 		} {
 			must(t, s.UpsertSpec(ctx, newSpec(t, r.id, r.name, r.slot, 0, minute(0))))
 		}
-		every := []string{"spec-kilo", "spec-oscar", "spec-sierra", "spec-victor"}
+		every := []string{"spec-bravo", "spec-kilo", "spec-oscar", "spec-sierra", "spec-victor", "spec-xray", "spec-zulu"}
 		listed, err := listedSpecs(ctx, s, nil)
 		sameIDs(t, "ListSpecs with no filter", listed, err, every...)
 		for _, tc := range []struct {
@@ -108,6 +126,12 @@ func specs(t *testing.T, newStore storeFunc) {
 			{"query of spaces", storage.SpecQueryCriteria{Query: "   "}, every},
 			{"query with an underscore, matched as one", storage.SpecQueryCriteria{Query: "papa_q"}, []string{"spec-oscar"}},
 			{"query with a percent sign, matched as one", storage.SpecQueryCriteria{Query: "%"}, []string{"spec-sierra"}},
+			// The spec is silent on case beyond ASCII and on a backslash: the
+			// in-memory store folds case as strings.ToLower does and matches a
+			// backslash as itself, a query that ends in one included.
+			{"query in another case, beyond ASCII", storage.SpecQueryCriteria{Query: "äRZTE"}, []string{"spec-xray"}},
+			{"query with a backslash, matched as one", storage.SpecQueryCriteria{Query: `a\b`}, []string{"spec-zulu"}},
+			{"query that ends in a backslash, matched as one", storage.SpecQueryCriteria{Query: `a\`}, []string{"spec-zulu"}},
 		} {
 			listed, err := listedSpecs(ctx, s, s.BuildSpecFilter(tc.c))
 			sameIDs(t, "ListSpecs, "+tc.name, listed, err, tc.want...)
@@ -172,6 +196,20 @@ func newSpec(t *testing.T, id, name, slot string, v int, created time.Time) *mod
 func fullSpec(t *testing.T, id string, v int, created time.Time) *model.Spec {
 	t.Helper()
 	return newSpec(t, id, fmt.Sprintf("job %s v%d", id, v), fmt.Sprintf("slot-%s-%d", id, v), v, created)
+}
+
+// minimalSpec is spec id as its constructor builds it from the least it takes,
+// no name and a slot of one letter, created at created: every other field zero
+// or the constructor's default, and no modification time.
+func minimalSpec(t *testing.T, id string, created time.Time) *model.Spec {
+	t.Helper()
+	s, err := model.NewSpec(id, "", "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetCreatedAt(created)
+	s.SetUpdatedAt(time.Time{})
+	return s
 }
 
 // equalSpec compares every accessor of a spec read back with the spec written.

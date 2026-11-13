@@ -13,12 +13,25 @@ import (
 )
 
 // sessions checks the session rows, which a store creates once and then rotates
-// and revokes: the round trip, the rows a store refuses, deletion, rotation,
-// revocation and the listing and deletion of a user's sessions.
+// and revokes: the round trip of a full and of a minimal row, the rows a store
+// refuses, deletion, rotation, revocation and the listing, beyond a page too,
+// and deletion of a user's sessions.
 func sessions(t *testing.T, newStore storeFunc) {
 	t.Run("round trip", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
 		want := fullSession(t, "sess-a", "user-a", "cred-a", 0, minute(0))
+		must(t, s.CreateSession(ctx, want))
+
+		got, err := s.GetSession(ctx, want.ID())
+		gotRow(t, "GetSession", got, err, want, equalSession)
+		listed, err := s.ListSessionsByUser(ctx, want.UserID())
+		must(t, err)
+		equalRows(t, "ListSessionsByUser", listed, []*model.Session{want}, equalSession)
+	})
+
+	t.Run("round trip of a minimal row", func(t *testing.T) {
+		s, ctx := newStore(t), t.Context()
+		want := minimalSession(t, "sess-a", "user-a", "cred-a", minute(0))
 		must(t, s.CreateSession(ctx, want))
 
 		got, err := s.GetSession(ctx, want.ID())
@@ -115,10 +128,11 @@ func sessions(t *testing.T, newStore storeFunc) {
 			expiresAt time.Time
 			updatedAt time.Time
 		}{
+			// A zero time keeps the stored one, which is not the Unix epoch, so that
+			// a store which writes a zero time as the epoch fails.
+			{"at a zero time", "first", minute(60), time.Time{}},
 			// The time given is the modification time, the Unix epoch included.
-			{"at the Unix epoch", "first", minute(60), time.Unix(0, 0)},
-			// A zero time keeps the stored one.
-			{"at a zero time", "second", minute(120), time.Time{}},
+			{"at the Unix epoch", "second", minute(120), time.Unix(0, 0)},
 			// The same hash and expiry change nothing, whatever the time.
 			{"to the same hash and expiry", "second", minute(120), minute(500)},
 		} {
@@ -171,6 +185,29 @@ func sessions(t *testing.T, newStore storeFunc) {
 		expect(t, outcome{"ListSessionsByUser of an empty user ID", errOf(s.ListSessionsByUser(ctx, "")), storage.ErrInvalidArgument})
 	})
 
+	t.Run("listing by user beyond a page", func(t *testing.T) {
+		s, ctx := newStore(t), t.Context()
+		// More sessions of one user than the largest page holds, written in one
+		// transaction: the listing is not a page, it returns them all, so a store
+		// that answers with one page, of the default size or the largest, fails.
+		var rows []written
+		must(t, s.WithTx(ctx, func(tx storage.Storage) error {
+			for i := range storage.MaxListLimit + 1 {
+				session := fullSession(t, fmt.Sprintf("sess-%03d", i), "user-a", "cred-a", 0, minute(i))
+				if err := tx.CreateSession(ctx, session); err != nil {
+					return err
+				}
+				rows = append(rows, written{session.ID(), session.CreatedAt()})
+			}
+			return nil
+		}))
+		got, err := s.ListSessionsByUser(ctx, "user-a")
+		must(t, err)
+		if ids, want := idsOf(got), listed(rows); !slices.Equal(ids, want) {
+			t.Errorf("ListSessionsByUser: %d rows, want all %d in the listing order", len(ids), len(want))
+		}
+	})
+
 	t.Run("delete by user", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
 		writeUserSessions(t, s)
@@ -221,6 +258,21 @@ func fullSession(t *testing.T, id, userID, credentialID string, v int, created t
 	s.SetRevokedAt(created.Add(time.Duration(v+2) * time.Hour))
 	s.SetCreatedAt(created)
 	s.SetUpdatedAt(created.Add(time.Duration(v+1) * time.Minute))
+	return s
+}
+
+// minimalSession is session id of userID and credentialID as its constructor
+// builds it from the least it takes, no auth kind, a refresh hash of one byte
+// and an expiry an hour after created, created at created: not revoked, and no
+// modification time.
+func minimalSession(t *testing.T, id, userID, credentialID string, created time.Time) *model.Session {
+	t.Helper()
+	s, err := model.NewSession(id, userID, credentialID, "", []byte{0}, created.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetCreatedAt(created)
+	s.SetUpdatedAt(time.Time{})
 	return s
 }
 

@@ -14,7 +14,8 @@ import (
 )
 
 // pagination checks every paginated listing, one subtest each: the listing
-// order, the cursor, the limits and the empty page.
+// order, the cursor, the limits, the empty page and, for a listing that takes
+// a filter, the cursor of a filtered listing.
 func pagination(t *testing.T, newStore storeFunc) {
 	for _, l := range listings() {
 		t.Run(l.name, func(t *testing.T) {
@@ -24,6 +25,9 @@ func pagination(t *testing.T, newStore storeFunc) {
 			t.Run("malformed or foreign cursor", func(t *testing.T) { badCursors(t, newStore(t), l) })
 			t.Run("empty page", func(t *testing.T) { emptyPages(t, newStore(t), l) })
 			t.Run("pages hold their place", func(t *testing.T) { holdsPlace(t, newStore(t), l) })
+			if l.filtered != nil {
+				t.Run("a filter drains its rows once", func(t *testing.T) { filteredDrain(t, newStore(t), l) })
+			}
 		})
 	}
 }
@@ -33,14 +37,24 @@ type listing struct {
 	name string
 	// put writes the row of key, created at created, and returns its ID. Rows of
 	// keys in order have IDs in order, but for execution records, whose IDs are
-	// digests of their run.
+	// digests of their run. The agent of a rollout or a record is agentOf(key).
 	put func(t *testing.T, s storage.Storage, key string, created time.Time) (string, error)
 	del func(ctx context.Context, s storage.Storage, id string) error
 	// page lists one page: the IDs of its rows, nil when its Items is nil, and
 	// its cursor.
 	page func(ctx context.Context, s storage.Storage, opts storage.ListOptions) ([]string, string, error)
+	// filtered lists one page as page does, with a filter the factory builds
+	// that matches the rows of the keys that start with m and no other; nil for
+	// a listing that takes no filter the factory builds.
+	filtered func(ctx context.Context, s storage.Storage, opts storage.ListOptions) ([]string, string, error)
 }
 
+// agentOf is the agent of the rollout or the execution record of key: agent-
+// and the key's first character.
+func agentOf(key string) string { return "agent-" + key[:1] }
+
+// listings returns every paginated listing of the store, each with how it
+// writes, deletes and pages the rows it lists.
 func listings() []listing {
 	return []listing{
 		{
@@ -52,6 +66,9 @@ func listings() []listing {
 			del: func(ctx context.Context, s storage.Storage, id string) error { return s.DeleteAgent(ctx, id) },
 			page: func(ctx context.Context, s storage.Storage, o storage.ListOptions) ([]string, string, error) {
 				return pageOf(s.ListAgents(ctx, nil, o))
+			},
+			filtered: func(ctx context.Context, s storage.Storage, o storage.ListOptions) ([]string, string, error) {
+				return pageOf(s.ListAgents(ctx, s.BuildAgentFilter(storage.AgentQueryCriteria{Query: "agent-m"}), o))
 			},
 		},
 		{
@@ -75,6 +92,9 @@ func listings() []listing {
 			page: func(ctx context.Context, s storage.Storage, o storage.ListOptions) ([]string, string, error) {
 				return pageOf(s.ListUsers(ctx, nil, o))
 			},
+			filtered: func(ctx context.Context, s storage.Storage, o storage.ListOptions) ([]string, string, error) {
+				return pageOf(s.ListUsers(ctx, s.BuildUserFilter(storage.UserQueryCriteria{Query: "user-m"}), o))
+			},
 		},
 		{
 			name: "ListRoles",
@@ -97,27 +117,36 @@ func listings() []listing {
 			page: func(ctx context.Context, s storage.Storage, o storage.ListOptions) ([]string, string, error) {
 				return pageOf(s.ListSpecs(ctx, nil, o))
 			},
+			filtered: func(ctx context.Context, s storage.Storage, o storage.ListOptions) ([]string, string, error) {
+				return pageOf(s.ListSpecs(ctx, s.BuildSpecFilter(storage.SpecQueryCriteria{Query: "spec-m"}), o))
+			},
 		},
 		{
 			name: "ListRollouts",
 			put: func(t *testing.T, s storage.Storage, key string, created time.Time) (string, error) {
-				r := fullRollout(t, "spec-"+key, "agent-a", 0, created)
+				r := fullRollout(t, "spec-"+key, agentOf(key), 0, created)
 				return r.ID(), s.UpsertRollout(t.Context(), r)
 			},
 			del: func(ctx context.Context, s storage.Storage, id string) error { return s.DeleteRollout(ctx, id) },
 			page: func(ctx context.Context, s storage.Storage, o storage.ListOptions) ([]string, string, error) {
 				return pageOf(s.ListRollouts(ctx, nil, o))
 			},
+			filtered: func(ctx context.Context, s storage.Storage, o storage.ListOptions) ([]string, string, error) {
+				return pageOf(s.ListRollouts(ctx, s.BuildRolloutFilter(storage.RolloutQueryCriteria{AgentID: "agent-m"}), o))
+			},
 		},
 		{
 			name: "ListExecutions",
 			put: func(t *testing.T, s storage.Storage, key string, created time.Time) (string, error) {
-				e := fullExecution(t, "agent-a", "uid-"+key, 0, created)
+				e := fullExecution(t, agentOf(key), "uid-"+key, 0, created)
 				return e.ID(), s.UpsertExecution(t.Context(), e)
 			},
 			del: func(ctx context.Context, s storage.Storage, id string) error { return s.DeleteExecution(ctx, id) },
 			page: func(ctx context.Context, s storage.Storage, o storage.ListOptions) ([]string, string, error) {
 				return pageOf(s.ListExecutions(ctx, nil, o))
+			},
+			filtered: func(ctx context.Context, s storage.Storage, o storage.ListOptions) ([]string, string, error) {
+				return pageOf(s.ListExecutions(ctx, s.BuildExecutionFilter(storage.ExecutionQueryCriteria{AgentID: "agent-m"}), o))
 			},
 		},
 	}
@@ -162,7 +191,7 @@ func putRows(t *testing.T, s storage.Storage, l listing, rows ...keyed) []writte
 }
 
 // listed returns the IDs of rows in the order of every listing: newest first,
-// and rows created at one time in ID order.
+// and rows created at one time in the byte order of their IDs.
 func listed(rows []written) []string {
 	rows = slices.Clone(rows)
 	slices.SortFunc(rows, func(a, b written) int {
@@ -178,11 +207,18 @@ func listed(rows []written) []string {
 	return ids
 }
 
-// orderRows are rows whose listing order, g, b, e, c, f, a, d, is neither the
-// order of their IDs nor that of their writes. Two rows share each minute, and
-// in two of the pairs the row first by ID is written second, so that a store
-// which breaks a tie in the order of the writes fails. g is a nanosecond after
-// b and e, so that a store which keeps less than nanoseconds ties them.
+// orderRows are rows whose listing order, g, b, e, c, f, a, d, x-B, x-a, x-b,
+// x_a, is neither the order of their IDs nor that of their writes. Rows share
+// each minute, and in three of the ties the row first by ID is written later,
+// so that a store which breaks a tie in the order of the writes fails. g is a
+// nanosecond after b and e, so that a store which keeps less than nanoseconds
+// ties them.
+//
+// The four rows of minute 0 have IDs that differ only in case or only in
+// punctuation. The spec is silent on how IDs compare: the in-memory store
+// compares them as bytes, upper case before lower case and - before _, and the
+// suite pins that. A database that orders or compares them in a locale's
+// collation, which ignores case and punctuation at first, lists them otherwise.
 var orderRows = []keyed{
 	{"e", minute(3)},
 	{"d", minute(1)},
@@ -191,6 +227,26 @@ var orderRows = []keyed{
 	{"a", minute(1)},
 	{"f", minute(2)},
 	{"g", minute(3).Add(time.Nanosecond)},
+	{"x-b", minute(0)},
+	{"x_a", minute(0)},
+	{"x-B", minute(0)},
+	{"x-a", minute(0)},
+}
+
+// filterRows are rows of which those of the keys that start with m, the rows a
+// listing's filter matches, are every other one in the listing order: m6, a5,
+// m5, z5, m4, a3, m3, z3, m2. So each page of the filtered listing ends between
+// rows the filter refuses, rows tied with its last one included.
+var filterRows = []keyed{
+	{"z5", minute(5)},
+	{"m2", minute(2)},
+	{"a3", minute(3)},
+	{"m6", minute(6)},
+	{"m4", minute(4)},
+	{"z3", minute(3)},
+	{"a5", minute(5)},
+	{"m3", minute(3)},
+	{"m5", minute(5)},
 }
 
 // drain lists every row from cursor on, limit rows a page, and returns their
@@ -241,6 +297,26 @@ func drainsOnce(t *testing.T, s storage.Storage, l listing) {
 	for limit := 1; limit <= len(want)+1; limit++ {
 		if got := drain(t, s, l, "", limit); !slices.Equal(got, want) {
 			t.Errorf("%s with limit %d: %v, want %v", l.name, limit, got, want)
+		}
+	}
+}
+
+// filteredDrain checks that the cursor of a filtered listing drains the rows
+// its filter matches once at every page size, every page full but the last: a
+// store that filters the page it read, and not the rows it reads the page from,
+// gives short pages or ends the listing early.
+func filteredDrain(t *testing.T, s storage.Storage, l listing) {
+	var matching []written
+	for i, w := range putRows(t, s, l, filterRows...) {
+		if strings.HasPrefix(filterRows[i].key, "m") {
+			matching = append(matching, w)
+		}
+	}
+	want := listed(matching)
+	filtered := listing{name: l.name + " with a filter", page: l.filtered}
+	for limit := 1; limit <= len(want)+1; limit++ {
+		if got := drain(t, s, filtered, "", limit); !slices.Equal(got, want) {
+			t.Errorf("%s with limit %d: %v, want %v", filtered.name, limit, got, want)
 		}
 	}
 }
@@ -327,6 +403,7 @@ func emptyPages(t *testing.T, s storage.Storage, l listing) {
 	emptyPage(t, l.name+" past the last row", page, next)
 }
 
+// emptyPage fails t unless a page is an empty list, not nil, with no cursor.
 func emptyPage(t *testing.T, what string, page []string, next string) {
 	t.Helper()
 	switch {
@@ -345,21 +422,25 @@ func emptyPage(t *testing.T, what string, page []string, next string) {
 // cursor's own row included.
 func holdsPlace(t *testing.T, s storage.Storage, l listing) {
 	ctx := t.Context()
-	rows := putRows(t, s, l, keyed{"a", minute(6)}, keyed{"b", minute(5)}, keyed{"c", minute(5)}, keyed{"d", minute(5)}, keyed{"e", minute(4)}, keyed{"f", minute(3)})
+	// The rows of minute 5 have IDs that differ only in case or only in
+	// punctuation, as the last rows of orderRows do: the cursor among them is a
+	// place in the byte order of the IDs.
+	rows := putRows(t, s, l, keyed{"a", minute(6)}, keyed{"x-b", minute(5)}, keyed{"x_a", minute(5)}, keyed{"x-B", minute(5)}, keyed{"x-a", minute(5)}, keyed{"e", minute(4)}, keyed{"f", minute(3)})
 	first, next, err := l.page(ctx, s, storage.ListOptions{Limit: 2})
 	must(t, err)
 	if len(first) != 2 || next == "" {
 		t.Fatalf("%s: a first page of %v and cursor %q, want two rows and a cursor", l.name, first, next)
 	}
 
-	// The cursor stands at a row tied with two others. Between the pages that row
-	// is deleted, and rows are written before it, tied with it and after it.
+	// The cursor stands at a row tied with three others, x-B where IDs follow the
+	// keys. Between the pages that row is deleted, and rows are written before
+	// it, tied with it, x-A before x-B by ID and x.a after it, and after it.
 	at := first[1]
 	i := slices.IndexFunc(rows, func(r written) bool { return r.id == at })
 	cursor := rows[i]
 	must(t, l.del(ctx, s, at))
 	rows = slices.Delete(rows, i, i+1)
-	rows = append(rows, putRows(t, s, l, keyed{"g", minute(9)}, keyed{"h", minute(5)}, keyed{"i", minute(1)})...)
+	rows = append(rows, putRows(t, s, l, keyed{"g", minute(9)}, keyed{"x-A", minute(5)}, keyed{"x.a", minute(5)}, keyed{"i", minute(1)})...)
 
 	var after []written
 	for _, r := range rows {

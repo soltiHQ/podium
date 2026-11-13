@@ -12,12 +12,25 @@ import (
 )
 
 // executions checks the execution records, keyed by a digest of their run: the
-// round trip, an upsert that inserts only a new record, the records a store
-// refuses, deletion and the filter the factory builds.
+// round trip of a full and of a minimal record, an upsert that inserts only a
+// new record, the records a store refuses, deletion and the filter the factory
+// builds.
 func executions(t *testing.T, newStore storeFunc) {
 	t.Run("round trip", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
 		want := fullExecution(t, "agent-a", "uid-a", 0, minute(0))
+		must(t, s.UpsertExecution(ctx, want))
+
+		got, err := s.GetExecution(ctx, want.ID())
+		gotRow(t, "GetExecution", got, err, want, equalExecution)
+		listed, err := listedExecutions(ctx, s, nil)
+		must(t, err)
+		equalRows(t, "ListExecutions", listed, []*model.ExecutionRecord{want}, equalExecution)
+	})
+
+	t.Run("round trip of a minimal row", func(t *testing.T) {
+		s, ctx := newStore(t), t.Context()
+		want := minimalExecution(t, "agent-a", minute(0))
 		must(t, s.UpsertExecution(ctx, want))
 
 		got, err := s.GetExecution(ctx, want.ID())
@@ -183,6 +196,16 @@ func newExecution(t *testing.T, p model.ExecutionRecordParams) *model.ExecutionR
 func fullExecution(t *testing.T, agentID, taskUID string, v int, captured time.Time) *model.ExecutionRecord {
 	t.Helper()
 	return newExecution(t, executionParams(agentID, "build", taskUID, v, captured))
+}
+
+// minimalExecution is a record of agentID with the least its constructor takes,
+// captured at captured: a run of generation 1 and attempt 1 that succeeded, no
+// exit code, no run times and no name but the run's own.
+func minimalExecution(t *testing.T, agentID string, captured time.Time) *model.ExecutionRecord {
+	t.Helper()
+	return newExecution(t, model.ExecutionRecordParams{
+		AgentID: agentID, TaskName: "t", TaskUID: "u", Generation: 1, Attempt: 1, Status: "succeeded", CapturedAt: captured,
+	})
 }
 
 // equalExecution compares every accessor of a record read back with the record

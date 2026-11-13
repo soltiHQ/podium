@@ -11,13 +11,30 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
-// roles checks the role rows: the round trip, replacement, the rows a store
-// refuses, deletion, the lookups by name and by IDs and the listing, which takes
-// no filter the factory builds.
+// roles checks the role rows: the round trip of a full and of a minimal row,
+// replacement, the rows a store refuses, deletion, the lookups by name and by
+// IDs and the listing, which takes no filter the factory builds.
 func roles(t *testing.T, newStore storeFunc) {
 	t.Run("round trip", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
 		want := fullRole(t, "role-a", "admin", 0, minute(0))
+		must(t, s.UpsertRole(ctx, want))
+
+		got, err := s.GetRole(ctx, want.ID())
+		gotRow(t, "GetRole", got, err, want, equalRole)
+		got, err = s.GetRoleByName(ctx, want.Name())
+		gotRow(t, "GetRoleByName", got, err, want, equalRole)
+		many, err := s.GetRoles(ctx, []string{want.ID()})
+		must(t, err)
+		equalRows(t, "GetRoles", many, []*model.Role{want}, equalRole)
+		listed, err := listedRoles(ctx, s, nil)
+		must(t, err)
+		equalRows(t, "ListRoles", listed, []*model.Role{want}, equalRole)
+	})
+
+	t.Run("round trip of a minimal row", func(t *testing.T) {
+		s, ctx := newStore(t), t.Context()
+		want := minimalRole(t, "role-a", "admin", minute(0))
 		must(t, s.UpsertRole(ctx, want))
 
 		got, err := s.GetRole(ctx, want.ID())
@@ -38,7 +55,9 @@ func roles(t *testing.T, newStore storeFunc) {
 		must(t, errors.Join(s.UpsertRole(ctx, fullRole(t, "role-a", "admin", 0, minute(0))), s.UpsertRole(ctx, other)))
 
 		// Every field changes, the name and the creation time too: the row lists at
-		// its new time, and the lookup finds it by its new name alone.
+		// its new time, and the lookup finds it by its new name alone. That
+		// CreatedAt never changes is a rule for callers, not the store, which keeps
+		// no earlier one.
 		want := fullRole(t, "role-a", "owner", 1, minute(5))
 		must(t, s.UpsertRole(ctx, want))
 		got, err := s.GetRole(ctx, want.ID())
@@ -132,7 +151,8 @@ func roles(t *testing.T, newStore storeFunc) {
 	t.Run("listing filter", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
 		must(t, errors.Join(s.UpsertRole(ctx, fullRole(t, "role-a", "admin", 0, minute(0))), s.UpsertRole(ctx, fullRole(t, "role-b", "viewer", 0, minute(0)))))
-		// The factory builds no role filter: a nil one lists every row, any other is refused.
+		// The factory builds no role filter: a nil one lists every row, any other
+		// is refused.
 		listed, err := listedRoles(ctx, s, nil)
 		sameIDs(t, "ListRoles with no filter", listed, err, "role-a", "role-b")
 		expect(t,
@@ -160,6 +180,19 @@ func fullRole(t *testing.T, id, name string, v int, created time.Time) *model.Ro
 	must(t, errors.Join(r.PermissionAdd(enum.All[v+2]), r.PermissionAdd(enum.All[v+7])))
 	r.SetCreatedAt(created)
 	r.SetUpdatedAt(created.Add(time.Duration(v+1) * time.Minute))
+	return r
+}
+
+// minimalRole is role id of name as its constructor builds it, created at
+// created: no permission, and no modification time.
+func minimalRole(t *testing.T, id, name string, created time.Time) *model.Role {
+	t.Helper()
+	r, err := model.NewRole(id, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SetCreatedAt(created)
+	r.SetUpdatedAt(time.Time{})
 	return r
 }
 

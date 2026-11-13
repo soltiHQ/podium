@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
@@ -13,8 +14,8 @@ import (
 
 // transactions checks WithTx: the transaction reads its own writes and commits
 // them, a callback error or a context done before the commit rolls every write
-// back, a nested WithTx reuses the transaction, and the handle rotates sessions
-// at the caller's time.
+// back, a nested WithTx reuses the transaction, a write the transaction refuses
+// leaves it usable, and the handle rotates sessions at the caller's time.
 func transactions(t *testing.T, newStore storeFunc) {
 	t.Run("reads its own writes and commits them", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
@@ -166,6 +167,85 @@ func transactions(t *testing.T, newStore storeFunc) {
 			outcome{"WithTx", err, errRollback},
 			outcome{"GetAgent of the nested write rolled back", errOf(s.GetAgent(ctx, late.ID())), storage.ErrNotFound},
 		)
+	})
+
+	t.Run("a refused write leaves the transaction usable", func(t *testing.T) {
+		// The spec is silent on a write refused inside a transaction: the
+		// in-memory store answers it, changes nothing for it and goes on, and the
+		// suite pins that. The user service relies on it: its delete of a user
+		// goes on after ErrNotFound and commits. Each write below is refused, or
+		// matches no row, in a transaction that then writes an agent and commits,
+		// so a database that aborts a transaction on a failed statement fails.
+		var (
+			session      = liveSession(t, "sess-a", "user-a", "cred-a", 0, minute(0))
+			sameID       = fullSession(t, session.ID(), "user-b", "cred-b", 1, minute(5))
+			deletedTwice = fullAgent(t, "agent-deleted", 0, minute(0))
+			invalid      = fullAgent(t, "agent-invalid", 0, minute(0))
+			absentRun    = fullExecution(t, "agent-x", "uid-x", 0, minute(0)).ID()
+		)
+		invalid.SetCreatedAt(time.Time{})
+		for _, tc := range []struct {
+			name  string
+			want  error // nil, or the sentinel errors.Is finds in what the write answers
+			write func(ctx context.Context, tx storage.Storage) error
+		}{
+			{"DeleteAgent of an absent row", storage.ErrNotFound, func(ctx context.Context, tx storage.Storage) error { return tx.DeleteAgent(ctx, "agent-x") }},
+			{"DeleteAgentCredential of an absent row", storage.ErrNotFound, func(ctx context.Context, tx storage.Storage) error {
+				return tx.DeleteAgentCredential(ctx, "agent-x")
+			}},
+			{"DeleteUser of an absent row", storage.ErrNotFound, func(ctx context.Context, tx storage.Storage) error { return tx.DeleteUser(ctx, "user-x") }},
+			{"DeleteRole of an absent row", storage.ErrNotFound, func(ctx context.Context, tx storage.Storage) error { return tx.DeleteRole(ctx, "role-x") }},
+			{"DeleteCredential of an absent row", storage.ErrNotFound, func(ctx context.Context, tx storage.Storage) error {
+				return tx.DeleteCredential(ctx, "cred-x")
+			}},
+			{"DeleteVerifier of an absent row", storage.ErrNotFound, func(ctx context.Context, tx storage.Storage) error { return tx.DeleteVerifier(ctx, "ver-x") }},
+			{"DeleteSession of an absent row", storage.ErrNotFound, func(ctx context.Context, tx storage.Storage) error { return tx.DeleteSession(ctx, "sess-x") }},
+			{"DeleteSpec of an absent row", storage.ErrNotFound, func(ctx context.Context, tx storage.Storage) error { return tx.DeleteSpec(ctx, "spec-x") }},
+			{"DeleteRollout of an absent row", storage.ErrNotFound, func(ctx context.Context, tx storage.Storage) error {
+				return tx.DeleteRollout(ctx, model.RolloutID("spec-x", "agent-x"))
+			}},
+			{"DeleteExecution of an absent row", storage.ErrNotFound, func(ctx context.Context, tx storage.Storage) error {
+				return tx.DeleteExecution(ctx, absentRun)
+			}},
+			{"DeleteAgent of a row the transaction deleted", storage.ErrNotFound, func(ctx context.Context, tx storage.Storage) error {
+				if err := errors.Join(tx.UpsertAgent(ctx, deletedTwice), tx.DeleteAgent(ctx, deletedTwice.ID())); err != nil {
+					return fmt.Errorf("the writes before the second delete: %w", err)
+				}
+				return tx.DeleteAgent(ctx, deletedTwice.ID())
+			}},
+			{"DeleteVerifierByCredential of a credential with no verifier", nil, func(ctx context.Context, tx storage.Storage) error {
+				return tx.DeleteVerifierByCredential(ctx, "cred-x")
+			}},
+			{"DeleteSessionsByUser of a user with no session", nil, func(ctx context.Context, tx storage.Storage) error {
+				return tx.DeleteSessionsByUser(ctx, "user-x")
+			}},
+			{"DeleteRolloutsBySpec of a spec with no rollout", nil, func(ctx context.Context, tx storage.Storage) error {
+				return tx.DeleteRolloutsBySpec(ctx, "spec-x")
+			}},
+			{"CreateSession of an existing ID", storage.ErrAlreadyExists, func(ctx context.Context, tx storage.Storage) error { return tx.CreateSession(ctx, sameID) }},
+			{"UpsertAgent of a row without a creation time", storage.ErrInvalidArgument, func(ctx context.Context, tx storage.Storage) error {
+				return tx.UpsertAgent(ctx, invalid)
+			}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				s, ctx := newStore(t), t.Context()
+				must(t, s.CreateSession(ctx, session))
+				after := fullAgent(t, "agent-after", 0, minute(1))
+				must(t, s.WithTx(ctx, func(tx storage.Storage) error {
+					expect(t, outcome{tc.name + " inside the transaction", tc.write(ctx, tx), tc.want})
+					return tx.UpsertAgent(ctx, after)
+				}))
+				got, err := s.GetAgent(ctx, after.ID())
+				gotRow(t, "GetAgent of the write after the refused one", got, err, after, equalAgent)
+				// The refused write changed nothing.
+				kept, err := s.GetSession(ctx, session.ID())
+				gotRow(t, "GetSession of the session written before the transaction", kept, err, session, equalSession)
+				expect(t,
+					outcome{"GetAgent of the row the transaction deleted", errOf(s.GetAgent(ctx, deletedTwice.ID())), storage.ErrNotFound},
+					outcome{"GetAgent of the row without a creation time", errOf(s.GetAgent(ctx, invalid.ID())), storage.ErrNotFound},
+				)
+			})
+		}
 	})
 
 	t.Run("the handle rotates sessions at the caller's time", func(t *testing.T) {
