@@ -201,6 +201,9 @@ func fullSpec(t *testing.T, id string, v int, created time.Time) *model.Spec {
 // minimalSpec is spec id as its constructor builds it from the least it takes,
 // no name and a slot of one letter, created at created: every other field zero
 // or the constructor's default, and no modification time.
+//
+// The zero UpdatedAt is a pin the spec is silent on: see the note on the
+// minimal rows in contract.go.
 func minimalSpec(t *testing.T, id string, created time.Time) *model.Spec {
 	t.Helper()
 	s, err := model.NewSpec(id, "", "s")

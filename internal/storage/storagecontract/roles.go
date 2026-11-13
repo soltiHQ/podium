@@ -185,6 +185,9 @@ func fullRole(t *testing.T, id, name string, v int, created time.Time) *model.Ro
 
 // minimalRole is role id of name as its constructor builds it, created at
 // created: no permission, and no modification time.
+//
+// The zero UpdatedAt is a pin the spec is silent on: see the note on the
+// minimal rows in contract.go.
 func minimalRole(t *testing.T, id, name string, created time.Time) *model.Role {
 	t.Helper()
 	r, err := model.NewRole(id, name)

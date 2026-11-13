@@ -77,8 +77,10 @@ func scanner(t *testing.T, newStore storeFunc) {
 			equalExecution)
 	})
 
-	// A scan returns clones the caller owns (storage.Scanner): changing a row
-	// through a setter leaves the store's copy as written. The execution record
+	// A scan returns clones the caller owns (storage.Scanner, storage.go, "as
+	// clones the caller owns"): changing a row through a setter leaves the
+	// store's copy as written. The wants are copies taken before the scan, so a
+	// store that returns the caller's own pointer fails too. The execution record
 	// has no setter, so it has no leaf.
 	t.Run("a scanned row is a clone the caller owns", func(t *testing.T) {
 		s, ctx := newStore(t), t.Context()
@@ -86,40 +88,41 @@ func scanner(t *testing.T, newStore storeFunc) {
 		agent := fullAgent(t, "agent-a", 0, minute(0))
 		rollout := fullRollout(t, "spec-a", "agent-a", 0, minute(0))
 		spec := fullSpec(t, "spec-a", 0, minute(0))
+		wantAgent, wantRollout, wantSpec := agent.Clone(), rollout.Clone(), spec.Clone()
 		must(t, errors.Join(s.UpsertAgent(ctx, agent), s.UpsertRollout(ctx, rollout), s.UpsertSpec(ctx, spec)))
 
 		rows, err := sc.ScanAgents(ctx, nil)
 		if err != nil || len(rows) != 1 {
 			t.Fatalf("ScanAgents: %d rows, %v, want one", len(rows), err)
 		}
-		rows[0].SetUpdatedAt(agent.UpdatedAt().Add(time.Hour))
+		rows[0].SetUpdatedAt(wantAgent.UpdatedAt().Add(time.Hour))
 		rows[0].SetStatus(enum.AgentStatusActive)
 		again, err := sc.ScanAgents(ctx, nil)
-		gotRows(t, "ScanAgents after a change of a scanned row", again, err, []*model.Agent{agent}, equalAgent)
-		got, err := s.GetAgent(ctx, agent.ID())
-		gotRow(t, "GetAgent after a change of a scanned row", got, err, agent, equalAgent)
+		gotRows(t, "ScanAgents after a change of a scanned row", again, err, []*model.Agent{wantAgent}, equalAgent)
+		got, err := s.GetAgent(ctx, wantAgent.ID())
+		gotRow(t, "GetAgent after a change of a scanned row", got, err, wantAgent, equalAgent)
 
 		rolloutRows, err := sc.ScanRollouts(ctx, nil)
 		if err != nil || len(rolloutRows) != 1 {
 			t.Fatalf("ScanRollouts: %d rows, %v, want one", len(rolloutRows), err)
 		}
-		rolloutRows[0].SetUpdatedAt(rollout.UpdatedAt().Add(time.Hour))
+		rolloutRows[0].SetUpdatedAt(wantRollout.UpdatedAt().Add(time.Hour))
 		rolloutRows[0].SetActualTaskID("changed")
 		rolloutsAgain, err := sc.ScanRollouts(ctx, nil)
-		gotRows(t, "ScanRollouts after a change of a scanned row", rolloutsAgain, err, []*model.Rollout{rollout}, equalRollout)
-		gotRollout, err := s.GetRollout(ctx, rollout.ID())
-		gotRow(t, "GetRollout after a change of a scanned row", gotRollout, err, rollout, equalRollout)
+		gotRows(t, "ScanRollouts after a change of a scanned row", rolloutsAgain, err, []*model.Rollout{wantRollout}, equalRollout)
+		gotRollout, err := s.GetRollout(ctx, wantRollout.ID())
+		gotRow(t, "GetRollout after a change of a scanned row", gotRollout, err, wantRollout, equalRollout)
 
 		specRows, err := sc.ScanSpecs(ctx, nil)
 		if err != nil || len(specRows) != 1 {
 			t.Fatalf("ScanSpecs: %d rows, %v, want one", len(specRows), err)
 		}
-		specRows[0].SetUpdatedAt(spec.UpdatedAt().Add(time.Hour))
-		specRows[0].SetVersion(spec.Version() + 1)
+		specRows[0].SetUpdatedAt(wantSpec.UpdatedAt().Add(time.Hour))
+		specRows[0].SetVersion(wantSpec.Version() + 1)
 		specsAgain, err := sc.ScanSpecs(ctx, nil)
-		gotRows(t, "ScanSpecs after a change of a scanned row", specsAgain, err, []*model.Spec{spec}, equalSpec)
-		gotSpec, err := s.GetSpec(ctx, spec.ID())
-		gotRow(t, "GetSpec after a change of a scanned row", gotSpec, err, spec, equalSpec)
+		gotRows(t, "ScanSpecs after a change of a scanned row", specsAgain, err, []*model.Spec{wantSpec}, equalSpec)
+		gotSpec, err := s.GetSpec(ctx, wantSpec.ID())
+		gotRow(t, "GetSpec after a change of a scanned row", gotSpec, err, wantSpec, equalSpec)
 	})
 
 	t.Run("foreign filter", func(t *testing.T) {

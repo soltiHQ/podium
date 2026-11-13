@@ -203,6 +203,9 @@ func fullCredential(t *testing.T, id, userID string, auth enum.Auth, v int, crea
 // minimalCredential is credential id of userID as its constructor builds it
 // from those alone, created at created: no auth kind, no secret, and no
 // modification time.
+//
+// The zero UpdatedAt is a pin the spec is silent on: see the note on the
+// minimal rows in contract.go.
 func minimalCredential(t *testing.T, id, userID string, created time.Time) *model.Credential {
 	t.Helper()
 	c, err := model.NewCredential(id, userID, "")

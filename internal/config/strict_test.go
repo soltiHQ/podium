@@ -511,7 +511,7 @@ func TestBackendDefaultsToMemory(t *testing.T) {
 	}
 }
 
-// The settings of the removed file store fail loading, each naming its key.
+// The settings of the removed file store fail loading, each naming its section.
 // Each subtest asserts the parent key cluster.standalone, not the leaf: the
 // loader names the unknown section, not the setting inside it.
 func TestStandaloneSettingsRefused(t *testing.T) {

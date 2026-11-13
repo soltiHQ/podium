@@ -201,6 +201,9 @@ func fullRollout(t *testing.T, specID, agentID string, v int, created time.Time)
 // minimalRollout is the rollout of specID on agentID as its constructor builds
 // it, at desired generation 0, created at created: every other field zero or
 // the constructor's default, its push, sync and modification times zero.
+//
+// The zero UpdatedAt is a pin the spec is silent on: see the note on the
+// minimal rows in contract.go.
 func minimalRollout(t *testing.T, specID, agentID string, created time.Time) *model.Rollout {
 	t.Helper()
 	r, err := model.NewRollout(specID, agentID, 0)

@@ -155,6 +155,9 @@ func fullVerifier(t *testing.T, id, credentialID string, v int, created time.Tim
 // minimalVerifier is verifier id of credentialID as its constructor builds it,
 // with the auth kind it takes, created at created: no data, and no
 // modification time.
+//
+// The zero UpdatedAt is a pin the spec is silent on: see the note on the
+// minimal rows in contract.go.
 func minimalVerifier(t *testing.T, id, credentialID string, created time.Time) *model.Verifier {
 	t.Helper()
 	vf, err := model.NewVerifier(id, credentialID, enum.Password)

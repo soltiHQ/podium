@@ -210,6 +210,9 @@ func fullUser(t *testing.T, id, subject string, v int, created time.Time) *model
 
 // minimalUser is user id of subject as its constructor builds it, created at
 // created: every other field zero, and no modification time.
+//
+// The zero UpdatedAt is a pin the spec is silent on: see the note on the
+// minimal rows in contract.go.
 func minimalUser(t *testing.T, id, subject string, created time.Time) *model.User {
 	t.Helper()
 	u, err := model.NewUser(id, subject)

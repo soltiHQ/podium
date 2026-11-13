@@ -233,6 +233,9 @@ func fullAgent(t *testing.T, id string, v int, created time.Time) *model.Agent {
 // minimalAgent is agent id as its constructor builds it from the ID alone,
 // created at created: every other field zero or the constructor's default, its
 // other times, the last sync and the staleness deadline among them, zero.
+//
+// The zero UpdatedAt is a pin the spec is silent on: see the note on the
+// minimal rows in contract.go.
 func minimalAgent(t *testing.T, id string, created time.Time) *model.Agent {
 	t.Helper()
 	a, err := model.NewAgent(id, "", "")

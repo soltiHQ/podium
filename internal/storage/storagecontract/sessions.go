@@ -266,6 +266,9 @@ func fullSession(t *testing.T, id, userID, credentialID string, v int, created t
 // builds it from the least it takes, no auth kind, a refresh hash of one byte
 // and an expiry an hour after created, created at created: not revoked, and no
 // modification time.
+//
+// The zero UpdatedAt is a pin the spec is silent on: see the note on the
+// minimal rows in contract.go.
 func minimalSession(t *testing.T, id, userID, credentialID string, created time.Time) *model.Session {
 	t.Helper()
 	s, err := model.NewSession(id, userID, credentialID, "", []byte{0}, created.Add(time.Hour))
