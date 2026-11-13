@@ -33,7 +33,7 @@ func New(store storage.Storage, logger zerolog.Logger) *Service {
 
 // List returns a page of users matching the query.
 func (s *Service) List(ctx context.Context, q ListQuery) (*Page, error) {
-	res, err := s.store.ListUsers(ctx, q.Filter, storage.ListOptions{
+	res, err := s.store.ListUsers(ctx, s.store.BuildUserFilter(q.Criteria), storage.ListOptions{
 		Limit:  service.NormalizeListLimit(q.Limit, defaultListLimit),
 		Cursor: q.Cursor,
 	})

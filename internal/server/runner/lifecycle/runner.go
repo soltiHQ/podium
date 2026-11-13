@@ -15,7 +15,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/server/runner/base"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
 
 // forgetter is the subset of *proxy.Pool that the lifecycle runner needs: it closes
@@ -125,7 +124,7 @@ func (r *Runner) due(a *model.Agent, now time.Time) action {
 
 func (r *Runner) tick(ctx context.Context) {
 	now := r.now()
-	items, err := storage.AllAgents(ctx, r.store, inmemory.NewAgentFilter().StaleAtBefore(now))
+	items, err := storage.AllAgents(ctx, r.store, r.store.BuildAgentFilter(storage.AgentQueryCriteria{StaleAtBefore: now}))
 	if err != nil {
 		r.logger.Error().Err(err).Msg("tick: list agents failed")
 		return

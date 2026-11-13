@@ -573,6 +573,25 @@ func (s *state) DeleteRolloutsBySpec(ctx context.Context, specID string) error {
 
 // --- FilterFactory ---
 
+func (s *state) BuildAgentFilter(c storage.AgentQueryCriteria) storage.AgentFilter {
+	f := NewAgentFilter()
+	if c.Query != "" {
+		f.Query(c.Query)
+	}
+	if !c.StaleAtBefore.IsZero() {
+		f.StaleAtBefore(c.StaleAtBefore)
+	}
+	return f
+}
+
+func (s *state) BuildUserFilter(c storage.UserQueryCriteria) storage.UserFilter {
+	f := NewUserFilter()
+	if c.Query != "" {
+		f.Query(c.Query)
+	}
+	return f
+}
+
 func (s *state) BuildRolloutFilter(c storage.RolloutQueryCriteria) storage.RolloutFilter {
 	f := NewRolloutFilter()
 	if c.SpecID != "" {

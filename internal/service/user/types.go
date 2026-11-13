@@ -19,9 +19,8 @@ var ErrStale = errors.New("user changed since it was read")
 
 // ListQuery describes a paginated users listing request.
 type ListQuery struct {
-	// Filter is a storage-level filter.
-	// Backends validate that the filter was constructed for that backend and return storage.ErrInvalidArgument otherwise.
-	Filter storage.UserFilter
+	// Criteria is turned into the backend's filter by the store.
+	Criteria storage.UserQueryCriteria
 
 	Cursor string
 	Limit  int

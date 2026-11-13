@@ -15,7 +15,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/http/route"
@@ -61,19 +60,13 @@ func (a *API) AgentsRouter(w http.ResponseWriter, r *http.Request) {
 func (a *API) agentList(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
 	var (
 		limit  = queryInt(r, "limit", 0)
-		filter storage.AgentFilter
-
 		cursor = r.URL.Query().Get("cursor")
 		q      = r.URL.Query().Get("q")
 	)
-	if q != "" {
-		filter = inmemory.NewAgentFilter().Query(q)
-	}
-
 	res, err := a.agentSVC.List(r.Context(), agent.ListQuery{
-		Limit:  limit,
-		Cursor: cursor,
-		Filter: filter,
+		Limit:    limit,
+		Cursor:   cursor,
+		Criteria: storage.AgentQueryCriteria{Query: q},
 	})
 	if err != nil {
 		a.logger.Error().Err(err).Msg("agent list failed")

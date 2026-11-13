@@ -41,7 +41,7 @@ storage/
 ```text
   Storage (aggregate)
   ├── ExecutionStore    Upsert / Get / List / Delete
-  ├── FilterFactory     BuildExecutionFilter / BuildRolloutFilter / BuildSpecFilter
+  ├── FilterFactory     BuildExecutionFilter / BuildAgentFilter / BuildUserFilter / BuildRolloutFilter / BuildSpecFilter
   ├── TxStore           WithTx
   ├── AgentStore        Upsert / Get / List / Delete
   ├── AgentCredentialStore  Upsert / Get / List / Delete

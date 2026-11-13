@@ -479,6 +479,14 @@ type RolloutStore interface {
 type FilterFactory interface {
 	BuildExecutionFilter(c ExecutionQueryCriteria) ExecutionFilter
 
+	// BuildAgentFilter constructs an AgentFilter for this backend from the supplied criteria.
+	// Empty criteria match every agent.
+	BuildAgentFilter(c AgentQueryCriteria) AgentFilter
+
+	// BuildUserFilter constructs a UserFilter for this backend from the supplied criteria.
+	// Empty criteria match every user.
+	BuildUserFilter(c UserQueryCriteria) UserFilter
+
 	// BuildRolloutFilter constructs a RolloutFilter for this backend from the supplied criteria.
 	// Empty criteria match every rollout.
 	BuildRolloutFilter(c RolloutQueryCriteria) RolloutFilter

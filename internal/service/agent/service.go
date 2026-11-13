@@ -181,7 +181,7 @@ func New(store storage.Storage, logger zerolog.Logger, opts ...Option) *Service 
 
 // List returns a page of agents matching the query.
 func (s *Service) List(ctx context.Context, q ListQuery) (*Page, error) {
-	res, err := s.store.ListAgents(ctx, q.Filter, storage.ListOptions{
+	res, err := s.store.ListAgents(ctx, s.store.BuildAgentFilter(q.Criteria), storage.ListOptions{
 		Limit:  service.NormalizeListLimit(q.Limit, defaultListLimit),
 		Cursor: q.Cursor,
 	})

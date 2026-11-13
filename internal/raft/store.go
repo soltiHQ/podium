@@ -336,6 +336,14 @@ func (s *Store) DeleteRolloutsBySpec(ctx context.Context, specID string) error {
 
 // === FilterFactory — passthrough ===
 
+func (s *Store) BuildAgentFilter(c storage.AgentQueryCriteria) storage.AgentFilter {
+	return s.inner.BuildAgentFilter(c)
+}
+
+func (s *Store) BuildUserFilter(c storage.UserQueryCriteria) storage.UserFilter {
+	return s.inner.BuildUserFilter(c)
+}
+
 func (s *Store) BuildRolloutFilter(c storage.RolloutQueryCriteria) storage.RolloutFilter {
 	return s.inner.BuildRolloutFilter(c)
 }
