@@ -72,8 +72,10 @@ func minute(m int) time.Time { return epoch.Add(time.Duration(m) * time.Minute) 
 var errRollback = errors.New("storagecontract: roll the transaction back")
 
 // foreignFilter is a filter no store builds: the suite passes it where a store
-// expects a filter of its own. It passes a filter the factory built for another
-// listing too: the spec is silent on one, and the in-memory store refuses it.
+// expects a filter of its own. Of the other filters the suite passes, the spec
+// is silent on two, and the suite pins what the in-memory store does with them:
+// a filter the factory built for another listing is refused, and a nil filter,
+// which the suite passes to list or scan every row, lists every row.
 type foreignFilter struct{}
 
 // foreignCursor has the shape of an in-memory cursor and the tag of a backend

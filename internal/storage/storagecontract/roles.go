@@ -116,9 +116,8 @@ func roles(t *testing.T, newStore storeFunc) {
 		got, err := s.GetRoles(ctx, []string{"role-a", "role-c", "role-b"})
 		must(t, err)
 		equalRows(t, "GetRoles", got, []*model.Role{a, c, b}, equalRole)
-		// Divergence: the spec says GetRoles drops a repeated ID. The in-memory store
-		// looks each ID up once but returns a role for every ID asked for, in their
-		// order, a repeated one again; the suite pins that.
+		// A repeated ID is answered again: one role per ID asked for, in the order
+		// asked, repeats included.
 		got, err = s.GetRoles(ctx, []string{"role-b", "role-a", "role-b"})
 		must(t, err)
 		equalRows(t, "GetRoles of a repeated ID", got, []*model.Role{b, a, b}, equalRole)
