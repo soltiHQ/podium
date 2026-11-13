@@ -58,8 +58,8 @@ func TestNewLogsAdminPasswordOnFirstMemoryStart(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 
-	var logs bytes.Buffer
-	a, err := New(context.Background(), cfg, zerolog.New(&logs), WithPasswordCost(bcrypt.MinCost))
+	logs := &syncBuffer{}
+	a, err := New(context.Background(), cfg, zerolog.New(logs), WithPasswordCost(bcrypt.MinCost))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,8 +67,18 @@ func TestNewLogsAdminPasswordOnFirstMemoryStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := logs.String()
-	if n := strings.Count(out, "admin password generated"); n != 1 || !strings.Contains(out, `"level":"warn"`) || !strings.Contains(out, `"password":"`) {
-		t.Fatalf("the log holds %d lines about the generated password, want one WARN with the password:\n%s", n, out)
+	var withPassword []logLine
+	for _, line := range (&clusterNode{id: "memory", logs: logs}).logged(t, map[string]any{}) {
+		if _, ok := line.fields["password"]; ok {
+			withPassword = append(withPassword, line)
+		}
+	}
+	if n := strings.Count(out, "admin password generated"); n != 1 || len(withPassword) != 1 {
+		t.Fatalf("the log holds %d lines about the generated password and %d with a password, want one of each:\n%s", n, len(withPassword), out)
+	}
+	line := withPassword[0].fields
+	if message, _ := line["message"].(string); line["level"] != "warn" || line["password"] == "" || !strings.Contains(message, "admin password generated") {
+		t.Fatalf("the line with the password is %v, want the WARN about the generated password", line)
 	}
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
 		t.Fatalf("the start wrote %v (%v) into its working directory, want nothing", entries, err)

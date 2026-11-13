@@ -566,7 +566,8 @@ as `podium agent-token` printed it for agents provisioned before this version,
 becomes a derived credential: at the agent's next sync, in the transaction that
 checks it, and at each start of a memory node and each leadership term of a raft
 node, for every such credential (`TestSweepCredentials`, in
-`internal/service/agent`). A stored token that an earlier secret derived stays
+`internal/service/agent`; `TestLegacyRowsConvertedAtStart`, in `internal/app`,
+shows a memory start). A stored token that an earlier secret derived stays
 stored: it keeps working, and whoever holds that earlier secret can derive it.
 Each such start and term then logs, when there are any, at WARN with
 `stored_credentials`, how many stored credentials are left,
