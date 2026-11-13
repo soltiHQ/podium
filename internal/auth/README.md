@@ -137,7 +137,7 @@ logs a WARN, not an ERROR; the access log of an API route records a 503 with
 | Access token | `exp` required; `exp` and `nbf` allow 30 s of clock skew |
 | Refresh token | 32-byte `crypto/rand`, base64 raw URL encoded |
 | Refresh validation | SHA3-256 hash, `subtle.ConstantTimeCompare` |
-| Session ID | 16-byte `crypto/rand`, hex encoded; not in the access log |
+| Session ID | 16-byte `crypto/rand`, hex encoded; never logged: no field names it, a logged path shows `{id}` |
 | Auth cookies | HttpOnly, SameSite Lax (refresh: Strict), Secure per `cookie_secure` |
 | Device cookie | HMAC-SHA256, bound to the account, 90 days; HttpOnly, Strict, `/login` |
 | Cross-site requests | main listener refuses cross-origin browser mutations (403) |

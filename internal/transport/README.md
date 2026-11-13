@@ -81,6 +81,12 @@ leader's CORS headers, every `Access-Control-*` header and the `Origin` token of
 `Vary`, and keeps the rest: an answer that names the origin twice is one a
 browser refuses (`TestForwardedWriteCarriesTheCORSHeadersOnce`).
 
+No HTTP log line carries a cookie or a session ID. `Logger`, `Recovery`,
+`CrossOrigin` and the auth middleware log the path of
+`POST /api/v1/session/{id}/revoke` with `{id}` in place of the session ID
+(`logPath`): the `session_id` cookie carries the same value, and with the
+refresh token it renews the session (`TestLoggedPathsHideTheSessionID`).
+
 ### gRPC
 
 ```text

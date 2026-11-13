@@ -41,7 +41,7 @@ func Recovery(logger zerolog.Logger) func(http.Handler) http.Handler {
 
 				evt := logger.Error().
 					Str("method", r.Method).
-					Str("path", r.URL.Path).
+					Str("path", logPath(r.URL.Path)).
 					Str("panic", fmt.Sprintf("%v", rec)).
 					Bytes("stack", stack)
 

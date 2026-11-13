@@ -22,7 +22,8 @@ import (
 // response.TooManyRequests sets that header. Any other 429 stays a WARN. A
 // follower that proxies the leader's answer logs the same line for it, the
 // headers of the answer being the leader's. It never logs cookies: the session_id
-// cookie authenticates a refresh.
+// cookie authenticates a refresh, and the path names the session ID it carries as
+// {id} (logPath).
 func Logger(logger zerolog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -44,7 +45,7 @@ func Logger(logger zerolog.Logger) func(http.Handler) http.Handler {
 
 			evt.
 				Str("method", r.Method).
-				Str("path", r.URL.Path).
+				Str("path", logPath(r.URL.Path)).
 				Int("status", m.Code).
 				Int64("bytes", m.Written).
 				Str("duration", time.Since(start).String())
