@@ -5,7 +5,7 @@
 # Build artifacts
 /bin/
 
-# Local runtime state (default standalone data_dir)
+# Local runtime state (a raft data_dir under the working directory)
 /data/
 
 # Vendored proto schemas and generated Go bindings (task generate)

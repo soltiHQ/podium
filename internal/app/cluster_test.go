@@ -293,11 +293,11 @@ func TestRefusedChangesChangeNothing(t *testing.T) {
 	})
 }
 
-// Standalone registers no cluster route: its cluster paths answer as before
+// Memory registers no cluster route: its cluster paths answer as before
 // raft mode had them, as every path the UI's catch-all page route takes. An
 // authenticated GET is 404, an authenticated POST or DELETE 405, as that route
 // answers a method other than GET, and a request without credentials 401.
-func TestClusterRoutesAbsentInStandalone(t *testing.T) {
+func TestClusterRoutesAbsentInMemory(t *testing.T) {
 	f := newBrowserFixture(t, config.Default(), nil)
 	cookies := f.login(t, "alice")
 	for _, tc := range []struct {

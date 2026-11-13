@@ -15,38 +15,21 @@ import (
 type Backend string
 
 const (
-	// BackendStandalone runs as a single-node deployment using a
-	// durable disk-backed store. Explicit Standalone.Ephemeral opts into memory. Always leader. Default.
-	BackendStandalone Backend = "standalone"
+	// BackendMemory runs a single node whose state lives in memory and is lost
+	// when the process stops. Always leader. Default.
+	BackendMemory Backend = "memory"
 
 	// BackendRaft runs as a multi-replica HA cluster. Replicas keep their
-	// in-memory stores in sync via hashicorp/raft.
+	// in-memory stores in sync via hashicorp/raft, which keeps its log and
+	// snapshots in Raft.DataDir.
 	BackendRaft Backend = "raft"
 )
 
 // Config is the top-level cluster configuration.
 type Config struct {
-	Standalone StandaloneConfig `yaml:"standalone"`
-	Backend    Backend          `yaml:"backend"`
-	Raft       RaftConfig       `yaml:"raft"`
-	Discovery  DiscoveryConfig  `yaml:"discovery"`
-}
-
-// DefaultStandaloneDataDir is relative to the process working directory.
-const DefaultStandaloneDataDir = "data/podium"
-
-// DefaultStandaloneSnapshotThreshold is the number of log entries after which the
-// durable store writes a snapshot and truncates its log.
-const DefaultStandaloneSnapshotThreshold = 4096
-
-// StandaloneConfig configures persistent single-node storage.
-// Ephemeral explicitly opts into volatile development state and ignores DataDir.
-// SnapshotThreshold is the number of log entries that starts a snapshot; zero
-// keeps the default.
-type StandaloneConfig struct {
-	Ephemeral         bool   `yaml:"ephemeral"`
-	DataDir           string `yaml:"data_dir"`
-	SnapshotThreshold int    `yaml:"snapshot_threshold"`
+	Backend   Backend         `yaml:"backend"`
+	Raft      RaftConfig      `yaml:"raft"`
+	Discovery DiscoveryConfig `yaml:"discovery"`
 }
 
 // The defaults of the raft log compaction settings of [RaftConfig]: they are
@@ -306,15 +289,11 @@ func ServerList(peers []Peer, nodeID, advertise string) ([]Peer, error) {
 	return sorted, nil
 }
 
-// DefaultConfig returns a standalone config. Its raft settings are the
-// defaults of the compaction settings; the other raft settings have none.
+// DefaultConfig returns a memory config. Its raft settings are the defaults of
+// the compaction settings; the other raft settings have none.
 func DefaultConfig() Config {
 	return Config{
-		Backend: BackendStandalone,
-		Standalone: StandaloneConfig{
-			DataDir:           DefaultStandaloneDataDir,
-			SnapshotThreshold: DefaultStandaloneSnapshotThreshold,
-		},
+		Backend: BackendMemory,
 		Raft: RaftConfig{
 			SnapshotInterval:  DefaultRaftSnapshotInterval,
 			SnapshotThreshold: DefaultRaftSnapshotThreshold,
@@ -323,23 +302,15 @@ func DefaultConfig() Config {
 	}
 }
 
-// Validate requires a persistent standalone location unless ephemeral mode is
-// explicitly selected. Ephemeral takes precedence over a default/yaml/env path.
-// A negative snapshot threshold is refused. Backend raft checks its own
-// settings and the peers instead (see validateRaft); standalone reads neither.
+// Validate checks the backend: memory reads no other setting, and backend raft
+// checks its own settings and the peers (see validateRaft).
 func (c Config) Validate() error {
 	switch c.Backend {
-	case "", BackendStandalone:
-		if !c.Ephemeral() && strings.TrimSpace(c.Standalone.DataDir) == "" {
-			return fmt.Errorf("standalone.data_dir is required unless standalone.ephemeral is explicitly true")
-		}
-		if c.Standalone.SnapshotThreshold < 0 {
-			return fmt.Errorf("standalone.snapshot_threshold must not be negative")
-		}
+	case "", BackendMemory:
 	case BackendRaft:
 		return c.validateRaft()
 	default:
-		return fmt.Errorf("unknown backend %q", c.Backend)
+		return fmt.Errorf("unknown backend %q: it must be one of %s, %s", c.Backend, BackendMemory, BackendRaft)
 	}
 	return nil
 }
@@ -552,24 +523,17 @@ func everyInterface(host string) bool {
 	return host == "" || (ip != nil && ip.IsUnspecified())
 }
 
-// DataDir returns the data directory of the selected backend: Standalone.DataDir,
-// or Raft.DataDir in raft mode. Ephemeral standalone state has none.
+// DataDir returns the data directory of the selected backend: Raft.DataDir in
+// raft mode, "" for memory, which writes nothing to disk.
 func (c Config) DataDir() string {
-	if c.Ephemeral() {
-		return ""
-	}
-	switch c.Backend {
-	case "", BackendStandalone:
-		return c.Standalone.DataDir
-	case BackendRaft:
+	if c.Backend == BackendRaft {
 		return c.Raft.DataDir
 	}
 	return ""
 }
 
 // Ephemeral reports whether the selected backend keeps its state in memory only,
-// which only standalone with Standalone.Ephemeral does.
+// which memory, the default, does.
 func (c Config) Ephemeral() bool {
-	standalone := c.Backend == "" || c.Backend == BackendStandalone
-	return standalone && c.Standalone.Ephemeral
+	return c.Backend == "" || c.Backend == BackendMemory
 }

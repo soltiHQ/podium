@@ -16,7 +16,7 @@ const RingSize = 100
 
 // Writer routes mutating hub operations (Notify, Record, DeleteIssues)
 // through an external transport (Raft, Kafka, etc.) so every replica sees
-// the same events. Nil writer = in-process only (standalone profile).
+// the same events. Nil writer = in-process only (memory backend).
 type Writer interface {
 	Notify(event string)
 	Record(kind string, payload Payload)
@@ -119,13 +119,14 @@ func (h *Hub) Notify(event string) {
 //
 // Here a window (see WithCoalesce) holds refresh pulses back, and not in
 // Notify, because this is where every pulse reaches the clients of a replica:
-// from a standalone Notify, from the state machine of each Raft replica that
-// applies a replicated pulse, and from the local fallback of a follower. Each
-// replica thus bounds the traffic to its own clients, whichever node sent the
-// burst and whatever leadership did meanwhile, and the trailing delivery comes
-// from the pulses that replica applied. It only touches local channels, so no
-// timer ever calls into the replication transport. The pulses Notify sends to
-// the Writer are not held back: replication costs one command per pulse.
+// from a Notify of the memory backend, from the state machine of each Raft
+// replica that applies a replicated pulse, and from the local fallback of a
+// follower. Each replica thus bounds the traffic to its own clients, whichever
+// node sent the burst and whatever leadership did meanwhile, and the trailing
+// delivery comes from the pulses that replica applied. It only touches local
+// channels, so no timer ever calls into the replication transport. The pulses
+// Notify sends to the Writer are not held back: replication costs one command
+// per pulse.
 func (h *Hub) ApplyLocalNotify(event string) {
 	if h.coalesce != nil && IsRefreshKind(event) {
 		h.coalesce.notify(event)

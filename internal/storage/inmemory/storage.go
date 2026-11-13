@@ -156,16 +156,10 @@ func (s *state) GetUserBySubject(ctx context.Context, subject string) (*model.Us
 }
 
 func (s *state) ListUsers(ctx context.Context, filter storage.UserFilter, opts storage.ListOptions) (*storage.UserListResult, error) {
-	var predicate func(*model.User) bool
-
-	if filter != nil {
-		f, ok := filter.(*UserFilter)
-		if !ok {
-			return nil, storage.ErrInvalidArgument
-		}
-		predicate = f.Matches
+	predicate, err := userPredicate(filter)
+	if err != nil {
+		return nil, err
 	}
-
 	return s.users.List(ctx, predicate, opts)
 }
 
@@ -485,14 +479,9 @@ func (s *state) GetRoleByName(ctx context.Context, name string) (*model.Role, er
 }
 
 func (s *state) ListRoles(ctx context.Context, filter storage.RoleFilter, opts storage.ListOptions) (*storage.RoleListResult, error) {
-	var predicate func(*model.Role) bool
-
-	if filter != nil {
-		f, ok := filter.(*RoleFilter)
-		if !ok {
-			return nil, storage.ErrInvalidArgument
-		}
-		predicate = f.Matches
+	predicate, err := rolePredicate(filter)
+	if err != nil {
+		return nil, err
 	}
 	return s.roles.List(ctx, predicate, opts)
 }
@@ -572,6 +561,25 @@ func (s *state) DeleteRolloutsBySpec(ctx context.Context, specID string) error {
 }
 
 // --- FilterFactory ---
+
+func (s *state) BuildAgentFilter(c storage.AgentQueryCriteria) storage.AgentFilter {
+	f := NewAgentFilter()
+	if c.Query != "" {
+		f.Query(c.Query)
+	}
+	if !c.StaleAtBefore.IsZero() {
+		f.StaleAtBefore(c.StaleAtBefore)
+	}
+	return f
+}
+
+func (s *state) BuildUserFilter(c storage.UserQueryCriteria) storage.UserFilter {
+	f := NewUserFilter()
+	if c.Query != "" {
+		f.Query(c.Query)
+	}
+	return f
+}
 
 func (s *state) BuildRolloutFilter(c storage.RolloutQueryCriteria) storage.RolloutFilter {
 	f := NewRolloutFilter()

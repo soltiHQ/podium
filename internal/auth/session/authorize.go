@@ -9,7 +9,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
-// AuthorizeAccess checks the durable session after cryptographic verification.
+// AuthorizeAccess checks the stored session after cryptographic verification.
 // Revocation, account disablement and permission changes take effect on the
 // next request rather than waiting for the access token's expiry.
 func (s *Service) AuthorizeAccess(ctx context.Context, id *identity.Identity) (*identity.Identity, error) {

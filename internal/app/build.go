@@ -25,7 +25,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/bootstrap"
 	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/cluster/discovery"
-	"github.com/soltiHQ/control-plane/internal/cluster/standalone"
+	"github.com/soltiHQ/control-plane/internal/cluster/memory"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/handler"
@@ -44,7 +44,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/spec"
 	"github.com/soltiHQ/control-plane/internal/service/user"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/storage/durable"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 	"github.com/soltiHQ/control-plane/internal/transport/grpc/interceptor"
@@ -64,7 +63,7 @@ type services struct {
 	spec       *spec.Service
 	user       *user.Service
 	role       *role.Service
-	// cluster is the membership service of a raft node, nil in standalone.
+	// cluster is the membership service of a raft node, nil in memory.
 	cluster *clustersvc.Service
 }
 
@@ -131,7 +130,7 @@ func withMetrics(m *metrics.Metrics) clusterOption {
 }
 
 // withConfigDigests gives a raft node d, the digests of the settings every
-// replica must share (raftpkg.Config.ConfigDigests). Standalone ignores them.
+// replica must share (raftpkg.Config.ConfigDigests), which memory ignores.
 func withConfigDigests(d cluster.Digests) clusterOption {
 	return func(o *clusterOptions) { o.digests = &d }
 }
@@ -140,10 +139,10 @@ func withConfigDigests(d cluster.Digests) clusterOption {
 // by cfg. In raft mode the hub is also wired to replicate mutations through
 // the Raft log. opts configure the hub, and a raft node's configuration
 // digests. Returns the store/leadership/hub the rest of the app uses,
-// plus a shutdown function for the storage resources (nil for ephemeral standalone)
+// plus a shutdown function for the storage resources (nil for memory)
 // and, in raft mode, the node's cluster administration, which the cluster service
 // changes the membership through and which gives the node's configuration check
-// (nil in standalone).
+// (nil in memory).
 func buildCluster(cfg cluster.Config, logger zerolog.Logger, opts ...clusterOption) (storage.Storage, cluster.Leadership, *event.Hub, func(), *raftpkg.Admin, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, nil, nil, nil, nil, fmt.Errorf("cluster: %w", err)
@@ -155,40 +154,9 @@ func buildCluster(cfg cluster.Config, logger zerolog.Logger, opts ...clusterOpti
 	inner := inmemory.New()
 	hub := event.NewHub(logger, o.hub...)
 	switch cfg.Backend {
-	case "", cluster.BackendStandalone:
-		if cfg.Ephemeral() {
-			logger.Warn().Msg("standalone.ephemeral=true: control-plane state will be lost on restart")
-			return inner, standalone.NewLeadership(), hub, nil, nil, nil
-		}
-		durableOpts := []durable.Option{
-			durable.WithSnapshotThreshold(cfg.Standalone.SnapshotThreshold),
-			durable.WithFailureHandler(func(err error) {
-				logger.Error().Err(err).Str("data_dir", cfg.Standalone.DataDir).
-					Msg("standalone durable storage failed: reads and writes fail until restart")
-			}),
-		}
-		if o.metrics != nil {
-			durableOpts = append(durableOpts, durable.WithCommitObserver(o.metrics.StoreCommit("durable")))
-		}
-		store, err := durable.Open(cfg.Standalone.DataDir, durableOpts...)
-		if err != nil {
-			hub.Close()
-			return nil, nil, nil, nil, nil, err
-		}
-		if store.Migrated() {
-			// Once: the migrated file is in format 2 from here on.
-			logger.Warn().Str("data_dir", cfg.Standalone.DataDir).
-				Msgf("standalone durable storage migrated %s from single-blob to format 2: older versions refuse the migrated file, so rolling back needs a copy made before this start", durable.FileName)
-		}
-		logger.Info().Str("data_dir", cfg.Standalone.DataDir).Msg("standalone durable storage restored")
-		if o.probes != nil {
-			o.probes.failure = store.Failure
-		}
-		return store, standalone.NewLeadership(), hub, func() {
-			if err := store.Close(); err != nil {
-				logger.Error().Err(err).Msg("close standalone storage")
-			}
-		}, nil, nil
+	case "", cluster.BackendMemory:
+		logger.Warn().Msg("backend memory: control-plane state will be lost on restart")
+		return inner, memory.NewLeadership(), hub, nil, nil, nil
 	case cluster.BackendRaft:
 		disco, err := discovery.New(cfg.Discovery)
 		if err != nil {
@@ -251,8 +219,8 @@ func entries(n int) uint64 {
 // agentCAs reads the agents' CA bundle, tls.server.client_ca_file, as
 // tlsconf.ServerConfig.Build reads it, and fails as Build fails on it, with its
 // error: a bundle that cannot be read, or holds no certificate, fails the start
-// of a raft node here, before the node starts, as it fails a standalone start
-// in Build. It gives no certificates while the discovery listeners require no
+// of a raft node here, before the node starts, as it fails a memory start in
+// Build. It gives no certificates while the discovery listeners require no
 // client certificate. A raft node reads the bundle once, with this, and both
 // digests it (sharedSettings) and builds the discovery listeners' pool from
 // what it read (agentListenerTLS), so the node's digest names the very
@@ -268,7 +236,7 @@ func agentCAs(cfg config.Config) ([]*x509.Certificate, error) {
 // agentListenerTLS is the TLS of the agent-facing listeners, HTTP discovery and
 // gRPC: in raft mode built from cas, the agents' CA bundle that New read for the
 // digests (agentCAs), so the bundle is read once, however the file changes in
-// between; in standalone from the file, by Build, as before.
+// between; in memory from the file, by Build, as before.
 func agentListenerTLS(cfg config.Config, raftMode bool, cas []*x509.Certificate) (*tls.Config, error) {
 	if raftMode {
 		return cfg.TLS.Server.BuildWithClientCAs(cas)
@@ -344,7 +312,7 @@ const (
 
 // credentialSweepRunner is the runner that sweeps the agent credentials
 // (agent.Service.SweepCredentials) at the start of each leadership term of this
-// replica, through Leadership.WhenLeader: once at start in standalone, which
+// replica, through Leadership.WhenLeader: once at start in memory, which
 // always leads, and once per term on a raft leader, a leader write like any
 // other. It converts the stored credentials whose token the enrollment secret
 // derives at generation 0, and logs what it found (logCredentialSweep). A
@@ -476,7 +444,7 @@ func warnOpenDiscovery(logger zerolog.Logger, cfg config.Config) {
 }
 
 // warnForwarding logs, once at the start of a raft node, what its forwards to
-// the leader lack, one WARN per case; standalone forwards nothing and New calls
+// the leader lack, one WARN per case; memory forwards nothing and New calls
 // it in raft mode only. A follower forwards the writes it gets, logins, cookies
 // and tokens included, and the agents' syncs to the leader:
 //   - without tls.server, in plaintext, over HTTP and gRPC alike;
@@ -502,7 +470,7 @@ func warnForwarding(logger zerolog.Logger, cfg config.Config) {
 // so an agent has one budget of each whichever transport it uses. resolver gives
 // both the client IP; gRPC discovery reads it from x-forwarded-for only in raft
 // mode, where a follower forwards its syncs to the leader with forwarder, while
-// standalone keeps the peer address, as before. m counts and times the calls of
+// memory keeps the peer address, as before. m counts and times the calls of
 // both listeners and the outcome of each sync; nil records nothing.
 func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, cfg config.Config, resolver *clientip.Resolver, serverTLS, forwardTLS *tls.Config, forwarder *interceptor.Forwarder, m *metrics.Metrics) (http.Handler, *grpc.Server) {
 	limiter := kit.NewLimiter(cfg.Auth)
@@ -652,7 +620,7 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *e
 }
 
 // syncForwarder returns the forwarder of a follower's gRPC discovery syncs in raft
-// mode, nil in standalone. It sends a Sync through the generated client, over TLS
+// mode, nil in memory. It sends a Sync through the generated client, over TLS
 // with forwardTLS, the tls.client configuration, when the gRPC listener serves TLS
 // (tls.server), as the HTTP listeners forward their writes. The caller closes it.
 func syncForwarder(cfg config.Config, leadership cluster.Leadership, forwardTLS *tls.Config) *interceptor.Forwarder {
@@ -677,7 +645,7 @@ func forwardSync(ctx context.Context, conn grpc.ClientConnInterface, req any, op
 // forwarding headers of trusted_proxies, and in raft mode, where a follower
 // forwards writes to the leader, of the hosts of the current raft configuration
 // as well (raftHosts). Those hosts' names are looked up until the returned
-// function, nil in standalone, closes them.
+// function, nil in memory, closes them.
 func clientResolver(cfg config.Config, leadership cluster.Leadership) (*clientip.Resolver, func(), error) {
 	membership, raft := leadership.(cluster.Membership)
 	if !raft {

@@ -45,7 +45,7 @@ color, radius and elevation tokens live in `static/css/app.css` and
   spec, task name, UID and terminal-result filters use opaque continuations;
   public pages default to 50 records and are capped at 100. Changing filters
   starts from the first page.
-- `internal/auth/session/authorize.go`: checks durable session and current RBAC
+- `internal/auth/session/authorize.go`: checks stored session and current RBAC
   after JWT verification, so revoke, account disable and permission changes
   apply to the next request.
 

@@ -13,7 +13,7 @@ import (
 
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
 	"github.com/soltiHQ/control-plane/internal/cluster"
-	"github.com/soltiHQ/control-plane/internal/cluster/standalone"
+	"github.com/soltiHQ/control-plane/internal/cluster/memory"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
@@ -34,7 +34,7 @@ func mainHandler(t *testing.T, cfg config.Config) http.Handler {
 // mainHandlerOver builds the main listener from cfg over store, logging to logger.
 func mainHandlerOver(t *testing.T, cfg config.Config, store storage.Storage, logger zerolog.Logger) http.Handler {
 	t.Helper()
-	return mainHandlerOf(t, cfg, store, logger, standalone.NewLeadership(), nil)
+	return mainHandlerOf(t, cfg, store, logger, memory.NewLeadership(), nil)
 }
 
 // mainHandlerOf builds the main listener of a node led as leadership says,

@@ -81,6 +81,12 @@ leader's CORS headers, every `Access-Control-*` header and the `Origin` token of
 `Vary`, and keeps the rest: an answer that names the origin twice is one a
 browser refuses (`TestForwardedWriteCarriesTheCORSHeadersOnce`).
 
+No HTTP log line carries a cookie or a session ID. `Logger`, `Recovery`,
+`CrossOrigin` and the auth middleware log the path of
+`POST /api/v1/session/{id}/revoke` with `{id}` in place of the session ID
+(`logPath`): the `session_id` cookie carries the same value, and with the
+refresh token it renews the session (`TestLoggedPathsHideTheSessionID`).
+
 ### gRPC
 
 ```text
@@ -138,7 +144,7 @@ RFC 7239 `Forwarded` is not supported. The login limiter,
 `middleware.StreamLimit` and HTTP discovery take the client IP from the
 resolver. gRPC discovery does too in raft mode, from the peer and its
 `x-forwarded-for` metadata, which a follower sets when it forwards a sync;
-standalone gRPC discovery uses the peer address, whatever metadata the call
+memory-backend gRPC discovery uses the peer address, whatever metadata the call
 carries.
 
 ## Rate limits

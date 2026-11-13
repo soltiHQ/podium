@@ -67,7 +67,7 @@ func (c Configuration) Voters() int {
 
 // Admin is implemented by drivers whose cluster membership can change: raft. It
 // is the narrow interface through which the cluster service reads this node's
-// view of its cluster and changes the membership. Standalone has none.
+// view of its cluster and changes the membership. The memory backend has none.
 type Admin interface {
 	// NodeID returns this node's ID.
 	NodeID() string

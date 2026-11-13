@@ -131,8 +131,7 @@ other labels take the fixed values below.
 | `podium_rollouts` | gauge | `status` (`pending`, `synced`, `drift`, `failed`, `unknown`) | Rollouts in this node's store, read at scrape. |
 | `podium_sync_turns_total` | counter | `outcome` (`answered`, `unanswered`, `local`) | Agent turns of the sync runner, which runs on the leader only: `answered` when the agent answered a call, `unanswered` when a call got no answer, `local` when the turn needed no call. A tick that is cancelled reports none. |
 | `podium_sync_turn_duration_seconds` | histogram | none | The duration of those turns. |
-| `podium_store_commit_duration_seconds` | histogram | `backend` (`durable`, `raft`) | A durable commit (log append, its sync, and the apply), or a raft write from proposal to answer, which only the leader makes. Buckets from 0.5 ms to 1 s. An in-memory store has none. |
-| `podium_store_failed` | gauge | none | 1 while the store has failed, which `/readyz` reports as `storage failed`; it reads the same hook, and is 0 on a node whose store cannot fail. |
+| `podium_store_commit_duration_seconds` | histogram | `backend` (`raft`) | A raft write from proposal to answer, which only the leader makes. Buckets from 0.5 ms to 1 s. The memory backend has none. |
 
 The outcomes of `podium_discovery_syncs_total`:
 
@@ -213,8 +212,8 @@ how long they have been silent. `hb` is the heartbeat the agent reported, or
   thresholds to sync again first. A replica that takes leadership long after it
   started gives the grace all the same. The grace restarts with every term, so a
   control plane restarted, or a cluster whose leader changes, more often than
-  the deletion threshold deletes no silent agent. In standalone the one term
-  starts when the runner does.
+  the deletion threshold deletes no silent agent. On the memory backend the one
+  term starts when the runner does.
 - **Status only gets worse.** Lifecycle never lowers a status: an agent that was
   already `disconnected` stays so during the grace, and only a sync makes an
   agent `active` again. No event is recorded when the status does not change;
@@ -338,10 +337,9 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s, 40
   observed. A synced rollout without a task makes no call.
 - **Reinstalls are not bounded by `push_timeout`.** After a complete listing,
   each rollout whose task is missing is queued for a reinstall by a write to the
-  store, about 1 ms on the durable store; in raft mode each write is a
-  replicated commit. These writes make no agent call, so the turn's budget does
-  not stop them: an agent that lost all its tasks has one write per rollout in
-  one turn.
+  store, quick on the memory backend; in raft mode each write is a replicated
+  commit. These writes make no agent call, so the turn's budget does not stop
+  them: an agent that lost all its tasks has one write per rollout in one turn.
 - **A listing that cannot finish is logged when that changes.** When an agent's
   listing turns incomplete, the runner logs one warning that names the cause (a
   task too large to list, the budget used, a repeated cursor, pages of different

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -32,21 +31,13 @@ func TestBootstrapOptionsFollowTheSelectedBackend(t *testing.T) {
 		dataDir   string
 		ephemeral bool
 	}{
-		{"standalone", func(*config.Config) {}, "/data/standalone", false},
-		{"ephemeral standalone", func(c *config.Config) { c.Cluster.Standalone.Ephemeral = true }, "", true},
+		{"memory", func(*config.Config) {}, "", true},
+		{"unset backend is memory", func(c *config.Config) { c.Cluster.Backend = "" }, "", true},
 		{"raft", func(c *config.Config) { c.Cluster.Backend = cluster.BackendRaft }, "/data/raft", false},
-		{"raft ignores the standalone flag", func(c *config.Config) {
-			c.Cluster.Backend = cluster.BackendRaft
-			c.Cluster.Standalone.Ephemeral = true
-		}, "/data/raft", false},
-		{"unknown backend", func(c *config.Config) {
-			c.Cluster.Backend = "other"
-			c.Cluster.Standalone.Ephemeral = true
-		}, "", false},
+		{"unknown backend", func(c *config.Config) { c.Cluster.Backend = "other" }, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.Default()
-			cfg.Cluster.Standalone.DataDir = "/data/standalone"
 			cfg.Cluster.Raft.DataDir = "/data/raft"
 			cfg.BootstrapAdminPassword = "operator-chosen-password"
 			tc.mutate(&cfg)
@@ -58,60 +49,39 @@ func TestBootstrapOptionsFollowTheSelectedBackend(t *testing.T) {
 	}
 }
 
-// A fresh install with the default configuration starts and writes its
-// administrator password into the data directory, without logging it. A
-// restart leaves that file alone.
-func TestNewWritesAdminPasswordFileOnFirstStart(t *testing.T) {
+// A fresh install with the default configuration, the memory backend, starts and
+// logs its generated administrator password once, at WARN, and writes no file:
+// the state is in memory, so there is no data directory for it.
+func TestNewLogsAdminPasswordOnFirstMemoryStart(t *testing.T) {
 	cfg := config.Default()
-	cfg.Cluster.Standalone.DataDir = filepath.Join(t.TempDir(), "podium")
 	cfg.Auth.JWTSecret = strings.Repeat("first-start-test-secret", 2)
-	path := filepath.Join(cfg.Cluster.Standalone.DataDir, bootstrap.PasswordFile)
+	dir := t.TempDir()
+	t.Chdir(dir)
 
-	start := func() string {
-		t.Helper()
-		var logs bytes.Buffer
-		a, err := New(context.Background(), cfg, zerolog.New(&logs), WithPasswordCost(bcrypt.MinCost))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = a.Shutdown(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-		return logs.String()
-	}
-
-	first := start()
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("the first start wrote no password file: %v", err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("password file has mode %v, want 0600", info.Mode().Perm())
-	}
-	written, err := os.ReadFile(path)
+	logs := &syncBuffer{}
+	a, err := New(context.Background(), cfg, zerolog.New(logs), WithPasswordCost(bcrypt.MinCost))
 	if err != nil {
 		t.Fatal(err)
 	}
-	password := strings.TrimSpace(string(written))
-	if password == "" {
-		t.Fatal("password file is empty")
-	}
-	if strings.Contains(first, password) {
-		t.Fatalf("the log contains the password:\n%s", first)
-	}
-	if !strings.Contains(first, path) {
-		t.Fatalf("the log does not name %s:\n%s", path, first)
-	}
-
-	if second := start(); strings.Contains(second, password) {
-		t.Fatalf("the restart log contains the password:\n%s", second)
-	}
-	again, err := os.ReadFile(path)
-	if err != nil {
+	if err = a.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(written, again) {
-		t.Fatal("a restart rewrote the password file")
+	out := logs.String()
+	var withPassword []logLine
+	for _, line := range (&clusterNode{id: "memory", logs: logs}).logged(t, map[string]any{}) {
+		if _, ok := line.fields["password"]; ok {
+			withPassword = append(withPassword, line)
+		}
+	}
+	if n := strings.Count(out, "admin password generated"); n != 1 || len(withPassword) != 1 {
+		t.Fatalf("the log holds %d lines about the generated password and %d with a password, want one of each:\n%s", n, len(withPassword), out)
+	}
+	line := withPassword[0].fields
+	if message, _ := line["message"].(string); line["level"] != "warn" || line["password"] == "" || !strings.Contains(message, "admin password generated") {
+		t.Fatalf("the line with the password is %v, want the WARN about the generated password", line)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("the start wrote %v (%v) into its working directory, want nothing", entries, err)
 	}
 }
 
@@ -176,13 +146,12 @@ func TestNewRaftRefusesToStartWithoutADataDirectory(t *testing.T) {
 }
 
 // The cost New is given is the cost of the password hashes the services write:
-// the hash of the administrator that a standalone start seeds has it. A New that
+// the hash of the administrator that a memory start seeds has it. A New that
 // dropped the option, or passed the services another cost, would hash at the
 // default, 12.
 func TestPasswordCostReachesTheServices(t *testing.T) {
 	const cost = bcrypt.MinCost + 1 // neither the default nor the floor
 	cfg := config.Default()
-	cfg.Cluster.Standalone.Ephemeral = true
 	cfg.Auth.JWTSecret = strings.Repeat("password-cost-test-secret", 2)
 	a, err := New(context.Background(), cfg, zerolog.Nop(), WithPasswordCost(cost))
 	if err != nil {

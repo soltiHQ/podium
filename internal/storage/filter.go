@@ -1,6 +1,10 @@
 package storage
 
-import "github.com/soltiHQ/control-plane/domain/enum"
+import (
+	"time"
+
+	"github.com/soltiHQ/control-plane/domain/enum"
+)
 
 // AgentFilter defines a backend-specific query object for agents.
 //
@@ -56,5 +60,32 @@ type RolloutQueryCriteria struct {
 // Note:
 // This struct is consumed by FilterFactory.BuildSpecFilter, which translates it into the backend-specific SpecFilter.
 type SpecQueryCriteria struct {
+	Query string
+}
+
+// AgentQueryCriteria defines a backend-agnostic query description for agents.
+//
+// Each field is optional and zero values are ignored during filter construction.
+// Passing a fully zeroed struct therefore matches every agent in storage.
+//
+// Note:
+// This struct is consumed by FilterFactory.BuildAgentFilter, which translates it into the backend-specific AgentFilter.
+type AgentQueryCriteria struct {
+	// Query is a case-insensitive substring of the agent ID, name or endpoint.
+	Query string
+	// StaleAtBefore bounds the staleness deadline: an agent matches when its
+	// deadline is before it, or was never set. Zero: no bound.
+	StaleAtBefore time.Time
+}
+
+// UserQueryCriteria defines a backend-agnostic query description for users.
+//
+// Each field is optional and zero values are ignored during filter construction.
+// Passing a fully zeroed struct therefore matches every user in storage.
+//
+// Note:
+// This struct is consumed by FilterFactory.BuildUserFilter, which translates it into the backend-specific UserFilter.
+type UserQueryCriteria struct {
+	// Query is a case-insensitive substring of the user subject, name or email.
 	Query string
 }

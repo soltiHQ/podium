@@ -2,24 +2,19 @@ package spec
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 
 	"github.com/rs/zerolog"
 
-	"github.com/soltiHQ/control-plane/internal/storage/durable"
+	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/storage/storagetest"
 )
 
-// benchStore opens a durable store in a fresh directory and seeds it.
-func benchStore(b *testing.B, f storagetest.Fixture) *durable.Store {
+// benchStore opens an in-memory store and seeds it.
+func benchStore(b *testing.B, f storagetest.Fixture) *inmemory.Store {
 	b.Helper()
-	s, err := durable.Open(filepath.Join(b.TempDir(), "state"))
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.Cleanup(func() { _ = s.Close() })
-	if err = storagetest.Seed(context.Background(), s, f); err != nil {
+	s := inmemory.New()
+	if err := storagetest.Seed(context.Background(), s, f); err != nil {
 		b.Fatal(err)
 	}
 	return s

@@ -167,14 +167,13 @@ func TestMismatchedReplicaLogsError(t *testing.T) {
 	}
 }
 
-// Standalone digests nothing and checks nothing: New gives the app no cluster
+// Memory digests nothing and checks nothing: New gives the app no cluster
 // service, whose status would give a fingerprint, and Run starts the seven
-// runners of standalone, the configuration check not among them.
-func TestStandaloneRunsNoConfigCheck(t *testing.T) {
+// runners of memory, the configuration check not among them.
+func TestMemoryRunsNoConfigCheck(t *testing.T) {
 	logs := &syncBuffer{}
 	cfg := config.Default()
-	cfg.Cluster.Standalone.Ephemeral = true
-	cfg.Auth.JWTSecret = strings.Repeat("standalone-config-check-secret", 2)
+	cfg.Auth.JWTSecret = strings.Repeat("memory-config-check-secret", 2)
 	cfg.HTTP.Addr, cfg.HTTPDiscovery.Addr, cfg.GRPC.Addr = "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0"
 	cfg.Ops.Addr = "" // the ops listener is an eighth runner, which this test does not count
 	a, err := New(context.Background(), cfg, zerolog.New(logs), WithPasswordCost(bcrypt.MinCost))
@@ -182,7 +181,7 @@ func TestStandaloneRunsNoConfigCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	if a.cluster != nil {
-		t.Fatal("a standalone app has a cluster service")
+		t.Fatal("a memory app has a cluster service")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	ran := make(chan error, 1)
@@ -196,9 +195,9 @@ func TestStandaloneRunsNoConfigCheck(t *testing.T) {
 			t.Errorf("shutdown: %v", err)
 		}
 	})
-	node := &clusterNode{id: "standalone", logs: logs}
+	node := &clusterNode{id: "memory", logs: logs}
 	starting := map[string]any{"message": "runner starting"}
-	waitFor(t, 10*time.Second, "the runners of standalone start", func() bool { return len(node.logged(t, starting)) >= 7 })
+	waitFor(t, 10*time.Second, "the runners of memory start", func() bool { return len(node.logged(t, starting)) >= 7 })
 	// A deliberate delay, not a wait for a condition: the server starts every
 	// runner at once, so an eighth would log its start within it.
 	time.Sleep(100 * time.Millisecond)
@@ -207,6 +206,6 @@ func TestStandaloneRunsNoConfigCheck(t *testing.T) {
 		names = append(names, fmt.Sprint(line.fields["runner"]))
 	}
 	if len(names) != 7 || slices.Contains(names, configCheck) {
-		t.Fatalf("standalone started the runners %v, want seven without %s", names, configCheck)
+		t.Fatalf("memory started the runners %v, want seven without %s", names, configCheck)
 	}
 }

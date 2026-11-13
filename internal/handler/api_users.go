@@ -17,7 +17,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/session"
 	"github.com/soltiHQ/control-plane/internal/service/user"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/http/route"
@@ -94,19 +93,13 @@ func (a *API) SessionsRouter(w http.ResponseWriter, r *http.Request) {
 func (a *API) userList(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode) {
 	var (
 		limit  = queryInt(r, "limit", 0)
-		filter storage.UserFilter
-
 		cursor = r.URL.Query().Get("cursor")
 		q      = r.URL.Query().Get("q")
 	)
-	if q != "" {
-		filter = inmemory.NewUserFilter().Query(q)
-	}
-
 	res, err := a.userSVC.List(r.Context(), user.ListQuery{
-		Limit:  limit,
-		Cursor: cursor,
-		Filter: filter,
+		Limit:    limit,
+		Cursor:   cursor,
+		Criteria: storage.UserQueryCriteria{Query: q},
 	})
 	if err != nil {
 		a.logger.Error().Err(err).Msg("user list failed")
@@ -432,6 +425,8 @@ func (a *API) userSetPassword(w http.ResponseWriter, r *http.Request, mode httpc
 	response.NoContent(w, r)
 }
 
+// userRevokeSession revokes the session id names. Neither of its log lines
+// names the session: the session_id cookie carries its ID.
 func (a *API) userRevokeSession(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	err := a.sessionSVC.Revoke(
 		r.Context(),
@@ -442,12 +437,12 @@ func (a *API) userRevokeSession(w http.ResponseWriter, r *http.Request, mode htt
 		if writeUserAccessError(w, r, mode, err) {
 			return
 		}
-		a.failure(err).Str("session_id", id).Msg("session revoke failed")
+		a.failure(err).Msg("session revoke failed")
 		response.StoreFailed(w, r, mode, err)
 		return
 	}
 
-	a.logger.Info().Str("session_id", id).Msg("session revoked")
+	a.logger.Info().Msg("session revoked")
 	htmx.Trigger(w, event.RefreshSessions)
 	a.hub.Notify(event.RefreshSessions)
 	response.NoContent(w, r)

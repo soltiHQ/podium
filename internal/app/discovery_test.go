@@ -23,7 +23,7 @@ import (
 	discoverv1 "github.com/soltiHQ/control-plane/api/gen/solti/discover/v1"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
-	"github.com/soltiHQ/control-plane/internal/cluster/standalone"
+	"github.com/soltiHQ/control-plane/internal/cluster/memory"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/handler"
@@ -94,13 +94,12 @@ func TestRaftNodeWarnsWhatItsForwardsLack(t *testing.T) {
 	}
 }
 
-// Standalone forwards nothing, and says nothing about forwards: a node without
+// Memory forwards nothing, and says nothing about forwards: a node without
 // TLS, which warns in raft mode, starts without the warning.
-func TestStandaloneWarnsOfNoForwarding(t *testing.T) {
+func TestMemoryWarnsOfNoForwarding(t *testing.T) {
 	var logs bytes.Buffer
 	cfg := config.Default()
-	cfg.Cluster.Standalone.Ephemeral = true
-	cfg.Auth.JWTSecret = strings.Repeat("standalone-forwarding-secret", 2)
+	cfg.Auth.JWTSecret = strings.Repeat("memory-forwarding-secret", 2)
 	a, err := New(context.Background(), cfg, zerolog.New(&logs), WithPasswordCost(bcrypt.MinCost))
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +108,7 @@ func TestStandaloneWarnsOfNoForwarding(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := forwardingWarnings(t, logs.Bytes()); len(got) != 0 {
-		t.Fatalf("standalone warned %q", got)
+		t.Fatalf("memory warned %q", got)
 	}
 }
 
@@ -143,7 +142,6 @@ func TestNewWarnsWhoCanRegisterAgents(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs bytes.Buffer
 			cfg := config.Default()
-			cfg.Cluster.Standalone.Ephemeral = true
 			cfg.Auth.JWTSecret = strings.Repeat("agent-auth-test-secret", 2)
 			cfg.AgentAuth.Require = tc.require
 			a, err := New(context.Background(), cfg, zerolog.New(&logs), WithPasswordCost(bcrypt.MinCost))
@@ -269,7 +267,7 @@ func newDiscoveryClientsLogged(t *testing.T, cfg config.Config, logger zerolog.L
 	}
 	hub := event.NewHub(logger)
 	t.Cleanup(hub.Close)
-	h, srv := buildDiscoveryListeners(logger, svc.agent, hub, standalone.NewLeadership(), cfg, nil, nil, nil, nil, nil)
+	h, srv := buildDiscoveryListeners(logger, svc.agent, hub, memory.NewLeadership(), cfg, nil, nil, nil, nil, nil)
 	return discoveryClients{http: h, grpc: serveDiscovery(t, srv), agents: svc.agent}
 }
 
@@ -298,7 +296,7 @@ func TestGRPCDiscoveryRejectsOversizedMessage(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, nil, false, 0, nil, nil))
+	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, memory.NewLeadership(), kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, nil, false, 0, nil, nil))
 	sync := func(id string, osBytes int) error {
 		_, err := client.Sync(ctx, &discoverv1.SyncRequest{
 			Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1,
@@ -325,7 +323,7 @@ func TestGRPCDiscoveryCapsHeaders(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, standalone.NewLeadership(), kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, nil, false, 0, nil, nil))
+	client := serveDiscovery(t, buildGRPCServer(logger, svc, hub, memory.NewLeadership(), kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, nil, false, 0, nil, nil))
 	sync := func(id string, padding int) error {
 		md := metadata.AppendToOutgoingContext(ctx, "x-padding", strings.Repeat("p", padding))
 		_, err := client.Sync(md, &discoverv1.SyncRequest{
@@ -605,19 +603,19 @@ func TestDiscoveryEnrollmentUsesTheConfiguredSecret(t *testing.T) {
 	}
 }
 
-// Standalone gRPC discovery takes its client IP from the peer, as it did before
+// Memory gRPC discovery takes its client IP from the peer, as it did before
 // followers forwarded syncs: x-forwarded-for counts for nothing, even from a
 // host that trusted_proxies lists, while HTTP discovery believes that host's
 // X-Forwarded-For. Each attempt names an address of its own; over gRPC the
 // limiter still counts all of them at the peer.
-func TestStandaloneGRPCDiscoveryIgnoresForwardedFor(t *testing.T) {
+func TestMemoryGRPCDiscoveryIgnoresForwardedFor(t *testing.T) {
 	cfg := config.Default()
 	cfg.TrustedProxies = []string{"127.0.0.1"} // the address of the test's own client
 	logger := zerolog.Nop()
-	leadership := standalone.NewLeadership()
+	leadership := memory.NewLeadership()
 	resolver, closeHosts, err := clientResolver(cfg, leadership)
 	if err != nil || closeHosts != nil {
-		t.Fatalf("clientResolver in standalone: %v, with a closer: %v", err, closeHosts != nil)
+		t.Fatalf("clientResolver in memory: %v, with a closer: %v", err, closeHosts != nil)
 	}
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)

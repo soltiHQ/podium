@@ -350,9 +350,11 @@ type RoleStore interface {
 	//   - ErrInternal for unexpected storage failures.
 	GetRole(ctx context.Context, id string) (*model.Role, error)
 
-	// GetRoles retrieves roles by their IDs.
+	// GetRoles retrieves roles by their IDs: one role per ID asked for, in the
+	// order asked, repeats included.
 	//
 	// Returns:
+	//   - ErrNotFound if one of the IDs has no role.
 	//   - ErrInvalidArgument if ids are empty or contain empty elements.
 	//   - ErrUnavailable if the backend is temporarily unavailable.
 	//   - ErrInternal for unexpected storage failures.
@@ -478,6 +480,14 @@ type RolloutStore interface {
 // FilterFactory defines constructors for backend-specific filters built from backend-agnostic query criteria.
 type FilterFactory interface {
 	BuildExecutionFilter(c ExecutionQueryCriteria) ExecutionFilter
+
+	// BuildAgentFilter constructs an AgentFilter for this backend from the supplied criteria.
+	// Empty criteria match every agent.
+	BuildAgentFilter(c AgentQueryCriteria) AgentFilter
+
+	// BuildUserFilter constructs a UserFilter for this backend from the supplied criteria.
+	// Empty criteria match every user.
+	BuildUserFilter(c UserQueryCriteria) UserFilter
 
 	// BuildRolloutFilter constructs a RolloutFilter for this backend from the supplied criteria.
 	// Empty criteria match every rollout.

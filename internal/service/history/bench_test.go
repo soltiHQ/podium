@@ -17,30 +17,24 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/raft"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/storage/durable"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/storage/storagetest"
 )
 
-// backends are the stores the benchmarks compare: the standalone durable store and
-// a single-node Raft cluster.
+// backends are the stores the benchmarks compare: the in-memory store and a
+// single-node Raft cluster.
 var backends = []struct {
 	name string
 	open func(b *testing.B) storage.Storage
 }{
-	{"durable", openDurable},
+	{"memory", openMemory},
 	{"raft", openRaft},
 }
 
-// openDurable opens a durable store in a fresh directory.
-func openDurable(b *testing.B) storage.Storage {
+// openMemory opens an in-memory store.
+func openMemory(b *testing.B) storage.Storage {
 	b.Helper()
-	s, err := durable.Open(filepath.Join(b.TempDir(), "state"))
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.Cleanup(func() { _ = s.Close() })
-	return s
+	return inmemory.New()
 }
 
 // openRaft starts a single-node Raft cluster and returns its store once the node

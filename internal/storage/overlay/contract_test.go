@@ -21,7 +21,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/raft"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/storage/durable"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/storage/storagetest"
 )
@@ -36,18 +35,7 @@ var backends = []struct {
 	open func(t *testing.T) storage.Storage
 }{
 	{"inmemory", func(*testing.T) storage.Storage { return inmemory.New() }},
-	{"durable", openDurable},
 	{"raft", openRaft},
-}
-
-func openDurable(t *testing.T) storage.Storage {
-	t.Helper()
-	s, err := durable.Open(filepath.Join(t.TempDir(), "state"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = s.Close() })
-	return s
 }
 
 // openRaft starts a single-node Raft cluster on loopback, whose one peer is the

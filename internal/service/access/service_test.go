@@ -1,12 +1,14 @@
 package access
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -197,5 +199,37 @@ func TestLoginRejectsBlankSubjectOrPassword(t *testing.T) {
 		if _, _, err := svc.Login(context.Background(), req); !errors.Is(err, iauth.ErrInvalidRequest) {
 			t.Errorf("Login(%q, %q): %v, want ErrInvalidRequest", req.Subject, req.Password, err)
 		}
+	}
+}
+
+// Logout logs no session ID: the session_id cookie carries it, and with the
+// refresh token it renews the session.
+func TestLogoutLogsNoSessionID(t *testing.T) {
+	const id = "secret-session-id"
+	ctx := context.Background()
+	store := inmemory.New()
+	sess, err := model.NewSession(id, "user-1", "cred-1", enum.Password, make([]byte, 32), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateSession(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	cfg := iauth.Config{JWTSecret: strings.Repeat("k", iauth.MinJWTSecretLen)}.WithDefaults()
+	svc := New(kit.New(store, cfg, bcrypt.MinCost), store, zerolog.New(&logs).Level(zerolog.DebugLevel))
+	if err := svc.Logout(ctx, LogoutRequest{SessionID: id}); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := store.GetSession(ctx, id); err != nil || !s.Revoked() {
+		t.Fatalf("session not revoked: %v", err)
+	}
+	out := logs.String()
+	if !strings.Contains(out, `"message":"logout"`) {
+		t.Fatalf("no logout line: %s", out)
+	}
+	if strings.Contains(out, id) || strings.Contains(out, "session_id") {
+		t.Fatalf("the log carries the session ID: %s", out)
 	}
 }

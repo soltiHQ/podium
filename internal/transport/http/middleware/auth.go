@@ -90,7 +90,7 @@ func checkFailed(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode
 		if errors.Is(err, cluster.ErrLeadershipLost) {
 			message = "auth refresh outcome unknown: with auth.rotate_refresh, this node lost its leadership, or shut down, while the rotation of the refresh token committed, which may have taken effect: a retry at the current leader refreshes the browser unless it did, and then the browser logs in again; the 503 names that leader in X-Leader when this node knows it, which a node that shut down does not"
 		}
-		logger.Warn().Err(err).Str("method", r.Method).Str("path", r.URL.Path).Msg(message)
+		logger.Warn().Err(err).Str("method", r.Method).Str("path", logPath(r.URL.Path)).Msg(message)
 		response.FromError(w, r, mode, err)
 		return
 	}
@@ -99,9 +99,9 @@ func checkFailed(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode
 }
 
 // logCheckFailure logs why credentials could not be checked: the method, the
-// path and the error. It never logs a cookie or a token.
+// path through logPath, and the error; never a cookie, a token or a session ID.
 func logCheckFailure(logger zerolog.Logger, r *http.Request, err error) {
-	logger.Error().Err(err).Str("method", r.Method).Str("path", r.URL.Path).Msg("auth check failed")
+	logger.Error().Err(err).Str("method", r.Method).Str("path", logPath(r.URL.Path)).Msg("auth check failed")
 }
 
 // authenticate returns the identity of r, from its bearer token or access

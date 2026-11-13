@@ -132,6 +132,7 @@ func (s *Service) Logout(ctx context.Context, req LogoutRequest) error {
 		return err
 	}
 
-	s.logger.Debug().Str("session_id", req.SessionID).Msg("logout")
+	// No session ID: the session_id cookie carries it.
+	s.logger.Debug().Msg("logout")
 	return nil
 }

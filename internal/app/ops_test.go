@@ -3,15 +3,12 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,8 +29,8 @@ import (
 	"github.com/soltiHQ/control-plane/internal/config"
 )
 
-// runningApp is an app that New built and Run serves, as main runs it: standalone
-// with ephemeral state, every listener on a loopback port the kernel picks.
+// runningApp is an app that New built and Run serves, as main runs it: the
+// memory backend, every listener on a loopback port the kernel picks.
 type runningApp struct {
 	app    *App
 	cfg    config.Config
@@ -44,12 +41,11 @@ type runningApp struct {
 }
 
 // newApp builds, with New, the app of a default configuration that configure
-// changes: standalone with ephemeral state, every listener on a loopback port the
+// changes: the memory backend, every listener on a loopback port the
 // kernel picks. It returns the app, its configuration and its logs.
 func newApp(t *testing.T, configure func(*config.Config)) (*App, config.Config, *syncBuffer) {
 	t.Helper()
 	cfg := config.Default()
-	cfg.Cluster.Standalone.Ephemeral = true
 	cfg.Auth.JWTSecret = strings.Repeat("ops-listener-test-secret", 2)
 	cfg.Auth = cfg.Auth.WithDefaults()
 	cfg.HTTP.Addr, cfg.HTTPDiscovery.Addr, cfg.GRPC.Addr, cfg.Ops.Addr = "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0", "127.0.0.1:0"
@@ -188,32 +184,15 @@ func bearerFor(t *testing.T, a *App, cfg config.Config, userID string, permissio
 	return value
 }
 
-// A node is not ready while its durable store has failed, and not ready once the
-// shutdown starts, which it reports while the UI listener still answers, for the
-// shutdown delay. The failure is injected at the seam of the readiness; the
-// store's own failure is the durable package's test.
-func TestReadinessFollowsStoreAndShutdown(t *testing.T) {
-	var (
-		broken  atomic.Bool
-		release func()
-	)
+// A node is ready once it serves, and not ready once the shutdown starts, which
+// it reports while the UI listener still answers, for the shutdown delay.
+func TestReadinessFollowsShutdown(t *testing.T) {
+	var release func()
 	r := startApp(t, func(c *config.Config) { c.Server.ShutdownDelay = time.Hour }, func(a *App) {
 		release = gateDelay(a)
-		a.ready.failure = func() error {
-			if broken.Load() {
-				return errors.New("injected durable failure")
-			}
-			return nil
-		}
 	})
 	ops, ui := r.app.ops.Addr, r.app.ui.Addr
 	waitFor(t, 10*time.Second, "the listeners bind", func() bool { return ops() != "" && ui() != "" })
-	opsAnswers(t, ops(), "/readyz", 200, "ok")
-
-	broken.Store(true)
-	opsAnswers(t, ops(), "/readyz", 503, "storage failed")
-	opsAnswers(t, ops(), "/livez", 200, "ok") // a failed store is not a dead process
-	broken.Store(false)
 	opsAnswers(t, ops(), "/readyz", 200, "ok")
 
 	r.cancel()
@@ -235,28 +214,24 @@ func TestReadinessFollowsStoreAndShutdown(t *testing.T) {
 	}
 }
 
-// The reasons of readiness, first that applies: shutting down, then starting, a
-// failed store, and for raft a missing leader.
+// The reasons of readiness, first that applies: shutting down, then starting,
+// and for raft a missing leader.
 func TestReadinessReasonOrder(t *testing.T) {
-	failed := func() error { return errors.New("failed") }
 	for _, tc := range []struct {
 		name         string
 		bound, going bool
-		failure      func() error
 		leader       func() string
 		want         string
 	}{
-		{"ready", true, false, nil, nil, ""},
-		{"starting", false, false, nil, nil, reasonStarting},
-		{"failed store", true, false, failed, nil, reasonStorage},
-		{"no leader", true, false, nil, func() string { return "" }, reasonNoLeader},
-		{"a leader", true, false, nil, func() string { return "n1" }, ""},
-		{"shutting down before all", false, true, failed, func() string { return "" }, reasonShuttingDown},
-		{"starting before the store", false, false, failed, func() string { return "" }, reasonStarting},
-		{"the store before the leader", true, false, failed, func() string { return "" }, reasonStorage},
+		{"ready", true, false, nil, ""},
+		{"starting", false, false, nil, reasonStarting},
+		{"no leader", true, false, func() string { return "" }, reasonNoLeader},
+		{"a leader", true, false, func() string { return "n1" }, ""},
+		{"shutting down before all", false, true, func() string { return "" }, reasonShuttingDown},
+		{"starting before the leader", false, false, func() string { return "" }, reasonStarting},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &readiness{failure: tc.failure, leader: tc.leader}
+			r := &readiness{leader: tc.leader}
 			r.bound.Store(tc.bound)
 			r.shuttingDown.Store(tc.going)
 			if got := r.reason(); got != tc.want {
@@ -274,8 +249,8 @@ func TestLeaderProbeOnRaft(t *testing.T) {
 		n.start(t)
 	}
 	for _, n := range nodes {
-		if n.app.ready.leader == nil || n.app.ready.failure != nil {
-			t.Fatalf("%s: readiness hooks leader set %v, failure set %v; a raft node needs a leader and has no store that fails", n.id, n.app.ready.leader != nil, n.app.ready.failure != nil)
+		if n.app.ready.leader == nil {
+			t.Fatalf("%s: a raft node needs a leader hook in its readiness", n.id)
 		}
 	}
 	for _, n := range nodes {
@@ -360,7 +335,7 @@ func TestOpsListenerDisabledWhenAddrEmpty(t *testing.T) {
 	}
 	waitFor(t, 10*time.Second, "the other listeners bind", func() bool { return r.app.ui.Addr() != "" && r.app.grpc.Addr() != "" })
 	waitFor(t, 10*time.Second, "the app is ready", func() bool { return r.app.ready.reason() == "" })
-	node := &clusterNode{id: "standalone", logs: r.logs}
+	node := &clusterNode{id: "node", logs: r.logs}
 	if got := node.logged(t, map[string]any{"runner": "ops"}); len(got) != 0 {
 		t.Fatalf("lines of an ops runner with ops.addr empty: %v", got)
 	}
@@ -368,20 +343,11 @@ func TestOpsListenerDisabledWhenAddrEmpty(t *testing.T) {
 
 // The gRPC health service reports the overall service and the discovery service
 // as SERVING while the node is ready, and NOT_SERVING when it is not, without
-// authentication: a failed store, and the shutdown, which holds for the delay.
+// authentication: the shutdown, which holds for the delay.
 func TestGRPCHealthFollowsReadiness(t *testing.T) {
-	var (
-		broken  atomic.Bool
-		release func()
-	)
+	var release func()
 	r := startApp(t, func(c *config.Config) { c.Server.ShutdownDelay = time.Hour }, func(a *App) {
 		release = gateDelay(a)
-		a.ready.failure = func() error {
-			if broken.Load() {
-				return errors.New("injected durable failure")
-			}
-			return nil
-		}
 	})
 	waitFor(t, 10*time.Second, "the listeners bind", func() bool { return r.app.grpc.Addr() != "" })
 	conn, err := grpc.NewClient(r.app.grpc.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -402,10 +368,6 @@ func TestGRPCHealthFollowsReadiness(t *testing.T) {
 			})
 		}
 	}
-	expect(healthpb.HealthCheckResponse_SERVING)
-	broken.Store(true)
-	expect(healthpb.HealthCheckResponse_NOT_SERVING)
-	broken.Store(false)
 	expect(healthpb.HealthCheckResponse_SERVING)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -689,38 +651,28 @@ func TestHealthSyncDoesNotLoseTheShutdown(t *testing.T) {
 	}
 }
 
-// New wires the readiness to the store it built: a durable store has the failure
-// hook and no leader hook, an in-memory one has neither.
+// New wires the readiness to the backend it built: the memory backend has no
+// leader hook, as it needs no leader.
 func TestReadinessHooksFollowTheBackend(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		ephemeral bool
-		failure   bool
-	}{{"durable", false, true}, {"in memory", true, false}} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := config.Default()
-			cfg.Cluster.Standalone.Ephemeral = tc.ephemeral
-			cfg.Cluster.Standalone.DataDir = filepath.Join(t.TempDir(), "state")
-			cfg.Auth.JWTSecret = strings.Repeat("ops-listener-test-secret", 2)
-			a, err := New(context.Background(), cfg, zerolog.Nop(), WithPasswordCost(bcrypt.MinCost))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() { _ = a.Shutdown(context.Background()) }()
-			if (a.ready.failure != nil) != tc.failure || a.ready.leader != nil {
-				t.Fatalf("hooks: failure set %v, leader set %v; want failure set %v and no leader hook", a.ready.failure != nil, a.ready.leader != nil, tc.failure)
-			}
-		})
+	cfg := config.Default()
+	cfg.Auth.JWTSecret = strings.Repeat("ops-listener-test-secret", 2)
+	a, err := New(context.Background(), cfg, zerolog.Nop(), WithPasswordCost(bcrypt.MinCost))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = a.Shutdown(context.Background()) }()
+	if a.ready.leader != nil {
+		t.Fatal("a memory node has a leader hook")
 	}
 }
 
-// /leaderz of a raft node is the leader once start-up has finished, whatever the
-// store does and also during the shutdown; of a standalone node, while it is ready.
+// /leaderz of a raft node is the leader once start-up has finished, also
+// during the shutdown; of a memory node, while it is ready.
 func TestLeaderReason(t *testing.T) {
 	leads := func() bool { return true }
 	follows := func() bool { return false }
 	raft := func(bound, going bool, amLeader func() bool) string {
-		r := &readiness{leader: func() string { return "n1" }, failure: func() error { return errors.New("failed") }}
+		r := &readiness{leader: func() string { return "n1" }}
 		r.bound.Store(bound)
 		r.shuttingDown.Store(going)
 		return r.leaderReason(amLeader)
@@ -737,13 +689,13 @@ func TestLeaderReason(t *testing.T) {
 	if got := raft(false, false, leads); got != reasonStarting {
 		t.Fatalf("raft leader still starting: %q, want %q", got, reasonStarting)
 	}
-	standalone := &readiness{}
-	standalone.bound.Store(true)
-	if got := standalone.leaderReason(leads); got != "" {
-		t.Fatalf("ready standalone: %q, want none", got)
+	node := &readiness{}
+	node.bound.Store(true)
+	if got := node.leaderReason(leads); got != "" {
+		t.Fatalf("ready memory node: %q, want none", got)
 	}
-	standalone.shuttingDown.Store(true)
-	if got := standalone.leaderReason(leads); got != reasonShuttingDown {
-		t.Fatalf("standalone shutting down: %q, want %q", got, reasonShuttingDown)
+	node.shuttingDown.Store(true)
+	if got := node.leaderReason(leads); got != reasonShuttingDown {
+		t.Fatalf("memory node shutting down: %q, want %q", got, reasonShuttingDown)
 	}
 }

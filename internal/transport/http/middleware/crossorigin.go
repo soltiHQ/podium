@@ -27,7 +27,7 @@ func CrossOrigin(cfg CORSConfig, logger zerolog.Logger) func(http.Handler) http.
 	p.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		logger.Warn().
 			Str("method", r.Method).
-			Str("path", r.URL.Path).
+			Str("path", logPath(r.URL.Path)).
 			Str("sec_fetch_site", r.Header.Get("Sec-Fetch-Site")).
 			Str("origin", r.Header.Get("Origin")).
 			Msg("cross-origin request blocked")

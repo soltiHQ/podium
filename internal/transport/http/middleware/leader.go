@@ -90,7 +90,7 @@ type LeaderOptions struct {
 // X-Leader always has the one meaning documented in internal/transport/README.md, and every answer sets
 // it through response.SetLeader.
 //
-// In a standalone deployment AmLeader is always true, so the middleware adds essentially zero overhead:
+// On the memory backend AmLeader is always true, so the middleware adds essentially zero overhead:
 // that context value, which says nothing.
 func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler) http.Handler {
 	isWrite := opts.IsWrite

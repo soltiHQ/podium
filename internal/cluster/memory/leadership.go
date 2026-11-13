@@ -1,7 +1,7 @@
-// Package standalone implements a Leadership that is always leader.
+// Package memory implements a Leadership that is always leader.
 // It exists so runners can be wired to cluster.Leadership unchanged in a
-// single-node deployment.
-package standalone
+// single-node deployment on the memory backend.
+package memory
 
 import (
 	"context"

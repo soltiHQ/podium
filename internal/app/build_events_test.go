@@ -29,7 +29,6 @@ func TestHubOptionsKeepTheDefaultWindowForZero(t *testing.T) {
 	cfg := config.Default()
 	cfg.Events.Coalesce = 0
 	cc := cluster.DefaultConfig()
-	cc.Standalone.Ephemeral = true
 	_, _, hub, _, _, err := buildCluster(cc, zerolog.Nop(), withHubOptions(hubOptions(cfg)...))
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +56,6 @@ func TestHubOptionsKeepTheDefaultWindowForZero(t *testing.T) {
 func TestNewWiresTheConfiguredEventCoalesceWindow(t *testing.T) {
 	const window = 50 * time.Millisecond
 	cfg := config.Default()
-	cfg.Cluster.Standalone.Ephemeral = true
 	cfg.Auth.JWTSecret = strings.Repeat("event-coalesce-test-secret", 2)
 	cfg.Events.Coalesce = window
 	a, err := New(context.Background(), cfg, zerolog.Nop(), WithPasswordCost(bcrypt.MinCost))

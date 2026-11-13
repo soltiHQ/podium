@@ -23,22 +23,22 @@ app/
 ```go
 type App struct { /* opaque */ }
 
-func New(ctx, cfg, logger, opts...) (*App, error) // build; standalone seeds here, raft never waits for a leader
+func New(ctx, cfg, logger, opts...) (*App, error) // build; memory seeds here, raft never waits for a leader
 func (a *App) Run(ctx) error               // start runners; block until ctx done or runner exits
 func (a *App) Shutdown(ctx) error          // release resources; idempotent
 ```
 
-- `New` returns a ready-to-run \[`App`\]. Standalone seeds the initial data in
-  `New`, and a seed that fails fails it. A raft node waits for no leader: `New`
-  checks before anything starts what any seed needs, and the `bootstrap` runner
-  seeds at the start of each leadership term of the node, see
+- `New` returns a ready-to-run \[`App`\]. The memory backend seeds the initial
+  data in `New`, and a seed that fails fails it. A raft node waits for no
+  leader: `New` checks before anything starts what any seed needs, and the
+  `bootstrap` runner seeds at the start of each leadership term of the node, see
   `internal/bootstrap/README.md`. On error `New` releases anything already
   acquired (Raft node, event hub) before returning.
 - `Run` delegates to \[`server.Server.Run`\] which orchestrates lifecycle of all
   runners (HTTP, HTTP discovery, gRPC, the ops listener unless `ops.addr` is
   empty, sync, lifecycle, history; while agent auth is required,
-  agent-credentials, which at each start of standalone and each leadership term
-  of a raft node converts the stored agent credentials that the enrollment
+  agent-credentials, which at each start of a memory node and each leadership
+  term of a raft node converts the stored agent credentials that the enrollment
   secret derives and logs how many are stored or unusable, see "Enrollment
   secret" in `internal/config/README.md`; and in raft mode bootstrap and
   config-check, which compares the settings every replica must share with the
@@ -55,8 +55,8 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   close as the UI listener starts to stop, which ends their streams.
 - `Shutdown` closes resources in this order: log hub → proxy pool → event hub →
   in raft mode the gRPC sync forwarder, then the lookups of the raft hosts'
-  names that the client IP resolver trusts, then the Raft node; in standalone
-  with a data dir, the durable store. Safe to call multiple times.
+  names that the client IP resolver trusts, then the Raft node. Safe to call
+  multiple times.
 
 ## Startup flow
 
@@ -82,7 +82,7 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
   initServices()                  ← history, user, role, credential, session, agent, spec, access; then cluster over the Admin, with the fingerprint, if raft
         │
    ┌────┴───────────────┬────────────────────────────────────────┐
-   │ standalone         │ raft                                   │
+   │ memory             │ raft                                   │
    │ bootstrap.Run()    │ no wait: the bootstrap runner seeds at │
    │                    │ the start of each leadership term      │
    └────┬───────────────┴────────────────────────────────────────┘
@@ -131,7 +131,7 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
    └──────────────────────┘
         │
         ▼
-  a.Shutdown(30s timeout)  →  logHub.Close → proxy.Close → eventHub.Close → raftShutdown (forwarder, hosts, raft; standalone: the durable store)
+  a.Shutdown(30s timeout)  →  logHub.Close → proxy.Close → eventHub.Close → raftShutdown (forwarder, hosts, raft; memory: none)
         │
         ▼
   main returns
@@ -145,7 +145,7 @@ func (a *App) Shutdown(ctx) error          // release resources; idempotent
 ## Error path during build
 
 If any builder fails inside `New` (e.g. Raft node fails to start, a raft node's
-seed check or a standalone `bootstrap.Run` errors), the function releases every
+seed check or a memory `bootstrap.Run` errors), the function releases every
 resource already acquired before returning the error. The caller never sees a
 partially-built `App` — either a fully wired one or `nil, err`. A listener binds
 its port in `Run`, not in `New`: one that cannot bind ends `Run` with a

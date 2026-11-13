@@ -36,7 +36,7 @@ const applyTimeout = 5 * time.Second
 //     atomic replication. fn reads its own writes everywhere: point reads,
 //     index lookups, listings and scans.
 //   - Every single mutation method is a WithTx of that one write, as in the
-//     durable store. The overlay checks the write as the FSM will check the
+//     in-memory store. The overlay checks the write as the FSM will check the
 //     op when it applies it, before anything is proposed: the delete of an
 //     absent row gives ErrNotFound to its caller and no command is proposed.
 //     So a command that fails to apply is a corrupted log entry or a version
@@ -336,6 +336,14 @@ func (s *Store) DeleteRolloutsBySpec(ctx context.Context, specID string) error {
 }
 
 // === FilterFactory — passthrough ===
+
+func (s *Store) BuildAgentFilter(c storage.AgentQueryCriteria) storage.AgentFilter {
+	return s.inner.BuildAgentFilter(c)
+}
+
+func (s *Store) BuildUserFilter(c storage.UserQueryCriteria) storage.UserFilter {
+	return s.inner.BuildUserFilter(c)
+}
 
 func (s *Store) BuildRolloutFilter(c storage.RolloutQueryCriteria) storage.RolloutFilter {
 	return s.inner.BuildRolloutFilter(c)

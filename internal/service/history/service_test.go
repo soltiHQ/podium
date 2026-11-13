@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
@@ -21,7 +20,6 @@ import (
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/storage/durable"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
 
@@ -283,7 +281,7 @@ func TestCanceledSourceAndFailedTransactionDoNotPublish(t *testing.T) {
 	if _, err := svc.Capture(ctx, captureReq(), src, CaptureOptions{}); !errors.Is(err, context.Canceled) || s.transactions != 0 || len(all(t, s)) != 0 {
 		t.Fatalf("canceled source published: %v", err)
 	}
-	s.failure = errors.New("durable fsync failed")
+	s.failure = errors.New("store commit failed")
 	result, err := svc.Capture(context.Background(), captureReq(), source(run(1, "failed")), CaptureOptions{})
 	if err == nil || result.Added != 0 || len(all(t, s)) != 0 {
 		t.Fatalf("failed commit reported success %+v %v", result, err)
@@ -719,72 +717,6 @@ func TestCaptureDropsARowThatIsPastRetentionAtOnce(t *testing.T) {
 	}
 	if got := held(svc); got.rows != 0 || got.bytes != 0 || !got.oldest.IsZero() {
 		t.Fatalf("counters %+v, want none", got)
-	}
-}
-
-func TestCountersMatchStoreAfterRestart(t *testing.T) {
-	ctx := context.Background()
-	dir := filepath.Join(t.TempDir(), "state")
-	open := func() *durable.Store {
-		t.Helper()
-		store, err := durable.Open(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = store.Close() })
-		return store
-	}
-	cfg := Config{Retention: 12 * time.Hour, MaxRecords: 5}
-	epoch := time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC)
-	first := open()
-	svc, err := New(first, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	capture := func(hour int) {
-		t.Helper()
-		svc.now = func() time.Time { return epoch.Add(time.Duration(hour) * time.Hour) }
-		if _, err := svc.Capture(ctx, captureReq(), source(run(hour+1, "failed")), CaptureOptions{}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// Ten captures an hour apart: the count limit keeps the newest five. One more,
-	// twenty hours in, ages out all but the last two of those.
-	for hour := range 10 {
-		capture(hour)
-	}
-	capture(20)
-	want := truth(t, first)
-	if want.rows != 3 {
-		t.Fatalf("history of %d rows, want the 3 that retention leaves", want.rows)
-	}
-	if got := held(svc); !sameUsage(got, want) {
-		t.Fatalf("counters %+v, store %+v", got, want)
-	}
-
-	if err := first.Close(); err != nil {
-		t.Fatal(err)
-	}
-	second := open()
-	scans := new(atomic.Int64)
-	restarted, err := New(counting{Storage: second, scans: scans}, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	restarted.now = func() time.Time { return epoch.Add(20 * time.Hour) }
-	if n, err := restarted.Prune(ctx); err != nil || n != 0 || scans.Load() != 1 {
-		t.Fatalf("first prune after the restart removed %d rows in %d passes: %v", n, scans.Load(), err)
-	}
-	if got := held(restarted); !sameUsage(got, want) {
-		t.Fatalf("counters after the restart %+v, store %+v", got, want)
-	}
-	for range 100 {
-		if _, err := restarted.Prune(ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if scans.Load() != 1 {
-		t.Fatalf("pruning a counted history made %d passes", scans.Load()-1)
 	}
 }
 

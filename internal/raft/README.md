@@ -989,9 +989,9 @@ that apply alike encode alike (`TestFingerprintChangesWithEachSetting`):
 A raft node reads that bundle once, before it starts, and fails as `Build` fails
 on it, with the same error: a bundle that cannot be read, or holds no
 certificate, fails `New` before the raft node opens anything
-(`TestUnreadableAgentCABundleFailsTheStart`), where standalone fails later, in
-`Build`, as before. It then builds its discovery listeners' pool from the
-certificates it read, not from a second read of the file, so the digest it
+(`TestUnreadableAgentCABundleFailsTheStart`), where the memory backend fails
+later, in `Build`, as before. It then builds its discovery listeners' pool from
+the certificates it read, not from a second read of the file, so the digest it
 answers with names the very certificates its listeners check agents against,
 however the file changes meanwhile (`TestRaftNodeReadsTheAgentCABundleOnce`,
 `tlsconf.ServerConfig.BuildWithClientCAs`). Every setting of `cors` counts even
@@ -1073,8 +1073,8 @@ nothing. Its lines carry `runner=config-check`, `node_id` and the leader's
 mutual TLS, two of which share their settings, by hashicorp/raft's transfer to a
 chosen node, and shows each of these lines where it belongs, the drifted node
 leading included; `TestMismatchedReplicaLogsError`, in `internal/app`, runs
-three whole nodes as main runs them. Standalone digests, serves and checks
-nothing.
+three whole nodes as main runs them. The memory backend digests, serves and
+checks nothing.
 
 The check covers exactly the settings above. Nothing compares the others: the
 settings of the runners that only the leader runs, `lifecycle.*`, `sync.*` and
@@ -1102,16 +1102,16 @@ group until all run the same one.
 The data directory and its `snapshots` directory are made 0700, and `New`
 refuses either, before it opens anything there, the log of a node with state
 included, when its group or others have any permission on it or it is a symlink,
-written with a trailing slash or not, as the durable store does
-(`TestRaftRefusesLooseDataDir`). raft-boltdb makes its files 0600, but
-hashicorp/raft makes each snapshot directory 0755 and its `meta.json` and
-`state.bin` 0644, so the snapshot store takes their group and other permissions
-off as soon as `FileSnapshotStore.Create` returns, before any state is written
-into them, and they are still private once `Close` has put the snapshot in
-place. hashicorp/raft creates the snapshot a leader installs through the same
-`Create`, so a follower's installed snapshot is as private: its directory 0700,
-its files 0600 (`TestSnapshotAndRestoreUnderLoad`). `New` does the same to the
-snapshots already there (`TestRaftFilesArePrivate`,
+written with a trailing slash or not (`TestRaftRefusesLooseDataDir`).
+raft-boltdb makes its files 0600, but hashicorp/raft makes each snapshot
+directory 0755 and its `meta.json` and `state.bin` 0644, so the snapshot store
+takes their group and other permissions off as soon as
+`FileSnapshotStore.Create` returns, before any state is written into them, and
+they are still private once `Close` has put the snapshot in place.
+hashicorp/raft creates the snapshot a leader installs through the same `Create`,
+so a follower's installed snapshot is as private: its directory 0700, its files
+0600 (`TestSnapshotAndRestoreUnderLoad`). `New` does the same to the snapshots
+already there (`TestRaftFilesArePrivate`,
 `TestSnapshotsArePrivateWhileWritten`).
 
 ## Follower writes
@@ -1367,9 +1367,9 @@ decided per request from the TCP peer, as for `trusted_proxies`:
   through: such a client reaches the leader from the host's address, and its own
   forwarding headers pick its client IP.
 
-In standalone the resolver trusts `trusted_proxies` only, and gRPC discovery
-reads no forwarding metadata: its client is the peer, as before
-(`TestStandaloneGRPCDiscoveryIgnoresForwardedFor`).
+On the memory backend the resolver trusts `trusted_proxies` only, and gRPC
+discovery reads no forwarding metadata: its client is the peer, as before
+(`TestMemoryGRPCDiscoveryIgnoresForwardedFor`).
 
 The main listener refuses a cross-origin browser mutation before the `Leader`
 middleware runs, so a follower answers it 403 itself and the request never
@@ -1393,7 +1393,7 @@ the values of the state:
 
 `Store` checks every write against the state before it proposes it. A
 transaction runs on an overlay of the leader's store, and a single-operation
-write is a transaction of one operation, as in the durable store: the overlay
+write is a transaction of one operation, as in the in-memory store: the overlay
 refuses what the FSM would refuse when it applies the operation. So the delete
 of an absent row gives its caller `ErrNotFound` and no command reaches the log,
 and a bulk delete that matches nothing proposes nothing
@@ -1530,15 +1530,13 @@ followers' HTTP API.
 
 ## Performance
 
-`bench_test.go` holds three benchmarks. `BenchmarkThreeNodeHeartbeat` is
-`BenchmarkHeartbeat` of `internal/storage/durable`, the heartbeat that discovery
-runs for an enrolled agent (verify the token, read the agent, upsert it), on the
-leader's store of the cluster of "Multi-node tests": three nodes with mutual TLS
-on loopback, built by `newLoopbackCluster`, whose helpers take a `testing.TB`
-for that. The store is seeded through raft with the P2a fixture of
-`internal/storage/storagetest` (see "Performance" in
-`internal/storage/durable/README.md`) at 100, 1000 and 5000 agents: one command,
-which all three nodes apply, in 0.1 s, 0.15 s and 0.25 s.
+`bench_test.go` holds three benchmarks. `BenchmarkThreeNodeHeartbeat` is the
+heartbeat that discovery runs for an enrolled agent (verify the token, read the
+agent, upsert it), on the leader's store of the cluster of "Multi-node tests":
+three nodes with mutual TLS on loopback, built by `newLoopbackCluster`, whose
+helpers take a `testing.TB` for that. The store is seeded through raft with the
+P2a fixture of `internal/storage/storagetest` at 100, 1000 and 5000 agents: one
+command, which all three nodes apply, in 0.1 s, 0.15 s and 0.25 s.
 `BenchmarkThreeNodeBarrier` is the barrier that the first transaction of a
 leader's term starts with (`awaitApplied`), on the same cluster, which every
 transaction started with before "One barrier per term". Both report the entries
@@ -1571,12 +1569,15 @@ and so on the conservative side. The commands:
 ```sh
 task golang:exec CMD='go test -run "^$" -bench "^(BenchmarkThreeNodeHeartbeat|BenchmarkThreeNodeBarrier)$" -benchtime=1000x -count=3 ./internal/raft/'
 task golang:exec CMD='go test -run "^$" -bench "^BenchmarkLatestConfiguration$" -benchtime=20x -count=3 ./internal/raft/'
-task golang:exec CMD='go test -run "^$" -bench "^BenchmarkHeartbeat$" -benchtime=1000x -count=4 ./internal/storage/durable/'
 ```
 
 A cell below is the median over the runs of the p50 or the p99 of one run: the
 median and the 99th percentile of the latency of one operation over its
-iterations (`storagetest.Measure`, which the durable benchmarks use too).
+iterations (`storagetest.Measure`).
+
+The "standalone" cells and columns below were measured on the standalone file
+store, which podium no longer has: they are kept as measured, as the cost of one
+bbolt commit that a raft commit is read against, and cannot be measured again.
 
 The latency of a commit is its fsyncs. bbolt syncs twice per transaction. The
 standalone store commits one transaction, and a raft commit stores its entry in

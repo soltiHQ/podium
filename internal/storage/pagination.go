@@ -19,11 +19,14 @@ const (
 // Ordering:
 // All list operations must order results by: CreatedAt DESC, ID ASC
 //
-// CreatedAt is immutable, so a record updated between page fetches keeps its position.
-// This ensures:
+// Callers keep a record's CreatedAt when they update it, so a record updated
+// between page fetches keeps its position. This ensures:
 //   - Deterministic ordering.
 //   - Stable cursor-based pagination.
 //   - No duplicates or gaps between pages.
+//
+// Keeping CreatedAt is the callers' rule, not the store's: an upsert writes the
+// CreatedAt it is given, and keeps no earlier one.
 type ListOptions struct {
 	// Cursor is an opaque continuation token returned from a previous list call.
 	Cursor string
@@ -42,7 +45,7 @@ type ListOptions struct {
 //   - NextCursor must be treated as opaque by callers.
 type ListResult[T any] struct {
 	// Items contain the requested page of items.
-	// May be nil or empty if no items match the query.
+	// An empty list, never nil, when no item is left to list.
 	Items []T
 
 	// NextCursor is an opaque token for retrieving the next page.

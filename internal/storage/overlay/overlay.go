@@ -89,6 +89,14 @@ func (t *Tx) BuildExecutionFilter(c storage.ExecutionQueryCriteria) storage.Exec
 	return t.base.BuildExecutionFilter(c)
 }
 
+func (t *Tx) BuildAgentFilter(c storage.AgentQueryCriteria) storage.AgentFilter {
+	return t.base.BuildAgentFilter(c)
+}
+
+func (t *Tx) BuildUserFilter(c storage.UserQueryCriteria) storage.UserFilter {
+	return t.base.BuildUserFilter(c)
+}
+
 func (t *Tx) BuildRolloutFilter(c storage.RolloutQueryCriteria) storage.RolloutFilter {
 	return t.base.BuildRolloutFilter(c)
 }

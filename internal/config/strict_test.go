@@ -492,3 +492,60 @@ func TestEverySectionValidatedAtLoad(t *testing.T) {
 		})
 	}
 }
+
+// Without a file the backend is memory, the default.
+func TestBackendDefaultsToMemory(t *testing.T) {
+	t.Setenv("CONFIG_PATH", "")
+	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+	cfg, err := load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Cluster.Backend != "memory" {
+		t.Fatalf("cluster.backend = %q, want memory", cfg.Cluster.Backend)
+	}
+	// A file that sets something else keeps the default backend too.
+	writeConfig(t, "ops:\n  addr: 127.0.0.1:18081\n")
+	if cfg, err = load(""); err != nil || cfg.Cluster.Backend != "memory" {
+		t.Fatalf("backend of a file without cluster.backend = %q, %v, want memory", cfg.Cluster.Backend, err)
+	}
+}
+
+// The settings of the removed file store fail loading, each naming its section.
+// Each subtest asserts the parent key cluster.standalone, not the leaf: the
+// loader names the unknown section, not the setting inside it.
+func TestStandaloneSettingsRefused(t *testing.T) {
+	for _, tc := range []struct{ name, body, key string }{
+		{"data_dir", "cluster:\n  standalone:\n    data_dir: /var/lib/podium\n", "cluster.standalone"},
+		{"ephemeral", "cluster:\n  standalone:\n    ephemeral: true\n", "cluster.standalone"},
+		{"snapshot_threshold", "cluster:\n  standalone:\n    snapshot_threshold: 512\n", "cluster.standalone"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfig(t, tc.body)
+			_, err := load("")
+			if err == nil || !strings.Contains(err.Error(), `unknown key "`+tc.key+`"`) {
+				t.Fatalf("error = %v, want an unknown key %q", err, tc.key)
+			}
+		})
+	}
+}
+
+// A removed file store variable, under the cluster prefix, fails loading.
+func TestStandaloneVariablesRefused(t *testing.T) {
+	t.Setenv("CONFIG_PATH", "")
+	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+	t.Setenv("SOLTI_CLUSTER_STANDALONE_DATA_DIR", "/var/lib/podium")
+	_, err := load("")
+	if want := "unknown environment variable SOLTI_CLUSTER_STANDALONE_DATA_DIR"; err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+}
+
+// backend: standalone is no backend any more; the error names the two there are.
+func TestBackendStandaloneRefused(t *testing.T) {
+	writeConfig(t, "cluster:\n  backend: standalone\n")
+	_, err := load("")
+	if err == nil || !strings.Contains(err.Error(), `"standalone"`) || !strings.Contains(err.Error(), "memory, raft") {
+		t.Fatalf("error = %v, want the backend named with memory, raft", err)
+	}
+}

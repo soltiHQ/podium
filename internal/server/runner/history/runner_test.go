@@ -11,7 +11,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/model"
-	"github.com/soltiHQ/control-plane/internal/cluster/standalone"
+	"github.com/soltiHQ/control-plane/internal/cluster/memory"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	agentsvc "github.com/soltiHQ/control-plane/internal/service/agent"
 	historysvc "github.com/soltiHQ/control-plane/internal/service/history"
@@ -28,7 +28,7 @@ func newRunner(t *testing.T, cfg Config) (*Runner, *inmemory.Store) {
 	}
 	pool := proxy.NewPool(nil, true)
 	t.Cleanup(func() { _ = pool.Close() })
-	r, err := New(cfg, zerolog.Nop(), s, pool, agentsvc.New(s, zerolog.Nop()), svc, standalone.NewLeadership())
+	r, err := New(cfg, zerolog.Nop(), s, pool, agentsvc.New(s, zerolog.Nop()), svc, memory.NewLeadership())
 	if err != nil {
 		t.Fatal(err)
 	}

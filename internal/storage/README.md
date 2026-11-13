@@ -32,8 +32,8 @@ storage/
 │   ├── command.go   EncodeCommand / DecodeCommand — the SOLTI-CMD framing of the ops
 │   └── agent.go …   the Storage methods of Tx, one file per entity group
 │
-├── durable/         the standalone store on disk, see its README
-├── snapshot/        the versioned state codec of raft compaction and the durable store
+├── snapshot/        the versioned state codec of raft compaction and restore
+├── storagecontract/ the contract suite every backend runs (Run), the in-memory store its reference
 └── storagetest/     the fixture and the measurement the storage and service benchmarks share
 ```
 
@@ -42,7 +42,7 @@ storage/
 ```text
   Storage (aggregate)
   ├── ExecutionStore    Upsert / Get / List / Delete
-  ├── FilterFactory     BuildExecutionFilter / BuildRolloutFilter / BuildSpecFilter
+  ├── FilterFactory     BuildExecutionFilter / BuildAgentFilter / BuildUserFilter / BuildRolloutFilter / BuildSpecFilter
   ├── TxStore           WithTx
   ├── AgentStore        Upsert / Get / List / Delete
   ├── AgentCredentialStore  Upsert / Get / List / Delete
@@ -108,11 +108,10 @@ process implements the optional `Scanner` interface, and the helpers use it:
   order, as clones the caller owns
 - The filter runs once per row, not once per row per page
 - The rows are one consistent state, not one state per page
-- `inmemory.Store` and its transaction handle, `durable.Store`, `raft.Store` and
-  the `overlay.Tx` that `raft.Store.WithTx` and `durable.Store.WithTx` hand out
-  are Scanners. A wrapper that embeds `storage.Storage` hides the interface and
-  gets the paged path too: forward the four `Scan*` methods to keep the single
-  pass
+- `inmemory.Store` and its transaction handle, `raft.Store` and the `overlay.Tx`
+  that `raft.Store.WithTx` hands out are Scanners. A wrapper that embeds
+  `storage.Storage` hides the interface and gets the paged path too: forward the
+  four `Scan*` methods to keep the single pass
 - A page asked for with `Limit` and `Cursor`, as the API and the UI do, is
   unchanged
 
@@ -120,14 +119,13 @@ process implements the optional `Scanner` interface, and the helpers use it:
 
 `overlay.Tx` holds a transaction in memory over a base store that does not
 change while it runs. `raft.Store.WithTx` runs its callback on one and
-replicates what it recorded; `durable.Store.WithTx` logs it to disk, then
-applies it to the state its readers see:
+replicates what it recorded:
 
 ```text
   tx := overlay.New(base)      writes land in tx; every read of tx sees them over the base
   tx.UpsertAgent(ctx, a)       checked as the state machine will apply it, recorded as a SOLTI-CMD op
   tx.Ops(), tx.Empty()         the recorded ops in write order; nothing to commit when empty
-  overlay.EncodeCommand(ops)   the SOLTI-CMD command Raft replicates and the durable store logs
+  overlay.EncodeCommand(ops)   the SOLTI-CMD command Raft replicates
   overlay.ApplyOps(ctx, s, …)  applies the ops to s, as the Raft state machine does on commit
 ```
 
@@ -146,21 +144,78 @@ applies it to the state its readers see:
 ## Filter pattern
 
 Filters are **backend-specific**. The storage package declares empty marker
-interfaces (`AgentFilter`, `RolloutFilter` …).\
-Each backend provides concrete types with builder methods:
+interfaces (`AgentFilter`, `RolloutFilter` …) and backend-agnostic criteria
+(`AgentQueryCriteria`, `RolloutQueryCriteria` …). Code outside
+`internal/storage` builds a filter from criteria through the store's
+`FilterFactory`, and never names a backend:
 
 ```text
-  inmemory.NewAgentFilter().
-      ByPlatform("linux").
-      ByLabel("env", "prod").
-      Query("web-")                ──→  implements storage.AgentFilter
+  store.BuildAgentFilter(storage.AgentQueryCriteria{
+      Query:         "web-",
+      StaleAtBefore: now,
+  })                                    ──→  this store's storage.AgentFilter
 
-  inmemory.NewRolloutFilter().
-      BySpecID("spec-42").
-      ByStatus(enum.SyncStatusPending)  ──→  implements storage.RolloutFilter
+  store.BuildRolloutFilter(storage.RolloutQueryCriteria{
+      SpecID:   "spec-42",
+      Statuses: []enum.SyncStatus{enum.SyncStatusPending},
+  })                                    ──→  this store's storage.RolloutFilter
 ```
 
-Passing a filter from a wrong backend returns `ErrInvalidArgument`.
+A backend implements only the factory. The builder chains of `inmemory`
+(`NewAgentFilter().ByLabel(…)`, `NewRolloutFilter().BySpecID(…)` …) belong to
+the in-memory store, whose factory composes them, and to its tests.
+
+Passing a filter of another backend, or one the factory built for another
+listing, returns `ErrInvalidArgument`.
+
+## Contract suite
+
+`storagecontract.Run` is the storage contract as a test suite: the behaviour of
+`storage.Storage` that a caller can observe. It describes the in-memory store,
+the reference backend, so a backend that passes it behaves as the in-memory
+store does. A backend runs it from a test of its own, with a constructor that
+opens an empty store; `inmemory` does so in `contract_test.go`:
+
+```go
+func TestContract(t *testing.T) {
+	storagecontract.Run(t, func(t *testing.T) storage.Storage { return open(t) })
+}
+```
+
+It pins:
+
+- the round trip: every field of every entity written, read back through each
+  read that returns it, times compared as instants; for a full row, and for a
+  minimal one whose zero values (no exit code, zero times) come back zero
+- the rows a store refuses (`ValidateEntity`: nil, no ID, no creation time),
+  `ErrNotFound` for a missing ID, and an upsert that replaces the whole row, its
+  creation time included
+- the listing order `(CreatedAt DESC, ID ASC)` to the nanosecond, IDs compared
+  as bytes, the limits (default 100, at most 500), a cursor that is a place in
+  that order and drains every row once, of a filtered listing too, a malformed
+  or foreign cursor refused, and an empty page that is an empty list
+- each criteria field of the filter factory, a query matched as a literal
+  substring (`%`, `_` and a backslash included) in any case, beyond ASCII too,
+  and a filter of another backend or of another listing refused
+- the lookups by subject, role name, user and auth kind, and credential: exact,
+  and `ErrInternal` when two rows match; the listings by user, which return
+  every row, more than a page holds included
+- `GetRoles`, the bulk deletes, the execution record kept as first written, and
+  the rotation and revocation of sessions
+- `WithTx`: it reads its own writes, rolls every write back on a callback error
+  or on a context done before the commit, runs its callback once, nests without
+  a savepoint and goes on after a write it refuses; its handle rotates sessions
+  at the caller's time
+- `Scan*` against the drained listing and `Count*` by status, in a transaction
+  too
+
+The groups are subtests, so that a backend can run one at a time
+(`go test -run 'TestContract/Agents'`): `Agents`, `AgentCredentials`, `Specs`,
+`Rollouts`, `Executions`, `Users`, `Credentials`, `Verifiers`, `Sessions`,
+`Roles`, `Pagination`, `Tx`, `Scanner` and `Counter`; the last two skip a store
+that lacks the interface. Every check opens its own store and none runs in
+parallel. The suite imports no backend: the foreign filter and the foreign
+cursor it passes are its own.
 
 ## In-memory implementation
 

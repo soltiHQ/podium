@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"path/filepath"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -17,7 +16,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/storage/durable"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
 )
@@ -138,14 +136,6 @@ func TestMarkFailedRecordsAfterPushTimeout(t *testing.T) {
 		open func(t *testing.T) storage.Storage
 	}{
 		{"inmemory", func(*testing.T) storage.Storage { return inmemory.New() }},
-		{"durable", func(t *testing.T) storage.Storage {
-			s, err := durable.Open(filepath.Join(t.TempDir(), "state"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = s.Close() })
-			return s
-		}},
 	} {
 		t.Run(backend.name, func(t *testing.T) {
 			r, _, hub := newFakeRunner(t, &fakeProxy{})
