@@ -80,6 +80,21 @@ vars:
     fetch "https://unpkg.com/htmx.org@{{.htmx_version}}/dist/htmx.min.js" {{.htmx_sha256}} ui/static/js/htmx.min.js
 
   go_paths: api cmd domain internal ui
+
+  # The packages ci/golang/test/postgres tests against Postgres: each package
+  # whose tests need a database adds itself here. Without Postgres, those tests
+  # skip in ci/golang/test.
+  postgres_test_packages: ./internal/storage/sqlstore/...
+  # The Postgres server of ci/golang/test/postgres: the current stable image,
+  # postgres:18.7 on 2026-11-13, pinned by the digest of its multi-arch index,
+  # so that it runs on arm64 and amd64 hosts alike. To move it, pin the index
+  # digest of the new tag: docker buildx imagetools inspect postgres:<tag>.
+  postgres_image: postgres:18.7@sha256:9f4fd4aa918f52ae3d6f3b687f1de90d8f867cd4d520021545a9a50c120eae3b
+  # The network and the container of ci/golang/test/postgres. A run first
+  # removes those a killed run left behind, so two runs must not overlap.
+  postgres_network: podium-test-postgres
+  postgres_container: podium-test-postgres
+
   # Every tracked README: a new one is added here.
   markdown_paths: >-
     README.md
@@ -94,6 +109,7 @@ vars:
     internal/server/README.md
     internal/service/README.md
     internal/storage/README.md
+    internal/storage/sqlstore/README.md
     internal/transport/README.md
     internal/transportctx/README.md
     internal/uikit/README.md
@@ -159,6 +175,46 @@ tasks:
       - task: golang:test
         vars:
           TEST_ARGS: -race -count=1 -timeout=10m ./...
+
+  ci/golang/test/postgres:
+    desc: Run the Go tests that need Postgres, with the race detector, against a pinned Postgres container
+    vars:
+      # The tests reach the server by the container's name, on the network.
+      postgres_url: postgres://postgres:podium-test@{{.postgres_container}}:5432/postgres?sslmode=disable
+    cmds:
+      - task: generate
+      # What a killed run left behind.
+      - docker rm --force {{.postgres_container}} >/dev/null 2>&1 || true
+      - docker network rm {{.postgres_network}} >/dev/null 2>&1 || true
+      - defer: docker rm --force {{.postgres_container}} >/dev/null 2>&1; docker network rm {{.postgres_network}} >/dev/null 2>&1; true
+      - docker network create {{.postgres_network}} >/dev/null
+      # The data lives in memory, and fsync is off: the server is the tests'
+      # alone and gone after them.
+      - >-
+        docker run --detach --rm --pull=missing
+        --name {{.postgres_container}} --network {{.postgres_network}}
+        --env POSTGRES_PASSWORD=podium-test --tmpfs /var/lib/postgresql
+        {{.postgres_image}}
+        -c fsync=off -c synchronous_commit=off -c full_page_writes=off >/dev/null
+      # The image's entrypoint initialises the cluster on a server that listens
+      # on its socket alone, then restarts it on TCP: ready over TCP is ready.
+      - |
+        for i in $(seq 1 60); do
+          if docker exec {{.postgres_container}} pg_isready --quiet --host 127.0.0.1 --username postgres; then
+            exit 0
+          fi
+          sleep 1
+        done
+        echo 'postgres accepted no connection within 60 s' >&2
+        docker logs {{.postgres_container}} >&2 || true
+        exit 1
+      - task: golang:exec
+        vars:
+          CMD: go test -race -count=1 -timeout=10m {{.postgres_test_packages}}
+          TASK_CONTEXT:
+            ref: >-
+              dict "CONTAINER_RUN_ARGS" (printf "--network %s" .postgres_network)
+              "CONTAINER_ENVS" (printf "PODIUM_TEST_POSTGRES_URL=%s" .postgres_url)
 
   ci/golang/audit:
     desc: Run Go vuln check

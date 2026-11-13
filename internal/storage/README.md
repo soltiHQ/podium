@@ -17,6 +17,7 @@ storage/
 ├── pagination.go   ListResult[T], ListOptions, limits
 ├── filter.go       backend-agnostic filter markers (AgentFilter, RolloutFilter …)
 ├── validate.go     ValidateEntity — the row check the in-memory store and the overlay share
+├── readonly.go     MarkReadOnly / IsReadOnly — the contexts a backend's read replica may serve
 │
 ├── inmemory/
 │   ├── storage.go   Store — aggregates GenericStore instances, implements Storage
@@ -32,7 +33,9 @@ storage/
 │   ├── command.go   EncodeCommand / DecodeCommand — the SOLTI-CMD framing of the ops
 │   └── agent.go …   the Storage methods of Tx, one file per entity group
 │
-├── snapshot/        the versioned state codec of raft compaction and restore
+├── snapshot/        the versioned state codec of raft compaction and restore; entity.go: one entity
+│                    as the JSON of its snapshot message, the SQL store's row body
+├── sqlstore/        the SQL store of the database mode: its core and the Postgres schema (see its README)
 ├── storagecontract/ the contract suite every backend runs (Run), the in-memory store its reference
 └── storagetest/     the fixture and the measurement the storage and service benchmarks share
 ```
