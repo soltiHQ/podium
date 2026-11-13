@@ -15,8 +15,11 @@
 // callback of WithTx — so a replica that does not lead writes nothing; the
 // store returns the fence's refusal unchanged. The callback runs once: nothing
 // is retried. Its error, or a context done before the commit, rolls the
-// transaction back. A transaction inside the callback is the same one, without
-// a savepoint, so a nested callback's error rolls nothing back by itself.
+// transaction back. A context that ends while COMMIT is in flight can leave the
+// transaction committed while the caller gets the context's error: the caller
+// cannot tell, which is inherent, as with the apply timeout of raft. A
+// transaction inside the callback is the same one, without a savepoint, so a
+// nested callback's error rolls nothing back by itself.
 //
 // # Refused writes keep the transaction usable
 //

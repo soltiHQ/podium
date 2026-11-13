@@ -75,7 +75,8 @@ func (Postgres) Rebind(query string) string {
 //     cancel on the server's side; 55P03, a lock timeout; class 53, a lack of
 //     resources: storage.ErrUnavailable;
 //   - a connection that failed or was lost: a failed connection attempt
-//     (*pgconn.ConnectError), SQLSTATE class 08, 57P01 to 57P03 and 57P05 (the
+//     (*pgconn.ConnectError, naming the SQLSTATE of the server's refusal when it
+//     carries one), SQLSTATE class 08, 57P01 to 57P03 and 57P05 (the
 //     server ends the session or does not take it), a connection the driver or
 //     database/sql gave up (driver.ErrBadConn, pgconn.ErrConnClosed), a
 //     network error, a stream cut short: storage.ErrUnavailable;
@@ -87,6 +88,10 @@ func (Postgres) Rebind(query string) string {
 // timed out (connect_timeout in the URL) is storage.ErrUnavailable, and so is
 // 57014: a caller whose own context ended gets its context's error from the
 // store, which checks the context before it classifies.
+//
+// An error that wraps a storage sentinel comes back unchanged, unless a
+// *pgconn.PgError is in its chain: that one is classified by its SQLSTATE, as
+// the server's own error, so that its Detail never travels on in a wrapper.
 //
 // The error returned names the SQLSTATE and the table, column and constraint a
 // server error names, and nothing else of the error: PgError.Message and Detail
@@ -100,12 +105,18 @@ func (Postgres) Classify(err error) error {
 	switch {
 	case err == nil:
 		return nil
-	case classified(err):
+	case classified(err) && !errors.As(err, &pgErr):
 		return err
 	case errors.Is(err, context.Canceled):
 		return context.Canceled
 	case errors.As(err, &connectErr):
-		return fmt.Errorf("%w: postgres: the connection attempt failed", storage.ErrUnavailable)
+		msg := "postgres: the connection attempt failed"
+		if errors.As(err, &pgErr) && pgErr.Code != "" {
+			// The server's refusal: 28P01 a wrong password, 3D000 an unknown
+			// database, 53300 too many connections. Its code, and nothing else.
+			msg += ", SQLSTATE " + pgErr.Code
+		}
+		return fmt.Errorf("%w: %s", storage.ErrUnavailable, msg)
 	case errors.Is(err, context.DeadlineExceeded):
 		return context.DeadlineExceeded
 	case errors.As(err, &pgErr):

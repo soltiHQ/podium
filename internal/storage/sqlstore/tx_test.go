@@ -81,6 +81,42 @@ func TestTxRollbackOnCancel(t *testing.T) {
 	})
 }
 
+// TestTxPanic checks that a panic in the callback rolls the transaction back,
+// releases the gate and the connection, and is raised again.
+func TestTxPanic(t *testing.T) {
+	db := migrated(t)
+	createNotes(t, db, "kept")
+	s, ctx := openStore(t, Options{Primary: db}), t.Context()
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_ = s.transact(ctx, func(h *handle) error {
+			if err := addNote(ctx, h.tx, "lost"); err != nil {
+				return err
+			}
+			panic("sqlstore test: the callback panics")
+		})
+		t.Error("transact returned after the callback's panic")
+	}()
+	if recovered != "sqlstore test: the callback panics" {
+		t.Errorf("recovered %v, want the callback's panic raised again", recovered)
+	}
+	wantNotes(t, "after the panic", db, "kept")
+	if inUse := db.Stats().InUse; inUse != 0 {
+		t.Errorf("%d connections in use after the panic, want none", inUse)
+	}
+
+	// The gate is free: a leaked one would hold this transaction until its
+	// context ends.
+	next, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := s.transact(next, func(h *handle) error { return addNote(next, h.tx, "after") }); err != nil {
+		t.Fatalf("transact after the panic: %v", err)
+	}
+	wantNotes(t, "after the next transaction", db, "after", "kept")
+}
+
 // TestTxNested checks that a transaction inside a callback is the outer one:
 // each sees the other's writes, the nested callback's error rolls nothing back
 // by itself, the outer error rolls back the nested writes, and a nil callback is
@@ -155,6 +191,17 @@ func (f *stubFence) Check(ctx context.Context, tx *sql.Tx) error {
 	return err
 }
 
+// writingFence writes a note before it refuses, as a fence that took a lock or
+// counted a refusal would.
+type writingFence struct{ err error }
+
+func (f writingFence) Check(ctx context.Context, tx *sql.Tx) error {
+	if err := addNote(ctx, tx, "written by the fence"); err != nil {
+		return err
+	}
+	return f.err
+}
+
 // fenced reports whether the stub fence marked the transaction q runs in.
 func fenced(ctx context.Context, q querier) (bool, error) {
 	var mark string
@@ -164,7 +211,8 @@ func fenced(ctx context.Context, q querier) (bool, error) {
 
 // TestFence checks that the fence checks each write transaction once, inside
 // it and before its callback, and that a refusing fence's error is returned
-// unchanged, with no callback run and nothing written.
+// unchanged, with no callback run and nothing written, what the fence itself
+// wrote included.
 func TestFence(t *testing.T) {
 	db := migrated(t)
 	createNotes(t, db)
@@ -198,6 +246,17 @@ func TestFence(t *testing.T) {
 		// The fence's own error, not one that wraps it.
 		if err != errRefused || calls != 0 || fence.checks.Load() != 1 {
 			t.Errorf("transact: %v after %d calls and %d checks; want the fence's error unchanged, no call, one check", err, calls, fence.checks.Load())
+		}
+		wantNotes(t, "after the refusal", db, "a", "b")
+	})
+
+	t.Run("a refusal rolls back what the fence wrote", func(t *testing.T) {
+		errRefused := errors.New("sqlstore test: this replica lost the lease")
+		s := openStore(t, Options{Primary: db, Fence: writingFence{err: errRefused}})
+		calls := 0
+		err := s.transact(ctx, func(*handle) error { calls++; return nil })
+		if err != errRefused || calls != 0 {
+			t.Errorf("transact: %v after %d calls; want the fence's error unchanged and no call", err, calls)
 		}
 		wantNotes(t, "after the refusal", db, "a", "b")
 	})

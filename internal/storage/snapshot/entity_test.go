@@ -286,8 +286,9 @@ func TestEntityJSONRoundTrip(t *testing.T) {
 // TestEntityJSONRefusesWhatItCannotCarry checks that a Marshal function refuses,
 // with storage.ErrInvalidArgument, an entity its JSON would not carry exactly:
 // nil, a time outside the years 1678 to 2262, which a message holds in Unix
-// nanoseconds, the Unix epoch where a message reads 0 back as the zero time, and
-// a string that is not valid UTF-8, which a proto3 string field refuses.
+// nanoseconds, the Unix epoch where a message reads 0 back as the zero time, a
+// string that is not valid UTF-8, which a proto3 string field refuses, and a spec
+// config the message cannot represent.
 func TestEntityJSONRefusesWhatItCannotCarry(t *testing.T) {
 	agent := func(t *testing.T, change func(*model.Agent)) *model.Agent {
 		a, err := model.NewAgent("agent-a", "edge", "https://edge.example.net")
@@ -310,8 +311,18 @@ func TestEntityJSONRefusesWhatItCannotCarry(t *testing.T) {
 		{"a staleness deadline before 1678", func(t *testing.T) ([]byte, error) {
 			return snapshot.MarshalAgentJSON(agent(t, func(a *model.Agent) { a.SetStaleAt(time.Date(1600, 1, 1, 0, 0, 0, 0, time.UTC)) }))
 		}},
-		{"a last sync at the Unix epoch", func(t *testing.T) ([]byte, error) {
+		{"a last-seen time at the Unix epoch", func(t *testing.T) ([]byte, error) {
 			return snapshot.MarshalAgentJSON(agent(t, func(a *model.Agent) { a.SetLastSeenAt(time.Unix(0, 0)) }))
+		}},
+		{"a spec config the message cannot represent", func(t *testing.T) ([]byte, error) {
+			s, err := model.NewSpec("spec-a", "job", "slot")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.SetCreatedAt(created)
+			// JSON has no function: the message cannot carry the config.
+			s.SetKindConfig(map[string]any{"hook": func() {}})
+			return snapshot.MarshalSpecJSON(s)
 		}},
 		{"a session expiring after 2262", func(t *testing.T) ([]byte, error) {
 			s, err := model.NewSession("sess-a", "user-a", "cred-a", enum.Password, []byte{1}, time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC))

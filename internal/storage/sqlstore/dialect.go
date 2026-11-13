@@ -21,10 +21,15 @@ type Dialect interface {
 	// transaction it gave up, a read-only server, a timeout, a lack of
 	// resources), to storage.ErrUnavailable; anything else to
 	// storage.ErrInternal. The error of a done context comes back as itself,
-	// and an error that already wraps a storage sentinel unchanged. The error it returns carries the engine's
-	// error code and the names of the table, column and constraint at most:
-	// never a row's data, a statement's arguments, the engine's message or
-	// detail, or a connection string.
+	// and an error that already wraps a storage sentinel unchanged. The error
+	// it returns carries the engine's error code and the names of the table,
+	// column and constraint at most: never a row's data, a statement's
+	// arguments, the engine's message or detail, or a connection string.
+	//
+	// It cannot see the caller's context: a connection attempt that ended on the
+	// caller's own deadline, a *pgconn.ConnectError that wraps it, answers
+	// storage.ErrUnavailable. A caller outside the store checks its context
+	// first, as the store's classify does, and returns the context's error.
 	Classify(err error) error
 
 	// Migrations holds the engine's migrations, NNNN_name.sql at its root,

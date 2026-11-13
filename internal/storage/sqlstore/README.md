@@ -26,6 +26,7 @@ sqlstore/
 ├── readonly.go     the read routing: the replica for marked listings, the primary otherwise
 ├── cursor.go       the listing cursor, tagged "sql"
 ├── errors.go       ErrSchemaNewer, ErrSchemaOlder, what every dialect's classification shares
+├── keys.go         the cap on a value bound to an indexed column, bytea binding
 └── pgtest/         a fresh Postgres database per test, for the tests of the database mode
 ```
 
@@ -68,9 +69,23 @@ and counts read, and its body:
   as they are
 - a status podium fills from its own enum is a `smallint`, or `text` (the
   execution record's)
-- no column checks more than the store does in Go: a lookup's column is indexed,
-  not unique, as in the in-memory store, and a lookup that finds two rows
-  answers `storage.ErrInternal`
+- no constraint checks more than the store does in Go, but for the size of an
+  index entry: a lookup's column is indexed, not unique, as in the in-memory
+  store, and a lookup that finds two rows answers `storage.ErrInternal`. A btree
+  entry is capped near 2.7 kB, and an `INSERT` of a larger key fails with
+  SQLSTATE 54000, which aborts the transaction it runs in. So the store refuses,
+  in Go and before any statement, a value it binds to an indexed column — an ID,
+  a foreign ID, a subject, a role name — longer than 2048 bytes (the values of a
+  composite index, a credential's user ID and auth kind, together), with
+  `storage.ErrInvalidArgument`, and the transaction stays usable. One helper
+  does it for every entity, and only for the values a write binds: a lookup of a
+  longer value finds nothing, as in memory. This is a divergence: memory and
+  raft accept such keys. podium's own IDs are short and an agent ID is at most
+  128 bytes, so only a REST client's username or role name over 2 KiB meets it
+- the body is read into the model: an older podium that rewrites a row a newer
+  one wrote drops the fields it does not know. That is acceptable for the
+  rolling upgrades the design allows, whose migrations only add, and raft's
+  state machine loses such fields the same way
 - each table has an index in the listing order, `(created_at DESC, id ASC)`
 
 The other tables are the database mode's own, and the leadership and the events
@@ -100,6 +115,9 @@ transport that use them may change them:
 - The callback runs once: nothing is retried. Its error, or a context done
   before the commit, rolls the transaction back; a context done before the
   transaction runs no callback
+- A context that ends while `COMMIT` is in flight can leave the transaction
+  committed while the caller gets the context's error: the caller cannot tell.
+  That is inherent, and raft's apply timeout behaves alike
 - A transaction inside the callback is the same one, without a savepoint: a
   nested callback's error rolls nothing back by itself, and the fence does not
   check it again
@@ -147,9 +165,16 @@ done context as itself. For Postgres:
 | SQLSTATE 57014, a statement timeout or a cancel on the server's side, while the caller's context is live | `storage.ErrUnavailable` |
 | SQLSTATE 55P03, a lock timeout | `storage.ErrUnavailable` |
 | SQLSTATE class 53, a lack of resources (disk, memory, connections) | `storage.ErrUnavailable` |
-| a failed connection attempt (`*pgconn.ConnectError`, a timed-out one included), SQLSTATE class 08, 57P01 to 57P03, 57P05 (an idle-session timeout), `driver.ErrBadConn`, `pgconn.ErrConnClosed`, a network error, a stream cut short | `storage.ErrUnavailable` |
+| a failed connection attempt (`*pgconn.ConnectError`, a timed-out one included; the SQLSTATE of the server's refusal, as 28P01 or 3D000, when it carries one), SQLSTATE class 08, 57P01 to 57P03, 57P05 (an idle-session timeout), `driver.ErrBadConn`, `pgconn.ErrConnClosed`, a network error, a stream cut short | `storage.ErrUnavailable` |
 | `context.Canceled`, `context.DeadlineExceeded`, and any error once the caller's context is done, 57014 included | the context's error itself |
 | anything else, SQLSTATE 57P04 (the database was dropped) included | `storage.ErrInternal` |
+
+An error that already wraps a storage sentinel is returned as it is, unless a
+`*pgconn.PgError` is in its chain: that one is classified by its SQLSTATE. A
+`*pgconn.ConnectError` wrapping the caller's own deadline answers
+`storage.ErrUnavailable` from the dialect, which cannot see the caller's
+context; the store checks its context first and returns the context's error, and
+a caller outside the store does the same.
 
 An error the store returns names the SQLSTATE and the table, column and
 constraint at most. It never carries `PgError.Detail` or `Message`, which quote

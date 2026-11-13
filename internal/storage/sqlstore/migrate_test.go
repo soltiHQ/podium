@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"slices"
 	"strings"
 	"testing"
@@ -55,49 +56,40 @@ func latest(t *testing.T) int {
 	return len(files)
 }
 
+// column returns the first column of each row query returns, in order, scanned
+// into T; what names the read in a failure.
+func column[T any](t *testing.T, db *sql.DB, what, query string) []T {
+	t.Helper()
+	rows, err := db.QueryContext(t.Context(), query)
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+	defer func() { _ = rows.Close() }()
+	values := []T{}
+	for rows.Next() {
+		var v T
+		if err := rows.Scan(&v); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		values = append(values, v)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+	return values
+}
+
 // tables returns the tables of db's current schema, sorted.
 func tables(t *testing.T, db *sql.DB) []string {
 	t.Helper()
-	rows, err := db.QueryContext(t.Context(),
+	return column[string](t, db, "list the tables",
 		`SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() ORDER BY table_name`)
-	if err != nil {
-		t.Fatalf("list the tables: %v", err)
-	}
-	defer func() { _ = rows.Close() }()
-	names := []string{}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatalf("list the tables: %v", err)
-		}
-		names = append(names, name)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("list the tables: %v", err)
-	}
-	return names
 }
 
 // versions returns the versions podium_schema_migrations records, in order.
 func versions(t *testing.T, db *sql.DB) []int {
 	t.Helper()
-	rows, err := db.QueryContext(t.Context(), `SELECT version FROM podium_schema_migrations ORDER BY version`)
-	if err != nil {
-		t.Fatalf("read the recorded versions: %v", err)
-	}
-	defer func() { _ = rows.Close() }()
-	recorded := []int{}
-	for rows.Next() {
-		var v int
-		if err := rows.Scan(&v); err != nil {
-			t.Fatalf("read the recorded versions: %v", err)
-		}
-		recorded = append(recorded, v)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("read the recorded versions: %v", err)
-	}
-	return recorded
+	return column[int](t, db, "read the recorded versions", `SELECT version FROM podium_schema_migrations ORDER BY version`)
 }
 
 // versionsNamed is how a refusal names the two versions.
@@ -288,12 +280,7 @@ func TestConcurrentMigrate(t *testing.T) {
 		done := make(chan error, 1)
 		go func() { done <- Migrate(ctx, db, Postgres{}) }()
 		// The migrator's creation waits on the other session's, uncommitted.
-		waitFor(t, 10*time.Second, "the migrator waits on a lock", func() bool {
-			var waiting int
-			err := db.QueryRowContext(ctx, `SELECT count(*) FROM pg_stat_activity
-				WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting)
-			return err == nil && waiting > 0
-		})
+		waitFor(t, 10*time.Second, "the migrator waits on a lock", func() bool { return waitsOnALock(t, db) })
 		if err := other.Commit(); err != nil {
 			t.Fatalf("commit the other session: %v", err)
 		}
@@ -307,6 +294,92 @@ func TestConcurrentMigrate(t *testing.T) {
 			t.Errorf("recorded versions %v, want [1]", got)
 		}
 	})
+}
+
+// waitsOnALock reports whether a session of db's database waits on a lock.
+func waitsOnALock(t *testing.T, db *sql.DB) bool {
+	var waiting int
+	err := db.QueryRowContext(t.Context(), `SELECT count(*) FROM pg_stat_activity
+		WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting)
+	return err == nil && waiting > 0
+}
+
+// fsDialect is the Postgres dialect over migrations a test writes.
+type fsDialect struct {
+	Postgres
+	files fs.FS
+}
+
+func (d fsDialect) Migrations() fs.FS { return d.files }
+
+// TestMigrationsRunOneToATransaction migrates with a first file that applies and
+// a second that fails halfway: the second rolls back whole, the first stays
+// applied and recorded, and Open still refuses the schema as older.
+func TestMigrationsRunOneToATransaction(t *testing.T) {
+	d := fsDialect{files: fstest.MapFS{
+		"0001_first.sql": {Data: []byte(`CREATE TABLE first_table (id int);`)},
+		// Its first statement succeeds, its second fails.
+		"0002_second.sql": {Data: []byte(`CREATE TABLE second_table (id int); INSERT INTO no_such_table VALUES (1);`)},
+	}}
+	db := pgtest.Fresh(t)
+	ctx := t.Context()
+
+	err := Migrate(ctx, db, d)
+	if err == nil || !strings.Contains(err.Error(), "0002_second.sql") || strings.Contains(err.Error(), "0001_first.sql") {
+		t.Fatalf("Migrate: %v, want the failure of 0002_second.sql alone", err)
+	}
+	if want := []string{"first_table", "podium_schema_migrations"}; !slices.Equal(tables(t, db), want) {
+		t.Errorf("tables %q, want %q: the first migration kept, the second rolled back whole", tables(t, db), want)
+	}
+	if got := versions(t, db); !slices.Equal(got, []int{1}) {
+		t.Errorf("recorded versions %v, want [1]", got)
+	}
+	if v, err := SchemaVersion(ctx, db); err != nil || v != 1 {
+		t.Errorf("SchemaVersion = %d, %v; want 1", v, err)
+	}
+	if s, err := Open(ctx, Options{Primary: db, Dialect: d}); s != nil || !errors.Is(err, ErrSchemaOlder) {
+		t.Errorf("Open: %v, %v; want no store and ErrSchemaOlder", s, err)
+	}
+}
+
+// TestMigrateRechecksTheVersionUnderTheLock starts a migration of a database at
+// version 0 whose lock another migrator holds, a newer podium's, which records
+// version 99: once the lock is free the migration reads that version again and
+// refuses with ErrSchemaNewer, applying nothing.
+func TestMigrateRechecksTheVersionUnderTheLock(t *testing.T) {
+	db := pgtest.Fresh(t)
+	ctx := t.Context()
+	if _, err := db.ExecContext(ctx, createMigrationsTable); err != nil {
+		t.Fatal(err)
+	}
+	other, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = other.Rollback() }()
+	for _, statement := range []string{lockMigrations, `INSERT INTO podium_schema_migrations (version) VALUES (99)`} {
+		if _, err := other.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("the newer migrator: %v", err)
+		}
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- Migrate(ctx, db, Postgres{}) }()
+	// The migration read version 0, and waits for the lock.
+	waitFor(t, 10*time.Second, "the migrator waits on the lock", func() bool { return waitsOnALock(t, db) })
+	if err := other.Commit(); err != nil {
+		t.Fatalf("commit the newer migrator: %v", err)
+	}
+	want := versionsNamed(99, latest(t))
+	if err := <-done; !errors.Is(err, ErrSchemaNewer) || !strings.Contains(err.Error(), want) {
+		t.Errorf("Migrate: %v; want ErrSchemaNewer naming %q", err, want)
+	}
+	if got := tables(t, db); !slices.Equal(got, []string{"podium_schema_migrations"}) {
+		t.Errorf("tables %q after the refusal, want only podium_schema_migrations", got)
+	}
+	if got := versions(t, db); !slices.Equal(got, []int{99}) {
+		t.Errorf("recorded versions %v after the refusal, want [99]", got)
+	}
 }
 
 // waitFor polls cond every 10 ms until it holds, and fails t when it still does

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
+	"os"
 	"strings"
 	"syscall"
 	"testing"
@@ -89,6 +91,11 @@ func TestClassifyMapping(t *testing.T) {
 		{name: "a closed connection", err: fmt.Errorf("query: %w", pgconn.ErrConnClosed), want: storage.ErrUnavailable},
 		{name: "an unknown error", err: errors.New("sql: Scan error on column index 0: " + secret), want: storage.ErrInternal},
 		{name: "an error already classified", err: fmt.Errorf("%w: gone", storage.ErrNotFound), want: storage.ErrNotFound},
+		// The sentinel does not shelter the server's error: it is classified by its
+		// SQLSTATE, and its Detail goes no further.
+		{name: "a sentinel that wraps a server error", err: fmt.Errorf("%w: %w", storage.ErrNotFound, &pgconn.PgError{
+			Code: "22P02", Message: `invalid input syntax for type integer: "` + secret + `"`, Detail: "Key (id)=(" + secret + ")",
+		}), want: storage.ErrInternal, says: []string{"22P02"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
@@ -197,6 +204,48 @@ func TestClassify(t *testing.T) {
 			t.Fatalf("ping: %v, want an error of a deadline", err)
 		}
 		classified(t, err, storage.ErrUnavailable, "")
+	})
+
+	t.Run("a connection the server refuses", func(t *testing.T) {
+		// The server's refusal travels in the connection error: the store names
+		// its SQLSTATE and nothing else, neither the message nor the user, the
+		// host or the password the URL carries.
+		server := os.Getenv(pgtest.EnvURL)
+		if server == "" {
+			t.Skipf("%s is unset: no Postgres server to test against", pgtest.EnvURL)
+		}
+		base, err := url.Parse(server)
+		if err != nil || base.User == nil {
+			t.Fatalf("pgtest: %s is not a postgres:// URL with a user", pgtest.EnvURL)
+		}
+		for _, tc := range []struct {
+			name, sqlstate string
+			change         func(*url.URL)
+		}{
+			{"a wrong password", "28P01", func(u *url.URL) { u.User = url.UserPassword(u.User.Username(), secret) }},
+			{"an unknown database", "3D000", func(u *url.URL) { u.Path = "/no_such_database_" + secret }},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				u := *base
+				tc.change(&u)
+				db, err := sql.Open("pgx", u.String())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = db.Close() }()
+				err = db.PingContext(ctx)
+				if err == nil {
+					t.Skip("the server accepted the connection: it does not check this")
+				}
+				classified(t, err, storage.ErrUnavailable, "SQLSTATE "+tc.sqlstate)
+				got := Postgres{}.Classify(err).Error()
+				for _, leak := range []string{u.Hostname(), "FATAL", "authentication failed", "does not exist"} {
+					if strings.Contains(got, leak) {
+						t.Errorf("Classify = %q, carries %q", got, leak)
+					}
+				}
+			})
+		}
 	})
 
 	t.Run("unique violation", func(t *testing.T) {

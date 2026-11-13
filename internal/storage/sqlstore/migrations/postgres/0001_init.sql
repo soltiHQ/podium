@@ -21,8 +21,9 @@ CREATE TABLE IF NOT EXISTS podium_schema_migrations (
 -- The body is bytea too: jsonb refuses the escape \u0000 protojson writes for
 -- a NUL. A time a statement compares is a bigint of Unix nanoseconds, 0 for
 -- the zero time. A status podium fills from its own enum is a smallint, or
--- text. No column checks more than the store does in Go: a lookup's column is
--- indexed, not unique, as in the in-memory store.
+-- text. No constraint checks more than the store does in Go, but for the size
+-- of an index entry, near 2.7 kB, which the store checks first (2048 bytes a
+-- key): a lookup's column is indexed, not unique, as in the in-memory store.
 --
 -- Every listing runs in the order (created_at DESC, id ASC), which the
 -- table's _listing index holds.
