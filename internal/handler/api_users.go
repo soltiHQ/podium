@@ -425,6 +425,8 @@ func (a *API) userSetPassword(w http.ResponseWriter, r *http.Request, mode httpc
 	response.NoContent(w, r)
 }
 
+// userRevokeSession revokes the session id names. Neither of its log lines
+// names the session: the session_id cookie carries its ID.
 func (a *API) userRevokeSession(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	err := a.sessionSVC.Revoke(
 		r.Context(),
@@ -435,12 +437,12 @@ func (a *API) userRevokeSession(w http.ResponseWriter, r *http.Request, mode htt
 		if writeUserAccessError(w, r, mode, err) {
 			return
 		}
-		a.failure(err).Str("session_id", id).Msg("session revoke failed")
+		a.failure(err).Msg("session revoke failed")
 		response.StoreFailed(w, r, mode, err)
 		return
 	}
 
-	a.logger.Info().Str("session_id", id).Msg("session revoked")
+	a.logger.Info().Msg("session revoked")
 	htmx.Trigger(w, event.RefreshSessions)
 	a.hub.Notify(event.RefreshSessions)
 	response.NoContent(w, r)

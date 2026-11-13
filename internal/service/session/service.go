@@ -67,7 +67,8 @@ func (s *Service) Delete(ctx context.Context, req DeleteRequest) error {
 		return err
 	}
 
-	s.logger.Debug().Str("session_id", req.ID).Msg("session deleted")
+	// No session ID: the session_id cookie carries it.
+	s.logger.Debug().Msg("session deleted")
 	return nil
 }
 
@@ -118,6 +119,7 @@ func (s *Service) Revoke(ctx context.Context, actor *identity.Identity, req Revo
 		return err
 	}
 
-	s.logger.Debug().Str("session_id", req.ID).Msg("session revoked")
+	// No session ID: the session_id cookie carries it.
+	s.logger.Debug().Msg("session revoked")
 	return nil
 }
