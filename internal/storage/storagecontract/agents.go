@@ -245,7 +245,8 @@ func minimalAgent(t *testing.T, id string, created time.Time) *model.Agent {
 	return a
 }
 
-// equalAgent compares every accessor of an agent read back with the agent written.
+// equalAgent compares every accessor of an agent read back with the agent
+// written.
 func equalAgent(t *testing.T, what string, got, want *model.Agent) {
 	t.Helper()
 	if got == nil {

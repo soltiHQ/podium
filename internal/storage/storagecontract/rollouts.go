@@ -101,7 +101,8 @@ func rollouts(t *testing.T, newStore storeFunc) {
 			pending = rolloutIn(t, "spec-a", "agent-a", enum.SyncStatusPending)
 			synced  = rolloutIn(t, "spec-a", "agent-b", enum.SyncStatusSynced)
 			failed  = rolloutIn(t, "spec-b", "agent-a", enum.SyncStatusFailed)
-			// Its spec ID has spec-a's as a prefix: an exact comparison tells them apart.
+			// Its spec ID has spec-a's as a prefix: an exact comparison tells them
+			// apart.
 			longer = rolloutIn(t, "spec-ab", "agent-a", enum.SyncStatusSynced)
 			// Agent IDs that differ from agent-a by a suffix or in case: an exact
 			// comparison tells them apart.

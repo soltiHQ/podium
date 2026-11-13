@@ -122,7 +122,8 @@ func credentials(t *testing.T, newStore storeFunc) {
 			outcome{"GetCredentialByUserAndAuth of a user ID never written", errOf(s.GetCredentialByUserAndAuth(ctx, "user-x", enum.Password)), storage.ErrNotFound},
 			outcome{"GetCredentialByUserAndAuth of an empty user ID", errOf(s.GetCredentialByUserAndAuth(ctx, "", enum.Password)), storage.ErrInvalidArgument},
 		)
-		// The user and auth kind are indexed, not unique: two rows of them are a fault.
+		// The user and auth kind are indexed, not unique: two rows of them are a
+		// fault.
 		must(t, s.UpsertCredential(ctx, fullCredential(t, "cred-e", "user-a", enum.Password, 1, minute(1))))
 		expect(t, outcome{"GetCredentialByUserAndAuth of keys two rows hold", errOf(s.GetCredentialByUserAndAuth(ctx, "user-a", enum.Password)), storage.ErrInternal})
 	})

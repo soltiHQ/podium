@@ -103,7 +103,8 @@ func verifiers(t *testing.T, newStore storeFunc) {
 			outcome{"GetVerifierByCredential of a credential never written", errOf(s.GetVerifierByCredential(ctx, "cred-x")), storage.ErrNotFound},
 			outcome{"GetVerifierByCredential of an empty credential ID", errOf(s.GetVerifierByCredential(ctx, "")), storage.ErrInvalidArgument},
 		)
-		// The credential is indexed, not unique: two rows of one credential are a fault.
+		// The credential is indexed, not unique: two rows of one credential are a
+		// fault.
 		must(t, s.UpsertVerifier(ctx, fullVerifier(t, "ver-d", "cred-a", 1, minute(1))))
 		expect(t, outcome{"GetVerifierByCredential of a credential two rows hold", errOf(s.GetVerifierByCredential(ctx, "cred-a")), storage.ErrInternal})
 	})

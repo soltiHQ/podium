@@ -191,8 +191,8 @@ func newSpec(t *testing.T, id, name, slot string, v int, created time.Time) *mod
 	return s
 }
 
-// fullSpec is spec id with every field set from v: with v 0, none to its zero or
-// default value.
+// fullSpec is spec id with every field set from v: with v 0, none to its zero
+// or default value.
 func fullSpec(t *testing.T, id string, v int, created time.Time) *model.Spec {
 	t.Helper()
 	return newSpec(t, id, fmt.Sprintf("job %s v%d", id, v), fmt.Sprintf("slot-%s-%d", id, v), v, created)

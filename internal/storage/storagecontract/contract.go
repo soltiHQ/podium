@@ -5,7 +5,9 @@
 // from a test of its own, with a constructor that opens an empty store:
 //
 //	func TestContract(t *testing.T) {
-//		storagecontract.Run(t, func(t *testing.T) storage.Storage { return open(t) })
+//		storagecontract.Run(t, func(t *testing.T) storage.Storage {
+//			return open(t)
+//		})
 //	}
 //
 // The suite imports no backend: the foreign filter and the foreign cursor it
@@ -31,9 +33,9 @@ type storeFunc = func(t *testing.T) storage.Storage
 // Run checks the storage contract on stores newStore returns, each empty.
 //
 // The checks are grouped by subtest, so that a backend can run one group at a
-// time (go test -run 'TestContract/Agents'). Every check opens its own store and
-// none runs in parallel, so newStore may hand out one database, emptied each
-// time. Scanner and Counter skip a store that lacks the interface.
+// time (go test -run 'TestContract/Agents'). Every check opens its own store
+// and none runs in parallel, so newStore may hand out one database, emptied
+// each time. Scanner and Counter skip a store that lacks the interface.
 func Run(t *testing.T, newStore func(t *testing.T) storage.Storage) {
 	groups := []struct {
 		name string
@@ -67,6 +69,13 @@ var epoch = time.Date(2026, 10, 1, 12, 0, 0, 123456789, time.FixedZone("contract
 
 // minute is m minutes after epoch.
 func minute(m int) time.Time { return epoch.Add(time.Duration(m) * time.Minute) }
+
+// The minimal rows (the minimal<X> builders and the minimal rows of the
+// agent-credential group) pin a zero UpdatedAt on every entity, and an empty
+// auth kind on the credential and the session. The spec is silent on them as
+// such; its round-trip rule covers zero values, and storage.ValidateEntity
+// accepts these rows (it refuses only no ID and no CreatedAt). A backend's
+// schema must therefore not refuse a zero UpdatedAt or an empty auth kind.
 
 // errRollback ends a transaction the suite rolls back on purpose.
 var errRollback = errors.New("storagecontract: roll the transaction back")

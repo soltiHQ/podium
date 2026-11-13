@@ -99,7 +99,8 @@ func sessions(t *testing.T, newStore storeFunc) {
 		got, err := s.GetSession(ctx, session.ID())
 		gotRow(t, "GetSession after the rotations that change nothing", got, err, session, equalSession)
 
-		// A rotation replaces the hash and the expiry, and stamps the time of the call.
+		// A rotation replaces the hash and the expiry, and stamps the time of the
+		// call.
 		before := time.Now()
 		must(t, s.RotateRefresh(ctx, session.ID(), []byte("rotated"), minute(60)))
 		after := time.Now()

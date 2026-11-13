@@ -291,7 +291,8 @@ func listingOrder(t *testing.T, s storage.Storage, l listing) {
 }
 
 // drainsOnce checks that the cursor drains every row once at every page size:
-// every page full but the last, and the last with no cursor, even when it is full.
+// every page full but the last, and the last with no cursor, even when it is
+// full.
 func drainsOnce(t *testing.T, s storage.Storage, l listing) {
 	want := listed(putRows(t, s, l, orderRows...))
 	for limit := 1; limit <= len(want)+1; limit++ {

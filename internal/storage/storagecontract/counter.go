@@ -94,9 +94,9 @@ func counterOf(t *testing.T, s storage.Storage) storage.Counter {
 	return c
 }
 
-// sameCounts fails t unless a count returned exactly want. The spec is silent on
-// a count of no row: the in-memory store, and the scan storage.CountAgents falls
-// back to, return an empty map, not nil.
+// sameCounts fails t unless a count returned exactly want. The spec is silent
+// on a count of no row: the in-memory store, and the scan storage.CountAgents
+// falls back to, return an empty map, not nil.
 func sameCounts[K comparable](t *testing.T, what string, got map[K]int, err error, want map[K]int) {
 	t.Helper()
 	switch {

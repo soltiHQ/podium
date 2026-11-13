@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
@@ -73,6 +75,51 @@ func scanner(t *testing.T, newStore storeFunc) {
 			s.BuildExecutionFilter(storage.ExecutionQueryCriteria{AgentID: "agent-1"}),
 			s.BuildExecutionFilter(storage.ExecutionQueryCriteria{AgentID: "agent-zulu"}),
 			equalExecution)
+	})
+
+	// A scan returns clones the caller owns (storage.Scanner): changing a row
+	// through a setter leaves the store's copy as written. The execution record
+	// has no setter, so it has no leaf.
+	t.Run("a scanned row is a clone the caller owns", func(t *testing.T) {
+		s, ctx := newStore(t), t.Context()
+		sc := scannerOf(t, s)
+		agent := fullAgent(t, "agent-a", 0, minute(0))
+		rollout := fullRollout(t, "spec-a", "agent-a", 0, minute(0))
+		spec := fullSpec(t, "spec-a", 0, minute(0))
+		must(t, errors.Join(s.UpsertAgent(ctx, agent), s.UpsertRollout(ctx, rollout), s.UpsertSpec(ctx, spec)))
+
+		rows, err := sc.ScanAgents(ctx, nil)
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("ScanAgents: %d rows, %v, want one", len(rows), err)
+		}
+		rows[0].SetUpdatedAt(agent.UpdatedAt().Add(time.Hour))
+		rows[0].SetStatus(enum.AgentStatusActive)
+		again, err := sc.ScanAgents(ctx, nil)
+		gotRows(t, "ScanAgents after a change of a scanned row", again, err, []*model.Agent{agent}, equalAgent)
+		got, err := s.GetAgent(ctx, agent.ID())
+		gotRow(t, "GetAgent after a change of a scanned row", got, err, agent, equalAgent)
+
+		rolloutRows, err := sc.ScanRollouts(ctx, nil)
+		if err != nil || len(rolloutRows) != 1 {
+			t.Fatalf("ScanRollouts: %d rows, %v, want one", len(rolloutRows), err)
+		}
+		rolloutRows[0].SetUpdatedAt(rollout.UpdatedAt().Add(time.Hour))
+		rolloutRows[0].SetActualTaskID("changed")
+		rolloutsAgain, err := sc.ScanRollouts(ctx, nil)
+		gotRows(t, "ScanRollouts after a change of a scanned row", rolloutsAgain, err, []*model.Rollout{rollout}, equalRollout)
+		gotRollout, err := s.GetRollout(ctx, rollout.ID())
+		gotRow(t, "GetRollout after a change of a scanned row", gotRollout, err, rollout, equalRollout)
+
+		specRows, err := sc.ScanSpecs(ctx, nil)
+		if err != nil || len(specRows) != 1 {
+			t.Fatalf("ScanSpecs: %d rows, %v, want one", len(specRows), err)
+		}
+		specRows[0].SetUpdatedAt(spec.UpdatedAt().Add(time.Hour))
+		specRows[0].SetVersion(spec.Version() + 1)
+		specsAgain, err := sc.ScanSpecs(ctx, nil)
+		gotRows(t, "ScanSpecs after a change of a scanned row", specsAgain, err, []*model.Spec{spec}, equalSpec)
+		gotSpec, err := s.GetSpec(ctx, spec.ID())
+		gotRow(t, "GetSpec after a change of a scanned row", gotSpec, err, spec, equalSpec)
 	})
 
 	t.Run("foreign filter", func(t *testing.T) {
