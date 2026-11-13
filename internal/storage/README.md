@@ -33,6 +33,7 @@ storage/
 │   └── agent.go …   the Storage methods of Tx, one file per entity group
 │
 ├── snapshot/        the versioned state codec of raft compaction and restore
+├── storagecontract/ the contract suite every backend runs (Run), the in-memory store its reference
 └── storagetest/     the fixture and the measurement the storage and service benchmarks share
 ```
 
@@ -158,6 +159,50 @@ Each backend provides concrete types with builder methods:
 ```
 
 Passing a filter from a wrong backend returns `ErrInvalidArgument`.
+
+## Contract suite
+
+`storagecontract.Run` is the storage contract as a test suite: the behaviour of
+`storage.Storage` that a caller can observe. It describes the in-memory store,
+the reference backend, so a backend that passes it behaves as the in-memory
+store does. A backend runs it from a test of its own, with a constructor that
+opens an empty store; `inmemory` does so in `contract_test.go`:
+
+```go
+func TestContract(t *testing.T) {
+	storagecontract.Run(t, func(t *testing.T) storage.Storage { return open(t) })
+}
+```
+
+It pins:
+
+- the round trip: every field of every entity written, read back through each
+  read that returns it, times compared as instants
+- the rows a store refuses (`ValidateEntity`: nil, no ID, no creation time),
+  `ErrNotFound` for a missing ID, and an upsert that replaces the whole row
+- the listing order `(CreatedAt DESC, ID ASC)` to the nanosecond, the limits
+  (default 100, at most 500), a cursor that is a place in that order and drains
+  every row once, a malformed or foreign cursor refused, and an empty page that
+  is an empty list
+- each criteria field of the filter factory, and a filter of another backend or
+  of another listing refused
+- the lookups by subject, role name, user and auth kind, and credential: exact,
+  and `ErrInternal` when two rows match
+- `GetRoles`, the bulk deletes, the execution record kept as first written, and
+  the rotation and revocation of sessions
+- `WithTx`: it reads its own writes, rolls every write back on a callback error
+  or on a context done before the commit, runs its callback once and nests
+  without a savepoint; its handle rotates sessions at the caller's time
+- `Scan*` against the drained listing and `Count*` by status, in a transaction
+  too
+
+The groups are subtests, so that a backend can run one at a time
+(`go test -run 'TestContract/Agents'`): `Agents`, `AgentCredentials`, `Specs`,
+`Rollouts`, `Executions`, `Users`, `Credentials`, `Verifiers`, `Sessions`,
+`Roles`, `Pagination`, `Tx`, `Scanner` and `Counter`; the last two skip a store
+that lacks the interface. Every check opens its own store and none runs in
+parallel. The suite imports no backend: the foreign filter and the foreign
+cursor it passes are its own.
 
 ## In-memory implementation
 
