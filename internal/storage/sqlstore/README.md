@@ -9,10 +9,9 @@ migrations. Postgres is the first dialect, through pgx's `database/sql` driver
 
 The package is the store's core — `Open`, the write gate, the transactions, the
 read routing, the error classification, the cursor, the migrator and the
-Postgres schema — and, on it, the methods of the first entity groups: agents,
-agent credentials, specs, rollouts and execution records. The methods of the
-others (users, credentials, verifiers, sessions, roles), which make `Store` a
-`storage.Storage`, are not written yet; they keep the rules below.
+Postgres schema — and the methods of the entities on it, which make `Store` a
+`storage.Storage` and keep the rules below. `storagecontract.Run` checks it, as
+it checks the in-memory store and raft.
 
 ## Package map
 
@@ -23,7 +22,7 @@ sqlstore/
 ├── postgres.go     Postgres: $n placeholders, the SQLSTATE classification, the embedded migrations
 ├── migrate.go      Migrate, SchemaVersion, the migration files
 ├── migrations/postgres/0001_init.sql   the Postgres schema
-├── tx.go           the write transactions: the gate, the fence, nesting
+├── tx.go           the write transactions: the gate, the fence, nesting, WithTx
 ├── readonly.go     the read routing: the replica for marked listings, the primary otherwise
 ├── cursor.go       the listing cursor, tagged "sql"
 ├── errors.go       ErrSchemaNewer, ErrSchemaOlder, what every dialect's classification shares
@@ -33,8 +32,10 @@ sqlstore/
 ├── filter.go       the filters of the factory: the criteria SQL applies, the Query Go applies
 ├── scan.go         the Scan methods, in one snapshot
 ├── count.go        the Count methods, by GROUP BY
-├── agents.go, agent_credentials.go, specs.go, rollouts.go, executions.go
+├── agents.go, agent_credentials.go, specs.go, rollouts.go, executions.go,
+│   users.go, credentials.go, verifiers.go, sessions.go, roles.go
 │                   one entity group each: its codec, its columns, its methods
+├── contract_test.go   storagecontract.Run on a Postgres database
 └── pgtest/         a fresh Postgres database per test, for the tests of the database mode
 ```
 
@@ -165,17 +166,19 @@ or a malformed one, is `storage.ErrInvalidArgument`.
 Every entity group is a file: its table and codec, the columns its row holds
 beside the body, its writes on the `writer` and its reads on the `reader`. The
 store embeds the reader, so a point lookup runs on the primary's pool; its
-writes, outside a transaction, run through the core's write transaction (gate,
-fence, a transaction of their own); the handle of a write transaction is a
-writer on it, and its reads are that transaction's.
+writes, outside `WithTx`, run through the core's write transaction (gate, fence,
+a transaction of their own); the handle `WithTx` gives is a writer on that
+transaction, and so are its reads.
 
 - **Writes validate in Go first.** `storage.ValidateEntity` (no nil, no ID, no
   creation time), then the entity's codec, which refuses a string that is not
   UTF-8 and a time outside the years 1678 to 2262, then the cap on a key: all
   before a statement, so a refused write leaves the transaction usable. An
   upsert is `INSERT … ON CONFLICT (id) DO UPDATE`. A delete answers
-  `ErrNotFound` from the rows it deleted. A bulk delete (`DeleteRolloutsBySpec`)
-  deletes every row the key holds and is idempotent
+  `ErrNotFound` from the rows it deleted. A bulk delete (`DeleteRolloutsBySpec`,
+  `DeleteSessionsByUser`, `DeleteVerifierByCredential`) deletes every row the
+  key holds and is idempotent; `DeleteVerifierByCredential` deletes every
+  verifier of the credential, as memory does
 - **Listings** run in the order `(created_at DESC, id ASC)` by keyset: the rows
   after the place the cursor names. SQL applies the exact criteria and the
   order; nothing else. A page is one statement of `limit+1` rows when no Go
@@ -191,9 +194,10 @@ writer on it, and its reads are that transaction's.
   `Query`, over the rows SQL returns, as `storage.TextQuery` does for the
   in-memory store (the query trimmed and folded with `strings.ToLower`, a field
   matches when its folded value contains it): agents over ID, name and endpoint;
-  specs over name and slot. `%`, `_` and `\` are literal, and case folds beyond
-  ASCII, as in memory, whatever the engine's collation. The bodies of the rows
-  are decoded for it, which the filtered agent listing at 5000 agents measures
+  users over subject, name and email; specs over name and slot. `%`, `_` and `\`
+  are literal, and case folds beyond ASCII, as in memory, whatever the engine's
+  collation. The bodies of the rows are decoded for it, which the filtered agent
+  listing at 5000 agents measures
 - **A criterion time outside the range of the column** is not refused: every
   stored time lies inside it, so the answer is the same for every row, and the
   filter builds it so. An agent's `StaleAtBefore` below the year 1678 matches
@@ -202,6 +206,30 @@ writer on it, and its reads are that transaction's.
   no stored record has one, and are left out of the statement
 - **A filter** the factory did not build, one built for another entity, or a nil
   typed pointer, is `ErrInvalidArgument`; a nil filter lists every row
+- **Lookups** (`GetUserBySubject`, `GetCredentialByUserAndAuth`,
+  `GetVerifierByCredential`, `GetRoleByName`) compare exactly, by bytes: no
+  trimming, no case folding. The columns are indexed, not unique, as in memory:
+  two rows answer `ErrInternal`, naming the table and no value. An upsert that
+  changes a subject, a role name or a link moves the row: the lookup of the old
+  value finds nothing
+- **By-user listings** (`ListCredentialsByUser`, `ListSessionsByUser`) return
+  every row of the user in the listing order, never a page, nil for none, from
+  the primary like the lookups: auth decides on them
+- **Roles.** `GetRoles` answers one role per ID asked for, in the order asked,
+  repeats included (each a copy of its own), and `ErrNotFound` when one is
+  missing. The store builds no role filter, so `ListRoles` takes only a nil
+  filter: any other is `ErrInvalidArgument`, as for every filter this store did
+  not build. The factory builds no criteria on a user's roles or permissions
+- **Sessions.** `CreateSession` of an existing ID answers `ErrAlreadyExists`
+  from `ON CONFLICT DO NOTHING` and the rows it inserted, with no failed
+  statement. `RotateRefresh`, `RotateRefreshAt` and `RevokeSession` are
+  read-modify-writes of the body through the model's methods, in one write
+  transaction, on the row read `FOR UPDATE`: a zero time keeps the stored
+  modification time, the same hash and expiry change nothing, the first
+  revocation wins. `RotateRefresh` stamps the time of the call. A rotation or a
+  revocation whose result the codec cannot carry (a time after 2262) is
+  `ErrInvalidArgument`, before any write. No error of a session method names its
+  ID: it is the session cookie
 - **Executions.** `UpsertExecution` validates the record as the model does
   (`model.NewExecutionRecord` of its parameters, its ID against its run's), then
   inserts only a new ID: `ON CONFLICT (id) DO NOTHING`. A replay is no error and

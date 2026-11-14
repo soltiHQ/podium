@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
@@ -77,6 +78,56 @@ func testExecution(t *testing.T, agentID string, captured time.Time) *model.Exec
 	return e
 }
 
+func testUser(t *testing.T, id, subject string, created time.Time) *model.User {
+	t.Helper()
+	u, err := model.NewUser(id, subject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.SetCreatedAt(created)
+	return u
+}
+
+func testCredential(t *testing.T, id, userID string, auth enum.Auth, created time.Time) *model.Credential {
+	t.Helper()
+	c, err := model.NewCredential(id, userID, auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetCreatedAt(created)
+	return c
+}
+
+func testVerifier(t *testing.T, id, credentialID string, created time.Time) *model.Verifier {
+	t.Helper()
+	v, err := model.NewVerifier(id, credentialID, enum.Password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.SetCreatedAt(created)
+	return v
+}
+
+func testSession(t *testing.T, id, userID string, created time.Time) *model.Session {
+	t.Helper()
+	s, err := model.NewSession(id, userID, "cred", enum.Password, []byte("refresh"), created.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetCreatedAt(created)
+	return s
+}
+
+func testRole(t *testing.T, id, name string, created time.Time) *model.Role {
+	t.Helper()
+	r, err := model.NewRole(id, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.SetCreatedAt(created)
+	return r
+}
+
 // seed writes one row of each entity group of a store, keyed by tag, and
 // returns the IDs it wrote by the read that must find them: the reads of a store
 // are told apart by which database's rows they return.
@@ -88,11 +139,14 @@ func seed(t *testing.T, s *Store, tag string) map[string]string {
 		spec      = testSpec(t, "spec-"+tag, testTime)
 		rollout   = testRollout(t, spec.ID(), agent.ID(), testTime)
 		execution = testExecution(t, agent.ID(), testTime)
+		user      = testUser(t, "user-"+tag, "sub-"+tag, testTime)
+		role      = testRole(t, "role-"+tag, "name "+tag, testTime)
 	)
 	ctx := t.Context()
 	err := errors.Join(
 		s.UpsertAgent(ctx, agent), s.UpsertAgentCredential(ctx, agentCred), s.UpsertSpec(ctx, spec),
 		s.UpsertRollout(ctx, rollout), s.UpsertExecution(ctx, execution),
+		s.UpsertUser(ctx, user), s.UpsertRole(ctx, role),
 	)
 	if err != nil {
 		t.Fatalf("seed %s: %v", tag, err)
@@ -103,6 +157,7 @@ func seed(t *testing.T, s *Store, tag string) map[string]string {
 		"ListSpecs":            spec.ID(), "ScanSpecs": spec.ID(),
 		"ListRollouts": rollout.ID(), "ScanRollouts": rollout.ID(),
 		"ListExecutions": execution.ID(), "ScanExecutions": execution.ID(),
+		"ListUsers": user.ID(), "ListRoles": role.ID(),
 		"CountAgents": "1", "CountRollouts": "1",
 	}
 }
@@ -115,6 +170,8 @@ type entityStore interface {
 	storage.SpecStore
 	storage.RolloutStore
 	storage.ExecutionStore
+	storage.UserStore
+	storage.RoleStore
 }
 
 // read returns what each listing, scan and count of s finds, by read, as the
@@ -139,6 +196,10 @@ func read(ctx context.Context, s entityStore) (map[string]string, error) {
 	found("ListRollouts", pageIDs(rollouts), err)
 	executions, err := s.ListExecutions(ctx, nil, opts)
 	found("ListExecutions", pageIDs(executions), err)
+	users, err := s.ListUsers(ctx, nil, opts)
+	found("ListUsers", pageIDs(users), err)
+	roles, err := s.ListRoles(ctx, nil, opts)
+	found("ListRoles", pageIDs(roles), err)
 	if sc, ok := s.(storage.Scanner); ok {
 		scannedAgents, err := sc.ScanAgents(ctx, nil)
 		found("ScanAgents", idsOf(scannedAgents), err)
@@ -361,6 +422,22 @@ func TestEntityKeys(t *testing.T) {
 		t.Errorf("GetAgent of an ID with a NUL: %v, %v", got, err)
 	}
 
+	// A lookup key carries a NUL too, and compares as bytes.
+	user := testUser(t, "user\x00nul", "sub\x00nul", testTime)
+	role := testRole(t, "role\x00nul", "name\x00nul", testTime)
+	if err := errors.Join(s.UpsertUser(ctx, user), s.UpsertRole(ctx, role)); err != nil {
+		t.Fatalf("write a user and a role with a NUL: %v", err)
+	}
+	if got, err := s.GetUserBySubject(ctx, "sub\x00nul"); err != nil || got.ID() != user.ID() {
+		t.Errorf("GetUserBySubject of a subject with a NUL: %v, %v", got, err)
+	}
+	if _, err := s.GetUserBySubject(ctx, "sub"); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("GetUserBySubject of the subject up to the NUL: %v, want storage.ErrNotFound", err)
+	}
+	if got, err := s.GetRoleByName(ctx, "name\x00nul"); err != nil || got.ID() != role.ID() {
+		t.Errorf("GetRoleByName of a name with a NUL: %v, %v", got, err)
+	}
+
 	random := make([]byte, maxKeyBytes/2)
 	_, _ = rand.Read(random)
 	atCap := hex.EncodeToString(random)
@@ -399,6 +476,25 @@ func TestIndexKeyIsRefusedBeforeAnyStatement(t *testing.T) {
 		{"a rollout's agent ID", func(tx *handle) error {
 			return tx.UpsertRollout(ctx, testRollout(t, short, long, testTime))
 		}},
+		{"a user ID", func(tx *handle) error { return tx.UpsertUser(ctx, testUser(t, long, short, testTime)) }},
+		{"a user's subject", func(tx *handle) error { return tx.UpsertUser(ctx, testUser(t, short, long, testTime)) }},
+		{"a credential ID", func(tx *handle) error {
+			return tx.UpsertCredential(ctx, testCredential(t, long, short, enum.Password, testTime))
+		}},
+		{"a credential's user ID", func(tx *handle) error {
+			return tx.UpsertCredential(ctx, testCredential(t, short, long, enum.Password, testTime))
+		}},
+		{"a credential's user ID and auth kind together", func(tx *handle) error {
+			return tx.UpsertCredential(ctx, testCredential(t, short, long[:maxKeyBytes-3], enum.Password, testTime))
+		}},
+		{"a verifier ID", func(tx *handle) error { return tx.UpsertVerifier(ctx, testVerifier(t, long, short, testTime)) }},
+		{"a verifier's credential ID", func(tx *handle) error {
+			return tx.UpsertVerifier(ctx, testVerifier(t, short, long, testTime))
+		}},
+		{"a session ID", func(tx *handle) error { return tx.CreateSession(ctx, testSession(t, long, short, testTime)) }},
+		{"a session's user ID", func(tx *handle) error { return tx.CreateSession(ctx, testSession(t, short, long, testTime)) }},
+		{"a role ID", func(tx *handle) error { return tx.UpsertRole(ctx, testRole(t, long, short, testTime)) }},
+		{"a role's name", func(tx *handle) error { return tx.UpsertRole(ctx, testRole(t, short, long, testTime)) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := s.transact(ctx, func(tx *handle) error {
@@ -416,3 +512,72 @@ func TestIndexKeyIsRefusedBeforeAnyStatement(t *testing.T) {
 		t.Errorf("the write outside a transaction: %v, want storage.ErrInvalidArgument", err)
 	}
 }
+
+// TestSessionErrorsNameNoSessionID checks that no error of a session method
+// names the session's ID, which is the session cookie: not the refusal of a
+// duplicate, of a missing row, of an argument, nor of a time the codec cannot
+// carry.
+func TestSessionErrorsNameNoSessionID(t *testing.T) {
+	s, ctx := openStore(t, Options{Primary: migrated(t)}), t.Context()
+	const id = "sess-secret-cookie-1729"
+	session := testSession(t, id, "user-a", testTime)
+	if err := s.CreateSession(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	far := time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC)
+	for name, err := range map[string]error{
+		"a duplicate":            s.CreateSession(ctx, session),
+		"a rotation of no row":   s.RotateRefresh(ctx, id+"x", []byte("hash"), testTime.Add(time.Hour)),
+		"a revocation of no row": s.RevokeSession(ctx, id+"x", testTime),
+		"a rotation to no hash":  s.RotateRefresh(ctx, id, nil, testTime.Add(time.Hour)),
+		"a rotation past 2262":   s.RotateRefresh(ctx, id, []byte("hash"), far),
+		"a revocation past 2262": s.RevokeSession(ctx, id, far),
+		"a delete of no row":     s.DeleteSession(ctx, id+"x"),
+	} {
+		switch {
+		case err == nil:
+			t.Errorf("%s: no error", name)
+		case strings.Contains(err.Error(), "secret-cookie"):
+			t.Errorf("%s: %q names the session ID", name, err)
+		}
+	}
+	// The refusals changed nothing.
+	if got, err := s.GetSession(ctx, id); err != nil || got.Revoked() {
+		t.Errorf("GetSession after the refusals: %v, %v; want the session as created", got, err)
+	}
+}
+
+// TestLookupsOfTwoRowsNameNoValue checks that the fault of a lookup that finds
+// two rows is storage.ErrInternal and names no subject, role name or credential.
+func TestLookupsOfTwoRowsNameNoValue(t *testing.T) {
+	s, ctx := openStore(t, Options{Primary: migrated(t)}), t.Context()
+	const secret = "secret-subject-1729"
+	if err := errors.Join(
+		s.UpsertUser(ctx, testUser(t, "user-a", secret, testTime)),
+		s.UpsertUser(ctx, testUser(t, "user-b", secret, testTime)),
+		s.UpsertRole(ctx, testRole(t, "role-a", secret, testTime)),
+		s.UpsertRole(ctx, testRole(t, "role-b", secret, testTime)),
+		s.UpsertCredential(ctx, testCredential(t, "cred-a", secret, enum.Password, testTime)),
+		s.UpsertCredential(ctx, testCredential(t, "cred-b", secret, enum.Password, testTime)),
+		s.UpsertVerifier(ctx, testVerifier(t, "ver-a", secret, testTime)),
+		s.UpsertVerifier(ctx, testVerifier(t, "ver-b", secret, testTime)),
+	); err != nil {
+		t.Fatal(err)
+	}
+	for name, err := range map[string]error{
+		"GetUserBySubject":           errOf(s.GetUserBySubject(ctx, secret)),
+		"GetRoleByName":              errOf(s.GetRoleByName(ctx, secret)),
+		"GetCredentialByUserAndAuth": errOf(s.GetCredentialByUserAndAuth(ctx, secret, enum.Password)),
+		"GetVerifierByCredential":    errOf(s.GetVerifierByCredential(ctx, secret)),
+	} {
+		switch {
+		case !errors.Is(err, storage.ErrInternal):
+			t.Errorf("%s: %v, want storage.ErrInternal", name, err)
+		case strings.Contains(err.Error(), secret):
+			t.Errorf("%s: %q names the value", name, err)
+		}
+	}
+}
+
+// errOf is the error of a call that returns a value too.
+func errOf[T any](_ T, err error) error { return err }

@@ -69,6 +69,38 @@ func agentQuery(filter storage.AgentFilter) (pageQuery[*model.Agent], error) {
 	return q, nil
 }
 
+// UserFilter is the user filter this store builds: a Query, in Go. The store
+// builds no criteria that depend on a user's roles or permissions: the factory
+// has none.
+type UserFilter struct {
+	query storage.TextQuery
+}
+
+// BuildUserFilter builds the filter of c.
+func (filters) BuildUserFilter(c storage.UserQueryCriteria) storage.UserFilter {
+	return &UserFilter{query: storage.NewTextQuery(c.Query)}
+}
+
+// userQuery resolves the filter of a listing, as agentQuery does.
+func userQuery(filter storage.UserFilter) (pageQuery[*model.User], error) {
+	f := &UserFilter{}
+	switch typed := filter.(type) {
+	case nil:
+	case *UserFilter:
+		if typed == nil {
+			return pageQuery[*model.User]{}, storage.ErrInvalidArgument
+		}
+		f = typed
+	default:
+		return pageQuery[*model.User]{}, storage.ErrInvalidArgument
+	}
+	q := pageQuery[*model.User]{kind: userKind, where: &where{}}
+	if !f.query.Empty() {
+		q.match = func(u *model.User) bool { return f.query.Matches(u.Subject(), u.Name(), u.Email()) }
+	}
+	return q, nil
+}
+
 // SpecFilter is the spec filter this store builds: a Query, in Go.
 type SpecFilter struct {
 	query storage.TextQuery

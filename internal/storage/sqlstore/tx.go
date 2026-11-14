@@ -80,6 +80,24 @@ func (h *handle) transact(ctx context.Context, fn func(h *handle) error) error {
 	return fn(h)
 }
 
+// WithTx runs fn in a write transaction, with the handle that reads and writes
+// it: the storage.Storage of fn. A nested WithTx on the handle runs in the same
+// transaction.
+func (s *Store) WithTx(ctx context.Context, fn func(tx storage.Storage) error) error {
+	if fn == nil {
+		return storage.ErrInvalidArgument
+	}
+	return s.transact(ctx, func(h *handle) error { return fn(h) })
+}
+
+// WithTx runs fn in the transaction h is, without a savepoint.
+func (h *handle) WithTx(ctx context.Context, fn func(tx storage.Storage) error) error {
+	if fn == nil {
+		return storage.ErrInvalidArgument
+	}
+	return h.transact(ctx, func(h *handle) error { return fn(h) })
+}
+
 // write runs fn, a write method of a writer, as a write transaction of its own:
 // the form every write method of the store takes outside WithTx.
 func (s *Store) write(ctx context.Context, fn func(w *writer) error) error {

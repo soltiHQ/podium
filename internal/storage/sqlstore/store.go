@@ -71,6 +71,21 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
+// The store, and the handle of its transactions, are storage.Storage, with the
+// optional capabilities of a store that reads its rows in a statement: the
+// scans, the counts and the session rotation at the caller's time. The counts
+// are optional on the handle, which has them all the same.
+var (
+	_ storage.Storage                = (*Store)(nil)
+	_ storage.Storage                = (*handle)(nil)
+	_ storage.ClockedSessionRotation = (*Store)(nil)
+	_ storage.ClockedSessionRotation = (*handle)(nil)
+	_ storage.Scanner                = (*Store)(nil)
+	_ storage.Scanner                = (*handle)(nil)
+	_ storage.Counter                = (*Store)(nil)
+	_ storage.Counter                = (*handle)(nil)
+)
+
 // Fence keeps a replica that does not lead from writing.
 type Fence interface {
 	// Check runs inside each write transaction before its first write, and
