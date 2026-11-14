@@ -7,7 +7,14 @@ fence on every write transaction of the store, and a registry of the replicas.
 `sqlstore.Fence`: what the HTTP and gRPC forwarding, the trust of a forwarding
 replica's `X-Forwarded-For` and the shared-settings check take, as they take
 raft's, and the fence the store is built with. `New` builds it from `Options`;
-`Run` takes part in the election until its context ends.
+`Run` takes part in the election until its context ends. `New` refuses a missing
+pool, the primary's pool as the lease's (writers would starve the lease), an
+empty replica ID or one a text column cannot hold, a negative lease or one under
+`cluster.MinDatabaseLease` (60 ms), and an advertise address that
+`cluster.CheckAdvertiseAddr` refuses: the configuration checks
+`cluster.database.advertise_addr` and the lease with the same rules, which live
+in `internal/cluster`, as this package imports it. `internal/app` wires it
+(`buildDatabase`): see "Database mode" in `internal/app/README.md`.
 
 The package also shares the event hub's events between the replicas:
 `EventTransport` is the mode's `event.Writer`, through the table
@@ -57,10 +64,25 @@ compare.
   context deadline a statement timeout later covers a server that does not
   answer
 - When `Run`'s context ends, the replica steps down, which cancels its
-  `WhenLeader` work first, then releases the row: `expires_at` becomes the
-  database's now, epoch and holder kept, so that its writes stay fenced until
-  another replica takes over. A planned restart, such as a rolling upgrade, so
-  moves the leadership within a second instead of a lease
+  `WhenLeader` work first, waits a sixth of the lease at most for that work to
+  return, then releases the row: `expires_at` becomes the database's now, epoch
+  and holder kept, so that its writes stay fenced until another replica takes
+  over. A planned restart, such as a rolling upgrade, so moves the leadership
+  within a second instead of a lease. The app stops its leader-only runners, and
+  waits for them up to its drain deadline (`server.shutdown_timeout`), before it
+  ends `Run`'s context, so that the work has normally returned. Work that has
+  not returned within that sixth of the lease, as runners that outlived the
+  drain deadline, may still run: the row is not released then, and expires a
+  lease after its last renewal, so that no other replica's leader-only work
+  starts while it may (a WARN, `the leader-only work has not ended`;
+  `TestNoReleaseWhileLeaderWorkRuns`). The registry row is deleted either way
+- `Options.Observer` is told of the lease's events, for the metrics: `Renewed`
+  after each renewal that landed, `Lost` each time a term ends before `Run`'s
+  end, at the step-down deadline or once a renewal or a write found the lease
+  moved; the release at `Run`'s end is no loss. The app counts them in
+  `podium_database_lease_renewals_total` and
+  `podium_database_lease_losses_total`, and reads `AmLeader` for
+  `podium_database_leader`
 
 ## The fence
 
@@ -98,7 +120,10 @@ for a released or expired row, and for this replica's own row after its
 step-down. It takes the lease when it reads it free or expired, and looks again
 at the expiry it read (and a hundredth of the lease), so that it takes an
 expired lease at once rather than at its next read. The holder answers its own
-advertise address.
+advertise address. `Leader` answers the same holder with its replica ID, and
+`WatchLeader` wakes a watcher, without blocking, at each change of it: when a
+follower reads another holder, or none, and when this replica takes the lease or
+steps down.
 
 ## The registry
 
@@ -115,6 +140,13 @@ replica itself is among its members while its own heartbeats succeed.
 When `Run`'s context ends, a replica deletes its row. The leader prunes, every
 minute, the rows unseen for an hour, of replicas that stopped without deleting
 theirs.
+
+`Digests` reads a replica's digests from its row, by its ID: the shared-settings
+check of the app (`raftpkg.NewConfigCheck`, the runner `config-check`) reads the
+leader's, the replica `Leader` names, at each change of leader that
+`WatchLeader` reports, and compares them with this replica's own, with raft's
+handling of a mismatch (see "Configuration drift" in `internal/raft/README.md`).
+A replica without a row is an error, which the check retries.
 
 ## Events
 
@@ -194,6 +226,7 @@ listener reconnects is lost, and the reconnect's own read covers it.
 | the lease (`Options.Lease`) | 10 s when zero; 60 ms at least |
 | a renewal | every third of the lease, after the send of the last |
 | the step-down | two thirds of the lease after the send of the last renewal that succeeded |
+| `Run`'s end, waiting for the `WhenLeader` work before the release | a sixth of the lease at most |
 | a lease statement's timeout | a sixth of the lease, cut to the step-down for a renewal; 10 ms at least |
 | a retry after a lease statement that failed | a twelfth of the lease; a follower, a second at most |
 | a follower's read of the lease row | every second, and at the expiry it read |
@@ -239,8 +272,10 @@ shutdown, or an error of `fn` ends it.
 ## Logs and errors
 
 Every line names the replica ID (`replica_id`) and its advertise address
-(`advertise_addr`), and the epoch when one is in play; never a database URL, a
-host of the database or a credential. The first failure of a run of lease
+(`advertise_addr`), and the epoch when one is in play; never a database URL or a
+credential. The package adds no host of the database itself: the app's logger
+carries the primary's host, port and database (`host`, `port`, `database`),
+which podium logs in place of a URL. The first failure of a run of lease
 statements, or of heartbeats, logs a WARN, the success that ends the run an
 INFO; the takeover, the release and the pruning an INFO, a step-down a WARN.
 
@@ -259,7 +294,8 @@ event's payload, a statement's argument or a connection string.
 ## Tests
 
 The tests take a database each from `pgtest` and skip while
-`PODIUM_TEST_POSTGRES_URL` is unset, but for `TestNewValidatesOptions`;
+`PODIUM_TEST_POSTGRES_URL` is unset, but for `TestNewValidatesOptions`, which
+checks `New`'s refusals, the primary's pool as the lease's among them;
 `task ci/golang/test/postgres` runs them against a Postgres container. Their
 leases are seconds long, and they wait on conditions:
 
@@ -279,8 +315,17 @@ leases are seconds long, and they wait on conditions:
   its answer, before the row expires
 - `TestReleaseOnStop`: a stopped leader releases the lease and deletes its row,
   and the other leads well within the lease
+- `TestNoReleaseWhileLeaderWorkRuns`: a leader stopped while its `WhenLeader`
+  work does not return leaves the lease to expire, and the other leads once it
+  expired
 - `TestMembersFromRegistry`, `TestRegistryPrunedByTheLeader`: the members, their
   digests, a crashed replica's drop-out, the pruning
+- `TestDigestsFromRegistry`: `Digests` reads each replica's digests, and refuses
+  a replica without a row
+- `TestLeaseObserved`: the renewals counted, a step-down and a moved lease
+  counted as losses, a clean stop not
+- `TestLeaderWatched`: `Leader` and the wake-ups of `WatchLeader` as a follower
+  reads the holder, and as it takes the lease once the holder stopped
 - `TestFollowerWriteWithoutLeaderIs503`: a follower that knows no leader refuses
   a write, which HTTP answers 503
 - `TestWhenLeaderRaftSemantics`: `fn` runs again at each acquisition, and while

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -215,23 +216,31 @@ func TestReadinessFollowsShutdown(t *testing.T) {
 }
 
 // The reasons of readiness, first that applies: shutting down, then starting,
-// and for raft a missing leader.
+// then a store that failed, as the database mode's ping finds it, and for raft
+// a missing leader.
 func TestReadinessReasonOrder(t *testing.T) {
+	failed := func() error { return errors.New("the primary does not answer") }
+	serves := func() error { return nil }
 	for _, tc := range []struct {
 		name         string
 		bound, going bool
+		failure      func() error
 		leader       func() string
 		want         string
 	}{
-		{"ready", true, false, nil, ""},
-		{"starting", false, false, nil, reasonStarting},
-		{"no leader", true, false, func() string { return "" }, reasonNoLeader},
-		{"a leader", true, false, func() string { return "n1" }, ""},
-		{"shutting down before all", false, true, func() string { return "" }, reasonShuttingDown},
-		{"starting before the leader", false, false, func() string { return "" }, reasonStarting},
+		{"ready", true, false, nil, nil, ""},
+		{"starting", false, false, nil, nil, reasonStarting},
+		{"no leader", true, false, nil, func() string { return "" }, reasonNoLeader},
+		{"a leader", true, false, nil, func() string { return "n1" }, ""},
+		{"shutting down before all", false, true, failed, func() string { return "" }, reasonShuttingDown},
+		{"starting before the leader", false, false, nil, func() string { return "" }, reasonStarting},
+		{"storage failed", true, false, failed, nil, reasonStorage},
+		{"a store that serves", true, false, serves, nil, ""},
+		{"starting before the store", false, false, failed, nil, reasonStarting},
+		{"the store before the leader", true, false, failed, func() string { return "" }, reasonStorage},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &readiness{leader: tc.leader}
+			r := &readiness{failure: tc.failure, leader: tc.leader}
 			r.bound.Store(tc.bound)
 			r.shuttingDown.Store(tc.going)
 			if got := r.reason(); got != tc.want {
@@ -652,7 +661,8 @@ func TestHealthSyncDoesNotLoseTheShutdown(t *testing.T) {
 }
 
 // New wires the readiness to the backend it built: the memory backend has no
-// leader hook, as it needs no leader.
+// leader hook, as it needs no leader, no failure hook, as its store cannot fail,
+// and leads unelected.
 func TestReadinessHooksFollowTheBackend(t *testing.T) {
 	cfg := config.Default()
 	cfg.Auth.JWTSecret = strings.Repeat("ops-listener-test-secret", 2)
@@ -661,18 +671,19 @@ func TestReadinessHooksFollowTheBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = a.Shutdown(context.Background()) }()
-	if a.ready.leader != nil {
-		t.Fatal("a memory node has a leader hook")
+	if a.ready.leader != nil || a.ready.failure != nil || a.ready.elected {
+		t.Fatal("a memory node has a leader hook, a failure hook, or an elected leader")
 	}
 }
 
-// /leaderz of a raft node is the leader once start-up has finished, also
-// during the shutdown; of a memory node, while it is ready.
+// /leaderz of a raft node, and of a replica of the database mode, is the leader
+// once start-up has finished, also during the shutdown and whatever the store
+// does; of a memory node, while it is ready.
 func TestLeaderReason(t *testing.T) {
 	leads := func() bool { return true }
 	follows := func() bool { return false }
 	raft := func(bound, going bool, amLeader func() bool) string {
-		r := &readiness{leader: func() string { return "n1" }}
+		r := &readiness{leader: func() string { return "n1" }, elected: true}
 		r.bound.Store(bound)
 		r.shuttingDown.Store(going)
 		return r.leaderReason(amLeader)
@@ -688,6 +699,19 @@ func TestLeaderReason(t *testing.T) {
 	}
 	if got := raft(false, false, leads); got != reasonStarting {
 		t.Fatalf("raft leader still starting: %q, want %q", got, reasonStarting)
+	}
+	// The database mode waits for no leader to be ready, and its leader is the
+	// leader while its store fails.
+	replica := &readiness{failure: func() error { return errors.New("the primary does not answer") }, elected: true}
+	replica.bound.Store(true)
+	if got := replica.leaderReason(leads); got != "" {
+		t.Fatalf("database leader whose store fails: %q, want none", got)
+	}
+	if got := replica.leaderReason(follows); got != reasonNotLeader {
+		t.Fatalf("database follower: %q, want %q", got, reasonNotLeader)
+	}
+	if got := replica.reason(); got != reasonStorage {
+		t.Fatalf("readiness of the database replica whose store fails: %q, want %q", got, reasonStorage)
 	}
 	node := &readiness{}
 	node.bound.Store(true)

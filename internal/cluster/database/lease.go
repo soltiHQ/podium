@@ -101,11 +101,13 @@ func (l *Leadership) renew(ctx context.Context, t *term) time.Duration {
 		l.leaseOK()
 		if l.stepDown(t) {
 			l.logger.Warn().Int64("epoch", t.epoch).Msg("database: a renewal found the lease moved to another replica: stepping down")
+			observe(l.observer.Lost)
 		}
 		return 0
 	}
 	l.leaseOK()
 	l.renewed(t, sent)
+	observe(l.observer.Renewed)
 	return time.Until(sent.Add(l.renewEvery))
 }
 
@@ -160,10 +162,14 @@ func (l *Leadership) follow(ctx, statements context.Context) time.Duration {
 }
 
 // see keeps h as the lease's holder this replica read, for CurrentLeader: none
-// when h is the zero seen.
+// when h is the zero seen. Another holder than the last wakes the watchers of
+// the leader.
 func (l *Leadership) see(h seen) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if h.id != l.holder.id {
+		l.leaderChanged()
+	}
 	l.holder = h
 }
 

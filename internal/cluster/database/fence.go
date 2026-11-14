@@ -54,6 +54,7 @@ func (l *Leadership) Check(ctx context.Context, tx *sql.Tx) error {
 		if l.stepDown(t) {
 			l.logger.Warn().Int64("epoch", t.epoch).Int64("lease_epoch", epoch).Str("holder_id", holder).
 				Msg("database: a write found the lease moved to another replica: stepping down")
+			observe(l.observer.Lost)
 		}
 		return errLeaseMoved
 	}

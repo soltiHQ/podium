@@ -52,6 +52,7 @@ type replicaConfig struct {
 	heartbeat  time.Duration
 	pruneEvery time.Duration
 	settings   cluster.SharedSettings
+	observer   Observer
 }
 
 // replica is a Leadership under test, on pools of its own.
@@ -81,6 +82,7 @@ func newReplica(t *testing.T, databaseURL, id string, cfg replicaConfig) *replic
 		AdvertiseAddr: id + ".podium.test:7000",
 		Lease:         cfg.lease,
 		Settings:      cfg.settings,
+		Observer:      cfg.observer,
 		Logger:        zerolog.New(logs),
 	})
 	if err != nil {
@@ -203,19 +205,24 @@ func cancelled(t *testing.T, ctx context.Context, within time.Duration, what str
 	}
 }
 
-// TestNewValidatesOptions checks what New refuses: a missing pool, an empty
+// TestNewValidatesOptions checks what New refuses: a missing pool, the
+// primary's pool as the lease's, whose writers would starve the lease, an empty
 // replica ID or one the registry's text column cannot hold, an advertise
 // address that is not host:port with a port number and a host to dial, and a
 // negative lease or one too short to bound its statements; a zero lease is
 // DefaultLease, and the lease sets the other timings. It needs no Postgres: New
 // connects to nothing.
 func TestNewValidatesOptions(t *testing.T) {
-	pool, err := sql.Open("pgx", "postgres://podium.invalid/podium")
-	if err != nil {
-		t.Fatal(err)
+	pools := make([]*sql.DB, 2)
+	for i := range pools {
+		pool, err := sql.Open("pgx", "postgres://podium.invalid/podium")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = pool.Close() })
+		pools[i] = pool
 	}
-	t.Cleanup(func() { _ = pool.Close() })
-	valid := Options{DB: pool, LeaseDB: pool, ReplicaID: "replica-1", AdvertiseAddr: "10.0.0.5:0"}
+	valid := Options{DB: pools[0], LeaseDB: pools[1], ReplicaID: "replica-1", AdvertiseAddr: "10.0.0.5:0"}
 
 	for _, tt := range []struct {
 		name   string
@@ -228,6 +235,7 @@ func TestNewValidatesOptions(t *testing.T) {
 		{"a lease of its own", func(o *Options) { o.Lease = time.Second }, true},
 		{"no primary pool", func(o *Options) { o.DB = nil }, false},
 		{"no lease pool", func(o *Options) { o.LeaseDB = nil }, false},
+		{"the primary's pool as the lease's", func(o *Options) { o.LeaseDB = o.DB }, false},
 		{"an empty replica ID", func(o *Options) { o.ReplicaID = "" }, false},
 		{"a replica ID with a NUL", func(o *Options) { o.ReplicaID = "replica\x001" }, false},
 		{"a replica ID that is not UTF-8", func(o *Options) { o.ReplicaID = "replica\xff" }, false},
@@ -266,9 +274,9 @@ func TestNewValidatesOptions(t *testing.T) {
 			t.Fatalf("New with a lease of %s: %v", tt.lease, err)
 		}
 		want := tt.want
-		got := []time.Duration{l.lease, l.renewEvery, l.stepDownAfter, l.statementTimeout}
-		if got[0] != want || got[1] != want/3 || got[2] != 2*want/3 || got[3] != want/6 {
-			t.Errorf("a lease of %s: lease, renewal, step-down, statement timeout %v; want %s and its third, two thirds and sixth", tt.lease, got, want)
+		got := []time.Duration{l.lease, l.renewEvery, l.stepDownAfter, l.statementTimeout, l.workGrace}
+		if got[0] != want || got[1] != want/3 || got[2] != 2*want/3 || got[3] != want/6 || got[4] != want/6 {
+			t.Errorf("a lease of %s: lease, renewal, step-down, statement timeout, work grace %v; want %s and its third, two thirds, sixth and sixth", tt.lease, got, want)
 		}
 		if l.poll != time.Second || l.heartbeat != time.Second || l.pruneEvery != time.Minute || l.pruneAfter != time.Hour {
 			t.Errorf("poll, heartbeat, prune interval and age %s, %s, %s, %s; want 1s, 1s, 1m and 1h", l.poll, l.heartbeat, l.pruneEvery, l.pruneAfter)
@@ -381,5 +389,50 @@ func TestWhenLeaderRaftSemantics(t *testing.T) {
 	}
 	if err := a.WhenLeader(context.Background(), func(context.Context) error { t.Error("fn ran once Run returned"); return nil }); err != nil {
 		t.Errorf("WhenLeader once Run returned: %v, want nil", err)
+	}
+}
+
+// TestLeaderWatched checks that Leader names the lease's holder as each replica
+// knows it, its ID and advertise address, and that WatchLeader wakes a watcher
+// at each change of it: a follower that first reads a holder, and once the
+// holder stopped, takes the lease itself. The function WatchLeader returns
+// stops the wake-ups.
+func TestLeaderWatched(t *testing.T) {
+	databaseURL, _ := migratedDatabase(t)
+	a := newReplica(t, databaseURL, "replica-a", replicaConfig{poll: 20 * time.Millisecond})
+	b := newReplica(t, databaseURL, "replica-b", replicaConfig{poll: 20 * time.Millisecond})
+	wake := make(chan struct{}, 1)
+	stop := b.WatchLeader(wake)
+	if id, addr := b.Leader(); id != "" || addr != "" {
+		t.Fatalf("Leader before Run: %q at %q, want none", id, addr)
+	}
+	a.start(t)
+	waitFor(t, 5*time.Second, "replica-a leading", a.AmLeader)
+	if id, addr := a.Leader(); id != a.id || addr != a.addr {
+		t.Errorf("the leader's Leader: %q at %q, want itself, %q at %q", id, addr, a.id, a.addr)
+	}
+
+	b.start(t)
+	receive(t, wake, 5*time.Second, "a wake-up once replica-b reads replica-a's lease")
+	waitFor(t, 5*time.Second, "replica-b knowing replica-a", func() bool {
+		id, addr := b.Leader()
+		return id == a.id && addr == a.addr
+	})
+
+	if err := a.stop(); err != nil {
+		t.Fatalf("replica-a's Run: %v", err)
+	}
+	receive(t, wake, 5*time.Second, "a wake-up once replica-a's lease ends")
+	waitFor(t, 5*time.Second, "replica-b leading", b.AmLeader)
+	if id, addr := b.Leader(); id != b.id || addr != b.addr {
+		t.Errorf("replica-b's Leader once it leads: %q at %q, want itself", id, addr)
+	}
+
+	stop()
+	b.mu.Lock()
+	watchers := len(b.watchers)
+	b.mu.Unlock()
+	if watchers != 0 {
+		t.Errorf("%d watchers after the stop, want none", watchers)
 	}
 }

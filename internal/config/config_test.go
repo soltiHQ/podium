@@ -508,3 +508,74 @@ func TestLoadOpsAndShutdownDelaySettings(t *testing.T) {
 		t.Fatalf("a negative delay: %v, want ErrNegativeShutdownDelay", err)
 	}
 }
+
+// databaseURL is the primary URL of the database loading tests, with a
+// distinctive user and password that no error may carry.
+const databaseURL = "postgres://podium_load_user:load-secret-pw-91c2@db.podium.test:5432/podium"
+
+// A database cluster loads from YAML with its URLs from the environment, as a
+// Secret gives them: migrate is unset unless written. The server needs
+// advertise_addr; podium migrate loads the same file, as strictly, without one.
+// No error of loading carries a URL, its user or its password.
+func TestLoadDatabaseCluster(t *testing.T) {
+	writeConfig(t, "cluster:\n  backend: database\n  database:\n    advertise_addr: 10.0.0.5:0\n    lease: 6s\n    max_open_conns: 20\n")
+	t.Setenv("SOLTI_CLUSTER_DATABASE_URL", databaseURL)
+	t.Setenv("SOLTI_CLUSTER_DATABASE_REPLICA_URL", databaseURL+"?target_session_attrs=read-only")
+	cfg, err := load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := cfg.Cluster.Database
+	if cfg.Cluster.Backend != "database" || d.Driver != "postgres" || d.URL != databaseURL || d.ReplicaURL == "" ||
+		d.AdvertiseAddr != "10.0.0.5:0" || d.Lease != 6*time.Second || d.MaxOpenConns != 20 || d.Migrate != nil || !d.Migrates() {
+		t.Fatalf("loaded %+v", d)
+	}
+
+	noSecret := func(t *testing.T, err error) {
+		t.Helper()
+		for _, secret := range []string{"load-secret-pw-91c2", "podium_load_user", "postgres://"} {
+			if err != nil && strings.Contains(err.Error(), secret) {
+				t.Errorf("error %q carries %q", err, secret)
+			}
+		}
+	}
+	// Without advertise_addr the server refuses the file, and podium migrate
+	// takes it.
+	writeConfig(t, "cluster:\n  backend: database\n  database:\n    migrate: false\n")
+	_, err = load("")
+	if err == nil || !strings.Contains(err.Error(), "database.advertise_addr") {
+		t.Fatalf("Load without advertise_addr: %v, want an error naming database.advertise_addr", err)
+	}
+	noSecret(t, err)
+	if cfg, err = LoadForMigration("", zerolog.Nop()); err != nil || cfg.Cluster.Database.Migrates() {
+		t.Fatalf("LoadForMigration without advertise_addr: %v, migrate %v; want the file, migrate false", err, cfg.Cluster.Database.Migrates())
+	}
+
+	// podium migrate loads as strictly as the server: an unknown key, a null
+	// leaf, a setting another section's validation refuses, and a backend other
+	// than database fail it, each without the URL.
+	for _, tc := range []struct {
+		name, body, says string
+		serverTakes      bool // a memory server starts on it
+	}{
+		{name: "unknown key", body: "cluster:\n  backend: database\n  database:\n    uri: x\n", says: `unknown key "cluster.database.uri"`},
+		{name: "null migrate", body: "cluster:\n  backend: database\n  database:\n    migrate: ~\n", says: "cluster.database.migrate has no value"},
+		{name: "invalid log level", body: "log:\n  level: loud\ncluster:\n  backend: database\n", says: "config.log"},
+		{name: "memory", body: "cluster:\n  backend: memory\n", says: "podium migrate", serverTakes: true},
+		{name: "URL pasted as the advertise address", body: "cluster:\n  backend: database\n  database:\n    advertise_addr: " + databaseURL + "\n", says: "database.advertise_addr"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeConfig(t, tc.body)
+			_, err := LoadForMigration("", zerolog.Nop())
+			if err == nil || !strings.Contains(err.Error(), tc.says) {
+				t.Fatalf("LoadForMigration: %v, want an error that says %q", err, tc.says)
+			}
+			noSecret(t, err)
+			_, err = load("")
+			if (err == nil) != tc.serverTakes {
+				t.Fatalf("Load: %v, want the server to take the file: %v", err, tc.serverTakes)
+			}
+			noSecret(t, err)
+		})
+	}
+}

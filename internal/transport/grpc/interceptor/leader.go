@@ -62,6 +62,10 @@ type LeaderOptions struct {
 	// send it to a leader: "not the leader", and "leader unreachable". A write that it forwards, and the
 	// leader's answer to it, are not refusals, even when that answer is an Unavailable.
 	Refused func()
+
+	// Forwarded, when set, is called once for each write that UnaryLeader sends to the leader, as it sends it,
+	// whatever the leader answers: a leader it cannot reach included, which Refused hears as well.
+	Forwarded func()
 }
 
 // UnaryLeader routes the write RPCs that reach a follower, as the HTTP Leader middleware routes writes:
@@ -86,6 +90,10 @@ func UnaryLeader(leadership cluster.Leadership, opts LeaderOptions) grpc.UnarySe
 	if refused == nil {
 		refused = func() {}
 	}
+	forwarded := opts.Forwarded
+	if forwarded == nil {
+		forwarded = func() {}
+	}
 	leaderOf := func() string {
 		if leadership.AmLeader() {
 			return ""
@@ -98,7 +106,8 @@ func UnaryLeader(leadership cluster.Leadership, opts LeaderOptions) grpc.UnarySe
 			return handler(context.WithValue(ctx, leaderKey{}, leaderOf), req)
 		}
 		leader := cluster.LeaderAddr(leadership.CurrentLeader(), opts.Port)
-		if leader != "" && opts.Forwarder.forwards(info.FullMethod) && !forwarded(ctx) {
+		if leader != "" && opts.Forwarder.forwards(info.FullMethod) && !forwardedHere(ctx) {
+			forwarded()
 			resp, err := opts.Forwarder.forward(ctx, leader, info.FullMethod, req)
 			if err == errLeaderUnreachable {
 				refused()
@@ -163,8 +172,8 @@ func hintNotLeader(ctx context.Context, leader string) {
 	}
 }
 
-// forwarded reports whether another node forwarded the call ctx carries, see ForwardedKey.
-func forwarded(ctx context.Context) bool {
+// forwardedHere reports whether another node forwarded the call ctx carries here, see ForwardedKey.
+func forwardedHere(ctx context.Context) bool {
 	md, _ := metadata.FromIncomingContext(ctx)
 	return len(md.Get(ForwardedKey)) > 0
 }

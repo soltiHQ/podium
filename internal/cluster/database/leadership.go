@@ -17,8 +17,9 @@
 // renewal's answer took. The lease's statements run on a pool of their own
 // (Options.LeaseDB), each under a statement timeout that the server enforces,
 // so that writers never starve them and none runs past the step-down. When Run's
-// context ends, the holder releases the row: expires_at becomes the database's
-// now, epoch and holder kept.
+// context ends, the holder releases the row once its WhenLeader work has
+// returned: expires_at becomes the database's now, epoch and holder kept. Work
+// that has not returned within a sixth of the lease leaves the row to expire.
 //
 // # The fence
 //
@@ -64,8 +65,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -87,9 +86,10 @@ var (
 // DefaultLease is the lease of an Options.Lease left zero.
 const DefaultLease = 10 * time.Second
 
-// minLease is the shortest lease New takes: a sixth of the lease bounds a lease
-// statement, which needs minStatementTimeout at least.
-const minLease = 6 * minStatementTimeout
+// minLease is the shortest lease New takes, which the configuration checks
+// too: a sixth of the lease bounds a lease statement, which needs
+// minStatementTimeout at least.
+const minLease = cluster.MinDatabaseLease
 
 // The intervals that do not follow the lease. A Leadership keeps each in a
 // field, which tests shorten before Run.
@@ -106,6 +106,10 @@ const (
 
 // errRunTwice is the error of a second Run.
 var errRunTwice = errors.New("database: the leadership ran already: a Leadership runs once")
+
+// workNotEnded is what Run's end logs when the WhenLeader work it cancelled has
+// not returned within its grace, and the lease is left to expire.
+const workNotEnded = "database: the leader-only work has not ended: the lease is not released, and expires a lease after its last renewal, so that no other replica's leader-only work starts while this one's may still run"
 
 // Options are what New builds a Leadership from.
 type Options struct {
@@ -128,9 +132,30 @@ type Options struct {
 	// Settings are the settings every replica must share: the registry holds
 	// their digests.
 	Settings cluster.SharedSettings
+	// Observer is told of the lease's events, for the metrics.
+	Observer Observer
 	// Logger gets the leadership's lines, which name the replica ID, the epoch
 	// and the advertise address, never a database URL or a credential.
 	Logger zerolog.Logger
+}
+
+// Observer is told of the lease's events, for the metrics; a nil function is
+// told nothing. Its functions run on the goroutines of the leadership and of
+// the store's writes, and must not block.
+type Observer struct {
+	// Renewed is called after each renewal of the lease that landed.
+	Renewed func()
+	// Lost is called each time a term of this replica ends before Run's end: at
+	// its step-down deadline, or once a renewal or a write found the lease
+	// moved to another replica. Run's end, which releases the lease, is none.
+	Lost func()
+}
+
+// observe calls fn, a function of an Observer, unless it is nil.
+func observe(fn func()) {
+	if fn != nil {
+		fn()
+	}
 }
 
 // Leadership is the database mode's leadership. Run takes part in the
@@ -141,15 +166,17 @@ type Leadership struct {
 	db, leaseDB *sql.DB
 	id, addr    string
 	digests     []byte // the registry's: Settings.Digests, the groups in order
+	observer    Observer
 	logger      zerolog.Logger
 
 	// The timings that follow the lease: a renewal every third of it
 	// (renewEvery), the step-down two thirds after the send of the last renewal
 	// that succeeded (stepDownAfter), a lease statement's timeout a sixth
 	// (statementTimeout), the pause after a lease statement that failed a
-	// twelfth (retryPause), and a follower's look past the expiry it read a
-	// hundredth (slack).
-	lease, renewEvery, stepDownAfter, statementTimeout, retryPause, slack time.Duration
+	// twelfth (retryPause), a follower's look past the expiry it read a
+	// hundredth (slack), and the wait of Run's end for the WhenLeader work it
+	// cancelled a sixth (workGrace).
+	lease, renewEvery, stepDownAfter, statementTimeout, retryPause, slack, workGrace time.Duration
 	// poll, heartbeat, pruneEvery and pruneAfter are pollInterval,
 	// heartbeatInterval, pruneInterval and pruneAge.
 	poll, heartbeat, pruneEvery, pruneAfter time.Duration
@@ -176,6 +203,13 @@ type Leadership struct {
 	holder seen
 	// members are the registry's replicas as the last heartbeat read them.
 	members []member
+	// watchers are woken at each change of the leader this replica knows
+	// (WatchLeader).
+	watchers map[chan<- struct{}]struct{}
+	// working counts the calls of fn that WhenLeader runs and that have not
+	// returned; idle is closed while none runs, and replaced when one starts.
+	working int
+	idle    chan struct{}
 }
 
 // term is a leadership term of this replica: the lease it took at an epoch.
@@ -203,16 +237,19 @@ type seen struct {
 }
 
 // New returns the leadership of opts, which runs once Run is called. It refuses
-// a missing pool, an empty replica ID or one that is not UTF-8 without NUL, as
-// the registry's text column needs, an advertise address that is not host:port
-// with a port number and a host to dial, and a negative lease or one under
-// minLease; a zero lease is DefaultLease. It connects to nothing.
+// a missing pool, the primary's pool as the lease's, an empty replica ID or one
+// that is not UTF-8 without NUL, as the registry's text column needs, an
+// advertise address that cluster.CheckAdvertiseAddr refuses, and a negative
+// lease or one under minLease; a zero lease is DefaultLease. It connects to
+// nothing.
 func New(opts Options) (*Leadership, error) {
 	switch {
 	case opts.DB == nil:
 		return nil, errors.New("database: the leadership needs the primary's pool, Options.DB")
 	case opts.LeaseDB == nil:
 		return nil, errors.New("database: the leadership needs a pool of its own for the lease, Options.LeaseDB")
+	case opts.LeaseDB == opts.DB:
+		return nil, errors.New("database: the lease needs a pool of its own, Options.LeaseDB, not the primary's, whose writers would starve it")
 	case opts.ReplicaID == "":
 		return nil, errors.New("database: the replica ID is empty")
 	case !text(opts.ReplicaID):
@@ -222,8 +259,8 @@ func New(opts Options) (*Leadership, error) {
 	case opts.Lease > 0 && opts.Lease < minLease:
 		return nil, fmt.Errorf("database: the lease %s is under %s: a sixth of it bounds a lease statement, which needs %s at least", opts.Lease, minLease, minStatementTimeout)
 	}
-	if err := checkAdvertise(opts.AdvertiseAddr); err != nil {
-		return nil, fmt.Errorf("database: advertise address %q: %w", opts.AdvertiseAddr, err)
+	if err := cluster.CheckAdvertiseAddr(opts.AdvertiseAddr); err != nil {
+		return nil, fmt.Errorf("database: the advertise address: %w", err)
 	}
 	lease := opts.Lease
 	if lease == 0 {
@@ -239,6 +276,7 @@ func New(opts Options) (*Leadership, error) {
 		id:               opts.ReplicaID,
 		addr:             opts.AdvertiseAddr,
 		digests:          digests,
+		observer:         opts.Observer,
 		logger:           opts.Logger.With().Str("replica_id", opts.ReplicaID).Str("advertise_addr", opts.AdvertiseAddr).Logger(),
 		lease:            lease,
 		renewEvery:       lease / 3,
@@ -246,6 +284,7 @@ func New(opts Options) (*Leadership, error) {
 		statementTimeout: lease / 6,
 		retryPause:       lease / 12,
 		slack:            lease / 100,
+		workGrace:        lease / 6,
 		poll:             pollInterval,
 		heartbeat:        heartbeatInterval,
 		pruneEvery:       pruneInterval,
@@ -253,30 +292,16 @@ func New(opts Options) (*Leadership, error) {
 		wake:             make(chan struct{}, 1),
 		acquired:         make(chan struct{}),
 		stopped:          make(chan struct{}),
+		watchers:         map[chan<- struct{}]struct{}{},
+		idle:             closedChan(),
 	}, nil
 }
 
-// checkAdvertise says what is wrong with addr as an advertise address, if
-// anything: it must be host:port, an IPv6 host in brackets, with a port number
-// from 0 to 65535 and a host the others can dial, not none or every interface,
-// in text a text column holds.
-func checkAdvertise(addr string) error {
-	host, port, err := net.SplitHostPort(addr)
-	switch {
-	case err != nil:
-		return fmt.Errorf("not host:port: %w", err)
-	case !text(addr):
-		return errors.New("not UTF-8 without NUL, which the registry's text column needs")
-	case host == "":
-		return errors.New("no host for the other replicas to dial")
-	}
-	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
-		return fmt.Errorf("the port %q is not a number from 0 to 65535", port)
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
-		return errors.New("every interface, which no other replica can dial")
-	}
-	return nil
+// closedChan returns a closed channel.
+func closedChan() chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
 }
 
 // text reports whether s is UTF-8 without NUL, as a Postgres text column takes
@@ -298,14 +323,60 @@ func (l *Leadership) AmLeader() bool {
 func (l *Leadership) CurrentLeader() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	_, address := l.leader()
+	return address
+}
+
+// Leader returns the ID and the advertise address of the lease's holder as this
+// replica knows it, as CurrentLeader answers: its own while it leads, the
+// holder's it read last while that lease lasts, and none otherwise. The
+// shared-settings check reads the holder's digests by its ID (Digests).
+func (l *Leadership) Leader() (id, address string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.leader()
+}
+
+// leader is Leader. l.mu must be held.
+func (l *Leadership) leader() (id, address string) {
 	if l.leading() != nil {
-		return l.addr
+		return l.id, l.addr
 	}
 	h := l.holder
 	if h.id == "" || h.id == l.id || !time.Now().Before(h.until) {
-		return ""
+		return "", ""
 	}
-	return h.address
+	return h.id, h.address
+}
+
+// ID returns this replica's ID, Options.ReplicaID.
+func (l *Leadership) ID() string { return l.id }
+
+// WatchLeader makes wake be woken, without blocking, at each change of the
+// leader this replica knows (Leader), until the function it returns stops it:
+// when it reads another holder of the lease, or none, takes the lease, or steps
+// down. The shared-settings check watches it, as raft's check watches the
+// leader observations of its node.
+func (l *Leadership) WatchLeader(wake chan<- struct{}) (stop func()) {
+	l.mu.Lock()
+	l.watchers[wake] = struct{}{}
+	l.mu.Unlock()
+	return func() {
+		l.mu.Lock()
+		delete(l.watchers, wake)
+		l.mu.Unlock()
+	}
+}
+
+// leaderChanged wakes the watchers of the leader, without blocking. l.mu must
+// be held.
+func (l *Leadership) leaderChanged() {
+	for wake := range l.watchers {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // WhenLeader implements cluster.Leadership with raft's semantics: while this
@@ -344,6 +415,7 @@ func (l *Leadership) WhenLeader(ctx context.Context, fn func(context.Context) er
 		joined := l.leading() == t
 		if joined {
 			t.grants[g] = struct{}{}
+			l.workStarted()
 		}
 		l.mu.Unlock()
 		if !joined {
@@ -353,6 +425,7 @@ func (l *Leadership) WhenLeader(ctx context.Context, fn func(context.Context) er
 		err := fn(termCtx)
 		l.mu.Lock()
 		delete(t.grants, g)
+		l.workEnded()
 		l.mu.Unlock()
 		cancel()
 		if err != nil {
@@ -364,12 +437,29 @@ func (l *Leadership) WhenLeader(ctx context.Context, fn func(context.Context) er
 	}
 }
 
+// workStarted counts a call of fn that WhenLeader starts. l.mu must be held.
+func (l *Leadership) workStarted() {
+	if l.working == 0 {
+		l.idle = make(chan struct{})
+	}
+	l.working++
+}
+
+// workEnded counts a call of fn that returned, and closes idle once none runs.
+// l.mu must be held.
+func (l *Leadership) workEnded() {
+	l.working--
+	if l.working == 0 {
+		close(l.idle)
+	}
+}
+
 // Run takes part in the election until ctx ends: it campaigns for the lease
 // while this replica does not hold it, renews it while it does, reads the
 // holder for CurrentLeader, and heartbeats the registry. When ctx ends it steps
-// down, cancelling the contexts of WhenLeader, releases the lease it held, and
-// deletes its registry row, then returns nil. A Leadership runs once: a second
-// Run returns an error at once.
+// down, cancelling the contexts of WhenLeader, releases the lease it held once
+// that work has returned, and deletes its registry row, then returns nil (see
+// leave). A Leadership runs once: a second Run returns an error at once.
 func (l *Leadership) Run(ctx context.Context) error {
 	if !l.running.CompareAndSwap(false, true) {
 		return errRunTwice
@@ -384,23 +474,44 @@ func (l *Leadership) Run(ctx context.Context) error {
 }
 
 // leave ends Run: it ends the term this replica leads, which cancels the
-// contexts of WhenLeader, stops WhenLeader, then releases the last lease this
-// replica took, if the row still holds it, and deletes its registry row. A
-// release or a delete that fails is logged: the lease then expires, and the
-// leader prunes the row.
+// contexts of WhenLeader, stops WhenLeader, waits a sixth of the lease at most
+// for the calls of fn in flight to return, then releases the last lease this
+// replica took, if the row still holds it, and deletes its registry row. Work
+// that has not returned by then, as runners that outlived the app's drain
+// deadline, may still run: the lease is not released, and expires a lease
+// after its last renewal, so that no other replica's leader-only work starts
+// while it may (workNotEnded, at WARN). A release or a delete that fails is
+// logged: the lease then expires, and the leader prunes the row.
 func (l *Leadership) leave() {
 	l.mu.Lock()
 	if l.term != nil {
 		l.end(l.term)
 	}
-	epoch := l.held
+	epoch, idle := l.held, l.idle
 	close(l.stopped)
 	l.mu.Unlock()
 	if epoch != 0 {
-		l.release(epoch)
+		if l.workReturns(idle) {
+			l.release(epoch)
+		} else {
+			l.logger.Warn().Int64("epoch", epoch).Dur("lease", l.lease).Msg(workNotEnded)
+		}
 	}
 	l.deregister()
 	l.logger.Info().Msg("database: the leadership stopped")
+}
+
+// workReturns waits for idle, closed once no call of fn runs, workGrace at
+// most, and reports whether it closed.
+func (l *Leadership) workReturns(idle <-chan struct{}) bool {
+	timer := time.NewTimer(l.workGrace)
+	defer timer.Stop()
+	select {
+	case <-idle:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // leading returns the term this replica leads, nil when it leads none or its
@@ -429,6 +540,7 @@ func (l *Leadership) begin(epoch int64, sent time.Time) {
 	l.term, l.held, l.holder = t, epoch, seen{}
 	close(l.acquired)
 	l.acquired = make(chan struct{})
+	l.leaderChanged()
 	l.mu.Unlock()
 	l.logger.Info().Int64("epoch", epoch).Msg("database: took the lease: this replica leads")
 }
@@ -462,6 +574,7 @@ func (l *Leadership) lapse(t *term) {
 	l.mu.Unlock()
 	l.logger.Warn().Int64("epoch", t.epoch).Dur("lease", l.lease).
 		Msg("database: no renewal of the lease succeeded within two thirds of the lease: stepping down")
+	observe(l.observer.Lost)
 }
 
 // stepDown ends t, if it is the term this replica leads, and reports whether
@@ -477,8 +590,8 @@ func (l *Leadership) stepDown(t *term) bool {
 }
 
 // end ends t, the term this replica leads: AmLeader turns false, the contexts
-// of WhenLeader are cancelled, and the lease loop wakes up to follow. l.mu must
-// be held.
+// of WhenLeader are cancelled, the lease loop wakes up to follow, and the
+// watchers of the leader wake. l.mu must be held.
 func (l *Leadership) end(t *term) {
 	t.timer.Stop()
 	l.term = nil
@@ -490,6 +603,7 @@ func (l *Leadership) end(t *term) {
 	case l.wake <- struct{}{}:
 	default:
 	}
+	l.leaderChanged()
 }
 
 // failed returns what an error of a statement under ctx means: the error of ctx

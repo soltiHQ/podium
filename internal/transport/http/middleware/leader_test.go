@@ -139,13 +139,18 @@ func TestLeaderAnswersCarryTheLeadersHTTPAddressOrNone(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("a write reached the handler of a follower") })
 			w := httptest.NewRecorder()
-			refused := 0
-			Leader(tt.leadership, LeaderOptions{ForwardPort: tt.port, Refused: func() { refused++ }})(next).ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/", nil))
+			refused, forwarded := 0, 0
+			opts := LeaderOptions{ForwardPort: tt.port, Refused: func() { refused++ }, Forwarded: func() { forwarded++ }}
+			Leader(tt.leadership, opts)(next).ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/", nil))
 			if w.Code != tt.status {
 				t.Fatalf("status = %d, want %d", w.Code, tt.status)
 			}
 			if refused != 1 {
 				t.Fatalf("Refused called %d times for the refusal, want once", refused)
+			}
+			// Only the leader that cannot be reached was sent the write.
+			if want := map[bool]int{true: 1, false: 0}[tt.status == http.StatusBadGateway]; forwarded != want {
+				t.Fatalf("Forwarded called %d times, want %d", forwarded, want)
 			}
 			if _, set := w.Header()[response.LeaderHeader]; set != (tt.leader != "") || w.Header().Get(response.LeaderHeader) != tt.leader {
 				t.Fatalf("%s = %q, want %q", response.LeaderHeader, w.Header().Get(response.LeaderHeader), tt.leader)
@@ -338,5 +343,43 @@ func TestLeaderForwardsWithoutTheProxyOfTheEnvironment(t *testing.T) {
 	if conn, err := proxy.Accept(); err == nil {
 		_ = conn.Close()
 		t.Fatal("the follower forwarded the write through the proxy of the environment")
+	}
+}
+
+// Forwarded hears each write a follower sends to the leader, once, whatever the
+// leader answers; never a read, a write on the leader, or a write the follower
+// refuses without sending it, as one another node forwarded already.
+func TestLeaderCountsTheWritesItForwards(t *testing.T) {
+	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusConflict) }))
+	t.Cleanup(leader.Close)
+	port := leader.Listener.Addr().(*net.TCPAddr).Port
+	served := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	for _, tc := range []struct {
+		name      string
+		leading   bool
+		method    string
+		marked    bool
+		status    int
+		forwarded int
+	}{
+		{"a write on a follower", false, http.MethodPost, false, http.StatusConflict, 1},
+		{"a read on a follower", false, http.MethodGet, false, http.StatusNoContent, 0},
+		{"a write on the leader", true, http.MethodPost, false, http.StatusNoContent, 0},
+		{"a write forwarded already", false, http.MethodPost, true, http.StatusServiceUnavailable, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			forwarded := 0
+			opts := LeaderOptions{ForwardPort: port, Forwarded: func() { forwarded++ }}
+			h := Leader(stubLeadership{leading: tc.leading, leader: "127.0.0.1:7000"}, opts)(served)
+			r := httptest.NewRequest(tc.method, "/api/v1/users", nil)
+			if tc.marked {
+				r.Header.Set(ForwardedHeader, "1")
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tc.status || forwarded != tc.forwarded {
+				t.Fatalf("answered %d with %d forwards heard, want %d with %d", w.Code, forwarded, tc.status, tc.forwarded)
+			}
+		})
 	}
 }

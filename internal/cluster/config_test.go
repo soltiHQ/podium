@@ -25,15 +25,15 @@ func TestMemoryIsTheDefaultBackend(t *testing.T) {
 	}
 }
 
-// A backend that is neither memory nor raft is refused, and the error names the
-// two there are.
+// A backend that is none of memory, raft and database is refused, and the error
+// names the three there are.
 func TestUnknownBackendNamesTheBackends(t *testing.T) {
 	for _, backend := range []cluster.Backend{"standalone", "other"} {
 		cfg := cluster.DefaultConfig()
 		cfg.Backend = backend
 		err := cfg.Validate()
-		if err == nil || !strings.Contains(err.Error(), string(backend)) || !strings.Contains(err.Error(), "memory, raft") {
-			t.Fatalf("backend %q: Validate() = %v, want an error naming it and memory, raft", backend, err)
+		if err == nil || !strings.Contains(err.Error(), string(backend)) || !strings.Contains(err.Error(), "memory, raft, database") {
+			t.Fatalf("backend %q: Validate() = %v, want an error naming it and memory, raft, database", backend, err)
 		}
 	}
 }
@@ -226,6 +226,7 @@ func TestDataDirIsThatOfTheSelectedBackend(t *testing.T) {
 		{"memory has no directory", func(*cluster.Config) {}, ""},
 		{"unset backend is memory", func(c *cluster.Config) { c.Backend = "" }, ""},
 		{"raft", func(c *cluster.Config) { c.Backend = cluster.BackendRaft }, "/var/lib/solti/raft"},
+		{"database has no directory", func(c *cluster.Config) { c.Backend = cluster.BackendDatabase }, ""},
 		{"unknown backend", func(c *cluster.Config) { c.Backend = "other" }, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -248,6 +249,7 @@ func TestEphemeralIsTheMemoryBackend(t *testing.T) {
 		{"memory", func(*cluster.Config) {}, true},
 		{"unset backend", func(c *cluster.Config) { c.Backend = "" }, true},
 		{"raft", func(c *cluster.Config) { c.Backend = cluster.BackendRaft }, false},
+		{"database", func(c *cluster.Config) { c.Backend = cluster.BackendDatabase }, false},
 		{"unknown backend", func(c *cluster.Config) { c.Backend = "other" }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -569,6 +571,138 @@ func TestMemoryIgnoresRaftConfig(t *testing.T) {
 		cfg.Discovery = cluster.DiscoveryConfig{Driver: "consul", Peers: []string{"=10.0.0.1:7000"}}
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("backend %q: Validate() = %v, want nil", backend, err)
+		}
+	}
+}
+
+// leakURL is the URL of the database tests: its user and password are
+// distinctive, so that a check of an error for them finds no common word.
+const leakURL = "postgres://podium_cfg_user:cfg-secret-pw-5d1e@db.podium.test:5432/podium?sslmode=verify-full"
+
+// databaseConfig is a valid database configuration: the primary at leakURL, the
+// replica advertising 10.0.0.5:0, its port unused.
+func databaseConfig() cluster.Config {
+	cfg := cluster.DefaultConfig()
+	cfg.Backend = cluster.BackendDatabase
+	cfg.Database.URL = leakURL
+	cfg.Database.AdvertiseAddr = "10.0.0.5:0"
+	return cfg
+}
+
+// The database settings are checked before anything connects: the driver is
+// postgres, the URL is set, advertise_addr is set and passes the leadership's
+// rules (a port number, a host to dial, no NUL), neither the lease nor
+// max_open_conns is negative, and a lease is long enough to bound its
+// statements. podium migrate needs no advertise_addr, and checks one only when
+// it is set. No error carries the URL, its user or its password: the URL is a
+// secret, and an operator may paste it into the wrong key.
+func TestDatabaseConfigValidated(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		change    func(*cluster.Config)
+		want      error
+		migration error // what ValidateMigration answers
+	}{
+		{name: "valid", change: func(*cluster.Config) {}},
+		{name: "a replica URL", change: func(c *cluster.Config) { c.Database.ReplicaURL = leakURL }},
+		{name: "an IPv6 advertise address", change: func(c *cluster.Config) { c.Database.AdvertiseAddr = "[fd00::5]:8080" }},
+		{name: "a host name", change: func(c *cluster.Config) { c.Database.AdvertiseAddr = "podium-0.podium.svc:0" }},
+		{name: "a lease and conns of their own", change: func(c *cluster.Config) { c.Database.Lease, c.Database.MaxOpenConns = 3*time.Second, 25 }},
+		{name: "the shortest lease", change: func(c *cluster.Config) { c.Database.Lease = cluster.MinDatabaseLease }},
+		{name: "no URL", change: func(c *cluster.Config) { c.Database.URL = "" }, want: cluster.ErrDatabaseRequired, migration: cluster.ErrDatabaseRequired},
+		{name: "a blank URL", change: func(c *cluster.Config) { c.Database.URL = "  " }, want: cluster.ErrDatabaseRequired, migration: cluster.ErrDatabaseRequired},
+		{name: "no advertise address", change: func(c *cluster.Config) { c.Database.AdvertiseAddr = "" }, want: cluster.ErrDatabaseRequired},
+		{name: "an advertise address without a port", change: func(c *cluster.Config) { c.Database.AdvertiseAddr = "10.0.0.5" }, want: errAny, migration: errAny},
+		{name: "a port that is no number", change: func(c *cluster.Config) { c.Database.AdvertiseAddr = "10.0.0.5:http" }, want: errAny, migration: errAny},
+		{name: "a port over 65535", change: func(c *cluster.Config) { c.Database.AdvertiseAddr = "10.0.0.5:65536" }, want: errAny, migration: errAny},
+		{name: "no host", change: func(c *cluster.Config) { c.Database.AdvertiseAddr = ":8080" }, want: errAny, migration: errAny},
+		{name: "every interface", change: func(c *cluster.Config) { c.Database.AdvertiseAddr = "0.0.0.0:8080" }, want: errAny, migration: errAny},
+		{name: "every IPv6 interface", change: func(c *cluster.Config) { c.Database.AdvertiseAddr = "[::]:8080" }, want: errAny, migration: errAny},
+		{name: "a NUL in the host", change: func(c *cluster.Config) { c.Database.AdvertiseAddr = "podium\x00:8080" }, want: errAny, migration: errAny},
+		{name: "the URL as the advertise address", change: func(c *cluster.Config) { c.Database.AdvertiseAddr = leakURL }, want: errAny, migration: errAny},
+		{name: "an unknown driver", change: func(c *cluster.Config) { c.Database.Driver = "mysql" }, want: errAny, migration: errAny},
+		{name: "no driver", change: func(c *cluster.Config) { c.Database.Driver = "" }, want: errAny, migration: errAny},
+		{name: "the URL as the driver", change: func(c *cluster.Config) { c.Database.Driver = leakURL }, want: errAny, migration: errAny},
+		{name: "a negative lease", change: func(c *cluster.Config) { c.Database.Lease = -time.Second }, want: errAny, migration: errAny},
+		{name: "a lease too short to bound its statements", change: func(c *cluster.Config) { c.Database.Lease = cluster.MinDatabaseLease - time.Millisecond }, want: errAny, migration: errAny},
+		{name: "negative max_open_conns", change: func(c *cluster.Config) { c.Database.MaxOpenConns = -1 }, want: errAny, migration: errAny},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := databaseConfig()
+			tc.change(&cfg)
+			err := cfg.Validate()
+			checkValidate(t, err, tc.want)
+			migrationErr := cfg.ValidateMigration()
+			checkValidate(t, migrationErr, tc.migration)
+			for _, e := range []error{err, migrationErr} {
+				for _, secret := range []string{"cfg-secret-pw-5d1e", "podium_cfg_user", "postgres://"} {
+					if e != nil && strings.Contains(e.Error(), secret) {
+						t.Errorf("Validate() = %q, carries %q", e, secret)
+					}
+				}
+			}
+		})
+	}
+}
+
+// The database settings default to the postgres driver, a lease of 0, which the
+// leadership takes as 10 s, max_open_conns 10 and migrations at start; a zero
+// max_open_conns is 10 too, and migrate false turns the migrations off.
+func TestDatabaseConfigDefaults(t *testing.T) {
+	cfg := cluster.DefaultConfig().Database
+	if cfg.Driver != cluster.DatabaseDriverPostgres || cfg.Lease != 0 || cfg.MaxOpenConns != 0 || cfg.Migrate != nil {
+		t.Fatalf("the default database settings %+v, want the postgres driver and every other setting at zero", cfg)
+	}
+	if cfg.OpenConns() != cluster.DefaultDatabaseMaxOpenConns || cluster.DefaultDatabaseMaxOpenConns != 10 || !cfg.Migrates() {
+		t.Fatalf("OpenConns() = %d, Migrates() = %v; want 10 and true", cfg.OpenConns(), cfg.Migrates())
+	}
+	off := false
+	cfg.MaxOpenConns, cfg.Migrate = 3, &off
+	if cfg.OpenConns() != 3 || cfg.Migrates() {
+		t.Fatalf("OpenConns() = %d, Migrates() = %v; want 3 and false", cfg.OpenConns(), cfg.Migrates())
+	}
+}
+
+// The database settings load from YAML and from the variables that follow their
+// YAML paths, migrate as a bool that is unset by default.
+func TestDatabaseConfigLoads(t *testing.T) {
+	cfg := cluster.DefaultConfig()
+	if err := yaml.Unmarshal([]byte("backend: database\ndatabase:\n  advertise_addr: 10.0.0.5:0\n  lease: 3s\n  migrate: false\n"), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SOLTI_CLUSTER_DATABASE_URL", leakURL)
+	t.Setenv("SOLTI_CLUSTER_DATABASE_REPLICA_URL", leakURL+"&target_session_attrs=read-only")
+	t.Setenv("SOLTI_CLUSTER_DATABASE_MAX_OPEN_CONNS", "20")
+	if err := settings.ApplyEnv("SOLTI_CLUSTER", &cfg, os.LookupEnv); err != nil {
+		t.Fatal(err)
+	}
+	d := cfg.Database
+	if cfg.Backend != cluster.BackendDatabase || d.URL != leakURL || !strings.HasSuffix(d.ReplicaURL, "read-only") || d.AdvertiseAddr != "10.0.0.5:0" ||
+		d.Lease != 3*time.Second || d.MaxOpenConns != 20 || d.Migrate == nil || *d.Migrate {
+		t.Fatalf("loaded %+v", d)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SOLTI_CLUSTER_DATABASE_MIGRATE", "true")
+	if err := settings.ApplyEnv("SOLTI_CLUSTER", &cfg, os.LookupEnv); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Database.Migrates() {
+		t.Fatal("SOLTI_CLUSTER_DATABASE_MIGRATE=true did not turn the migrations on")
+	}
+}
+
+// Memory and raft read no database setting, so invalid ones fail neither; podium
+// migrate needs backend database.
+func TestOtherBackendsIgnoreDatabaseConfig(t *testing.T) {
+	for _, cfg := range []cluster.Config{cluster.DefaultConfig(), raftConfig()} {
+		cfg.Database = cluster.DatabaseConfig{Driver: "mysql", AdvertiseAddr: "0.0.0.0:1", Lease: -1, MaxOpenConns: -1}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("backend %q: Validate() = %v, want nil", cfg.Backend, err)
+		}
+		if err := cfg.ValidateMigration(); err == nil || !strings.Contains(err.Error(), "database") {
+			t.Fatalf("backend %q: ValidateMigration() = %v, want an error that names backend database", cfg.Backend, err)
 		}
 	}
 }

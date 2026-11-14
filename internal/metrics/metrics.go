@@ -39,6 +39,14 @@ const (
 	SyncUnavailable = "unavailable"
 )
 
+// The values of the server label of podium_forwarded_writes_total: the listener
+// a forwarded write came in on.
+const (
+	ServerUI        = "ui"
+	ServerDiscovery = "discovery"
+	ServerGRPC      = "grpc"
+)
+
 // The values of the outcome label of podium_logins_total.
 const (
 	LoginOK      = "ok"
@@ -78,6 +86,9 @@ type Metrics struct {
 	turns        *prometheus.CounterVec
 	turnDuration prometheus.Histogram
 	storeCommit  *prometheus.HistogramVec
+	forwarded    *prometheus.CounterVec
+	// renewals and losses are the database mode's, registered by Database.
+	renewals, losses prometheus.Counter
 }
 
 // New returns the metrics of a podium whose build is info, with the Go and process
@@ -125,6 +136,18 @@ func New(info buildinfo.Info) *Metrics {
 			Help:    "Duration of a store commit by backend: the raft apply on the leader.",
 			Buckets: commitBuckets,
 		}, []string{"backend"}),
+		forwarded: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "podium_forwarded_writes_total",
+			Help: "Writes this node sent to the leader, by the listener they came in on (ui, discovery or grpc), whatever the leader answered, a leader it could not reach included.",
+		}, []string{"server"}),
+		renewals: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "podium_database_lease_renewals_total",
+			Help: "Renewals of the database lease that landed, on the replica that holds it.",
+		}),
+		losses: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "podium_database_lease_losses_total",
+			Help: "Terms of this replica that ended before its stop: no renewal landed within two thirds of the lease, or a renewal or a write found the lease moved.",
+		}),
 	}
 	commit := info.Commit
 	if commit == "" {
@@ -141,7 +164,7 @@ func New(info buildinfo.Info) *Metrics {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		build,
 		m.httpRequests, m.httpDuration, m.grpcRequests, m.grpcDuration,
-		m.syncs, m.logins, m.turns, m.turnDuration, m.storeCommit,
+		m.syncs, m.logins, m.turns, m.turnDuration, m.storeCommit, m.forwarded,
 	)
 	// The series that are known in advance exist from the start, at zero, so that
 	// a rate over them has a first sample and an alert can name them.
@@ -155,6 +178,9 @@ func New(info buildinfo.Info) *Metrics {
 	}
 	for _, outcome := range []string{TurnAnswered, TurnUnanswered, TurnLocal} {
 		m.turns.WithLabelValues(outcome)
+	}
+	for _, server := range []string{ServerUI, ServerDiscovery, ServerGRPC} {
+		m.forwarded.WithLabelValues(server)
 	}
 	return m
 }
@@ -208,4 +234,30 @@ func (m *Metrics) StoreCommit(backend string) func(time.Duration) {
 	}
 	h := m.storeCommit.WithLabelValues(backend)
 	return func(d time.Duration) { h.Observe(d.Seconds()) }
+}
+
+// StoreFailed registers podium_store_failed, which is 1 at a scrape where failed
+// returns true and 0 otherwise.
+func (m *Metrics) StoreFailed(failed func() bool) {
+	if m == nil {
+		return
+	}
+	m.reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "podium_store_failed",
+		Help: "1 while the store has failed and serves nothing, as /readyz reports it, otherwise 0.",
+	}, func() float64 {
+		if failed() {
+			return 1
+		}
+		return 0
+	}))
+}
+
+// Forwarded counts a write that this node sent to the leader, which came in on
+// the listener server, ServerUI, ServerDiscovery or ServerGRPC.
+func (m *Metrics) Forwarded(server string) {
+	if m == nil {
+		return
+	}
+	m.forwarded.WithLabelValues(server).Inc()
 }

@@ -507,3 +507,42 @@ func TestForwarderIgnoresTheProxyOfTheEnvironment(t *testing.T) {
 		t.Fatal("the Forwarder dialed the leader through the proxy of the environment")
 	}
 }
+
+// Forwarded hears each write a follower sends to the leader, once, whatever the
+// leader answers, one that cannot reach it included; never a read, or a write
+// the follower refuses without sending it.
+func TestUnaryLeaderCountsTheWritesItForwards(t *testing.T) {
+	leader := serve(t, status.Error(codes.InvalidArgument, "refused by the leader"))
+	leadership := &leaderStub{leader: "127.0.0.1:7000"}
+	forwarder := syncForwarder(t)
+	var forwarded, refused atomic.Int32
+	opts := LeaderOptions{
+		Port: leader.port, Forwarder: forwarder,
+		Forwarded: func() { forwarded.Add(1) }, Refused: func() { refused.Add(1) },
+	}
+	client := serve(t, nil, UnaryLeader(leadership, opts)).client(t)
+	ctx := context.Background()
+	if _, err := client.Sync(ctx, syncRequest()); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Sync: %v, want the leader's InvalidArgument", err)
+	}
+	leader.next(t)
+	if forwarded.Load() != 1 || refused.Load() != 0 {
+		t.Fatalf("a write the leader answered: %d forwards and %d refusals heard, want 1 and 0", forwarded.Load(), refused.Load())
+	}
+	// A call another node forwarded goes no further.
+	if _, err := client.Sync(metadata.NewOutgoingContext(ctx, metadata.Pairs(ForwardedKey, "1")), syncRequest()); status.Code(err) != codes.Unavailable {
+		t.Fatalf("a forwarded Sync: %v, want Unavailable", err)
+	}
+	if forwarded.Load() != 1 || refused.Load() != 1 {
+		t.Fatalf("a write forwarded already: %d forwards and %d refusals heard, want 1 and 1", forwarded.Load(), refused.Load())
+	}
+	if err := forwarder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Sync(ctx, syncRequest()); status.Code(err) != codes.Unavailable {
+		t.Fatalf("Sync with the forwarder closed: %v, want Unavailable", err)
+	}
+	if forwarded.Load() != 2 || refused.Load() != 2 {
+		t.Fatalf("a write that could not reach the leader: %d forwards and %d refusals heard, want 2 and 2", forwarded.Load(), refused.Load())
+	}
+}

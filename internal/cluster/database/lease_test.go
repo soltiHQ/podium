@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -367,4 +368,90 @@ func TestReleaseOnStop(t *testing.T) {
 		t.Errorf("the lease is %s's at epoch %d, want %s's at %d: the release keeps the epoch", row.holder, row.epoch, b.id, old.epoch+1)
 	}
 	checkLogs(t, a)
+}
+
+// TestLeaseObserved checks that the Observer counts each renewal that landed,
+// and each term lost before Run's end: one whose renewals stop landing, at its
+// step-down, and one whose renewal finds the lease moved; a clean stop, which
+// releases the lease, loses none.
+func TestLeaseObserved(t *testing.T) {
+	const lease = 1200 * time.Millisecond
+	databaseURL, admin := migratedDatabase(t)
+	var renewed, lost atomic.Int32
+	a := newReplica(t, databaseURL, "replica-a", replicaConfig{
+		lease:    lease,
+		poll:     20 * time.Millisecond,
+		observer: Observer{Renewed: func() { renewed.Add(1) }, Lost: func() { lost.Add(1) }},
+	})
+	a.start(t)
+	waitFor(t, 5*time.Second, "replica-a leading", a.AmLeader)
+	waitFor(t, 3*lease, "two renewals observed", func() bool { return renewed.Load() >= 2 })
+	if n := lost.Load(); n != 0 {
+		t.Fatalf("%d losses observed while replica-a renews, want none", n)
+	}
+
+	// Renewals stop landing: the step-down at the deadline is a loss.
+	release := lockLease(t, admin)
+	waitFor(t, 2*lease, "replica-a stepping down", func() bool { return !a.AmLeader() })
+	waitFor(t, time.Second, "the step-down observed", func() bool { return lost.Load() == 1 })
+	release()
+	waitFor(t, 3*lease, "replica-a leading again", a.AmLeader)
+
+	// A renewal that finds the lease moved is a loss too.
+	before := renewed.Load()
+	waitFor(t, 3*lease, "a renewal of the new term observed", func() bool { return renewed.Load() > before })
+	moveLease(t, admin)
+	waitFor(t, 2*lease, "the moved lease observed as lost", func() bool { return lost.Load() == 2 })
+
+	waitFor(t, 3*lease, "replica-a leading again after the move", a.AmLeader)
+	if err := a.stop(); err != nil {
+		t.Fatalf("replica-a's Run: %v", err)
+	}
+	if n := lost.Load(); n != 2 {
+		t.Errorf("%d losses observed after a clean stop, want the 2 before it: the release loses nothing", n)
+	}
+}
+
+// TestNoReleaseWhileLeaderWorkRuns checks that a leader whose Run ends while
+// its WhenLeader work has not returned, as the app's runners that outlived its
+// drain deadline, does not release the lease: the row is left to expire, so
+// that no other replica's leader-only work starts while this one's may still
+// run, and the stop logs it. The other replica takes over once the row expired.
+// Work that returns once its context is cancelled is waited for, and the lease
+// released (TestReleaseOnStop).
+func TestNoReleaseWhileLeaderWorkRuns(t *testing.T) {
+	const lease = 1200 * time.Millisecond
+	databaseURL, admin := migratedDatabase(t)
+	a := newReplica(t, databaseURL, "replica-a", replicaConfig{lease: lease})
+	stuck, running := make(chan struct{}), make(chan struct{}, 1)
+	t.Cleanup(func() { close(stuck) })
+	go func() {
+		_ = a.WhenLeader(context.Background(), func(context.Context) error {
+			running <- struct{}{}
+			<-stuck // ignores its context, as a runner stuck in a call
+			return nil
+		})
+	}()
+	a.start(t)
+	receive(t, running, 5*time.Second, "replica-a's work running in its term")
+	taken := readLease(t, admin)
+
+	if err := a.stop(); err != nil {
+		t.Fatalf("replica-a's Run: %v", err)
+	}
+	row := readLease(t, admin)
+	if row.left <= 0 || row.holder != a.id || row.epoch != taken.epoch {
+		t.Fatalf("after the stop the lease is %s's at epoch %d, %s left; want replica-a's at %d, unreleased", row.holder, row.epoch, row.left, taken.epoch)
+	}
+	logs := a.logs.String()
+	if !strings.Contains(logs, workNotEnded) || strings.Contains(logs, "database: released the lease") {
+		t.Errorf("replica-a's stop logged no WARN of the work still running, or released the lease:\n%s", logs)
+	}
+
+	b := newReplica(t, databaseURL, "replica-b", replicaConfig{lease: lease, poll: 20 * time.Millisecond})
+	b.start(t)
+	waitFor(t, 2*lease, "replica-b leading once the row expired", b.AmLeader)
+	if got := readLease(t, admin); got.epoch != taken.epoch+1 {
+		t.Errorf("replica-b took the lease at epoch %d, want %d", got.epoch, taken.epoch+1)
+	}
 }

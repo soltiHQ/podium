@@ -10,8 +10,9 @@
 // which makes it an env-only setting: it has that exact variable name and no
 // YAML key. No other variable name is read.
 //
-// The leaf types are string, bool, the integer kinds, time.Duration and
-// []string. Any other type makes [Walk] panic, so a setting of a new type fails
+// The leaf types are string, bool, *bool, the integer kinds, time.Duration and
+// []string; a *bool is a bool whose nil leaves the default to the package that
+// reads it. Any other type makes [Walk] panic, so a setting of a new type fails
 // the first test that loads the configuration instead of being ignored.
 package settings
 
@@ -138,7 +139,8 @@ func checkLeaf(f reflect.StructField) {
 	switch t := f.Type; {
 	case t == durationType, t.Kind() == reflect.String, t.Kind() == reflect.Bool,
 		t.Kind() >= reflect.Int && t.Kind() <= reflect.Int64,
-		t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.String:
+		t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.String,
+		t.Kind() == reflect.Pointer && t.Elem().Kind() == reflect.Bool:
 		return
 	}
 	panic(fmt.Sprintf("settings: field %s has type %s, which no environment variable can set", f.Name, f.Type))
@@ -201,6 +203,13 @@ func set(v reflect.Value, raw string) error {
 			return errors.New("not a valid boolean (true or false)")
 		}
 		v.SetBool(b)
+	case t.Kind() == reflect.Pointer:
+		// A *bool: a value sets it, where nil left the default to its package.
+		b, err := strconv.ParseBool(raw)
+		if err != nil {
+			return errors.New("not a valid boolean (true or false)")
+		}
+		v.Set(reflect.ValueOf(&b))
 	default:
 		n, err := strconv.ParseInt(raw, 10, t.Bits())
 		if err != nil {

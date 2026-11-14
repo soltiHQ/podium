@@ -38,8 +38,9 @@ const (
 var ErrConfigCheckStarted = errors.New("raft: configuration check already started")
 
 // ConfigCheck is the runner of a node's configuration check: while another node
-// leads, it fetches the leader's configuration digests over the raft port and
-// compares them with this node's, group by group. It checks at its start, once a
+// leads, it fetches the leader's configuration digests, over the raft port on a
+// raft node, from the replica registry in the database mode, and compares them
+// with this node's, group by group. It checks at its start, once a
 // leader other than this node is known, and again at each change of the leader
 // the node knows, so that a node whose settings drifted is caught as a follower
 // of a leader that shares the settings, and as the leader of followers that do.
@@ -63,7 +64,7 @@ type ConfigCheck struct {
 	self   string          // this node's ID
 	own    cluster.Digests // this node's digests
 	leader func() (id, address string)
-	fetch  func(ctx context.Context, address string) (cluster.Digests, error)
+	fetch  func(ctx context.Context, id, address string) (cluster.Digests, error)
 	// watch makes the check's wake be woken, without blocking, at every change
 	// of the leader the node knows, until the function it returns stops it.
 	watch func(wake chan<- struct{}) (stop func())
@@ -77,10 +78,12 @@ type ConfigCheck struct {
 	stopOnce sync.Once
 }
 
-// newConfigCheck returns the check of the node self, whose digests are own:
-// leader gives the leader the node knows, fetch a peer's digests, and watch
-// wakes the check at each change of leader.
-func newConfigCheck(self string, own cluster.Digests, leader func() (string, string), fetch func(context.Context, string) (cluster.Digests, error), watch func(chan<- struct{}) func(), logger zerolog.Logger) *ConfigCheck {
+// NewConfigCheck returns the check of the node self, whose digests are own:
+// leader gives the leader the node knows, its ID and address, fetch the digests
+// of that leader, and watch wakes the check at each change of leader. A raft
+// node's comes from Admin.ConfigCheck; the database mode builds its own with
+// it, whose fetch reads the leader's row of the replica registry.
+func NewConfigCheck(self string, own cluster.Digests, leader func() (id, address string), fetch func(ctx context.Context, id, address string) (cluster.Digests, error), watch func(wake chan<- struct{}) (stop func()), logger zerolog.Logger) *ConfigCheck {
 	return &ConfigCheck{
 		self:   self,
 		own:    own,
@@ -103,7 +106,7 @@ func (a *Admin) ConfigCheck(logger zerolog.Logger) *ConfigCheck {
 	if p.cfg.ConfigDigests == nil {
 		return nil
 	}
-	return newConfigCheck(p.cfg.NodeID, *p.cfg.ConfigDigests, a.Leader, func(ctx context.Context, address string) (cluster.Digests, error) {
+	return NewConfigCheck(p.cfg.NodeID, *p.cfg.ConfigDigests, a.Leader, func(ctx context.Context, _, address string) (cluster.Digests, error) {
 		return fetchDigests(ctx, address, p.security)
 	}, p.watchLeader, logger)
 }
@@ -207,7 +210,7 @@ func (c *ConfigCheck) run(ctx context.Context, wake <-chan struct{}) {
 func (c *ConfigCheck) check(ctx context.Context, wake <-chan struct{}, id, address string, state *checkState) (changed bool) {
 	pause := configRetryPause
 	for attempt := 1; ; attempt++ {
-		theirs, err := c.fetch(ctx, address)
+		theirs, err := c.fetch(ctx, id, address)
 		if err == nil {
 			c.compare(id, theirs, state)
 			return false

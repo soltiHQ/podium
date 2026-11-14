@@ -90,7 +90,7 @@ func (s *stubSource) leader() (string, string) {
 	return id, addr
 }
 
-func (s *stubSource) fetch(_ context.Context, addr string) (cluster.Digests, error) {
+func (s *stubSource) fetch(_ context.Context, _, addr string) (cluster.Digests, error) {
 	s.mu.Lock()
 	answer, failures := s.answers[addr], s.failures[addr]
 	if failures > 0 {
@@ -139,7 +139,7 @@ func receive(t *testing.T, ch <-chan string, what string) string {
 func runStubCheck(t *testing.T, src *stubSource, own cluster.Digests, after func(time.Duration) <-chan time.Time) (*ConfigCheck, *logBuffer) {
 	t.Helper()
 	logs := &logBuffer{}
-	check := newConfigCheck("n1", own, src.leader, src.fetch, src.watchLeader, zerolog.New(logs))
+	check := NewConfigCheck("n1", own, src.leader, src.fetch, src.watchLeader, zerolog.New(logs))
 	check.after = after
 	done := make(chan error, 1)
 	go func() { done <- check.Start(context.Background()) }()

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -267,7 +268,9 @@ func TestConcurrentMigrate(t *testing.T) {
 	})
 
 	t.Run("a creation of podium_schema_migrations that commits first", func(t *testing.T) {
-		db := pgtest.Fresh(t)
+		databaseURL := pgtest.NewDatabase(t)
+		db := pgtest.Open(t, databaseURL)
+		migrator := pgtest.Open(t, withApplicationName(t, databaseURL, migratorName))
 		ctx := t.Context()
 		other, err := db.BeginTx(ctx, nil)
 		if err != nil {
@@ -278,9 +281,9 @@ func TestConcurrentMigrate(t *testing.T) {
 			t.Fatalf("create podium_schema_migrations in the other session: %v", err)
 		}
 		done := make(chan error, 1)
-		go func() { done <- Migrate(ctx, db, Postgres{}) }()
+		go func() { done <- Migrate(ctx, migrator, Postgres{}) }()
 		// The migrator's creation waits on the other session's, uncommitted.
-		waitFor(t, 10*time.Second, "the migrator waits on a lock", func() bool { return waitsOnALock(t, db) })
+		waitFor(t, 10*time.Second, "the migrator waits on a lock", func() bool { return waitsOnALock(t, db, migratorName) })
 		if err := other.Commit(); err != nil {
 			t.Fatalf("commit the other session: %v", err)
 		}
@@ -296,12 +299,37 @@ func TestConcurrentMigrate(t *testing.T) {
 	})
 }
 
-// waitsOnALock reports whether a session of db's database waits on a lock.
-func waitsOnALock(t *testing.T, db *sql.DB) bool {
-	var waiting int
-	err := db.QueryRowContext(t.Context(), `SELECT count(*) FROM pg_stat_activity
-		WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting)
-	return err == nil && waiting > 0
+// migratorName is the application_name of the migrator's sessions in the tests
+// that wait for it to wait on a lock.
+const migratorName = "podium-test-migrator"
+
+// withApplicationName is databaseURL with application_name name, which names
+// the sessions of a pool on it in pg_stat_activity.
+func withApplicationName(t *testing.T, databaseURL, name string) string {
+	t.Helper()
+	u, err := url.Parse(databaseURL)
+	if err != nil {
+		t.Fatal("the database URL does not parse")
+	}
+	q := u.Query()
+	q.Set("application_name", name)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// waitsOnALock reports whether a session of db's database whose
+// application_name is name, the migrator's, waits on a lock: the test's own
+// sessions, which hold the lock, are not looked at. A query that fails fails the
+// test at once, instead of passing for no wait until the deadline.
+func waitsOnALock(t *testing.T, db *sql.DB, name string) bool {
+	t.Helper()
+	var waiting bool
+	err := db.QueryRowContext(t.Context(), `SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+		WHERE datname = current_database() AND application_name = $1 AND wait_event_type = 'Lock')`, name).Scan(&waiting)
+	if err != nil {
+		t.Fatalf("read the lock waits of the migrator: %v", err)
+	}
+	return waiting
 }
 
 // fsDialect is the Postgres dialect over migrations a test writes.
@@ -346,8 +374,17 @@ func TestMigrationsRunOneToATransaction(t *testing.T) {
 // version 0 whose lock another migrator holds, a newer podium's, which records
 // version 99: once the lock is free the migration reads that version again and
 // refuses with ErrSchemaNewer, applying nothing.
+//
+// The migration reads version 0 first, before it waits: Migrate's first read of
+// the version runs outside the lock, a plain read that the other migrator's
+// EXCLUSIVE lock lets through, and the other's version 99 is uncommitted then.
+// So the migration goes on to take the lock, and waits there; only its read
+// under the lock, once the other committed, can see 99. That second read is
+// what the test pins.
 func TestMigrateRechecksTheVersionUnderTheLock(t *testing.T) {
-	db := pgtest.Fresh(t)
+	databaseURL := pgtest.NewDatabase(t)
+	db := pgtest.Open(t, databaseURL)
+	migrator := pgtest.Open(t, withApplicationName(t, databaseURL, migratorName))
 	ctx := t.Context()
 	if _, err := db.ExecContext(ctx, createMigrationsTable); err != nil {
 		t.Fatal(err)
@@ -364,9 +401,9 @@ func TestMigrateRechecksTheVersionUnderTheLock(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- Migrate(ctx, db, Postgres{}) }()
+	go func() { done <- Migrate(ctx, migrator, Postgres{}) }()
 	// The migration read version 0, and waits for the lock.
-	waitFor(t, 10*time.Second, "the migrator waits on the lock", func() bool { return waitsOnALock(t, db) })
+	waitFor(t, 10*time.Second, "the migrator waits on the lock", func() bool { return waitsOnALock(t, db, migratorName) })
 	if err := other.Commit(); err != nil {
 		t.Fatalf("commit the newer migrator: %v", err)
 	}

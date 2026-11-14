@@ -62,6 +62,8 @@ type clusterNode struct {
 	// discarded marks a node of an attempt that startWholeNodes gave up: its Run
 	// may have ended on its own, which stop then does not report.
 	discarded bool
+	// opts are New's options besides the cheap password cost.
+	opts []Option
 }
 
 // clusterNodes returns one node per ID, none of them started yet, each with the
@@ -106,7 +108,7 @@ func (n *clusterNode) start(t *testing.T) {
 func (n *clusterNode) tryStart(t *testing.T) error {
 	t.Helper()
 	begin := time.Now()
-	a, err := New(context.Background(), n.cfg, zerolog.New(n.logs), WithPasswordCost(bcrypt.MinCost))
+	a, err := New(context.Background(), n.cfg, zerolog.New(n.logs), append([]Option{WithPasswordCost(bcrypt.MinCost)}, n.opts...)...)
 	if err != nil {
 		return fmt.Errorf("start %s: %w", n.id, err)
 	}

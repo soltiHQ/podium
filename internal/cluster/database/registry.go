@@ -3,6 +3,9 @@ package database
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/soltiHQ/control-plane/internal/cluster"
@@ -38,7 +41,13 @@ ON CONFLICT (id) DO UPDATE
 
 	// deleteReplica deletes the row of the replica $1.
 	deleteReplica = `DELETE FROM podium_replicas WHERE id = $1`
+
+	// readDigests reads the digests of the replica $1.
+	readDigests = `SELECT digests FROM podium_replicas WHERE id = $1`
 )
+
+// errNoRegistryRow is the error of Digests for a replica without a registry row.
+var errNoRegistryRow = errors.New("database: the replica has no registry row")
 
 // member is a replica the registry listed, a member until a time.
 type member struct {
@@ -167,4 +176,28 @@ func (l *Leadership) deregister() {
 	if _, err := l.db.ExecContext(ctx, deleteReplica, l.id); err != nil {
 		l.logger.Warn().Err(failed(ctx, err)).Msg("database: deleting this replica's registry row failed: the leader prunes it after an hour")
 	}
+}
+
+// Digests reads the digests of the settings every replica must share of the
+// replica id from its registry row, as its last heartbeat wrote them: the
+// shared-settings check compares the leader's with this replica's own. A
+// replica without a row, or a row whose digests are of another size, is an
+// error, and a statement that fails answers as failed classifies it, never
+// with a row or a connection string.
+func (l *Leadership) Digests(ctx context.Context, id string) (cluster.Digests, error) {
+	var raw []byte
+	err := l.db.QueryRowContext(ctx, readDigests, id).Scan(&raw)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return cluster.Digests{}, errNoRegistryRow
+	case err != nil:
+		return cluster.Digests{}, failed(ctx, err)
+	case len(raw) != digestsSize:
+		return cluster.Digests{}, fmt.Errorf("database: the registry row holds %d bytes of digests, want %d", len(raw), digestsSize)
+	}
+	var d cluster.Digests
+	for i := range d {
+		copy(d[i][:], raw[i*sha256.Size:])
+	}
+	return d, nil
 }

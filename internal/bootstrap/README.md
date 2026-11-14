@@ -4,7 +4,7 @@ Bootstrap reconciles the built-in roles and seeds the first administrator. The
 memory backend runs it once per start, inside `app.New`: a seed that fails fails
 the start, and a generated password is in the log when `New` returns. A raft
 node runs it at the start of each of its leadership terms, see "Raft mode"
-below.
+below, and so does a replica of the database mode, see "Database mode".
 
 ## Built-in roles
 
@@ -78,10 +78,16 @@ In order:
      logged once, at WARN, as
      `ephemeral mode: admin password generated: change it after first login`,
      with the `password` field. No other mode ever logs a password.
+   - **A required password** (`Options.PasswordRequired`, which the app sets for
+     `cluster.backend: database`; there is no data directory, and the state is
+     not ephemeral): nothing is generated. A seed that is due without
+     `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` fails with `ErrAdminPasswordRequired`,
+     which names the variable, before anything is stored, and no password is
+     logged. See "Database mode".
    - **Neither**: bootstrap does not guess ephemeral mode from an empty data
-     directory. With no data directory and no `Ephemeral` flag a seed fails with
-     `ErrNoDataDir` before anything is stored, and no password is logged. A data
-     directory wins when both are given.
+     directory. With no data directory, no `Ephemeral` flag and no required
+     password a seed fails with `ErrNoDataDir` before anything is stored, and no
+     password is logged. A data directory wins when both are given.
 
 The file is written before the password is stored. A start that stops in between
 leaves a file nobody needs, never a stored password nobody can read. A start
@@ -126,6 +132,25 @@ same, the failed write took effect (raft can report a lost leadership once the
 entry committed), and the next leader found nothing to seed: trust the file of
 the node whose seed failed after writing it, whose error names the file.
 
+## Database mode
+
+A replica of the database mode holds no data directory, so the administrator's
+password must come from `SOLTI_BOOTSTRAP_ADMIN_PASSWORD`
+(`Options.PasswordRequired`). `app.New` checks what any seed needs
+(`Options.Check`: the password policy for a set variable), then, once the store
+is open, `CheckSeed`: on a database whose user table makes a seed due, a start
+without the variable stops with `ErrAdminPasswordRequired`, naming it, and the
+process exits 1; once users exist, the variable is needed no more. Its read of
+the user table takes what is left of the start's startup retry, as the store's
+opening did: a database it cannot reach is tried again, not a failed start. The
+replica then seeds at the start of each of its leadership terms through its
+`bootstrap` runner, as a raft node does, and its writes go through the store,
+which fences every write transaction with the lease: only the leader seeds, and
+a replica that lost the lease writes nothing. Its lines name the replica by its
+random `replica_id`, and the primary's `host`, `port` and `database`, as the
+database mode's lines do. During a rolling upgrade the built-in roles follow
+whichever version leads, as on raft.
+
 ## Tests
 
 `bootstrap_test.go` covers:
@@ -141,8 +166,11 @@ the node whose seed failed after writing it, whose error names the file.
   the removal of a stale password file only after the new password is stored;
 - no password in the log, persistent or from the environment, the ephemeral log
   line, and the refusal to seed without a data directory or the ephemeral flag;
-- `Options.Check`, the checks of a raft node at start
+- `Options.Check`, the checks of a raft node or a database replica at start
   (`TestCheckRefusesWhatEverySeedNeeds`);
+- a required password: `ErrAdminPasswordRequired` from `Run` and `CheckSeed` on
+  an empty user table, nothing stored, the seed with the variable, and no need
+  of it once users exist (`TestPasswordRequiredWithoutAPassword`);
 - the reconciliation of built-in roles, and the earlier checks of an existing
   operator-managed administrator and a canceled startup.
 
@@ -152,4 +180,7 @@ administrator, with the same stored password on every node, which the file this
 README says to trust holds (`TestLateQuorumStillSeedsOnce`), and a new leader's
 term changes nothing (`TestSeedingIsIdempotentAcrossLeaders`). The checks at
 start are `TestNewRaftRefusesAnAdminPasswordBreakingThePolicy` and
-`TestNewRaftRefusesToStartWithoutADataDirectory`.
+`TestNewRaftRefusesToStartWithoutADataDirectory`. The database mode is tested in
+`internal/app` on Postgres: `TestBootstrapNeedsPassword` (an empty database
+without the variable stops the start; a start after the seed needs it no more)
+and `TestDatabaseModeServes` (the leader seeds the variable's password).

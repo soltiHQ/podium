@@ -127,3 +127,35 @@ VALUES ($1, $2, $3, now() - $4::interval)`, row.id, row.id+".podium.test:7000", 
 		}
 	}
 }
+
+// TestDigestsFromRegistry checks that Digests reads the digests a replica's
+// heartbeat wrote to its registry row, those of its shared settings, for the
+// shared-settings check, and refuses a replica without a row.
+func TestDigestsFromRegistry(t *testing.T) {
+	databaseURL, _ := migratedDatabase(t)
+	settings := map[string]cluster.SharedSettings{
+		"replica-a": {JWTSecret: "secret-a", Issuer: "podium"},
+		"replica-b": {JWTSecret: "secret-b", Issuer: "podium", AgentAuthRequire: true},
+	}
+	a := newReplica(t, databaseURL, "replica-a", replicaConfig{heartbeat: 50 * time.Millisecond, settings: settings["replica-a"]})
+	b := newReplica(t, databaseURL, "replica-b", replicaConfig{heartbeat: 50 * time.Millisecond, settings: settings["replica-b"]})
+	a.start(t)
+	b.start(t)
+	waitFor(t, 5*time.Second, "both replicas among replica-a's members", func() bool { return len(a.Members()) == 2 })
+
+	for id, s := range settings {
+		got, err := a.Digests(t.Context(), id)
+		if err != nil {
+			t.Fatalf("Digests(%s): %v", id, err)
+		}
+		if got != s.Digests() {
+			t.Errorf("Digests(%s) are not the digests of its settings", id)
+		}
+	}
+	if groups := settings["replica-a"].Digests().Differ(settings["replica-b"].Digests()); len(groups) != 2 {
+		t.Fatalf("the settings differ in %v, want two groups: the test's settings are wrong", groups)
+	}
+	if _, err := a.Digests(t.Context(), "replica-none"); err == nil {
+		t.Error("Digests of a replica without a registry row: no error")
+	}
+}

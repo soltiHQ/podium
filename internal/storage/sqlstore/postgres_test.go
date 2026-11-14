@@ -223,7 +223,9 @@ func TestClassify(t *testing.T) {
 	t.Run("a connection the server refuses", func(t *testing.T) {
 		// The server's refusal travels in the connection error: the store names
 		// its SQLSTATE and nothing else, neither the message nor the user, the
-		// host or the password the URL carries.
+		// host or the password the URL carries. The user is looked for in the
+		// forms a driver's message names it in, not as a bare word: the gate's
+		// user is postgres, which the classification names as the engine.
 		server := os.Getenv(pgtest.EnvURL)
 		if server == "" {
 			t.Skipf("%s is unset: no Postgres server to test against", pgtest.EnvURL)
@@ -232,6 +234,8 @@ func TestClassify(t *testing.T) {
 		if err != nil || base.User == nil {
 			t.Fatalf("pgtest: %s is not a postgres:// URL with a user", pgtest.EnvURL)
 		}
+		user := base.User.Username()
+		_, checksPasswords := base.User.Password()
 		for _, tc := range []struct {
 			name, sqlstate string
 			change         func(*url.URL)
@@ -249,11 +253,16 @@ func TestClassify(t *testing.T) {
 				defer func() { _ = db.Close() }()
 				err = db.PingContext(ctx)
 				if err == nil {
+					// A server that checks no password lets a wrong one in; one
+					// whose URL carries a password checks it, and must refuse it.
+					if tc.sqlstate == "28P01" && checksPasswords {
+						t.Fatal("the server accepted a wrong password, though the test URL carries one")
+					}
 					t.Skip("the server accepted the connection: it does not check this")
 				}
 				classified(t, err, storage.ErrUnavailable, "SQLSTATE "+tc.sqlstate)
 				got := Postgres{}.Classify(err).Error()
-				for _, leak := range []string{u.Hostname(), "FATAL", "authentication failed", "does not exist"} {
+				for _, leak := range []string{u.Hostname(), "FATAL", "authentication failed", "does not exist", "user=" + user, `user "` + user + `"`} {
 					if strings.Contains(got, leak) {
 						t.Errorf("Classify = %q, carries %q", got, leak)
 					}

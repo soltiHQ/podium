@@ -497,8 +497,8 @@ answers GET and HEAD with one line of text, but for `/version` and `/metrics`:
 | Route | Answers |
 | -- | -- |
 | `/livez` | 200 `ok` while the process serves. |
-| `/readyz` | 200 `ok` when the node is ready; otherwise 503 with the first reason that applies: `shutting down`, `starting` or `no raft leader`. |
-| `/leaderz` | 200 on the raft leader once its start-up has finished, also during the shutdown delay, and on a memory node while it is ready; otherwise 503. |
+| `/readyz` | 200 `ok` when the node is ready; otherwise 503 with the first reason that applies: `shutting down`, `starting`, `storage failed` (the database backend's primary does not answer its ping) or `no raft leader`. |
+| `/leaderz` | 200 on the raft leader, or the database backend's lease holder, once its start-up has finished, also during the shutdown delay, and on a memory node while it is ready; otherwise 503. |
 | `/version` | The build information as JSON: `version`, `modified`, `go_version` and `platform`, and `commit` and `build_time` when the binary carries them. |
 | `/metrics` | The Prometheus text exposition, below. |
 
@@ -532,6 +532,12 @@ No label carries an agent, user, spec, task or session ID, or a token.
 | `podium_sync_turns_total` | counter | `outcome` (`answered`, `unanswered`, `local`) | Agent turns of the sync runner, which runs on the leader only. |
 | `podium_sync_turn_duration_seconds` | histogram | none | Their duration. |
 | `podium_store_commit_duration_seconds` | histogram | `backend` (`raft`) | A raft write from its proposal to its answer, which only the leader makes. |
+| `podium_store_failed` | gauge | none | 1 while the store has failed, as `/readyz` reports `storage failed`; only the database backend's can. |
+| `podium_forwarded_writes_total` | counter | `server` (`ui`, `discovery`, `grpc`) | Writes a follower sent to the leader. |
+| `podium_database_leader` | gauge | none | Database backend only: 1 while this replica holds the lease. |
+| `podium_database_lease_renewals_total`, `podium_database_lease_losses_total` | counter | none | Its renewals of the lease that landed, and its terms lost before its stop. |
+| `podium_database_events_dropped_total` | counter | none | Events that never reached the database, applied on this replica alone. |
+| `podium_database_pool_*` | gauge, counter | `pool` (`primary`, `replica`, `lease`) | The `database/sql` statistics of each pool: `max_open_connections`, `open_connections`, `in_use_connections`, `idle_connections`, `wait_count_total`, `wait_duration_seconds_total`. |
 | `podium_raft_state` | gauge | `state` (`follower`, `candidate`, `leader`, `shutdown`) | Raft nodes only: 1 for the node's state. |
 | `podium_raft_term` | gauge | none | The node's current term. |
 | `podium_raft_last_index` | gauge | none | The index of the last entry in its log. |

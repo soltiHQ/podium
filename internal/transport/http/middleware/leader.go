@@ -70,6 +70,12 @@ type LeaderOptions struct {
 	// unusable, or the leader cannot be reached. A write that it proxies, and
 	// the leader's answer to it, are not refusals. It runs on the request's goroutine.
 	Refused func()
+
+	// Forwarded, when set, is called once for each write that this node sends to
+	// the leader, as it sends it, whatever the leader answers: a leader it cannot
+	// reach included, which Refused hears as well. It runs on the request's
+	// goroutine.
+	Forwarded func()
 }
 
 // Leader routes write requests to the cluster leader.
@@ -119,6 +125,10 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 	if refused == nil {
 		refused = func() {}
 	}
+	forwarded := opts.Forwarded
+	if forwarded == nil {
+		forwarded = func() {}
+	}
 	leader := func() string { return leaderAddress(leadership, opts.ForwardPort) }
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -161,6 +171,7 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 				http.Error(w, "cluster: leader unreachable", http.StatusBadGateway)
 			}
 			// The transport marks what the proxy sends (markForwarded).
+			forwarded()
 			proxy.ServeHTTP(w, r)
 		})
 	}

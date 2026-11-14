@@ -85,6 +85,12 @@ vars:
   # whose tests need a database adds itself here. Without Postgres, those tests
   # skip in ci/golang/test.
   postgres_test_packages: ./internal/storage/sqlstore/... ./internal/cluster/database/...
+  # The second invocation of ci/golang/test/postgres: packages whose other tests
+  # run in ci/golang/test, where internal/app is near 60 s under -race, so that
+  # only their Postgres tests run here, those whose names postgres_app_test_run
+  # matches.
+  postgres_app_test_packages: ./internal/app/ ./cmd/...
+  postgres_app_test_run: '^(TestDatabase|TestTwoReplicasForwardWrites$|TestBootstrapNeedsPassword$|TestMigrateCommand$)'
   # The Postgres server of ci/golang/test/postgres: the current stable image,
   # postgres:18.7 on 2026-11-13, pinned by the digest of its multi-arch index,
   # so that it runs on arm64 and amd64 hosts alike. To move it, pin the index
@@ -212,6 +218,13 @@ tasks:
       - task: golang:exec
         vars:
           CMD: go test -race -count=1 -timeout=10m {{.postgres_test_packages}}
+          TASK_CONTEXT:
+            ref: >-
+              dict "CONTAINER_RUN_ARGS" (printf "--network %s" .postgres_network)
+              "CONTAINER_ENVS" (printf "PODIUM_TEST_POSTGRES_URL=%s" .postgres_url)
+      - task: golang:exec
+        vars:
+          CMD: go test -race -count=1 -timeout=10m -run '{{.postgres_app_test_run}}' {{.postgres_app_test_packages}}
           TASK_CONTEXT:
             ref: >-
               dict "CONTAINER_RUN_ARGS" (printf "--network %s" .postgres_network)

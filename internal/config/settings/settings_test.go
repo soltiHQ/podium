@@ -15,6 +15,7 @@ type inner struct {
 
 type sample struct {
 	Flag   bool     `yaml:"flag"`
+	Maybe  *bool    `yaml:"maybe"` // nil: the default of its package
 	Count  int      `yaml:"count"`
 	Big    int64    `yaml:"big"`
 	Small  int8     `yaml:"small"`
@@ -32,23 +33,30 @@ func lookup(env map[string]string) func(string) (string, bool) {
 func TestApplyEnvParsesEveryType(t *testing.T) {
 	var got sample
 	err := settings.ApplyEnv("APP", &got, lookup(map[string]string{
-		"APP_FLAG": "true", "APP_COUNT": "-3", "APP_BIG": "9000000000", "APP_SMALL": "127",
+		"APP_FLAG": "true", "APP_MAYBE": "false", "APP_COUNT": "-3", "APP_BIG": "9000000000", "APP_SMALL": "127",
 		"APP_LIST": " a , b,c ", "APP_INNER_WAIT_FOR": "1m30s", "APP_INNER_NAME": " kept as is ",
 		"APP_PLAIN": "p", "APP_SECRET": "s3cret", "HIDDEN": "x", "APP_HIDDEN": "x",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.Flag || got.Count != -3 || got.Big != 9_000_000_000 || got.Small != 127 ||
+	if !got.Flag || got.Maybe == nil || *got.Maybe || got.Count != -3 || got.Big != 9_000_000_000 || got.Small != 127 ||
 		strings.Join(got.List, "|") != "a|b|c" || got.Inner.Wait != 90*time.Second ||
 		got.Inner.Name != " kept as is " || got.Plain != "p" || got.Secret != "s3cret" || got.Hidden != "" {
 		t.Fatalf("got %+v", got)
+	}
+	// A *bool that no variable sets stays nil, for its package's default.
+	var unset sample
+	if err := settings.ApplyEnv("APP", &unset, lookup(map[string]string{"APP_FLAG": "true"})); err != nil || unset.Maybe != nil {
+		t.Fatalf("an unset *bool: %v, %v; want nil", unset.Maybe, err)
 	}
 }
 
 func TestApplyEnvErrorsNameTheVariableNotTheValue(t *testing.T) {
 	for _, tc := range []struct{ name, value, says string }{
 		{"APP_FLAG", "yes please", "not a valid boolean"},
+		{"APP_MAYBE", "perhaps", "not a valid boolean"},
+		{"APP_MAYBE", "", "is empty"},
 		{"APP_COUNT", "12x", "not a valid integer"},
 		{"APP_SMALL", "128", "not a valid integer"}, // out of int8's range
 		{"APP_INNER_WAIT_FOR", "soon", "not a valid duration"},
@@ -74,7 +82,7 @@ func TestWalkNamesAndPaths(t *testing.T) {
 	for _, s := range settings.Walk("APP", &sample{}) {
 		got = append(got, s.Env+"="+s.Key())
 	}
-	want := "APP_FLAG=flag APP_COUNT=count APP_BIG=big APP_SMALL=small APP_LIST=list " +
+	want := "APP_FLAG=flag APP_MAYBE=maybe APP_COUNT=count APP_BIG=big APP_SMALL=small APP_LIST=list " +
 		"APP_INNER_WAIT_FOR=inner.wait_for APP_INNER_NAME=inner.name APP_PLAIN=plain APP_SECRET=secret"
 	if strings.Join(got, " ") != want {
 		t.Fatalf("walk = %s\nwant   %s", strings.Join(got, " "), want)

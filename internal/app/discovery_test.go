@@ -23,6 +23,7 @@ import (
 	discoverv1 "github.com/soltiHQ/control-plane/api/gen/solti/discover/v1"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/cluster/memory"
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/event"
@@ -86,7 +87,7 @@ func TestRaftNodeWarnsWhatItsForwardsLack(t *testing.T) {
 				cfg.TLS.Client.CertFile, cfg.TLS.Client.KeyFile = "client.crt", "client.key"
 			}
 			var logs bytes.Buffer
-			warnForwarding(zerolog.New(&logs), cfg)
+			warnForwarding(zerolog.New(&logs), cfg, cluster.BackendRaft)
 			if got := forwardingWarnings(t, logs.Bytes()); fmt.Sprint(got) != fmt.Sprint(tc.want) {
 				t.Fatalf("warnings %q, want %q", got, tc.want)
 			}

@@ -1041,13 +1041,17 @@ with `unknown rpc type 240`, and closes the connection
 ### The check
 
 The `config-check` runner, which `app` adds in raft mode, compares the node's
-digests with its leader's (`Admin.ConfigCheck`). It checks once a leader other
-than this node is known, and again at each change of the leader the node knows,
-which hashicorp/raft observes, a flap through no leader included: a drifted node
-is caught as the follower of a leader that shares the settings, and as the
-leader of followers that do. A node that leads, or knows no leader, checks
-nothing. Its lines carry `runner=config-check`, `node_id` and the leader's
-`leader_id`:
+digests with its leader's (`Admin.ConfigCheck`). The database mode builds the
+same runner with `NewConfigCheck`, which takes how to find the leader, its ID
+and address, how to fetch its digests, from its row of the replica registry
+there, and how to watch the leader change (see `internal/cluster/database`):
+what follows holds for it too, its `node_id` the replica's ID. It checks once a
+leader other than this node is known, and again at each change of the leader the
+node knows, which hashicorp/raft observes, a flap through no leader included: a
+drifted node is caught as the follower of a leader that shares the settings, and
+as the leader of followers that do. A node that leads, or knows no leader,
+checks nothing. Its lines carry `runner=config-check`, `node_id` and the
+leader's `leader_id`:
 
 - a mismatch is one ERROR,
   `configuration check: this node's configuration differs from the leader's in settings that every replica must share`,

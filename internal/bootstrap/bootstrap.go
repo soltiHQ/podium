@@ -35,6 +35,12 @@ const (
 // have nowhere to go, and bootstrap never falls back to the log.
 var ErrNoDataDir = errors.New("bootstrap: no data directory and the state is not ephemeral")
 
+// ErrAdminPasswordRequired is returned when the administrator has to be seeded
+// with [Options.PasswordRequired] and no AdminPassword: no data directory holds
+// a generated password, and bootstrap never logs one there. It names
+// [AdminPasswordEnv], never a password.
+var ErrAdminPasswordRequired = errors.New("bootstrap: the administrator has to be seeded and " + AdminPasswordEnv + " is not set: no data directory holds a generated password, so set it for the first start")
+
 // Options says where a generated administrator password goes and which password to use instead.
 type Options struct {
 	// DataDir receives the file with a generated administrator password.
@@ -47,23 +53,48 @@ type Options struct {
 	// AdminPassword is the initial administrator password, from [AdminPasswordEnv].
 	// Empty means bootstrap generates one.
 	AdminPassword string
+	// PasswordRequired says there is no data directory, and the state is not
+	// ephemeral either, as in the database mode: a seed takes AdminPassword, and
+	// one that is due without it fails with [ErrAdminPasswordRequired]. Neither
+	// DataDir nor Ephemeral is needed then.
+	PasswordRequired bool
 
 	// cost is the bcrypt cost of the password; zero is the default. Tests lower it.
 	cost int
 }
 
 // Check reports what would fail any seed with o, whatever the user table holds:
-// neither a data directory nor ephemeral state ([ErrNoDataDir]), or an
-// AdminPassword that breaks the password policy, whose error names
-// [AdminPasswordEnv] and never the value. [Run] checks both only once it knows
-// that a seed is due. A node that seeds at a leadership term, which can come
-// at any time, cannot know that at start, and checks o there instead.
+// neither a data directory, nor ephemeral state, nor a required password
+// ([ErrNoDataDir]), or an AdminPassword that breaks the password policy, whose
+// error names [AdminPasswordEnv] and never the value. [Run] checks both only
+// once it knows that a seed is due. A node that seeds at a leadership term,
+// which can come at any time, cannot know that at start, and checks o there
+// instead.
 func (o Options) Check() error {
-	if o.DataDir == "" && !o.Ephemeral {
+	if o.DataDir == "" && !o.Ephemeral && !o.PasswordRequired {
 		return ErrNoDataDir
 	}
 	if o.AdminPassword != "" {
 		return checkAdminPassword(o.AdminPassword)
+	}
+	return nil
+}
+
+// CheckSeed reports [ErrAdminPasswordRequired] when opts requires a password,
+// none is set, and the user table makes a seed due, as [Run] would fail then;
+// nil otherwise, and the error of a read that fails. A replica that seeds at a
+// leadership term checks it at start, so that its start stops, naming the
+// variable, rather than each term failing.
+func CheckSeed(ctx context.Context, opts Options, userSVC *user.Service, credSVC *credential.Service) error {
+	if !opts.PasswordRequired || opts.AdminPassword != "" {
+		return nil
+	}
+	seed, err := adminSeedNeeded(ctx, userSVC, credSVC)
+	if err != nil {
+		return err
+	}
+	if seed != seedNone {
+		return ErrAdminPasswordRequired
 	}
 	return nil
 }
@@ -155,8 +186,12 @@ func seedAdmin(ctx context.Context, logger zerolog.Logger, opts Options, userSVC
 	}
 
 	// Fail closed: without a data directory only a node that says its state is
-	// ephemeral may go on, and never by guessing from an empty path.
-	if opts.DataDir == "" && !opts.Ephemeral {
+	// ephemeral, or brings the password a mode without one requires, may go on,
+	// and never by guessing from an empty path.
+	switch {
+	case opts.PasswordRequired && opts.AdminPassword == "":
+		return ErrAdminPasswordRequired
+	case opts.DataDir == "" && !opts.Ephemeral && !opts.PasswordRequired:
 		return ErrNoDataDir
 	}
 
