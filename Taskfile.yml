@@ -84,7 +84,7 @@ vars:
   # The packages ci/golang/test/postgres tests against Postgres: each package
   # whose tests need a database adds itself here. Without Postgres, those tests
   # skip in ci/golang/test.
-  postgres_test_packages: ./internal/storage/sqlstore/...
+  postgres_test_packages: ./internal/storage/sqlstore/... ./internal/cluster/database/...
   # The Postgres server of ci/golang/test/postgres: the current stable image,
   # postgres:18.7 on 2026-11-13, pinned by the digest of its multi-arch index,
   # so that it runs on arm64 and amd64 hosts alike. To move it, pin the index
@@ -101,6 +101,7 @@ vars:
     internal/app/README.md
     internal/auth/README.md
     internal/bootstrap/README.md
+    internal/cluster/database/README.md
     internal/config/README.md
     internal/event/README.md
     internal/handler/README.md

@@ -7,7 +7,9 @@
 //   - [Leadership] — which replica runs singleton work
 //
 // Raft also implements [Membership], the members of its configuration, and
-// [Admin], through which the cluster service changes them (admin.go).
+// [Admin], through which the cluster service changes them (admin.go). The
+// database mode's leadership implements [Membership] too, from its replica
+// registry.
 //
 // [SharedSettings] are the settings every replica must share; their [Digests]
 // and [Fingerprint] (fingerprint.go) tell whether two nodes share them.
@@ -15,7 +17,8 @@
 // Storage atomicity is part of [storage.TxStore.WithTx], not this package.
 //
 // Drivers live in sub-packages: internal/cluster/discovery,
-// internal/cluster/memory, internal/cluster/raft.
+// internal/cluster/memory and internal/cluster/database; raft's in
+// internal/raft.
 package cluster
 
 import (
@@ -78,8 +81,8 @@ type Leadership interface {
 	// error. How often fn runs differs between drivers: raft calls fn again
 	// whenever it returns nil while the node still leads, after another
 	// barrier, so fn must return only once its context ends, or it runs again
-	// and again; memory, which always leads, calls fn once and returns
-	// what it returns.
+	// and again; the database mode likewise, without a barrier; memory, which
+	// always leads, calls fn once and returns what it returns.
 	WhenLeader(ctx context.Context, fn func(context.Context) error) error
 }
 
@@ -91,11 +94,14 @@ type LeaderReadiness interface {
 }
 
 // Membership is implemented by drivers whose leadership knows the members of
-// its cluster: raft, from its configuration. The memory backend has none.
+// its cluster: raft, from its configuration, and the database mode, from its
+// replica registry. The memory backend has none.
 type Membership interface {
-	// Members returns the members of the latest configuration, committed or
-	// not, each with the address the others reach it at, as written. Every
-	// call reads the configuration anew, cheaply.
+	// Members returns the members, each with the address the others reach it
+	// at, as written: raft's, those of its latest configuration, committed or
+	// not, read anew at every call; the database mode's, the replicas its
+	// registry saw within three heartbeats, from the list its last heartbeat
+	// read. A call is cheap.
 	Members() []Peer
 }
 
