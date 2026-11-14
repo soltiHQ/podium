@@ -16,6 +16,8 @@ func TestLeaderAddr(t *testing.T) {
 		want         string
 	}{
 		{"an IPv4 leader", "10.0.0.1:7000", 50051, "10.0.0.1:50051"},
+		{"a bracketed IPv4 leader, as the chart advertises", "[10.1.2.3]:8080", 8080, "10.1.2.3:8080"},
+		{"a bracketed IPv4 leader on another port", "[10.1.2.3]:8080", 50051, "10.1.2.3:50051"},
 		{"an IPv6 leader", "[fd00::1]:7000", 50051, "[fd00::1]:50051"},
 		{"a leader known by its host name", "podium-0.podium:7000", 8080, "podium-0.podium:8080"},
 		{"a host without a port", "leader-host", 8082, "leader-host:8082"},

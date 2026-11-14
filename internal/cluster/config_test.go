@@ -606,6 +606,11 @@ func TestDatabaseConfigValidated(t *testing.T) {
 		{name: "valid", change: func(*cluster.Config) {}},
 		{name: "a replica URL", change: func(c *cluster.Config) { c.Database.ReplicaURL = leakURL }},
 		{name: "an IPv6 advertise address", change: func(c *cluster.Config) { c.Database.AdvertiseAddr = "[fd00::5]:8080" }},
+		// The chart advertises [$(POD_IP)]:8080 for both IP families: a bracketed
+		// IPv4 host passes, and cluster.LeaderAddr strips its brackets
+		// (TestLeaderAddr).
+		{name: "a bracketed IPv4 advertise address", change: func(c *cluster.Config) { c.Database.AdvertiseAddr = "[10.1.2.3]:8080" }},
+		{name: "an unbracketed IPv6 advertise address", change: func(c *cluster.Config) { c.Database.AdvertiseAddr = "fd00::5:8080" }, want: errAny, migration: errAny},
 		{name: "a host name", change: func(c *cluster.Config) { c.Database.AdvertiseAddr = "podium-0.podium.svc:0" }},
 		{name: "a lease and conns of their own", change: func(c *cluster.Config) { c.Database.Lease, c.Database.MaxOpenConns = 3*time.Second, 25 }},
 		{name: "the shortest lease", change: func(c *cluster.Config) { c.Database.Lease = cluster.MinDatabaseLease }},

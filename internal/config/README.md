@@ -283,8 +283,13 @@ The first SIGINT or SIGTERM starts a graceful shutdown, in this order:
    look, once the leader-only runners have stopped, which they normally have
    within `server.shutdown_timeout`. A runner that has not stopped by then may
    still run: the lease is not released then, and expires a lease after its last
-   renewal, so that no other replica's leader-only runners start while it may
-   (one WARN, `the leader-only work has not ended`).
+   renewal, which only delays another replica's takeover, and the start of its
+   leader-only runners, until then; it does not stop the stuck work (one WARN,
+   `the leader-only work has not ended`). The close of the pools waits for the
+   queries in flight, so a runner stuck in a query can outlive the lease's
+   expiry, until the 30s bound ends the process. Until then it can overlap the
+   new leader's work: its database writes stay fenced, its calls to agents are
+   not.
 
 The delay is not part of `server.shutdown_timeout`, so a termination grace
 period must cover both, and the 30s of step 4. A **second** SIGINT or SIGTERM,
@@ -833,10 +838,10 @@ Any other value, an empty one included, fails configuration loading.
 
 `auth.rotate_refresh` (env `SOLTI_AUTH_ROTATE_REFRESH`, default `false`) makes
 every refresh of a browser's session replace its refresh token. The replacement
-is a write, so in raft mode only the leader can make it. A browser whose access
-token has expired (`auth.access_ttl`, 15m by default) and whose request, a GET
-included, reaches a follower gets 503 instead of a new token, with `X-Leader`
-when the follower knows its leader (see "Leader hint" in
+is a write, so in raft and database modes only the leader can make it. A browser
+whose access token has expired (`auth.access_ttl`, 15m by default) and whose
+request, a GET included, reaches a follower gets 503 instead of a new token,
+with `X-Leader` when the follower knows its leader (see "Leader hint" in
 `internal/transport/README.md`), and sets no cookie; the follower logs a WARN,
 `auth refresh needs the leader`, with the method and the path, and the access
 log of an API route records a 503 with `X-Leader` as a WARN too, so the refresh
@@ -848,14 +853,14 @@ retry at `X-Leader` refreshes the browser when it did not, and when it did, the
 browser logs in again. A refresh on a node that shuts down as the rotation
 commits has the same outcome and WARN, but its 503 carries no `X-Leader`, as the
 node knows no leader any more, so the access log of an API route records it as
-an ERROR, and a retry has to go to another node. So with rotation on, a raft
-deployment needs leader-sticky routing. The ops listener's `/leaderz` (see "Ops
-listener") answers 200 on the leader only and needs no credentials, so a
-balancer can route to the leader with it: keep rotation off in raft mode unless
-such routing is in place. See "Browsers and `auth.rotate_refresh`" in the
-runbook of `internal/raft/README.md`. Without rotation a refresh only reads, and
-works on every node, as does a request whose access token is still valid. The
-memory backend is unaffected.
+an ERROR, and a retry has to go to another node. So with rotation on, a raft or
+database deployment needs leader-sticky routing. The ops listener's `/leaderz`
+(see "Ops listener") answers 200 on the leader only and needs no credentials, so
+a balancer can route to the leader with it: keep rotation off in raft and
+database modes unless such routing is in place. See "Browsers and
+`auth.rotate_refresh`" in the runbook of `internal/raft/README.md`. Without
+rotation a refresh only reads, and works on every node, as does a request whose
+access token is still valid. The memory backend is unaffected.
 
 In raft mode every node checks an access token, and refreshes a session without
 rotation, against its own store, which follows the leader's with a lag: a
@@ -1081,11 +1086,12 @@ may paste a URL into the wrong key.
 - `max_open_conns` caps the primary's pool and the replica's, which keep as many
   connections idle; the lease has a pool of one connection of its own, so that
   writers never starve it.
-- `advertise_addr` is required: `host:port`, an IPv6 host in brackets, with a
-  host the other replicas can dial, not `0.0.0.0` or `::`, and a port number, 0
-  to 65535, which goes unused: every replica serves `http.addr`,
-  `http_discovery.addr` and `grpc.addr` on the same ports, which the forwarding
-  needs, as in raft (see "Cluster").
+- `advertise_addr` is required: `host:port`, the host a name or an IP and an
+  IPv6 host in brackets (a bracketed IPv4 host is accepted too, and the
+  forwarding strips its brackets), with a host the other replicas can dial, not
+  `0.0.0.0` or `::`, and a port number, 0 to 65535, which goes unused: every
+  replica serves `http.addr`, `http_discovery.addr` and `grpc.addr` on the same
+  ports, which the forwarding needs, as in raft (see "Cluster").
 - `migrate: true` migrates the schema at start, under a database lock, so that
   replicas that start together migrate once. `migrate: false` makes a replica
   refuse a schema older than its own, saying to run `podium migrate`, for
@@ -1093,15 +1099,16 @@ may paste a URL into the wrong key.
   than the replica's stops it, both versions named, and it writes nothing.
 
 At start a replica retries a database it cannot reach for 30 s, a second apart,
-with one WARN that names the SQLSTATE of a server's refusal, then exits 1, for
-the orchestrator to restart it; a schema that is not its own, a migration that
-fails, or any other failure stops it at once (`TestDatabaseStartRetries`,
-`TestDatabaseSchemaNotOursStopsTheStart`). The 30 s are one window for every
-read of the database at start: the migration, the opening of the store, and the
-read of the user table that decides whether `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` is
-needed (`TestDatabaseStartRetriesTheSeedCheck`). A database with no
-administrator stops the start unless `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` is set
-(see "First administrator").
+with one WARN for each database read that fails, which names the SQLSTATE of a
+server's refusal, then exits 1, for the orchestrator to restart it; a schema
+that is not its own, a migration that fails, or any other failure stops it at
+once (`TestDatabaseStartRetries`, `TestDatabaseSchemaNotOursStopsTheStart`). The
+30 s are one window for every read of the database at start: the migration, the
+opening of the store, and the read of the user table that decides whether
+`SOLTI_BOOTSTRAP_ADMIN_PASSWORD` is needed
+(`TestDatabaseStartRetriesTheSeedCheck`). A database with no administrator stops
+the start unless `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` is set (see "First
+administrator").
 
 Serving, a replica pings the primary every 5 s, each ping within 2 s: while the
 last ping failed, `/readyz` answers 503 `storage failed`, `podium_store_failed`
@@ -1117,6 +1124,86 @@ The forwarding of writes to the leader, the trust of a forwarding replica's
 (`database forwarding runs plaintext`) and the check of the settings every
 replica must share work as in raft, over the replicas the registry lists
 (`TestTwoReplicasForwardWrites`; see "Settings every replica must share").
+
+### Operating the database backend
+
+- **The role and the schema.** podium creates its tables and indexes in the
+  schema its connection resolves unqualified names to: the first of the role's
+  `search_path`, `public` unless the role has a schema of its own named after
+  it. The role of `url` needs to create tables in it (`CREATE` on the schema),
+  and runs podium's statements on them. Since Postgres 15 `public` no longer
+  grants `CREATE` to every role: grant it, or give the role its own schema. The
+  role of `replica_url` only reads. The tables hold what podium's state holds,
+  the password hashes, the session IDs, the stored agent tokens and the task
+  specs among it, unencrypted: the database's access control, encryption and
+  backups are yours. podium needs no extension and no superuser.
+- **Connections.** A replica holds at most `max_open_conns` connections to the
+  primary, plus the lease's one and the events listener's one, and at most
+  `max_open_conns` to the replica endpoint: 12 and 10 with the default, per
+  replica. `podium migrate` takes one. Add them up over the replicas, and over
+  the extra pod of a rolling update, against the server's `max_connections` and
+  its other clients', and size `max_open_conns` down instead of past it: a
+  replica that finds none free makes its request wait for one
+  (`podium_database_pool_wait_count_total`), and a server at its limit refuses
+  new connections. A pooler between podium and Postgres must hand out a direct
+  or session-mode connection: the events' `LISTEN` does not work through a
+  transaction-mode pool, such as PgBouncer's, which hands the connection to
+  another client between statements: no notification arrives, and every replica
+  then sees the others' events only at its read every 5 s (see "Events" in
+  `internal/cluster/database/README.md`).
+- **Replication.** Prefer synchronous replication for a standby that can take
+  over: the fence holds through a database failover, but rows that an
+  asynchronous standby had not received are lost, and with them the writes
+  podium answered. podium does not detect it.
+- **A read replica lags.** `replica_url` serves the lists of the GET requests of
+  the UI and the API, which can show state older than the primary's. Two effects
+  follow. A placement preview, a GET, can read the replica while `Deploy`, a
+  POST, checks the preview's token on the primary: until the replica catches up,
+  `Deploy` can refuse a token the preview gave. And a `DeleteIssues` right after
+  a `Record` on the same replica can answer 0 where memory answers 1, as the
+  event is applied when it is read back from the database. Runners, auth and
+  every decision read the primary.
+- **Migrations only add.** A release's migrations add tables, columns and
+  indexes, and never remove or rewrite what an earlier release reads, once a
+  release has shipped them, so the version before keeps working while a rollout
+  runs, and the built-in roles follow the version of the replica that leads. A
+  replica refuses a schema newer than its own, which is what a rollback past a
+  migration meets; there is no downgrade: back the database up before an
+  upgrade, with the database's own tools. With `migrate: true`, the default, the
+  first replica of the new version migrates at start; with `migrate: false`, run
+  `podium migrate` first, such as a Kubernetes Job that runs before the rollout.
+- **`podium migrate`** loads and validates the whole configuration as the server
+  does, `advertise_addr` aside, from the same file and variables (so it needs
+  `SOLTI_AUTH_JWT_SECRET` and the rest, and `cluster.backend: database`), logs
+  the host, port and database and the schema versions before and after, and
+  exits 0, or 1 on any failure, a configuration that fails loading and an
+  unreachable database after the startup retry included (2 on a bad command
+  line).
+- **Rate limits are per replica.** The login and sync limiters live in the
+  memory of one process: logins and agent syncs are forwarded to the leader, so
+  the leader's count decides them, the stream limiter counts on the replica that
+  holds the stream, and nothing is shared through the database. A failover, like
+  a restart, starts the new leader's limiters empty, so a lockout ends, and an
+  agent's sync bucket refills. A deployment that must hold one limit across
+  replicas needs it in front of podium.
+- **`auth.rotate_refresh` and routing.** With rotation on, a refresh is a write:
+  a replica that does not lead answers 503 with `X-Leader` where it knows the
+  leader. Route browsers by `/leaderz` (200 on the lease holder only), or leave
+  rotation off, as in raft (see "Browser sessions").
+- **Rotating the database password.** Postgres keeps the sessions it
+  authenticated before `ALTER ROLE … PASSWORD`, and podium reads the URLs at
+  start and sets no connection lifetime on its pools. So: change the password in
+  the database, update the secret that carries the URLs, then restart the
+  replicas one at a time (`kubectl rollout restart`). Between the change and the
+  restart each new connection a replica opens, to replace one that ended, fails
+  with SQLSTATE 28P01, and its requests answer 503 until it restarts; the open
+  connections keep working.
+- **The agent search is linear.** The UI's agent search reads and decodes every
+  agent, so its cost grows with the fleet: about 25 µs an agent on the
+  benchmark's server, 24 ms at 1000 agents and 136 ms at 5000, against well
+  under a millisecond in memory. A sync costs the same at every size. The
+  numbers and their conditions are in "Performance" in
+  `internal/storage/sqlstore/README.md`.
 
 ## Cluster
 

@@ -4,9 +4,9 @@ podium is the control plane of solti. Agents built with the
 [solti SDK](https://github.com/soltiHQ/sdk) register with it and report what
 they can run; operators use its web UI and REST API to write task specs, deploy
 them to the agents they target, and follow the tasks and their runs. A podium
-node keeps its state in memory, on its own, or runs as a node of a
+node keeps its state in memory, on its own, runs as a node of a
 [hashicorp/raft](https://github.com/hashicorp/raft) cluster, which keeps a log
-on disk.
+on disk, or runs as one of several replicas that share a Postgres database.
 
 This is the operator's guide: install, configure, run, observe, back up,
 upgrade, secure, develop and release. Each section is short and links to the
@@ -20,7 +20,7 @@ agents over HTTP       --->  :8082   discovery             \
 agents over gRPC       --->  :50051  discovery              >--  podium  --->  each agent's endpoint
 probes, Prometheus     --->  :8081   ops                   /       |           (gRPC or HTTP)
                                                                    |
-                                    state: memory, or a raft cluster
+                                    state: memory, a raft cluster, or a database
 ```
 
 - **Discovery.** Each agent syncs with podium over HTTP
@@ -50,13 +50,31 @@ probes, Prometheus     --->  :8081   ops                   /       |           (
   decide what each of them may read and change. The first start creates the
   administrator `admin`.
 
-`cluster.backend: memory`, the default, keeps the state in memory of one node
-and loses it when the process stops: podium writes nothing of its own state to a
-file. `cluster.backend: raft` runs the node as a member of a raft cluster: every
-node holds the whole state in memory and serves reads from its own copy, a
-follower forwards the writes it gets to the leader, and the raft log and
-snapshots are kept in `cluster.raft.data_dir`. See
-[Raft cluster](#raft-cluster).
+`cluster.backend` picks one of three configurations:
+
+| `cluster.backend` | State | Leader | Writes | Reads |
+| -- | -- | -- | -- | -- |
+| `memory` (default), one node | in memory, lost when the process stops | the node | the node | the node |
+| `raft`, 3 or more nodes | in memory on every node, replicated by raft; the raft log and snapshots on disk, in `cluster.raft.data_dir` | elected by raft | forwarded to the leader | each node's own copy, which can lag |
+| `database`, 1 or more replicas | in a Postgres database that the replicas share and hold none of | elected through a lease row in the database | forwarded to the leader, which writes | the database: the primary, and the read endpoint for the GET listings of the UI and the API |
+
+podium writes nothing of its own state to a file: raft keeps its log and
+snapshots in `cluster.raft.data_dir`. Behaviour is the same on the three,
+outages and failovers aside. See [Raft cluster](#raft-cluster) and
+[Database cluster](#database-cluster).
+
+What runs where, in `raft` and `database`:
+
+- **On the leader only:** the sync runner (podium's turns with the agents), the
+  lifecycle runner, the history collector and its pruning, the agent credential
+  sweep and the seeding of the first administrator, at the start of each term;
+  and every write: users, specs, deploys, the agents' syncs. A replica that
+  receives a write forwards it to the leader, or answers 503 while it knows no
+  leader.
+- **On any replica:** the reads of the UI and the REST API, the agents'
+  discovery listeners (their writes forwarded), the calls to agents that a user
+  asks for with a GET (task logs), the event streams of the clients connected to
+  it, and `/livez`, `/readyz`, `/leaderz`, `/version` and `/metrics`.
 
 ## Install
 
@@ -91,7 +109,8 @@ podium version
 The binary embeds the web UI. Unless configured otherwise it runs on the
 `memory` backend, which keeps its state in memory and loses it at exit; a
 service that must keep its state runs a raft node, with an absolute
-`cluster.raft.data_dir` (see [Data directory](#data-directory)).
+`cluster.raft.data_dir` (see [Data directory](#data-directory)), or replicas on
+a database (see [Database cluster](#database-cluster)).
 
 ### Container image
 
@@ -186,10 +205,11 @@ its variable and its default.
 | -- | -- | -- |
 | `SOLTI_AUTH_JWT_SECRET` | always | `auth.jwt_secret`: podium refuses to start without one of 32 bytes or more. It signs the access tokens and the device cookies. |
 | `SOLTI_AGENT_AUTH_ENROLL_SECRET` | to close agent enrollment | 32 bytes or more, read from the environment only. Without it, and without client certificates, any host that reaches a discovery listener can enroll a new agent ID, and podium logs a WARN at start: see [Provision agents](#provision-agents). Set while `agent_auth.require` is `false`, where it would close nothing, it fails loading. |
-| `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` | optional, first start | The first administrator's password, read from the environment only, 12 characters to 72 bytes; ignored once users exist. |
+| `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` | optional, first start; required on the database backend with an empty database | The first administrator's password, read from the environment only, 12 characters to 72 bytes; ignored once users exist. |
+| `SOLTI_CLUSTER_DATABASE_URL` | database backend | The primary's URL, with its credentials: a secret. `SOLTI_CLUSTER_DATABASE_REPLICA_URL` is the optional read endpoint. |
 
 Generate the two secrets with `openssl rand -hex 32` and keep them: every node
-of a raft cluster needs the same two values.
+of a raft cluster or of a database cluster needs the same two values.
 
 ### A minimal configuration
 
@@ -213,12 +233,13 @@ podium --config podium.yaml
 
 | Setting | Default | Notes |
 | -- | -- | -- |
-| `cluster.backend` | `memory` | `raft` for a cluster: see [Raft cluster](#raft-cluster). |
+| `cluster.backend` | `memory` | `raft` for a cluster: see [Raft cluster](#raft-cluster); `database` for replicas on Postgres: see [Database cluster](#database-cluster). |
+| `cluster.database.url`, `cluster.database.advertise_addr` | none | The database backend's primary, from `SOLTI_CLUSTER_DATABASE_URL`, and how the other replicas reach this one: see [Database cluster](#database-cluster). |
 | `cluster.raft.data_dir` | none | A raft node's log and snapshots: see [Data directory](#data-directory). |
 | `tls.server.cert_file`, `tls.server.key_file`, `tls.server.client_ca_file` | empty | TLS on 8080, 8082 and 50051, and client certificates for agents: see [TLS](#tls). |
 | `trusted_proxies` | empty | The reverse proxies whose `X-Forwarded-For` and `X-Forwarded-Proto` podium believes. |
 | `auth.cookie_secure` | `auto` | `always` when the proxy that terminates TLS cannot be listed in `trusted_proxies`. |
-| `auth.rotate_refresh` | `false` | In raft mode only behind leader-sticky routing: see [Raft cluster](#raft-cluster). |
+| `auth.rotate_refresh` | `false` | In raft and database modes only behind leader-sticky routing: see [Raft cluster](#raft-cluster) and [Database cluster](#database-cluster). |
 | `server.shutdown_delay` | `0s` | `5s` behind a load balancer or in Kubernetes: see [Stop](#stop). |
 | `server.shutdown_timeout` | `15s` | How long requests in flight get to finish at shutdown. |
 | `log.level`, `log.format` | `info`, `json` | See [Logs](#logs). |
@@ -228,6 +249,7 @@ podium --config podium.yaml
 ```text
 podium [--config PATH]                                runs the server
 podium agent-token [--generation N] [--] <agent-id>   prints an agent's token, derived from SOLTI_AGENT_AUTH_ENROLL_SECRET
+podium migrate [--config PATH]                        migrates the schema of the database backend's database, and exits
 podium version                                        prints the version, as podium --version does
 ```
 
@@ -244,12 +266,13 @@ prints the usage to stderr and exits 2. A configuration that fails to load exits
 | 8082 | `http_discovery.addr` | `:8082` | Agents' HTTP discovery, `POST /api/v1/discovery/sync`. |
 | 50051 | `grpc.addr` | `:50051` | Agents' gRPC discovery, `solti.discover.v1.DiscoverService`, and `grpc.health.v1.Health`. |
 | raft | `cluster.raft.bind_addr` | none: required in raft mode, 7000 in the examples | The raft transport between the nodes: mutual TLS 1.3, or plain TCP with `cluster.raft.allow_insecure_transport`. |
+| database | `cluster.database.url` | none: required in database mode | An outbound connection to Postgres (5432 usually); no port of podium's own. |
 
 `tls.server` puts TLS on 8080, 8082 and 50051; the ops listener always speaks
-plain HTTP. Every node of a raft cluster serves `http.addr`,
-`http_discovery.addr` and `grpc.addr` on the same ports as the others, as a
-follower forwards a write to the leader's host at its own port of the listener
-the write came in on.
+plain HTTP. Every node of a raft cluster, and every replica of a database
+cluster, serves `http.addr`, `http_discovery.addr` and `grpc.addr` on the same
+ports as the others, as a follower forwards a write to the leader's host at its
+own port of the listener the write came in on.
 
 ## Run
 
@@ -260,8 +283,11 @@ On the first start, while there is no user, podium creates the administrator
 which podium writes to no file and no log. Otherwise podium generates one; log
 in on port 8080 with it and change it.
 
-On the `memory` backend, which has no data directory, the generated password is
-in one log line, at WARN, and nowhere else. From the container above:
+On the database backend podium generates none: a database with no administrator
+needs `SOLTI_BOOTSTRAP_ADMIN_PASSWORD`, and a replica started without it stops
+with an error that names the variable. On the `memory` backend, which has no
+data directory, the generated password is in one log line, at WARN, and nowhere
+else. From the container above:
 
 ```sh
 docker logs podium 2>&1 | grep "admin password generated"
@@ -432,14 +458,24 @@ says.
 No test in this repository restores a copied data directory: try your backups on
 a disposable deployment.
 
+### Database
+
+The state is the database's: back it up with Postgres's own tools, a base backup
+or a dump, and test the restore. podium neither runs nor backs it up, and
+`podium migrate` is no backup. A restore returns the whole state to its time:
+the sessions, the rollouts and the credentials too. Take a backup before every
+upgrade, as the schema has no downgrade (see
+[Database cluster](#database-cluster)).
+
 ### What a backup holds
 
-- **All of podium's state, unencrypted**, including the users with their
-  password hashes (bcrypt), the roles, the sessions (refresh tokens as SHA3-256
-  hashes, session IDs as they are), the agents and their credentials, the task
-  specs as they were written, with whatever an operator put in a task's command
-  or config, credentials included, the rollouts, the run history, which holds no
-  command, environment or log, and `bootstrap-admin-password` while it exists.
+- **All of podium's state, unencrypted** (a raft node's `data_dir`, or the
+  database's tables), including the users with their password hashes (bcrypt),
+  the roles, the sessions (refresh tokens as SHA3-256 hashes, session IDs as
+  they are), the agents and their credentials, the task specs as they were
+  written, with whatever an operator put in a task's command or config,
+  credentials included, the rollouts, the run history, which holds no command,
+  environment or log, and `bootstrap-admin-password` while it exists.
 - **Agent credentials.** An agent enrolled under the enrollment secret has a
   derived credential: a generation and an ID of the secret, and no token. An
   agent that enrolled without the secret, or that a version before derived
@@ -474,6 +510,11 @@ without what was written since.
 
 - **Memory.** Replace the binary or the image tag and start: the state of the
   old process is lost, and there is nothing to migrate or to go back to.
+- **Database.** Back the database up, then roll the replicas one at a time. A
+  release's migrations only add, so the version before keeps working while the
+  rollout runs, and a replica refuses a schema newer than its own, which a
+  rollback past a migration meets, naming both versions: there is no downgrade
+  but the backup. See [Database cluster](#database-cluster).
 - **Raft.** Read [Rolling upgrade](internal/raft/README.md#rolling-upgrade)
   first. Upgrade one node at a time, and the next only once the last one follows
   the leader again (`GET /api/v1/cluster`), unless the new version writes a
@@ -593,6 +634,13 @@ such as grpc-go's `grpclog`, write to stderr. See
   proxy, list it in `trusted_proxies`, or every client shares the proxy's IP.
   See [Rate limiting](internal/config/README.md#rate-limiting) and
   [Security model](internal/auth/README.md#security-model).
+- **Database.** The database holds the whole state, unencrypted: the password
+  hashes, the session IDs, the stored agent tokens and the task specs. Put the
+  URLs in a secret (they carry the password), turn TLS on in them
+  (`sslmode=verify-full`), let only podium's role and your own tooling reach the
+  database, and encrypt its storage and backups. The replicas forward writes to
+  one another in plaintext without `tls.server`: see
+  [Database cluster](#database-cluster).
 - **Raft.** The raft port carries the whole state: give it mutual TLS with a CA
   that signs raft node certificates only, of one cluster, and let only the
   cluster's nodes reach it. Removing a node revokes nothing, as podium checks no
@@ -644,6 +692,106 @@ adding and removing members, a compromised node, browsers and
   `POST /api/v1/cluster/members` and `DELETE /api/v1/cluster/members/{id}`
   (`cluster:manage`) change the membership. See
   [Cluster](internal/handler/README.md#cluster-apiv1cluster).
+
+## Database cluster
+
+`cluster.backend: database` runs podium as any number of replicas that share a
+Postgres database: the replicas hold no state, elect their leader through a
+lease row in the database, and forward their writes to it. It takes one replica,
+for state that survives a restart, or several, for availability: a failover
+moves the leadership within a lease, 10 s by default, and every replica serves
+reads meanwhile. The leadership, the store and the events are in
+[internal/cluster/database](internal/cluster/database/README.md) and
+[internal/storage/sqlstore](internal/storage/sqlstore/README.md); the settings
+in [Database backend](internal/config/README.md#database-backend) and
+[Operating the database backend](internal/config/README.md#operating-the-database-backend).
+
+```yaml
+cluster:
+  backend: database
+  database:
+    advertise_addr: 10.0.0.5:8080   # this replica's address, for the other replicas; the port is unused
+    lease: 10s
+    max_open_conns: 10
+    migrate: true
+```
+
+```sh
+export SOLTI_CLUSTER_DATABASE_URL='postgres://podium:<password>@db.example.com:5432/podium?sslmode=verify-full'
+export SOLTI_CLUSTER_DATABASE_REPLICA_URL='postgres://podium_ro:<password>@db-replica.example.com:5432/podium?sslmode=verify-full'   # optional
+export SOLTI_BOOTSTRAP_ADMIN_PASSWORD='<12 characters to 72 bytes>'                       # an empty database needs it
+podium --config podium.yaml
+```
+
+| Setting | Variable | Default |  |
+| -- | -- | -- | -- |
+| `cluster.database.url` | `SOLTI_CLUSTER_DATABASE_URL` | none | The primary: the leader's writes and every read but one kind. A secret. |
+| `cluster.database.replica_url` | `SOLTI_CLUSTER_DATABASE_REPLICA_URL` | none | A read endpoint for the listings of the GET requests of the UI and the API. A secret. |
+| `cluster.database.advertise_addr` | `SOLTI_CLUSTER_DATABASE_ADVERTISE_ADDR` | none, required | `host:port`: the host a name or an IP, an IPv6 host in brackets (a bracketed IPv4 host is accepted); a host the other replicas can dial; the port is not used, as every replica serves the same ports. |
+| `cluster.database.lease` | `SOLTI_CLUSTER_DATABASE_LEASE` | `10s` | How long a lease lasts; a failover takes up to that long. |
+| `cluster.database.max_open_conns` | `SOLTI_CLUSTER_DATABASE_MAX_OPEN_CONNS` | `10` | The primary's pool, and the replica's. |
+| `cluster.database.migrate` | `SOLTI_CLUSTER_DATABASE_MIGRATE` | `true` | Migrate the schema at start; `false` refuses an older schema and says to run `podium migrate`. |
+| `cluster.database.driver` | `SOLTI_CLUSTER_DATABASE_DRIVER` | `postgres` | The only driver. |
+
+- **The URLs are secrets.** They carry the password: pass them as variables from
+  a secret. No log line, error, metric or `/version` carries them; podium logs
+  the host, the port and the database. TLS goes through the URL
+  (`sslmode=verify-full`, `sslrootcert`).
+- **Privileges.** The role creates tables in its schema, `public` unless it has
+  one of its own, which Postgres 15 and later no longer lets every role do:
+  grant `CREATE` on the schema. The read endpoint's role only reads.
+- **`LISTEN` needs a direct or session-mode connection** to the primary: podium
+  shares its events through it, and a pooler in transaction mode, PgBouncer's,
+  delivers none, so that the replicas see each other's events only every 5 s.
+- **Replication.** Prefer synchronous replication for a standby that can take
+  over: rows an asynchronous standby had not received when it did are lost.
+- **Connections.** Each replica holds up to `max_open_conns` + 2 connections to
+  the primary (the lease's and the events listener's besides) and
+  `max_open_conns` to the replica endpoint: add them up over the replicas, and
+  the extra pod of a rolling update, against the server's `max_connections`.
+- **Migrations only add.** With `migrate: true` the first replica of a new
+  version migrates at start, under a database lock. To migrate as a step of your
+  own, run `podium migrate [--config PATH]` first, such as a Kubernetes Job, and
+  set `migrate: false`: it validates the same configuration, and exits 0, or 1
+  on any failure. The version before keeps working while a rollout runs.
+- **Readiness.** `/readyz` answers 503 `storage failed` while the primary does
+  not answer a ping, and recovers with it, without a restart; it never waits for
+  a leader, so a failover leaves every replica serving reads. `/leaderz` answers
+  200 on the lease holder only. A write that reaches a replica while it knows no
+  leader answers 503.
+- **Forwarding and TLS.** A replica that does not lead forwards the writes it
+  gets, logins, cookies and tokens included, and the agents' syncs, to the
+  leader at the same ports, in plaintext without `tls.server`, with one WARN at
+  start that says so. Set `tls.server` on every replica, and the CA of the
+  replicas' certificates in every `tls.client.ca_file`, as in
+  [Raft cluster](#raft-cluster). Some settings must be the same on every
+  replica, which each checks against its leader's: see
+  [Settings every replica must share](internal/config/README.md#settings-every-replica-must-share).
+- **Rate limits are per replica**, in memory, not shared through the database: a
+  failover starts the new leader's limiters empty. See
+  [Rate limiting](internal/config/README.md#rate-limiting).
+- **`auth.rotate_refresh`** needs leader-sticky routing: with it on, a browser's
+  refresh on a replica that does not lead answers 503. Route browsers by
+  `/leaderz`, or leave it off.
+- **Rotating the database password.** Postgres keeps the sessions it
+  authenticated before `ALTER ROLE … PASSWORD`, and podium reads the URLs at
+  start and sets no connection lifetime: change the password in the database,
+  update the secret, then restart the replicas one at a time. Between the change
+  and the restart each new connection fails with SQLSTATE 28P01.
+- **A read replica lags.** The listings of the GET requests may show older state
+  than the primary's: a placement preview can make `Deploy` refuse its token
+  until the replica catches up, and a `DeleteIssues` right after a `Record` on
+  the same replica can answer 0. Runners and every decision read the primary.
+- **The agent search is linear.** The UI's search reads every agent: 24 ms at
+  1000 agents and 136 ms at 5000 on the benchmark's server, against well under a
+  millisecond in memory; a sync costs the same at every size. See
+  [Performance](internal/storage/sqlstore/README.md#performance).
+- **Kubernetes.** The [`podium` chart](https://github.com/soltiHQ/charts) runs
+  both modes: `mode: memory` (the default, one replica, no volume) and
+  `mode: database` (a Deployment of `replicas`, the URLs from a Secret, the pod
+  IP as the advertise address, and an optional pre-install and pre-upgrade Job
+  that runs `podium migrate`). Its image must be built from a release with the
+  database mode.
 
 ## Develop
 
@@ -739,6 +887,8 @@ together: see [Verification](ui/README.md#verification).
 | README | Covers |
 | -- | -- |
 | [internal/config](internal/config/README.md) | Every setting and its variable, the command line, logging, the ops listener, shutdown, TLS, agent authentication and enrollment, trusted proxies, browser sessions, rate limits, storage and cluster settings, and upgrading a raft node. |
+| [internal/cluster/database](internal/cluster/database/README.md) | The database mode's lease, fence, replica registry and events, its timings and the failover window. |
+| [internal/storage/sqlstore](internal/storage/sqlstore/README.md) | The SQL store of the database mode: schema, migrations, reads and writes, and its benchmark. |
 | [internal/raft](internal/raft/README.md) | The runbook of a three-node cluster, transport security, membership, configuration drift, follower reads and writes, and a raft node's metrics and logs. |
 | [internal/bootstrap](internal/bootstrap/README.md) | The built-in roles and the first administrator. |
 | [internal/auth](internal/auth/README.md) | Logins, sessions, passwords, login rate limiting and device cookies. |

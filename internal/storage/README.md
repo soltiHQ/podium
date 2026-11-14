@@ -4,6 +4,22 @@ Persistence contracts for control-plane domain entities.\
 Backend-agnostic interfaces: domain and application layers depend only on these,
 never on concrete implementations.
 
+## Backends
+
+`cluster.backend` picks where the state lives; every backend keeps the same
+contract (see "Contract suite"), so a service sees the same behaviour on each,
+outages and failovers aside:
+
+| `cluster.backend` | State | Store | Reads | Writes |
+| -- | -- | -- | -- | -- |
+| `memory`, one node | in memory, lost at exit | `inmemory` | the node | the node |
+| `raft`, 3 or more nodes | in memory on every node, replicated by raft's log and snapshots (on disk) | `inmemory` through `overlay` and the raft state machine | each node's own copy | forwarded to the leader |
+| `database`, 1 or more replicas | a Postgres database, the replicas holding none | `sqlstore` | the primary, and the read endpoint for the GET listings | forwarded to the leader, which writes |
+
+Nothing writes the state to a file of its own: raft keeps its log and snapshots
+in `cluster.raft.data_dir`. How to run each is in the root `README.md` and
+`internal/config/README.md`.
+
 ## Package map
 
 ```text

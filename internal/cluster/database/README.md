@@ -73,9 +73,14 @@ compare.
   ends `Run`'s context, so that the work has normally returned. Work that has
   not returned within that sixth of the lease, as runners that outlived the
   drain deadline, may still run: the row is not released then, and expires a
-  lease after its last renewal, so that no other replica's leader-only work
-  starts while it may (a WARN, `the leader-only work has not ended`;
-  `TestNoReleaseWhileLeaderWorkRuns`). The registry row is deleted either way
+  lease after its last renewal, which only delays another replica's takeover,
+  and the start of its leader-only work, until then; it does not stop the work
+  that is stuck (a WARN, `the leader-only work has not ended`;
+  `TestNoReleaseWhileLeaderWorkRuns`). The close of the pools waits for the
+  queries in flight, so a runner stuck in a query can outlive the lease's
+  expiry, until the shutdown's 30 s bound ends the process; until then it can
+  overlap the new leader's work: its database writes stay fenced, its calls to
+  agents are not. The registry row is deleted either way
 - `Options.Observer` is told of the lease's events, for the metrics: `Renewed`
   after each renewal that landed, `Lost` each time a term ends before `Run`'s
   end, at the step-down deadline or once a renewal or a write found the lease

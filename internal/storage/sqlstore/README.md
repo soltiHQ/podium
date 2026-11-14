@@ -311,6 +311,14 @@ database included ("run podium migrate"); both name the two versions. `Migrate`
 on a newer schema answers `ErrSchemaNewer` and writes nothing. `SchemaVersion`
 reads the version, 0 for a database without `podium_schema_migrations`.
 
+A release's migrations only add: tables, columns and indexes, never a change
+that the version before cannot read, so that the version before keeps working
+while a rollout runs, and a database whose schema is newer than a replica's
+stops that replica (`ErrSchemaNewer`). The role that migrates needs to create
+tables in its schema; `internal/config/README.md`, "Operating the database
+backend", has the operator's side: privileges, connections, replicas that lag
+and the password.
+
 Until the database mode is released, `0001_init.sql` stays the only migration
 and is edited in place: no installation exists. The lock statement and the
 catalog lookup of `SchemaVersion` (`to_regclass`) are Postgres's; a second
