@@ -343,11 +343,10 @@ func bootstrapOptions(cfg config.Config) bootstrap.Options {
 // administrator is seeded only when the user table is empty or a first seed
 // stopped halfway, through the store, whose writes only the leader makes. It
 // retries a failure while the replica leads, and leaves a lost term to the next
-// one (see [base.NewTermTask]). Its log lines name the replica (replicaLogger):
-// on raft, the node whose line says a password was generated holds the password
-// file.
+// one (see [base.NewTermTask]). Its log lines go to logger, which New makes name
+// the replica (replicaLogger): on raft, the node whose line says a password was
+// generated holds the password file.
 func seedingRunner(cfg config.Config, logger zerolog.Logger, leadership cluster.Leadership, svc services) *base.Runner {
-	logger = replicaLogger(cfg, logger, leadership)
 	opts := bootstrapOptions(cfg)
 	return base.NewTermTask("bootstrap", leadership, logger, func(ctx context.Context) error {
 		return bootstrap.Run(ctx, logger, opts, svc.role, svc.user, svc.credential)

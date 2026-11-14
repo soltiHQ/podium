@@ -46,6 +46,26 @@ type options struct {
 	passwordCost int
 	// database are the database mode's intervals, which tests shorten.
 	database databaseTimings
+	// leaderWork, a test hook, wraps the work that each leader-only runner runs
+	// under WhenLeader (watchedLeadership), so that a test sees that work start
+	// and end; nil leaves it as it is.
+	leaderWork func(work func(context.Context) error) func(context.Context) error
+}
+
+// watchedLeadership is a leadership whose WhenLeader runs fn through watch:
+// what the leader-only runners run under when a test watches their work
+// (options.leaderWork). The rest is the leadership's own.
+type watchedLeadership struct {
+	cluster.Leadership
+	watch func(work func(context.Context) error) func(context.Context) error
+}
+
+// WhenLeader runs fn, through watch, as the leadership runs it.
+func (w watchedLeadership) WhenLeader(ctx context.Context, fn func(context.Context) error) error {
+	if fn == nil {
+		return w.Leadership.WhenLeader(ctx, nil)
+	}
+	return w.Leadership.WhenLeader(ctx, w.watch(fn))
 }
 
 // defaultOptions are the production settings.
@@ -263,14 +283,21 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 	response.ErrorPageRenderer = pageSystem.ErrorPage
 	responder.LoginPath = routepath.PageLogin
 
-	lifecycleRunner, err := lifecycle.New(cfg.Lifecycle, logger, store, proxyPool, eventHub, leadership)
+	// The leader-only runners run their work under WhenLeader: through
+	// watchedLeadership when a test watches that work.
+	leaderOnly := leadership
+	if o.leaderWork != nil {
+		leaderOnly = watchedLeadership{Leadership: leadership, watch: o.leaderWork}
+	}
+
+	lifecycleRunner, err := lifecycle.New(cfg.Lifecycle, logger, store, proxyPool, eventHub, leaderOnly)
 	if err != nil {
 		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
 
-	syncRunner, err := syncrunner.New(cfg.Sync, logger, store, proxyPool, svc.agent, eventHub, svc.history, leadership)
+	syncRunner, err := syncrunner.New(cfg.Sync, logger, store, proxyPool, svc.agent, eventHub, svc.history, leaderOnly)
 	if err != nil {
 		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
@@ -279,7 +306,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 
 	syncRunner.ObserveTurns(m.SyncTurn)
 
-	historyRunner, err := historyrunner.New(cfg.History.Collector, logger, store, proxyPool, svc.agent, svc.history, leadership)
+	historyRunner, err := historyrunner.New(cfg.History.Collector, logger, store, proxyPool, svc.agent, svc.history, leaderOnly)
 	if err != nil {
 		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
@@ -362,7 +389,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		runners = append(runners, opsRunner)
 	}
 	if cfg.AgentAuth.Require {
-		runners = append(runners, credentialSweepRunner(logger, leadership, svc.agent))
+		runners = append(runners, credentialSweepRunner(logger, leaderOnly, svc.agent))
 	}
 	// The runners that read or write the cluster's state for themselves, the seed
 	// and the check of the shared settings, log as the cluster does: in the
@@ -372,7 +399,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		clusterLogger = dbHooks.logger
 	}
 	if elected {
-		runners = append(runners, seedingRunner(cfg, clusterLogger, leadership, svc))
+		runners = append(runners, seedingRunner(cfg, replicaLogger(cfg, clusterLogger, leadership), leaderOnly, svc))
 	}
 	// While another replica leads, the check compares this replica's digests
 	// with the leader's, at each change of leader.

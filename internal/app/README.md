@@ -132,11 +132,31 @@ its own from `pgtest`, and skip without one; the second invocation of
 `TestTwoReplicasForwardWrites`, `TestBootstrapNeedsPassword`,
 `TestDatabaseOutageRecovers`, `TestDatabaseStartRetries`,
 `TestDatabaseURLNeverLeaks`, `TestDatabaseSchemaNotOursStopsTheStart`,
-`TestDatabaseReplicaSettingsChecked` and `TestDatabaseStartRetriesTheSeedCheck`.
-`TestPoolConfig`, which needs no Postgres, pins each pool's `application_name`,
-the connect timeout of a URL without one, and the error of a URL that does not
-parse. Their startup retry and ping are shortened (`withDatabaseTimings`), and
-their leases are 1.5 s.
+`TestDatabaseReplicaSettingsChecked`, `TestDatabaseStartRetriesTheSeedCheck` and
+`TestDatabaseFailoverUnderLoad`. `TestPoolConfig`, which needs no Postgres, pins
+each pool's `application_name`, the connect timeout of a URL without one, and
+the error of a URL that does not parse. Their startup retry and ping are
+shortened (`withDatabaseTimings`), and their leases are 1.5 s, the failover's
+4.5 s.
+
+`TestDatabaseFailoverUnderLoad` runs three apps on one database, each through a
+TCP proxy of its own, which every pool of the app and its events listener
+connect through, with a lease of 4.5 s, whose renewal interval exceeds with a
+margin the second between two reads of the lease row by a follower. Simulated
+agents sync over HTTP discovery through all three, the followers forwarding to
+the leader, each its sequence as its uptime. At a random point of the leader's
+renewal interval, its proxy then cuts its connections and refuses new ones, as a
+partition cuts it (a clean stop would release the lease). The cut-off leader's
+`/leaderz` answers 503 within two thirds of the lease of the cut, and the work
+of its leader-only runners ends within that and a scheduling tolerance of 100
+ms, the time they take to return once the step-down cancelled them, before the
+new leader's starts; the first sync sent after the cut answered 200, through the
+new leader, comes within the lease and one renewal interval of it; and the
+database holds, for every agent, the sequence of its last acknowledged sync or a
+later one: no write answered 200 is lost. The test watches the leader-only
+runners' work through a hook that production never sets (`options.leaderWork`):
+New runs their `WhenLeader` work through it (`watchedLeadership`), as nothing
+else shows that work's end.
 
 ## Startup flow
 

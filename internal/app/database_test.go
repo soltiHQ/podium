@@ -227,8 +227,13 @@ func TestDatabaseModeServes(t *testing.T) {
 	opsAnswers(t, ops(), "/leaderz", 200, "ok")
 	waitFor(t, 10*time.Second, "the leader seeding the administrator", func() bool { return adminSeeded(n.app.store, dbAdminPassword) })
 	// The seed writes through the store: its lines name the primary and the
-	// replica that seeded.
-	seeded := n.logged(t, map[string]any{"message": "bootstrap: admin password set from " + bootstrap.AdminPasswordEnv})
+	// replica that seeded. It logs its line once the commit that adminSeeded saw
+	// returned.
+	var seeded []logLine
+	waitFor(t, 10*time.Second, "the line of the seed", func() bool {
+		seeded = n.logged(t, map[string]any{"message": "bootstrap: admin password set from " + bootstrap.AdminPasswordEnv})
+		return len(seeded) > 0
+	})
 	if len(seeded) != 1 {
 		t.Fatalf("the line of the seed logged %d times, want once", len(seeded))
 	}

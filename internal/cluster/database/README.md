@@ -259,6 +259,12 @@ listener reconnects is lost, and the reconnect's own read covers it.
 For a moment the old leader's `WhenLeader` work and the new one's may both run:
 the fence refuses the old one's writes; its calls to agents are not fenced.
 
+`TestDatabaseFailoverUnderLoad` (`internal/app`) checks the window of a leader
+cut off the database, as a partition cuts it, while agents sync through three
+replicas: the step-down within two thirds of the lease of the cut, the first
+write answered through the new leader within the lease and a third of it, and no
+write lost that was answered 200 (see `internal/app/README.md`).
+
 ## WhenLeader
 
 `WhenLeader` keeps raft's semantics: while the replica leads, it runs `fn` with

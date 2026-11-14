@@ -39,6 +39,7 @@ sqlstore/
 │   users.go, credentials.go, verifiers.go, sessions.go, roles.go
 │                   one entity group each: its codec, its columns, its methods
 ├── contract_test.go   storagecontract.Run on a Postgres database
+├── bench_test.go   BenchmarkAgentSyncs, against the in-memory store (see Performance)
 └── pgtest/         a fresh Postgres database per test, for the tests of the database mode
 ```
 
@@ -212,8 +213,9 @@ transaction, and so are its reads.
   matches when its folded value contains it): agents over ID, name and endpoint;
   users over subject, name and email; specs over name and slot. `%`, `_` and `\`
   are literal, and case folds beyond ASCII, as in memory, whatever the engine's
-  collation. The bodies of the rows are decoded for it, which the filtered agent
-  listing at 5000 agents measures
+  collation. The bodies of the rows are decoded for it: a search that matches
+  fewer rows than a page reads and decodes every row, which "Performance"
+  measures for the agents
 - **A criterion time outside the range of the column** is not refused: every
   stored time lies inside it, so the answer is the same for every row, and the
   filter builds it so. An agent's `StaleAtBefore` below the year 1678 matches
@@ -326,10 +328,15 @@ does both. While the variable is unset those tests skip, so
 `task ci/golang/test/postgres` runs them with the race detector against a
 Postgres container: it removes what a killed run left behind, creates a docker
 network, starts the server, waits until it accepts connections over TCP, runs
-`go test -race` through the Go container on that network with
+`go test` twice through the Go container on that network with
 `PODIUM_TEST_POSTGRES_URL` set, and removes the container and the network on
-every exit. Its packages are the Taskfile's `postgres_test_packages`, which each
-package of the database mode joins. CI runs it with the other Go checks.
+every exit. The first invocation tests the Taskfile's `postgres_test_packages`,
+which each package of the database mode joins, with the flags
+`postgres_test_flags` (`-race -count=1 -timeout=10m`); the second runs the tests
+of `internal/app` and `cmd` that need Postgres (`postgres_app_test_packages`,
+the names `postgres_app_test_run` matches) with `postgres_app_test_flags`, the
+same. Each of these variables can be set on the command line, as "Performance"
+does. CI runs the task with the other Go checks.
 
 The server is the current stable image pinned by the digest of its multi-arch
 index, so that it runs on arm64 and amd64 hosts alike:
@@ -337,3 +344,71 @@ index, so that it runs on arm64 and amd64 hosts alike:
 (pinned 2026-11-13; `postgres_image` in the Taskfile). To move it, pin the index
 digest of the new tag, as `docker buildx imagetools inspect postgres:<tag>`
 prints it.
+
+## Performance
+
+`bench_test.go` holds `BenchmarkAgentSyncs`, in a test package of its own
+(`sqlstore_test`), as it fences the store with the database leadership, which
+imports the store. It runs on two backends: `postgres`, the SQL store on a fresh
+database of its own, on a pool of the database mode's default 10 connections,
+its write transactions fenced by a `database.Leadership` that holds the lease,
+as in the database mode; and `memory`, the in-memory store of the memory mode.
+Each is seeded, in one transaction, with the P2a fixture of
+`internal/storage/storagetest` at 100, 1000 and 5000 agents: 20 specs, and per
+agent a stored credential and 3 rollouts. The benchmark then times the sync of
+an enrolled agent as discovery runs it, one after another, as a replica's store
+runs one write transaction at a time: verify the token, a write transaction that
+writes nothing while the token matches, read the agent, and upsert it, a write
+transaction. It reports the syncs a second (`syncs/s`) and the median and the
+99th percentile of one (`p50-ms`, `p99-ms`, from `storagetest.Measure`). Then it
+times 20 listings as the UI's agent search runs them (`agent.Service.List` of
+the factory's criteria, the default page of 30, on a context marked read-only),
+each a search for the ID of the agent in the middle of the fleet, which matches
+that agent alone, so that the SQL store reads and decodes every row, in batches
+of 64 (see "Entities"), and reports their median (`list-p50-ms`). The `postgres`
+sub-benchmarks skip without `PODIUM_TEST_POSTGRES_URL`, so
+`task ci/golang/bench` runs the `memory` ones once, as a smoke check. The
+numbers are indicative, not a gate.
+
+### Conditions
+
+The Task containers on an Apple M3 Max Mac (14 cores, 36 GiB) in OrbStack
+(Docker 29.8.2, linux/arm64, 14 vCPUs), Go 1.27.4, without `-race`, against the
+server of `task ci/golang/test/postgres`: `postgres:18.7` at the digest above,
+on the gate's docker network, its data on tmpfs, with `fsync`,
+`synchronous_commit` and `full_page_writes` off. Measured between 18:30 and
+18:32 UTC on 2026-11-14, on `555c5f9` with the change that added the benchmark,
+by the gate with its first invocation's flags and packages set, and its second
+invocation running nothing:
+
+```sh
+task ci/golang/test/postgres postgres_test_flags='-count=3 -timeout=30m -run=^$ -bench=^BenchmarkAgentSyncs$ -benchtime=1000x' postgres_test_packages=./internal/storage/sqlstore/ postgres_app_test_run='^$'
+```
+
+A cell is the median of the three runs.
+
+| backend | agents | syncs a second | sync p50 | sync p99 | search p50 |
+| -- | -- | -- | -- | -- | -- |
+| postgres | 100 | 3454 | 0.18 ms | 3.2 ms | 1.9 ms |
+| postgres | 1000 | 3473 | 0.18 ms | 3.3 ms | 23.6 ms |
+| postgres | 5000 | 3379 | 0.18 ms | 3.4 ms | 135.8 ms |
+| memory | 100 | 12023 | 0.034 ms | 1.3 ms | 0.008 ms |
+| memory | 1000 | 2088 | 0.26 ms | 4.5 ms | 0.087 ms |
+| memory | 5000 | 561 | 1.4 ms | 4.6 ms | 0.48 ms |
+
+### Reading them
+
+- A sync on Postgres costs the same at every fleet size: lookups and upserts by
+  key. The in-memory store's write transaction first copies every map of the
+  store, to roll back to (`takeSnapshot`), so its sync grows with the state: two
+  copies a sync.
+- 5000 agents that sync every 30 s, the fixture's heartbeat, need 167 syncs a
+  second. The server here flushes nothing to disk, unlike raft's commits in
+  `internal/raft/README.md`. Each of a sync's two write transactions takes the
+  fence's share lock on the lease row, which writes WAL, so a server that
+  flushes its WAL at each commit (`synchronous_commit` on, the default) adds
+  that flush twice to a sync, and a synchronous standby its acknowledgement as
+  well. Neither was measured.
+- The search at 5000 agents reads and decodes every agent's body: 136 ms here,
+  in proportion to the rows (about 25 µs a row), where the in-memory store takes
+  0.5 ms.
