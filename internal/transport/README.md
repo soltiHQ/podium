@@ -53,7 +53,10 @@ Main listener (`app.buildMainHandler`), outermost first:
                     after the reverse proxy dropped the hop-by-hop headers, and never forwards a marked write
                     again; drops the leader's CORS headers from its answer, as CORS above has set the follower's;
                     stores where the leader serves this listener in ctx (httpctx.Leader), for X-Leader
-       mux       ── wrapped by metrics.Route, which hands the matched pattern to the metrics
+       ReadOnly  ── marks GET and HEAD requests storage.MarkReadOnly: a backend with a read replica, the
+                    database mode's, may serve their listings, scans and counts from it; outside
+                    metrics.Route, which takes the route from the request it hands the mux
+        mux      ── wrapped by metrics.Route, which hands the matched pattern to the metrics
         │  per route:
   RequestID      ── installs request id + error slot (API routes and the event stream only)
    Logger        ── reads the slot back after the handler returns (same routes); logs 5xx at ERROR, but a 503 with X-Leader at WARN

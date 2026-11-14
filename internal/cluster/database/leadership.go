@@ -47,6 +47,13 @@
 // read. When Run's context ends, a replica deletes its row; the leader prunes
 // the rows unseen for an hour, of replicas that never did.
 //
+// # Events
+//
+// EventTransport is the mode's event.Writer: it shares the event hub's events
+// between the replicas as rows of podium_events, which every replica applies in
+// sequence, woken by a LISTEN of its own (NewPostgresWaker). Its doc gives the
+// rules.
+//
 // The statements and the error classification are Postgres's, through
 // sqlstore.Postgres: no error and no log line carries a statement's arguments,
 // an engine's detail or a connection string. A second engine brings its own.

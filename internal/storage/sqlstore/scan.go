@@ -28,7 +28,7 @@ func (r *reader) snapshot(ctx context.Context, read func(r *reader) error) error
 // order and filtered by match, nil for none. It reads in one statement: a
 // caller that needs a consistent state around it takes a snapshot.
 func queryAll[T any](ctx context.Context, r *reader, k kind[T], w *where, match func(T) bool) ([]T, error) {
-	bodies, err := r.bodies(ctx, "SELECT body FROM "+k.table+w.sql()+" ORDER BY created_at DESC, id ASC", 0, w.args...)
+	bodies, err := r.bodies(ctx, "SELECT body FROM "+k.table+w.sql()+" ORDER BY created_at DESC, id ASC", w.args...)
 	if err != nil {
 		return nil, err
 	}

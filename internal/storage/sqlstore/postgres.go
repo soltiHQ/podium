@@ -155,5 +155,33 @@ func classifyPgError(e *pgconn.PgError) error {
 	return fmt.Errorf("%w: %s", sentinel, b.String())
 }
 
+// eventLockKey is the key of the transaction-level advisory lock that orders
+// the inserts of event rows: "podiumev" in ASCII, a key of podium's own in the
+// database's one space of advisory keys.
+const eventLockKey int64 = 0x706f6469756d6576
+
+// NotifySQL returns NOTIFY with channel as a quoted identifier, which names the
+// channel exactly, with no case folding, as a LISTEN of the same quoted
+// identifier does. Postgres delivers the notification once the transaction
+// commits, and drops it when it rolls back; it folds identical notifications of
+// one transaction into one.
+func (Postgres) NotifySQL(channel string) string { return "NOTIFY " + quoteIdentifier(channel) }
+
+// EventLockSQL returns the statement that takes the transaction-level advisory
+// lock of eventLockKey: a second transaction that takes it waits until the
+// first commits or rolls back, which releases it. A committed transaction is
+// visible to every new snapshot before its locks are released, so the next
+// writer's rows take higher sequences, and become visible after. Readers take
+// no advisory lock.
+func (Postgres) EventLockSQL() string {
+	return "SELECT pg_advisory_xact_lock(" + strconv.FormatInt(eventLockKey, 10) + ")"
+}
+
+// quoteIdentifier quotes name as a Postgres identifier: in double quotes, a
+// double quote within it doubled.
+func quoteIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
 // Migrations returns the migrations of the Postgres schema.
 func (Postgres) Migrations() fs.FS { return postgresMigrations }

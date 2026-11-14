@@ -43,6 +43,20 @@ func TestRebind(t *testing.T) {
 	}
 }
 
+// TestNotifySQL checks that NOTIFY names its channel as a quoted identifier,
+// exactly, with no case folding, a double quote in it doubled, as a LISTEN of
+// the same quoted identifier names it.
+func TestNotifySQL(t *testing.T) {
+	for _, tc := range []struct{ channel, want string }{
+		{"podium_events", `NOTIFY "podium_events"`},
+		{`Mixed"Case`, `NOTIFY "Mixed""Case"`},
+	} {
+		if got := (Postgres{}).NotifySQL(tc.channel); got != tc.want {
+			t.Errorf("NotifySQL(%q) = %q, want %q", tc.channel, got, tc.want)
+		}
+	}
+}
+
 // secret is a value a test puts where a careless classification would copy it:
 // in a row, in PgError.Detail and Message, in a statement's argument, in a
 // connection string.

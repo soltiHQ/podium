@@ -14,12 +14,14 @@ import (
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/storage/snapshot"
 )
 
 // These tests check what the contract suite cannot see of the entity stores: the
-// routing of their reads, the snapshot of a scan, the paging of a listing the Go
-// filter thins out, a bound outside the range of a time column, and the cap on
-// an index key. The suite itself runs in contract_test.go.
+// routing of their reads, the snapshot of a scan, the chunks of GetRoles, the
+// paging of a listing the Go filter thins out, a bound outside the range of a
+// time column, and the cap on an index key. The suite itself runs in
+// contract_test.go.
 
 // testTime is a creation time in a zone other than UTC, between whole
 // microseconds.
@@ -128,37 +130,59 @@ func testRole(t *testing.T, id, name string, created time.Time) *model.Role {
 	return r
 }
 
-// seed writes one row of each entity group of a store, keyed by tag, and
-// returns the IDs it wrote by the read that must find them: the reads of a store
-// are told apart by which database's rows they return.
-func seed(t *testing.T, s *Store, tag string) map[string]string {
+// sharedUser is the user whose credential and session every seed writes, under
+// IDs of its own tag: the by-user listings are told apart by which database's
+// rows they return.
+const sharedUser = "user-shared"
+
+// seed writes rows of each entity group of a store, keyed by tag: agents agents,
+// each with a rollout of one spec, one row of each other group, and a credential
+// and a session of sharedUser ("cred-"+tag and "sess-"+tag). It returns what
+// each listing, scan and count must find, by read: the IDs of the rows, joined
+// in the listing order, and the total a count answers. The reads of a store are
+// told apart by which database's rows they return, and the counts by their
+// totals, when the databases are seeded with different numbers of agents.
+func seed(t *testing.T, s *Store, tag string, agents int) map[string]string {
 	t.Helper()
 	var (
-		agent     = testAgent(t, "agent-"+tag, testTime)
-		agentCred = testAgentCredential(t, agent.ID(), testTime)
-		spec      = testSpec(t, "spec-"+tag, testTime)
-		rollout   = testRollout(t, spec.ID(), agent.ID(), testTime)
-		execution = testExecution(t, agent.ID(), testTime)
-		user      = testUser(t, "user-"+tag, "sub-"+tag, testTime)
-		role      = testRole(t, "role-"+tag, "name "+tag, testTime)
+		spec       = testSpec(t, "spec-"+tag, testTime)
+		user       = testUser(t, "user-"+tag, "sub-"+tag, testTime)
+		role       = testRole(t, "role-"+tag, "name "+tag, testTime)
+		credential = testCredential(t, "cred-"+tag, sharedUser, enum.Password, testTime)
+		session    = testSession(t, "sess-"+tag, sharedUser, testTime)
+		ctx        = t.Context()
+		agentIDs   []string
+		rollouts   []string
 	)
-	ctx := t.Context()
-	err := errors.Join(
-		s.UpsertAgent(ctx, agent), s.UpsertAgentCredential(ctx, agentCred), s.UpsertSpec(ctx, spec),
-		s.UpsertRollout(ctx, rollout), s.UpsertExecution(ctx, execution),
-		s.UpsertUser(ctx, user), s.UpsertRole(ctx, role),
-	)
-	if err != nil {
+	errs := []error{
+		s.UpsertSpec(ctx, spec), s.UpsertUser(ctx, user), s.UpsertRole(ctx, role),
+		s.UpsertCredential(ctx, credential), s.CreateSession(ctx, session),
+	}
+	for i := range agents {
+		agent := testAgent(t, fmt.Sprintf("agent-%s-%d", tag, i), testTime)
+		rollout := testRollout(t, spec.ID(), agent.ID(), testTime)
+		errs = append(errs, s.UpsertAgent(ctx, agent), s.UpsertRollout(ctx, rollout))
+		agentIDs = append(agentIDs, agent.ID())
+		rollouts = append(rollouts, rollout.ID())
+	}
+	first := agentIDs[0]
+	agentCred := testAgentCredential(t, first, testTime)
+	execution := testExecution(t, first, testTime)
+	errs = append(errs, s.UpsertAgentCredential(ctx, agentCred), s.UpsertExecution(ctx, execution))
+	if err := errors.Join(errs...); err != nil {
 		t.Fatalf("seed %s: %v", tag, err)
 	}
+	// One creation time for all: the listing orders them by ID, as bytes.
+	slices.Sort(agentIDs)
+	slices.Sort(rollouts)
 	return map[string]string{
-		"ListAgents": agent.ID(), "ScanAgents": agent.ID(),
+		"ListAgents": strings.Join(agentIDs, ","), "ScanAgents": strings.Join(agentIDs, ","),
 		"ListAgentCredentials": agentCred.ID(),
 		"ListSpecs":            spec.ID(), "ScanSpecs": spec.ID(),
-		"ListRollouts": rollout.ID(), "ScanRollouts": rollout.ID(),
+		"ListRollouts": strings.Join(rollouts, ","), "ScanRollouts": strings.Join(rollouts, ","),
 		"ListExecutions": execution.ID(), "ScanExecutions": execution.ID(),
 		"ListUsers": user.ID(), "ListRoles": role.ID(),
-		"CountAgents": "1", "CountRollouts": "1",
+		"CountAgents": fmt.Sprint(agents), "CountRollouts": fmt.Sprint(agents),
 	}
 }
 
@@ -175,7 +199,7 @@ type entityStore interface {
 }
 
 // read returns what each listing, scan and count of s finds, by read, as the
-// IDs of the rows joined, or the count.
+// IDs of the rows joined, or the count's total over the statuses.
 func read(ctx context.Context, s entityStore) (map[string]string, error) {
 	var (
 		got  = map[string]string{}
@@ -212,11 +236,38 @@ func read(ctx context.Context, s entityStore) (map[string]string, error) {
 	}
 	if c, ok := s.(storage.Counter); ok {
 		agentCounts, err := c.CountAgents(ctx)
-		found("CountAgents", []string{fmt.Sprint(len(agentCounts))}, err)
+		found("CountAgents", []string{fmt.Sprint(total(agentCounts))}, err)
 		rolloutCounts, err := c.CountRollouts(ctx)
-		found("CountRollouts", []string{fmt.Sprint(len(rolloutCounts))}, err)
+		found("CountRollouts", []string{fmt.Sprint(total(rolloutCounts))}, err)
 	}
 	return got, errors.Join(errs...)
+}
+
+// total is the sum of a count's statuses.
+func total[S comparable](counts map[S]int) int {
+	n := 0
+	for _, c := range counts {
+		n += c
+	}
+	return n
+}
+
+// checkReads fails t unless every listing, scan and count of s under ctx finds
+// what want says, by read.
+func checkReads(t *testing.T, ctx context.Context, what string, s entityStore, want map[string]string) {
+	t.Helper()
+	got, err := read(ctx, s)
+	if err != nil {
+		t.Fatalf("%s: %v", what, err)
+	}
+	if len(got) != len(want) {
+		t.Errorf("%s: %d reads, want %d", what, len(got), len(want))
+	}
+	for name, w := range want {
+		if got[name] != w {
+			t.Errorf("%s: %s = %q, want %q", what, name, got[name], w)
+		}
+	}
 }
 
 // pageIDs returns the IDs of a page's rows, none for no page.
@@ -237,81 +288,139 @@ func idsOf[T interface{ ID() string }](rows []T) []string {
 }
 
 // TestReadsFollowTheRouting gives the store a replica that holds other rows than
-// the primary: every listing, scan and count of a context marked read-only reads
-// the replica, and of an unmarked one the primary; so does every read inside a
-// transaction, its context marked or not.
+// the primary, and other numbers of agents and rollouts: every listing, scan and
+// count of a context marked read-only reads the replica, and of an unmarked one
+// the primary; so does every read inside a transaction, its context marked or
+// not. The point lookups and the by-user listings read the primary, whatever the
+// context says: auth decides on them.
 func TestReadsFollowTheRouting(t *testing.T) {
 	primary, replica := migrated(t), migrated(t)
 	withReplica := openStore(t, Options{Primary: primary, Replica: replica})
-	onPrimary := seed(t, withReplica, "primary")
-	onReplica := seed(t, openStore(t, Options{Primary: replica}), "replica")
+	onPrimary := seed(t, withReplica, "primary", 1)
+	onReplica := seed(t, openStore(t, Options{Primary: replica}), "replica", 2)
 	marked := storage.MarkReadOnly(t.Context())
 
-	check := func(t *testing.T, ctx context.Context, what string, s entityStore, want map[string]string) {
-		t.Helper()
-		got, err := read(ctx, s)
-		if err != nil {
-			t.Fatalf("%s: %v", what, err)
-		}
-		if len(got) != len(want) {
-			t.Errorf("%s: %d reads, want %d", what, len(got), len(want))
-		}
-		for name, w := range want {
-			if got[name] != w {
-				t.Errorf("%s: %s = %q, want %q", what, name, got[name], w)
-			}
-		}
-	}
-	check(t, marked, "a marked context", withReplica, onReplica)
-	check(t, t.Context(), "an unmarked context", withReplica, onPrimary)
-	check(t, marked, "a marked context, no replica", openStore(t, Options{Primary: primary}), onPrimary)
+	checkReads(t, marked, "a marked context", withReplica, onReplica)
+	checkReads(t, t.Context(), "an unmarked context", withReplica, onPrimary)
+	checkReads(t, marked, "a marked context, no replica", openStore(t, Options{Primary: primary}), onPrimary)
 	err := withReplica.transact(marked, func(h *handle) error {
-		check(t, marked, "inside a transaction", h, onPrimary)
+		checkReads(t, marked, "inside a transaction", h, onPrimary)
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("transact: %v", err)
 	}
 	// A point lookup reads the primary, whatever the context says.
-	if _, err := withReplica.GetAgent(marked, "agent-primary"); err != nil {
+	if _, err := withReplica.GetAgent(marked, "agent-primary-0"); err != nil {
 		t.Errorf("GetAgent of a row on the primary, marked: %v", err)
 	}
-	if _, err := withReplica.GetAgent(marked, "agent-replica"); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := withReplica.GetAgent(marked, "agent-replica-0"); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("GetAgent of a row on the replica, marked: %v, want storage.ErrNotFound", err)
+	}
+	// So do the by-user listings.
+	credentials, err := withReplica.ListCredentialsByUser(marked, sharedUser)
+	if got := idsOf(credentials); err != nil || !slices.Equal(got, []string{"cred-primary"}) {
+		t.Errorf("ListCredentialsByUser, marked: %q, %v; want the primary's, cred-primary", got, err)
+	}
+	sessions, err := withReplica.ListSessionsByUser(marked, sharedUser)
+	if got := idsOf(sessions); err != nil || !slices.Equal(got, []string{"sess-primary"}) {
+		t.Errorf("ListSessionsByUser, marked: %q, %v; want the primary's, sess-primary", got, err)
 	}
 }
 
-// TestScanTakesASnapshot checks that a scan outside a transaction reads in one
-// read-only REPEATABLE READ transaction, and one inside a transaction reads that
-// transaction.
+// TestScanTakesASnapshot checks, through ScanAgents, that a scan outside a
+// transaction reads in one read-only REPEATABLE READ transaction of its own, and
+// one inside a transaction reads that transaction. podium_agents becomes a view
+// that shows the agent in-a-snapshot to a read-only REPEATABLE READ transaction
+// alone, and every other agent to every other read: the agents a read returns
+// say how it read.
 func TestScanTakesASnapshot(t *testing.T) {
-	s, ctx := openStore(t, Options{Primary: migrated(t)}), t.Context()
-	mode := func(r *reader) (isolation, readOnly string, err error) {
-		err = r.q.QueryRowContext(ctx, `SELECT current_setting('transaction_isolation'), current_setting('transaction_read_only')`).
-			Scan(&isolation, &readOnly)
-		return
+	db := migrated(t)
+	s, ctx := openStore(t, Options{Primary: db}), t.Context()
+	for _, id := range []string{"in-a-snapshot", "outside"} {
+		if err := s.UpsertAgent(ctx, testAgent(t, id, testTime)); err != nil {
+			t.Fatal(err)
+		}
 	}
-	err := s.snapshot(ctx, func(r *reader) error {
-		isolation, readOnly, err := mode(r)
-		if err != nil || isolation != "repeatable read" || readOnly != "on" {
-			return fmt.Errorf("a scan reads in %q, read-only %q, %v; want repeatable read, read-only", isolation, readOnly, err)
+	_, err := db.ExecContext(ctx, `ALTER TABLE podium_agents RENAME TO agent_rows;
+CREATE VIEW podium_agents AS SELECT * FROM agent_rows
+ WHERE (id = 'in-a-snapshot'::bytea) = (current_setting('transaction_isolation') = 'repeatable read'
+                                        AND current_setting('transaction_read_only') = 'on')`)
+	if err != nil {
+		t.Fatalf("swap podium_agents for the view: %v", err)
+	}
+
+	scanned, err := s.ScanAgents(ctx, nil)
+	if got := idsOf(scanned); err != nil || !slices.Equal(got, []string{"in-a-snapshot"}) {
+		t.Errorf("ScanAgents: %q, %v; want what a read-only REPEATABLE READ transaction sees, in-a-snapshot", got, err)
+	}
+	// A listing reads in no transaction of its own: the view tells the two apart.
+	listed, err := s.ListAgents(ctx, nil, storage.ListOptions{})
+	if got := pageIDs(listed); err != nil || !slices.Equal(got, []string{"outside"}) {
+		t.Errorf("ListAgents: %q, %v; want what a plain read sees, outside", got, err)
+	}
+
+	// Inside a transaction a scan reads the transaction: its own write, which no
+	// other session sees yet, and not what a snapshot sees.
+	err = s.transact(ctx, func(h *handle) error {
+		a := testAgent(t, "in-the-transaction", testTime)
+		body, err := snapshot.MarshalAgentJSON(a)
+		if err != nil {
+			return err
+		}
+		if _, err := h.tx.ExecContext(ctx, `INSERT INTO agent_rows (id, created_at, status, stale_at, body) VALUES ($1, $2, $3, 0, $4)`,
+			[]byte(a.ID()), a.CreatedAt().UnixNano(), int16(a.Status()), body); err != nil {
+			return err
+		}
+		scanned, err := h.ScanAgents(ctx, nil)
+		if got := idsOf(scanned); err != nil || !slices.Equal(got, []string{"in-the-transaction", "outside"}) {
+			t.Errorf("ScanAgents in a transaction: %q, %v; want what the transaction sees, in-the-transaction and outside", got, err)
 		}
 		return nil
 	})
 	if err != nil {
-		t.Error(err)
+		t.Fatalf("transact: %v", err)
 	}
-	err = s.transact(ctx, func(h *handle) error {
-		return h.snapshot(ctx, func(r *reader) error {
-			isolation, readOnly, err := mode(r)
-			if err != nil || isolation != "read committed" || readOnly != "off" {
-				return fmt.Errorf("a scan in a transaction reads in %q, read-only %q, %v; want the write transaction", isolation, readOnly, err)
+}
+
+// TestGetRolesInChunks asks GetRoles for more distinct IDs than one statement
+// looks for, backwards and with repeats: it answers one role per ID asked for,
+// in the order asked, the roles of each chunk found, and storage.ErrNotFound for
+// an ID missing from the last chunk.
+func TestGetRolesInChunks(t *testing.T) {
+	s, ctx := openStore(t, Options{Primary: migrated(t)}), t.Context()
+	ids := make([]string, roleChunk+1)
+	err := s.transact(ctx, func(h *handle) error {
+		for i := range ids {
+			ids[i] = fmt.Sprintf("role-%04d", i)
+			if err := h.UpsertRole(ctx, testRole(t, ids[i], "name "+ids[i], testTime)); err != nil {
+				return err
 			}
-			return nil
-		})
+		}
+		return nil
 	})
 	if err != nil {
-		t.Error(err)
+		t.Fatalf("write %d roles: %v", len(ids), err)
+	}
+
+	// Backwards, so that the first chunk holds the last roles and the second the
+	// first one; then the first and the last again.
+	ask := slices.Clone(ids)
+	slices.Reverse(ask)
+	ask = append(ask, ids[0], ids[len(ids)-1])
+	roles, err := s.GetRoles(ctx, ask)
+	if err != nil {
+		t.Fatalf("GetRoles of %d IDs: %v", len(ask), err)
+	}
+	if got := idsOf(roles); !slices.Equal(got, ask) {
+		t.Errorf("GetRoles of %d IDs answered %d roles, or out of order", len(ask), len(got))
+	}
+	if roles[len(roles)-1] == roles[0] {
+		t.Error("GetRoles answered one copy for an ID asked for twice")
+	}
+
+	if _, err := s.GetRoles(ctx, append(slices.Clone(ids), "role-missing")); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("GetRoles with an ID missing from the last chunk: %v, want storage.ErrNotFound", err)
 	}
 }
 

@@ -394,10 +394,13 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 
 	route.HandleFunc(mux, routepath.ApiEventStream, eventHub.SSEHandler(eventAccess), ridMW, logMW, authMW, middleware.StreamLimit(streamLimit))
 
-	// Outermost first: metrics, Recovery, CORS, Negotiate, CrossOrigin, Leader.
-	// CrossOrigin answers through the Responder that Negotiate picks, and runs
-	// before Leader. The metrics take the route from the mux, which Route wraps.
+	// Outermost first: metrics, Recovery, CORS, Negotiate, CrossOrigin, Leader,
+	// ReadOnly. CrossOrigin answers through the Responder that Negotiate picks,
+	// and runs before Leader. ReadOnly marks the GET and HEAD requests, whose
+	// listings a read replica may serve; it wraps Route, as the metrics take the
+	// route from the request Route hands to the mux.
 	h := metrics.Route(mux)
+	h = middleware.ReadOnly(h)
 	h = middleware.Leader(leadership, leaderOptions(addrPort(cfg.HTTP.Addr), cfg.TLS.Server.Enabled(), forwardTLS))(h)
 	h = middleware.CrossOrigin(cfg.CORS, logger)(h)
 	h = middleware.Negotiate(responder.NewJSON(), responder.NewHTML())(h)

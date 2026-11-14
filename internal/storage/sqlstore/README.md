@@ -3,9 +3,10 @@
 Package sqlstore keeps the control-plane state in a SQL database, for the
 `database` mode: podium's replicas hold no state, and the database holds it. It
 runs on `database/sql`, with a `Dialect` for what differs between engines:
-placeholders, the classification of the driver's errors and the schema's
-migrations. Postgres is the first dialect, through pgx's `database/sql` driver
-(`github.com/jackc/pgx/v5/stdlib`, registered as `pgx`).
+placeholders, the classification of the driver's errors, the schema's
+migrations, and the notification and the lock of the events transport
+(`internal/cluster/database`). Postgres is the first dialect, through pgx's
+`database/sql` driver (`github.com/jackc/pgx/v5/stdlib`, registered as `pgx`).
 
 The package is the store's core — `Open`, the write gate, the transactions, the
 read routing, the error classification, the cursor, the migrator and the
@@ -18,12 +19,14 @@ it checks the in-memory store and raft.
 ```text
 sqlstore/
 ├── store.go        Store, Options, Open (no migration), Fence, AllowAll; the package doc
-├── dialect.go      Dialect: Name, Rebind, Classify, Migrations
-├── postgres.go     Postgres: $n placeholders, the SQLSTATE classification, the embedded migrations
+├── dialect.go      Dialect: Name, Rebind, Classify, NotifySQL, EventLockSQL, Migrations
+├── postgres.go     Postgres: $n placeholders, the SQLSTATE classification, NOTIFY and the
+│                   events' advisory lock, the embedded migrations
 ├── migrate.go      Migrate, SchemaVersion, the migration files
 ├── migrations/postgres/0001_init.sql   the Postgres schema
 ├── tx.go           the write transactions: the gate, the fence, nesting, WithTx
 ├── readonly.go     the read routing: the replica for marked listings, the primary otherwise
+│                   and when the replica is unavailable
 ├── cursor.go       the listing cursor, tagged "sql"
 ├── errors.go       ErrSchemaNewer, ErrSchemaOlder, what every dialect's classification shares
 ├── keys.go         the cap on a value bound to an indexed column, bytea binding
@@ -107,7 +110,9 @@ transport that use them may change them:
   `advertise_addr`, the `digests` of the settings every replica must share, and
   `last_seen` in the database's clock
 - `podium_events` holds the events in sequence (`seq`), each a `kind` and a
-  `payload`, with the `created_at` they are pruned by
+  `payload`, with the `created_at` they are pruned by: the events transport of
+  `internal/cluster/database` writes and reads them, under the dialect's event
+  lock (`EventLockSQL`), with the dialect's wake-up (`NotifySQL`)
 
 ## Writes
 
@@ -150,11 +155,22 @@ commits. So the store refuses in Go, before any statement:
 
 ## Reads
 
-Point lookups, and every read of a transaction, read the primary. Listings,
-scans and counts read the replica (`Options.Replica`), when there is one, for a
-context marked `storage.MarkReadOnly` outside a transaction, and the primary
-otherwise: runners, auth and transactions decide on what they read, and a
-replica may lag. `Open` checks the primary's schema alone.
+Point lookups, the by-user listings (`ListCredentialsByUser`,
+`ListSessionsByUser`) and every read of a transaction read the primary.
+Listings, scans and counts read the replica (`Options.Replica`), when there is
+one, for a context marked `storage.MarkReadOnly` outside a transaction, and the
+primary otherwise: runners, auth and transactions decide on what they read, and
+a replica may lag. The HTTP layer marks the GET and HEAD requests of the UI and
+API listener (`middleware.ReadOnly`). `Open` checks the primary's schema alone.
+
+A marked read that fails on the replica with `storage.ErrUnavailable` (the
+replica down or unreachable, a connection it refused or ended, a statement it
+cancelled, as a hot standby does for a conflict with its recovery) runs once
+more, on the primary, while the context is live: a replica that is down never
+fails a listing the primary can answer. Any other error of the replica, and the
+error of a context that ended, comes back as it is. Each marked listing tries
+the replica first, so a replica that drops packets rather than refuse costs each
+listing its connection attempt, which the URL's `connect_timeout` bounds.
 
 The cursor of a listing is a place in the listing order: the creation time, in
 nanoseconds, and the ID's bytes of the row it was made at, as base64url JSON

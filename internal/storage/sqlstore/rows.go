@@ -54,9 +54,8 @@ func (r *reader) exec(ctx context.Context, query string, args ...any) (int64, er
 	return n, nil
 }
 
-// bodies runs a query that selects bodies, in its order, and returns them. At
-// most limit of them when limit is positive.
-func (r *reader) bodies(ctx context.Context, query string, limit int, args ...any) ([][]byte, error) {
+// bodies runs a query that selects bodies, and returns them in its order.
+func (r *reader) bodies(ctx context.Context, query string, args ...any) ([][]byte, error) {
 	rows, err := r.q.QueryContext(ctx, r.d.Rebind(query), args...)
 	if err != nil {
 		return nil, r.fail(ctx, err)
@@ -69,9 +68,6 @@ func (r *reader) bodies(ctx context.Context, query string, limit int, args ...an
 			return nil, r.fail(ctx, err)
 		}
 		out = append(out, body)
-		if limit > 0 && len(out) == limit {
-			break
-		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, r.fail(ctx, err)
@@ -101,7 +97,7 @@ func byID[T any](ctx context.Context, r *reader, k kind[T], id string) (T, error
 // and no value.
 func lookup[T any](ctx context.Context, r *reader, k kind[T], cond string, args ...any) (T, error) {
 	var zero T
-	found, err := r.bodies(ctx, "SELECT body FROM "+k.table+" WHERE "+cond+" LIMIT 2", 0, args...)
+	found, err := r.bodies(ctx, "SELECT body FROM "+k.table+" WHERE "+cond+" LIMIT 2", args...)
 	switch {
 	case err != nil:
 		return zero, err

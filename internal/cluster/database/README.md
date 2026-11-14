@@ -9,6 +9,11 @@ replica's `X-Forwarded-For` and the shared-settings check take, as they take
 raft's, and the fence the store is built with. `New` builds it from `Options`;
 `Run` takes part in the election until its context ends.
 
+The package also shares the event hub's events between the replicas:
+`EventTransport` is the mode's `event.Writer`, through the table
+`podium_events`, and `NewPostgresWaker` the `LISTEN` that wakes it (see
+"Events").
+
 ## Package map
 
 ```text
@@ -18,7 +23,10 @@ database/
 ├── lease.go        the lease's statements: take, renew, release, the followers'
 │                   read; the statement timeout
 ├── fence.go        Check, the fence of the store's write transactions
-└── registry.go     the replica registry: the heartbeat, Members, the pruning
+├── registry.go     the replica registry: the heartbeat, Members, the pruning
+└── events.go       EventTransport, the event.Writer through podium_events: the
+                    queue, the writer, the reader, the pruning; Waker and
+                    NewPostgresWaker, the LISTEN that wakes it
 ```
 
 ## The lease
@@ -108,6 +116,77 @@ When `Run`'s context ends, a replica deletes its row. The leader prunes, every
 minute, the rows unseen for an hour, of replicas that stopped without deleting
 theirs.
 
+## Events
+
+`EventTransport` is the mode's `event.Writer`: it shares the event hub's events
+between the replicas through `podium_events`, so that the UI on every replica
+sees what any replica sent. `NewEventTransport` builds it on the primary's pool,
+with the dialect, a waker, the hub and the leadership; the app attaches it with
+`hub.SetWriter` and runs it until its context ends (`Run`).
+
+- `Notify` and `Record` queue the event. The transport's writer writes it as a
+  row, and every replica applies it, through `ApplyLocalNotify` and
+  `ApplyLocalRecord`, once it reads the row back: the writer's replica too,
+  never at the call, so that each replica applies each event once, in the rows'
+  order
+- `DeleteIssues` removes the matching issues on its replica at the call and
+  returns how many, as the handlers decide on that count, as on raft, then
+  queues the deletion as a row, which every replica applies when it reads it.
+  The writer's replica applies it again, in sequence, where it removes nothing
+  more, unless an issue whose row came before the deletion's reached it after
+  the call: that one goes, as on every other replica
+- A row is a kind of podium's own (`notify`, `record`, `delete_issues`), never
+  the event's, which `text` would refuse with a NUL, and a payload, the
+  protojson of raft's op for the event (`event_notify`, `event_record`,
+  `event_delete_issues`), in `bytea`. Its sequence comes from the table's
+  identity, its `created_at` from the database's clock
+- The queue holds 1024 events, and queueing never waits. An event that finds it
+  full, or the transport stopped, or that does not encode (a string that is not
+  UTF-8, which raft's encoding refuses too), never reaches the database: it is
+  applied on its replica alone, as raft's `EventWriter` falls back, and counted
+  (`Dropped`)
+- The writer takes the queued events, 128 at most, and writes them in one
+  transaction, one attempt within 5 s: the dialect's event lock (`EventLockSQL`,
+  a transaction-level advisory lock for Postgres), a row per event, and the
+  dialect's wake-up (`NotifySQL`, `NOTIFY "podium_events"`), which goes out with
+  the commit. The lock makes the rows' sequence order their commit order, so
+  that a reader that reads the rows after the last sequence it read never skips
+  a row that committed after a later one; readers take no lock. A write that
+  fails before `COMMIT` applies its events on its replica alone and counts them;
+  one whose `COMMIT` fails may have written them, and leaves them to the reads.
+  Nothing is retried
+- Each replica reads the rows after the last sequence it read, in sequence: when
+  its waker wakes it, after each write of its own, and on an interval, every 5 s
+  with a waker, so that a listener that died without a word delays events that
+  long, and every second without one. It starts after the newest row present
+  when `Run` starts: the hub's history stays transient, as in the other modes,
+  and the events queued before then are written once `Run` knows where it starts
+- A row of an unknown kind, or whose payload does not decode as an event of its
+  kind, is skipped and logged without its payload, and the reads go on past it:
+  a newer release never stalls an older one during a rolling upgrade. The fields
+  of a payload this release does not know are dropped
+- The leader prunes, at the start of its term and every minute, the rows older
+  than ten minutes by the database's clock, under `WhenLeader`. A replica that
+  falls further behind than that misses what was pruned
+- When `Run`'s context ends, the events still queued, and every event sent
+  after, are applied on their replica alone and counted
+
+The waker of Postgres, `NewPostgresWaker`, listens on `EventsChannel`
+(`podium_events`) through a connection of its own, never one of the store's
+pool, with `application_name` `podium-events`. Its `Wait` returns on a
+notification, and on each connection, the first and every reconnect, as rows may
+have come while it did not listen. A connection that fails or is lost is closed,
+and the next `Wait` connects again after a pause: 100 ms after the first
+failure, doubling up to 5 s. Its errors pass through `sqlstore.Postgres`'s
+classification: a refused connection names its SQLSTATE and nothing else, and a
+connection string that does not parse is an error of its own that never quotes
+it.
+
+`LISTEN` needs a direct connection to the primary, or a pooler in session mode:
+PgBouncer in transaction mode delivers no notification, and every replica then
+sees the others' events only on its reads every 5 s. A notification sent while a
+listener reconnects is lost, and the reconnect's own read covers it.
+
 ## Timings
 
 | What | When |
@@ -121,6 +200,13 @@ theirs.
 | a heartbeat | every second |
 | a member | seen within three heartbeats |
 | the registry's pruning | by the leader, every minute, the rows unseen for an hour |
+| the event queue | 1024 events |
+| a write of events | 128 at most in one transaction, one attempt within 5 s |
+| a read of events, a prune | within 5 s each |
+| a read of events without a wake-up | every 5 s with a waker, every second without |
+| a reconnect of the waker | 100 ms after the first failure, doubling up to 5 s; its connection and `LISTEN` within 5 s |
+| the events' pruning | by the leader, every minute, the rows older than ten minutes |
+| a log line of one kind of the transport's failures | once a minute at most |
 
 ## The failover window
 
@@ -161,7 +247,14 @@ INFO; the takeover, the release and the pruning an INFO, a step-down a WARN.
 Errors are classified by `sqlstore.Postgres`, as the store's are: an error names
 the SQLSTATE at most, never a row, a statement's argument, `PgError.Detail` or a
 connection string. The statements are Postgres's; a second engine brings its
-own.
+own, and its dialect the events' lock and wake-up, or no wake-up, and the
+transport then polls.
+
+The events transport logs a failure, of a write, a read, the waker, a prune, an
+event that never reached the database or a row it skipped, at WARN, once a
+minute at most per kind, with `held_back`, how many lines of the kind it held
+back since the last; a prune that deleted rows logs at DEBUG. No line carries an
+event's payload, a statement's argument or a connection string.
 
 ## Tests
 
@@ -192,3 +285,26 @@ leases are seconds long, and they wait on conditions:
   a write, which HTTP answers 503
 - `TestWhenLeaderRaftSemantics`: `fn` runs again at each acquisition, and while
   it returns early
+
+The events transport's tests turn the reads on an interval off, or shorten them,
+so that only the path under test can deliver an event:
+
+- `TestEventsReachEveryReplica`: pulses and records from several goroutines on
+  two transports at once reach both hubs through the wake-ups, each once, in the
+  rows' order, each goroutine's in the order sent
+- `TestEventsResumeAfterReconnect`: the events written while a listener's
+  session is ended are applied once it reconnects, which alone wakes it
+- `TestEventQueueBounded`: with the writes stalled by a lock, no call waits, the
+  events past the queue are applied on their replica alone, counted and logged,
+  and the queue is written in order once the lock goes
+- `TestEventWritesSerialized`: a write waits for the event lock another
+  transaction holds, and takes a sequence after that one's row
+- `TestDeleteIssuesCountsLocally`: the count at the call, the deletion applied
+  by the other replica, and again by its writer, in sequence
+- `TestRunStartsAfterTheNewestRow`, `TestUnreadableRowsSkipped`: where the reads
+  start, and the rows a replica cannot read
+- `TestEventsPruned`: a follower's transport keeps the old rows, and prunes them
+  by the database's clock once its replica leads
+- `TestWakerErrorsNeverCarryURL`: a wrong password, a host that does not
+  resolve, a closed port and a URL that does not parse fail the waker without
+  its URL, user, host or password

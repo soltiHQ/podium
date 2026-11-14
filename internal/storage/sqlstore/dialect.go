@@ -32,6 +32,21 @@ type Dialect interface {
 	// first, as the store's classify does, and returns the context's error.
 	Classify(err error) error
 
+	// NotifySQL returns the statement that wakes the listeners of channel when
+	// the transaction it runs in commits, as the events transport of the
+	// database mode sends it after the event rows it writes; "" when the engine
+	// has no notifications, and the transport then polls. channel is a name of
+	// the transport's own, without NUL.
+	NotifySQL(channel string) string
+
+	// EventLockSQL returns the statement the events transport runs in its
+	// transaction before it inserts event rows: it holds every other
+	// transaction that runs it until this one ends, so that the rows' sequence
+	// order is their commit order, and a reader that reads the rows after the
+	// last sequence it applied skips none. A reader takes no such lock and
+	// never waits for one.
+	EventLockSQL() string
+
 	// Migrations holds the engine's migrations, NNNN_name.sql at its root,
 	// versions 1, 2, 3… without a gap.
 	Migrations() fs.FS
