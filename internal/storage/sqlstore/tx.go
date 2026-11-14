@@ -9,8 +9,9 @@ import (
 
 // handle is a write transaction as its callback sees it: every read and write
 // of the callback runs on tx, on the primary, and a transaction the callback
-// opens is this one.
+// opens is this one. It is the storage.Storage the callback of WithTx gets.
 type handle struct {
+	writer
 	store *Store
 	tx    *sql.Tx
 }
@@ -52,7 +53,8 @@ func (s *Store) transact(ctx context.Context, fn func(h *handle) error) error {
 	if err := s.fence.Check(ctx, tx); err != nil {
 		return err
 	}
-	if err := fn(&handle{store: s, tx: tx}); err != nil {
+	h := &handle{writer: writer{reader{d: s.dialect, q: tx}}, store: s, tx: tx}
+	if err := fn(h); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -76,4 +78,10 @@ func (h *handle) transact(ctx context.Context, fn func(h *handle) error) error {
 		return err
 	}
 	return fn(h)
+}
+
+// write runs fn, a write method of a writer, as a write transaction of its own:
+// the form every write method of the store takes outside WithTx.
+func (s *Store) write(ctx context.Context, fn func(w *writer) error) error {
+	return s.transact(ctx, func(h *handle) error { return fn(&h.writer) })
 }

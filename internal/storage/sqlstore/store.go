@@ -103,6 +103,10 @@ type Options struct {
 // Store keeps the control-plane state in a SQL database. The databases are the
 // caller's: the store does not close them.
 type Store struct {
+	// reader answers the point lookups, and the by-user listings, on the primary;
+	// the store routes its own listings, scans and counts.
+	reader
+
 	primary *sql.DB
 	replica *sql.DB // nil: the listings read the primary
 	dialect Dialect
@@ -138,6 +142,7 @@ func Open(ctx context.Context, opts Options) (*Store, error) {
 		fence = AllowAll{}
 	}
 	return &Store{
+		reader:  reader{d: opts.Dialect, q: opts.Primary, db: opts.Primary},
 		primary: opts.Primary,
 		replica: opts.Replica,
 		dialect: opts.Dialect,

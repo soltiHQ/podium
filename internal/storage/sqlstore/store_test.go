@@ -11,14 +11,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage/sqlstore/pgtest"
 )
 
-// querier is what the tests read and write a table through: a pool or a
-// transaction.
-type querier interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-}
-
 // migrated returns a pool on a fresh database migrated to this podium's schema.
 func migrated(t *testing.T) *sql.DB {
 	t.Helper()

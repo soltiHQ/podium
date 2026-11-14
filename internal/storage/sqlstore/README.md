@@ -7,11 +7,12 @@ placeholders, the classification of the driver's errors and the schema's
 migrations. Postgres is the first dialect, through pgx's `database/sql` driver
 (`github.com/jackc/pgx/v5/stdlib`, registered as `pgx`).
 
-So far the package is the store's core: `Open`, the write gate, the
-transactions, the read routing, the error classification, the cursor, the
-migrator and the Postgres schema. The entities' methods, which make `Store` a
-`storage.Storage`, are not written yet; they build on this core and keep the
-rules below.
+The package is the store's core — `Open`, the write gate, the transactions, the
+read routing, the error classification, the cursor, the migrator and the
+Postgres schema — and, on it, the methods of the first entity groups: agents,
+agent credentials, specs, rollouts and execution records. The methods of the
+others (users, credentials, verifiers, sessions, roles), which make `Store` a
+`storage.Storage`, are not written yet; they keep the rules below.
 
 ## Package map
 
@@ -27,6 +28,13 @@ sqlstore/
 ├── cursor.go       the listing cursor, tagged "sql"
 ├── errors.go       ErrSchemaNewer, ErrSchemaOlder, what every dialect's classification shares
 ├── keys.go         the cap on a value bound to an indexed column, bytea binding
+├── rows.go         the reader and the writer the entities' methods are on; lookups, deletes, upserts
+├── list.go         the keyset listing, with the Go filter applied to its batches
+├── filter.go       the filters of the factory: the criteria SQL applies, the Query Go applies
+├── scan.go         the Scan methods, in one snapshot
+├── count.go        the Count methods, by GROUP BY
+├── agents.go, agent_credentials.go, specs.go, rollouts.go, executions.go
+│                   one entity group each: its codec, its columns, its methods
 └── pgtest/         a fresh Postgres database per test, for the tests of the database mode
 ```
 
@@ -151,6 +159,62 @@ The cursor of a listing is a place in the listing order: the creation time, in
 nanoseconds, and the ID's bytes of the row it was made at, as base64url JSON
 tagged `sql`. A cursor that is not the store's, the in-memory store's included,
 or a malformed one, is `storage.ErrInvalidArgument`.
+
+## Entities
+
+Every entity group is a file: its table and codec, the columns its row holds
+beside the body, its writes on the `writer` and its reads on the `reader`. The
+store embeds the reader, so a point lookup runs on the primary's pool; its
+writes, outside a transaction, run through the core's write transaction (gate,
+fence, a transaction of their own); the handle of a write transaction is a
+writer on it, and its reads are that transaction's.
+
+- **Writes validate in Go first.** `storage.ValidateEntity` (no nil, no ID, no
+  creation time), then the entity's codec, which refuses a string that is not
+  UTF-8 and a time outside the years 1678 to 2262, then the cap on a key: all
+  before a statement, so a refused write leaves the transaction usable. An
+  upsert is `INSERT … ON CONFLICT (id) DO UPDATE`. A delete answers
+  `ErrNotFound` from the rows it deleted. A bulk delete (`DeleteRolloutsBySpec`)
+  deletes every row the key holds and is idempotent
+- **Listings** run in the order `(created_at DESC, id ASC)` by keyset: the rows
+  after the place the cursor names. SQL applies the exact criteria and the
+  order; nothing else. A page is one statement of `limit+1` rows when no Go
+  filter applies. The filtered listings below read keyset batches until they
+  hold `limit+1` matches or the rows end, so a page is full unless the rows are
+  over, no match is skipped or returned twice across pages, and the cursor names
+  the last row returned. A page with no row is an empty list
+- **What SQL filters, what Go filters.** SQL applies the exact criteria: an
+  agent's `StaleAtBefore` (a deadline before the bound, or none: `stale_at` 0
+  means never set, which the codec's refusal of the exact Unix epoch keeps
+  unambiguous); a rollout's `SpecID`, `AgentID` and `Statuses`; an execution
+  record's `AgentID`, `SpecID`, `TaskName`, `TaskUID` and `Statuses`. Go applies
+  `Query`, over the rows SQL returns, as `storage.TextQuery` does for the
+  in-memory store (the query trimmed and folded with `strings.ToLower`, a field
+  matches when its folded value contains it): agents over ID, name and endpoint;
+  specs over name and slot. `%`, `_` and `\` are literal, and case folds beyond
+  ASCII, as in memory, whatever the engine's collation. The bodies of the rows
+  are decoded for it, which the filtered agent listing at 5000 agents measures
+- **A criterion time outside the range of the column** is not refused: every
+  stored time lies inside it, so the answer is the same for every row, and the
+  filter builds it so. An agent's `StaleAtBefore` below the year 1678 matches
+  the agents with no deadline, and above 2262 every agent, as memory answers
+- **An execution record's `Statuses`** that are not terminal match nothing, as
+  no stored record has one, and are left out of the statement
+- **A filter** the factory did not build, one built for another entity, or a nil
+  typed pointer, is `ErrInvalidArgument`; a nil filter lists every row
+- **Executions.** `UpsertExecution` validates the record as the model does
+  (`model.NewExecutionRecord` of its parameters, its ID against its run's), then
+  inserts only a new ID: `ON CONFLICT (id) DO NOTHING`. A replay is no error and
+  changes nothing, its capture time included
+- **Scans.** A `Scan*` outside a transaction is one read-only REPEATABLE READ
+  transaction on the database the routing picks; inside a transaction it reads
+  that transaction. It returns the rows in the listing order, nil when none
+  matches
+- **Counts.** `CountAgents` and `CountRollouts` are one `GROUP BY` statement: an
+  empty map, not nil, when no row exists, and no entry for a status no row has.
+  Inside a transaction they count the transaction
+- **Context.** Every method honours its context: a done one answers its own
+  error, before a statement for a listing, a scan and a count
 
 ## Errors
 
