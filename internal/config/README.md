@@ -1162,18 +1162,15 @@ replica must share work as in raft, over the replicas the registry lists
   before 1.21 rejects, and the lease connection's session-level
   `statement_timeout`, which then leaks to the other clients of the pooled
   server connection.
-- **The lease bounds the write transactions.** A write transaction that holds
-  the fence's row lock blocks the leader's own renewals, which update the same
-  row: it must end within about a third of `lease`, two thirds at best, or the
-  leader steps down (3.3 s to 6.7 s with the default 10 s). Transactions that
-  run a statement per agent, `Deploy`, `Delete` and the credential sweep that
-  starts every term, grow with the fleet: at 5000 agents an explicit-target
-  `Deploy` reaches 3.3 s at a round trip of about 0.33 ms, and a sweep that
-  outlasts the bound is cancelled at each step-down and started again by the
-  next term, so it can loop. This is a known limit, not a fixed one: raise
-  `lease` with the fleet's size and the round-trip time to the database; a
-  failover takes up to that long (see "The lease" in
-  `internal/cluster/database/README.md`).
+- **A takeover waits for the old leader's writes.** A write transaction of any
+  length keeps the leadership: the leader's renewals do not wait for the fence's
+  lock. A takeover does: it waits for the old leader's write transactions in
+  flight, each attempt within a sixth of `lease` and retried, so a failover
+  takes `lease` plus the time those writes take to end. A transaction that a
+  leader cut off mid-transaction left open holds the takeover until the server
+  ends it: at once when the server sees the connection closed, otherwise at its
+  TCP keepalives or `idle_in_transaction_session_timeout`; podium sets neither
+  (see "The fence" in `internal/cluster/database/README.md`).
 - **Replication.** Prefer synchronous replication for a standby that can take
   over: the fence holds through a database failover, but rows that an
   asynchronous standby had not received are lost, and with them the writes

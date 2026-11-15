@@ -44,9 +44,14 @@ database/
 compare.
 
 - A replica takes the row when it is free (no row, or a released one) or
-  expired, in one statement that raises the epoch, also when this replica held
-  it last: an `INSERT … ON CONFLICT DO UPDATE … WHERE expires_at <= now()`. A
-  row that another replica holds, unexpired, is left as it is
+  expired, in one transaction that raises the epoch, also when this replica held
+  it last: `SELECT … FOR UPDATE` of the row, which waits for the old leader's
+  writes in flight (see "The fence"), then an
+  `INSERT … ON CONFLICT DO UPDATE … WHERE expires_at <= statement_timestamp()`.
+  The lease it takes starts at that statement, after the lock's wait, where
+  `now()` would be the transaction's start, before it. A row that another
+  replica holds, unexpired, is left as it is, a row renewed while the takeover
+  waited for the lock included
 - The holder renews the row every third of the lease, an `UPDATE` of
   `expires_at` that matches its epoch and its ID. A renewal that changes no row
   finds the lease moved, and steps the replica down at once
@@ -96,11 +101,11 @@ compare.
 first write:
 
 - a replica that does not hold the lease is refused, without a statement
-- the holder reads the row `SELECT epoch, holder … FOR SHARE` and compares both
-  with its own term's: the holder too, so that a database failover that brings
-  an older row back cannot let two replicas pass with one epoch. A row that
-  moved, a takeover this replica has not seen yet, or a missing one, is refused,
-  and steps the replica down at once
+- the holder reads the row `SELECT epoch, holder … FOR KEY SHARE` and compares
+  both with its own term's: the holder too, so that a database failover that
+  brings an older row back cannot let two replicas pass with one epoch. A row
+  that moved, a takeover this replica has not seen yet, or a missing one, is
+  refused, and steps the replica down at once
 
 Both refusals answer `cluster.ErrNotLeader`, with messages of their own
 (`this replica does not hold the lease`, `the lease moved to another replica`):
@@ -109,32 +114,36 @@ the fence runs before the first write, so nothing was written, as raft answers
 transports answer it with 503, and HTTP adds the leader's address when one is
 known.
 
-The share lock holds the row until the transaction ends. A takeover, which locks
-the row to update it, waits for the write in flight, and a fence that runs after
-a takeover reads the row it left: an ex-leader that has not yet noticed cannot
-commit. The leader's own renewals wait for its write in flight too: a write
-transaction that holds the row past the step-down deadline steps the leader
-down, and still commits, as no takeover lands before it ends.
+The key-share lock holds the row until the transaction ends, against the
+takeover alone:
 
-This is a known limit, not a fixed one. The share lock conflicts with the
-renewal's `UPDATE` of the same row, so while one write transaction holds the
-row, a renewal waits until its statement timeout (a sixth of the lease) and is
-retried a twelfth later. Once none lands within two thirds of the lease, the
-leader steps down: **a write transaction must end within about a third of the
-lease, two thirds at best**, depending on where in the renewal cycle it starts.
-With the default 10 s lease that is about 3.3 s to 6.7 s. Most of podium's
-transactions take milliseconds, but a few run one statement, one round trip
-each, per agent, with the gate and the lock held: `spec.Deploy` (about two
-statements per agent for explicit targets, one for label targets), `spec.Delete`
-(one upsert per rollout) and `agent.SweepCredentials` (two per agent). They grow
-with the fleet and the round-trip time: at 5000 agents an explicit-target
-`Deploy` reaches 3.3 s at a round trip of about 0.33 ms. The credential sweep
-runs at the start of every term: when it outlasts the bound, the step-down
-cancels it, its transaction rolls back, and the next term starts it again, so
-the sweep can loop without finishing. Raise `lease` with the fleet's size and
-the round-trip time to the database, so that the slowest of these transactions
-stays well inside a third of it; the price is a failover that takes up to that
-long.
+- The renewals and the release change `expires_at` alone, an `UPDATE` that takes
+  the row `FOR NO KEY UPDATE`, which the fence's lock does not hold: they never
+  wait for a write in flight
+- A takeover locks the row `FOR UPDATE` first, which waits for the writes in
+  flight, each until its transaction ends, and a fence that starts while a
+  takeover holds the row waits for it, then re-reads the row it left: an
+  ex-leader that has not yet noticed cannot commit. A renewal does not queue
+  behind a takeover that still waits for its lock: it lands, and the takeover,
+  once the writes ended, finds the lease renewed and takes nothing
+- **A statement that changes `epoch` or `holder` must run after
+  `SELECT … FOR UPDATE` of the row, in the same transaction.** An `UPDATE`
+  without that lock is a no-key update: a fence neither waits for it nor
+  re-reads the row after it. Postgres records an update made under that lock as
+  a key update, which a key-share lock waits for, and the fence's statement then
+  re-reads the row it left, as `READ COMMITTED` does after a lock's wait
+
+What remains:
+
+- A write transaction of any length keeps the leadership: the renewals land
+  while it runs, and it commits at the epoch it began in
+- A takeover waits for the old leader's writes in flight, each attempt under the
+  statement timeout (a sixth of the lease) and retried, so a failover takes the
+  lease plus the time those writes take to end
+- A transaction that a leader cut off mid-transaction left open holds the
+  takeover until the server ends it: at once when the server sees the connection
+  closed, otherwise when the server's TCP keepalives or
+  `idle_in_transaction_session_timeout` end it. podium sets neither
 
 ## Followers
 
@@ -273,7 +282,8 @@ listener reconnects is lost, and the reconnect's own read covers it.
   of the lease after the expiry, at a raised epoch. A leader that lost the
   database stepped down a third of the lease before. Writes answer 503 from the
   crash, or the step-down, until the takeover: at most a lease after the last
-  renewal that landed, 10 s by default
+  renewal that landed, 10 s by default, plus the time the old leader's writes in
+  flight take to end (see "The fence")
 - A leader that stops cleanly releases the row: another replica takes it at its
   next read, within a second
 - A leader whose process pauses past its lease, and wakes once another replica
@@ -338,7 +348,16 @@ leases are seconds long, and they wait on conditions:
   once
 - `TestExLeaderWriteFenced`: an ex-leader that has not seen the takeover writes
   nothing, and steps down at once
-- `TestTakeoverWaitsForAFencedWrite`: a takeover waits for the write in flight
+- `TestTakeoverWaitsForAFencedWrite`: a takeover waits for the write in flight,
+  and the lease it takes lasts a full lease from its upsert
+- `TestTakeoverYieldsToARenewalWhileItWaits`: the holder's renewal lands while a
+  takeover waits for a fenced write, and the takeover then takes nothing
+- `TestFenceWaitsForATakeoverInFlight`: a fence that starts while a takeover
+  holds the row waits for it, then refuses the write as the lease moved, and
+  steps the leader down
+- `TestFencedWriteLongerThanTheLeaseKeepsTheLead`: a write that holds the
+  fence's lock for three leases: the leader renews throughout, never steps down,
+  and the write commits at its epoch
 - `TestSameHolderNewEpoch`: a replica that takes the lease again raises the
   epoch, once the row expired
 - `TestStepDownBeforeExpiry`: a slow renewal lands, then renewals stop landing:

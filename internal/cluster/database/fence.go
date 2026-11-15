@@ -9,10 +9,13 @@ import (
 	"github.com/soltiHQ/control-plane/internal/cluster"
 )
 
-// fenceRead reads the lease row in a write transaction, FOR SHARE: a takeover,
-// and a renewal, wait until the transaction ends, and a fence that runs after a
-// takeover reads the row it left.
-const fenceRead = `SELECT epoch, holder FROM podium_leader WHERE id = 1 FOR SHARE`
+// fenceRead reads the lease row in a write transaction, FOR KEY SHARE: a
+// takeover, which locks the row FOR UPDATE first (lockForTakeover), waits until
+// the transaction ends, and a fence that runs while a takeover holds the row
+// waits for it, then reads the row it left. The renewal and the release, which
+// change expires_at alone, take the row FOR NO KEY UPDATE, which this lock does
+// not hold: they never wait for a write.
+const fenceRead = `SELECT epoch, holder FROM podium_leader WHERE id = 1 FOR KEY SHARE`
 
 // The fence's two refusals. Both are cluster.ErrNotLeader: the fence runs
 // before the transaction's first write, so nothing was written, as raft refuses
@@ -29,11 +32,13 @@ var (
 // Check implements sqlstore.Fence. It runs at the start of each write
 // transaction of the store, before its first write, and refuses the
 // transaction of a replica that does not hold the lease with errNotHolder. The
-// holder reads the lease row FOR SHARE and compares its epoch and holder with
-// its own term's: a row that moved, a missing one included, is refused with
-// errLeaseMoved, and steps this replica down at once. The share lock holds the
-// row until the transaction ends, so that no takeover lands while the write
-// runs. A statement that fails answers as failed classifies it.
+// holder reads the lease row FOR KEY SHARE and compares its epoch and holder
+// with its own term's: a row that moved, a missing one included, is refused
+// with errLeaseMoved, and steps this replica down at once. The key-share lock
+// holds the row against a takeover until the transaction ends, so that none
+// lands while the write runs; the renewals do not wait for it, so that a write
+// of any length keeps the leadership. A statement that fails answers as failed
+// classifies it.
 func (l *Leadership) Check(ctx context.Context, tx *sql.Tx) error {
 	t := l.current()
 	if t == nil {
@@ -59,7 +64,7 @@ func (l *Leadership) Check(ctx context.Context, tx *sql.Tx) error {
 		return errLeaseMoved
 	}
 	// A step-down while the row was read leaves the write to the replica that
-	// takes over; the share lock then holds that takeover until the rollback.
+	// takes over; the key-share lock then holds that takeover until the rollback.
 	if l.current() != t {
 		return errNotHolder
 	}

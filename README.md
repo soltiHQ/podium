@@ -728,7 +728,7 @@ podium --config podium.yaml
 | `cluster.database.url` | `SOLTI_CLUSTER_DATABASE_URL` | none | The primary: the leader's writes and every read but one kind. A secret. |
 | `cluster.database.replica_url` | `SOLTI_CLUSTER_DATABASE_REPLICA_URL` | none | A read endpoint for the listings of the GET requests of the UI and the API. A secret. |
 | `cluster.database.advertise_addr` | `SOLTI_CLUSTER_DATABASE_ADVERTISE_ADDR` | none, required | `host:port`: the host a name or an IP, an IPv6 host in brackets (a bracketed IPv4 host is accepted); a host the other replicas can dial; the port is not used, as every replica serves the same ports. |
-| `cluster.database.lease` | `SOLTI_CLUSTER_DATABASE_LEASE` | `10s` | How long a lease lasts; a failover takes up to that long. A write transaction must end within about a third of it, or the leader steps down: raise it with the fleet's size (see [Operating the database backend](internal/config/README.md#operating-the-database-backend)). |
+| `cluster.database.lease` | `SOLTI_CLUSTER_DATABASE_LEASE` | `10s` | How long a lease lasts; a failover takes up to that long, and longer while the old leader's write transactions in flight end (see [Operating the database backend](internal/config/README.md#operating-the-database-backend)). |
 | `cluster.database.max_open_conns` | `SOLTI_CLUSTER_DATABASE_MAX_OPEN_CONNS` | `10` | The primary's pool, and the replica's. |
 | `cluster.database.migrate` | `SOLTI_CLUSTER_DATABASE_MIGRATE` | `true` | Migrate the schema at start; `false` refuses an older schema and says to run `podium migrate`. |
 | `cluster.database.driver` | `SOLTI_CLUSTER_DATABASE_DRIVER` | `postgres` | The only driver. |

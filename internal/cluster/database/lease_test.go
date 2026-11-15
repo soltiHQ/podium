@@ -252,7 +252,7 @@ func TestSameHolderNewEpoch(t *testing.T) {
 	if row.holder != a.id || row.epoch != old.epoch+1 {
 		t.Fatalf("the lease is %s's at epoch %d, want %s's at %d", row.holder, row.epoch, a.id, old.epoch+1)
 	}
-	// The takeover's now() is its expires_at less the lease.
+	// The takeover's statement_timestamp() is its expires_at less the lease.
 	if took := row.expiresAt - lease.Microseconds(); took < old.expiresAt {
 		t.Errorf("replica-a took the lease again %d µs before it expired, want once it expired", old.expiresAt-took)
 	}

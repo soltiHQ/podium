@@ -8,28 +8,39 @@
 //
 // podium_leader holds one row: its epoch, its holder (a replica's ID), the
 // address the others forward writes to, and expires_at, in the database's
-// clock. A replica takes the row when it is free or expired, in one statement
-// that raises the epoch, also when this replica held it last. While it holds the
-// row it renews it every third of the lease, and it steps down, AmLeader false,
-// the contexts of WhenLeader cancelled and its writes refused, once no renewal
-// has succeeded within two thirds of the lease, counted from the send of the
-// last renewal that did: it stops before the row can expire, whatever the
-// renewal's answer took. The lease's statements run on a pool of their own
-// (Options.LeaseDB), each under a statement timeout that the server enforces,
-// so that writers never starve them and none runs past the step-down. When Run's
-// context ends, the holder releases the row once its WhenLeader work has
-// returned: expires_at becomes the database's now, epoch and holder kept. Work
-// that has not returned within a sixth of the lease leaves the row to expire.
+// clock. A replica takes the row when it is free or expired, in one transaction
+// that locks the row FOR UPDATE, which waits for the old leader's writes in
+// flight, then raises the epoch, also when this replica held it last: the lease
+// it takes starts at that statement. While it holds the row it renews it every
+// third of the lease, and it steps down, AmLeader false, the contexts of
+// WhenLeader cancelled and its writes refused, once no renewal has succeeded
+// within two thirds of the lease, counted from the send of the last renewal
+// that did: it stops before the row can expire, whatever the renewal's answer
+// took. The lease's statements run on a pool of their own (Options.LeaseDB),
+// each under a statement timeout that the server enforces, so that writers
+// never starve them and none runs past the step-down. When Run's context ends,
+// the holder releases the row once its WhenLeader work has returned: expires_at
+// becomes the database's now, epoch and holder kept. Work that has not returned
+// within a sixth of the lease leaves the row to expire.
 //
 // # The fence
 //
 // Check runs at the start of each write transaction of the store. A replica that
 // does not hold the lease is refused without a statement. The holder reads the
-// row FOR SHARE and compares its epoch and holder with its own: a row that moved,
-// a takeover this replica has not seen yet, is refused too, and steps it down at
-// once. Both refusals are cluster.ErrNotLeader, as nothing was written. The
-// share lock holds the row until the transaction ends: a takeover waits for the
-// write in flight, and a write after the takeover reads the row it left.
+// row FOR KEY SHARE and compares its epoch and holder with its own: a row that
+// moved, a takeover this replica has not seen yet, is refused too, and steps it
+// down at once. Both refusals are cluster.ErrNotLeader, as nothing was written.
+// The key-share lock holds the row until the transaction ends against the
+// takeover's FOR UPDATE alone: a takeover waits for the writes in flight, and a
+// fence that starts while a takeover holds the row waits for it, then reads the
+// row it left. The renewals and the release change expires_at alone, an UPDATE
+// that takes the row FOR NO KEY UPDATE, which the key-share lock does not hold:
+// a write transaction of any length keeps the leadership.
+//
+// The invariant: a statement that changes epoch or holder must run after
+// SELECT … FOR UPDATE of the row, in the same transaction. An UPDATE without
+// that lock is a no-key update: a fence neither waits for it nor re-reads the
+// row after it.
 //
 // # Followers
 //

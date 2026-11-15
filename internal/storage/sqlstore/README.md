@@ -414,7 +414,7 @@ A cell is the median of the three runs.
 - 5000 agents that sync every 30 s, the fixture's heartbeat, need 167 syncs a
   second. The server here flushes nothing to disk, unlike raft's commits in
   `internal/raft/README.md`. Each of a sync's two write transactions takes the
-  fence's share lock on the lease row, which writes WAL, so a server that
+  fence's key-share lock on the lease row, which writes WAL, so a server that
   flushes its WAL at each commit (`synchronous_commit` on, the default) adds
   that flush twice to a sync, and a synchronous standby its acknowledgement as
   well. Neither was measured.

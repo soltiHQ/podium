@@ -1,9 +1,11 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -127,8 +129,10 @@ func TestFenceRefusesAnotherHolderAtTheSameEpoch(t *testing.T) {
 }
 
 // TestTakeoverWaitsForAFencedWrite checks that the fence holds the lease row in
-// share mode until the write transaction ends: a takeover waits for the write in
-// flight, which commits, and takes the lease once it did.
+// key-share mode until the write transaction ends, and that a takeover, which
+// locks the row FOR UPDATE first, waits for the write in flight, which commits,
+// and takes the lease once it did. The lease it takes lasts a full lease from
+// its upsert, not from the start of its transaction, before the wait.
 func TestTakeoverWaitsForAFencedWrite(t *testing.T) {
 	databaseURL, admin := migratedDatabase(t)
 	a := newReplica(t, databaseURL, "replica-a", replicaConfig{lease: fenceLease})
@@ -157,16 +161,208 @@ func TestTakeoverWaitsForAFencedWrite(t *testing.T) {
 	if b.AmLeader() {
 		t.Fatal("replica-b took the lease while a fenced write was in flight")
 	}
+	// The takeover waits a second by the database's clock, within its statement
+	// timeout, a sixth of fenceLease.
+	waitFor(t, 5*time.Second, "replica-b's takeover waiting a second for the lock", func() bool { return lockWait(t, admin) >= time.Second })
 	close(proceed)
 	if err := receive(t, written, 5*time.Second, "the fenced write"); err != nil {
 		t.Fatalf("the fenced write: %v", err)
 	}
 	waitFor(t, 5*time.Second, "replica-b leading once the write committed", b.AmLeader)
+	if left := readLease(t, admin).left; left <= fenceLease-500*time.Millisecond {
+		t.Errorf("replica-b's lease has %s left once it leads, want over %s: a lease from its upsert, not from its transaction's start, before the wait", left, fenceLease-500*time.Millisecond)
+	}
 	if _, err := storeA.GetRole(ctx, role.ID()); err != nil {
 		t.Errorf("reading the fenced write back: %v", err)
 	}
 	if row := readLease(t, admin); row.holder != b.id || row.epoch != old.epoch+1 {
 		t.Errorf("the lease is %s's at epoch %d, want %s's at %d", row.holder, row.epoch, b.id, old.epoch+1)
+	}
+}
+
+// TestTakeoverYieldsToARenewalWhileItWaits checks that the holder's renewal
+// lands while a takeover waits for a fenced write: the renewal's no-key update
+// waits neither for the fence's key-share lock nor behind the takeover that
+// waits for it. Once the write ends, the takeover finds the lease renewed and
+// takes nothing.
+func TestTakeoverYieldsToARenewalWhileItWaits(t *testing.T) {
+	databaseURL, admin := migratedDatabase(t)
+	var renewed atomic.Int32
+	a := newReplica(t, databaseURL, "replica-a", replicaConfig{
+		lease:    testLease,
+		observer: Observer{Renewed: func() { renewed.Add(1) }},
+	})
+	a.start(t)
+	waitFor(t, 5*time.Second, "replica-a leading", a.AmLeader)
+	b := newReplica(t, databaseURL, "replica-b", replicaConfig{lease: fenceLease, poll: fastPoll})
+	b.start(t)
+	waitFor(t, 5*time.Second, "replica-b following replica-a", func() bool { return b.CurrentLeader() == a.addr })
+	storeA := openStore(t, a)
+	old := readLease(t, admin)
+
+	ctx := t.Context()
+	role := testRole(t, "role-1")
+	fenced, proceed := make(chan struct{}), make(chan struct{})
+	written := make(chan error, 1)
+	go func() {
+		written <- storeA.WithTx(ctx, func(tx storage.Storage) error {
+			close(fenced)
+			<-proceed
+			return tx.UpsertRole(ctx, role)
+		})
+	}()
+	receive(t, fenced, 5*time.Second, "the write past the fence")
+
+	// replica-b takes the lease once it reads it expired. A renewal of replica-a
+	// that lands before replica-b reads the row leaves it nothing to take, so the
+	// lease is expired again at each look that finds no takeover waiting.
+	waitFor(t, 5*time.Second, "replica-b's takeover waiting for the lock", func() bool {
+		if lockWaiters(t, admin) > 0 {
+			return true
+		}
+		expireLease(t, admin)
+		return false
+	})
+	// A renewal lands while the takeover waits: the count grows, and the row's
+	// lease lasts again, past the last expiry the test wrote.
+	before, waiters := renewed.Load(), 0
+	waitFor(t, testLease, "a renewal of replica-a landing while replica-b's takeover waits", func() bool {
+		landed := renewed.Load() > before && readLease(t, admin).left > 0
+		n := lockWaiters(t, admin)
+		if n == 0 {
+			t.Fatal("replica-b's takeover stopped waiting for the lock before a renewal of replica-a landed")
+		}
+		waiters = max(waiters, n)
+		return landed
+	})
+	t.Logf("%d renewals of replica-a landed while replica-b's takeover waited %s for the lock; at most %d sessions waited for a lock", renewed.Load()-before, lockWait(t, admin), waiters)
+	close(proceed)
+	if err := receive(t, written, 5*time.Second, "the fenced write"); err != nil {
+		t.Fatalf("the fenced write: %v", err)
+	}
+
+	waitFor(t, 5*time.Second, "replica-b following replica-a once its takeover found the lease renewed", func() bool { return b.CurrentLeader() == a.addr })
+	if !a.AmLeader() || b.AmLeader() {
+		t.Fatalf("replica-a leads %v and replica-b %v; want replica-a alone", a.AmLeader(), b.AmLeader())
+	}
+	if row := readLease(t, admin); row.holder != a.id || row.epoch != old.epoch {
+		t.Errorf("the lease is %s's at epoch %d, want %s's at %d: the takeover took nothing", row.holder, row.epoch, a.id, old.epoch)
+	}
+}
+
+// TestFenceWaitsForATakeoverInFlight checks that a fence that starts while a
+// takeover holds the lease row, locked FOR UPDATE and moved to another holder,
+// uncommitted, waits for the takeover, then reads the row it left: the write is
+// refused with the moved lease's refusal, commits nothing, and steps the leader
+// down.
+func TestFenceWaitsForATakeoverInFlight(t *testing.T) {
+	databaseURL, admin := migratedDatabase(t)
+	a := newReplica(t, databaseURL, "replica-a", replicaConfig{lease: fenceLease})
+	a.start(t)
+	waitFor(t, 5*time.Second, "replica-a leading", a.AmLeader)
+	storeA := openStore(t, a)
+
+	// A takeover in flight, as take runs it: the row locked FOR UPDATE, then
+	// moved to another holder at the next epoch.
+	takeover, err := admin.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin the takeover: %v", err)
+	}
+	t.Cleanup(func() { _ = takeover.Rollback() })
+	if _, err := takeover.ExecContext(context.Background(), `SELECT 1 FROM podium_leader WHERE id = 1 FOR UPDATE`); err != nil {
+		t.Fatalf("lock the lease row: %v", err)
+	}
+	if _, err := takeover.ExecContext(context.Background(), `UPDATE podium_leader
+   SET epoch = epoch + 1, holder = 'replica-ghost', address = 'replica-ghost.podium.test:7000'
+ WHERE id = 1`); err != nil {
+		t.Fatalf("move the lease: %v", err)
+	}
+
+	ctx := t.Context()
+	role := testRole(t, "role-1")
+	written := make(chan error, 1)
+	go func() { written <- storeA.UpsertRole(ctx, role) }()
+	waitFor(t, 5*time.Second, "replica-a's fence waiting for the takeover", func() bool { return lockWaiters(t, admin) > 0 })
+	select {
+	case err := <-written:
+		t.Fatalf("the write returned %v while the takeover was in flight, want it waiting", err)
+	default:
+	}
+
+	if err := takeover.Commit(); err != nil {
+		t.Fatalf("commit the takeover: %v", err)
+	}
+	err = receive(t, written, 5*time.Second, "the write once the takeover committed")
+	if !errors.Is(err, cluster.ErrNotLeader) || !errors.Is(err, errLeaseMoved) {
+		t.Fatalf("the write once the takeover committed: %v; want the fence's refusal of a moved lease, a cluster.ErrNotLeader", err)
+	}
+	if a.AmLeader() {
+		t.Error("replica-a still leads once its write found the lease moved")
+	}
+	if _, err := storeA.GetRole(ctx, role.ID()); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("reading the refused write back: %v, want storage.ErrNotFound", err)
+	}
+}
+
+// TestFencedWriteLongerThanTheLeaseKeepsTheLead checks that a write transaction
+// that holds the fence's lock for three leases keeps the leadership: the
+// renewals, no-key updates, do not wait for the fence's key-share lock, so the
+// leader renews throughout, never steps down, and the write commits at the
+// epoch it began in.
+func TestFencedWriteLongerThanTheLeaseKeepsTheLead(t *testing.T) {
+	const lease = 1200 * time.Millisecond
+	databaseURL, admin := migratedDatabase(t)
+	var renewed, lost atomic.Int32
+	a := newReplica(t, databaseURL, "replica-a", replicaConfig{
+		lease:    lease,
+		observer: Observer{Renewed: func() { renewed.Add(1) }, Lost: func() { lost.Add(1) }},
+	})
+	a.start(t)
+	waitFor(t, 5*time.Second, "replica-a leading", a.AmLeader)
+	storeA := openStore(t, a)
+	old := readLease(t, admin)
+
+	ctx := t.Context()
+	role := testRole(t, "role-1")
+	fenced, proceed := make(chan struct{}), make(chan struct{})
+	written := make(chan error, 1)
+	go func() {
+		written <- storeA.WithTx(ctx, func(tx storage.Storage) error {
+			close(fenced)
+			<-proceed
+			return tx.UpsertRole(ctx, role)
+		})
+	}()
+	receive(t, fenced, 5*time.Second, "the write past the fence")
+	passed, before := time.Now(), renewed.Load()
+
+	// For three leases from the moment the write passed the fence, replica-a
+	// leads, and no renewal waits for a lock.
+	for held := time.Since(passed); held < 3*lease; held = time.Since(passed) {
+		if !a.AmLeader() {
+			t.Fatalf("replica-a stepped down %s into a write that holds the fence's lock", held)
+		}
+		if n := lockWaiters(t, admin); n != 0 {
+			t.Fatalf("%d sessions wait for a lock %s into the write, want none: a renewal waits for the fence's lock", n, held)
+		}
+		time.Sleep(waitStep)
+	}
+	// Nine renewals are due over three leases.
+	if n := renewed.Load() - before; n < 4 {
+		t.Fatalf("%d renewals landed over three leases of the write, want 4 at least", n)
+	}
+	close(proceed)
+	if err := receive(t, written, 5*time.Second, "the fenced write"); err != nil {
+		t.Fatalf("the fenced write: %v", err)
+	}
+	if _, err := storeA.GetRole(ctx, role.ID()); err != nil {
+		t.Errorf("reading the fenced write back: %v", err)
+	}
+	if n := lost.Load(); n != 0 {
+		t.Errorf("%d losses observed, want none", n)
+	}
+	if row := readLease(t, admin); row.holder != a.id || row.epoch != old.epoch {
+		t.Errorf("the lease is %s's at epoch %d, want %s's at %d", row.holder, row.epoch, a.id, old.epoch)
 	}
 }
 

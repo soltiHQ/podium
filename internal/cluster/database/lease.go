@@ -9,22 +9,42 @@ import (
 )
 
 // The lease's statements. Each runs on the lease's pool, on one connection,
-// under the statement_timeout onLease sets first. now() is the database's clock:
-// in a statement of its own, the time the statement starts. A lease of $3 is in
-// microseconds.
+// under the statement_timeout onLease sets first; the takeover's two run in a
+// transaction of their own, lockForTakeover first. now() is the database's
+// clock: in a statement of its own, the time the statement starts; in a
+// transaction, the time the transaction started, where statement_timestamp()
+// is the statement's own start. A lease of $3 is in microseconds.
+//
+// The fence reads the row FOR KEY SHARE (fenceRead), a lock that holds it
+// against FOR UPDATE alone. renewLease and releaseLease change expires_at
+// alone, no-key updates, which never wait for a fence. A statement that changes
+// epoch or holder must run after lockForTakeover, in the same transaction:
+// Postgres then records its update as a key update, which a fence waits for,
+// then re-reads the row after. An UPDATE of epoch or holder without that lock
+// is a no-key update: a fence neither waits for it nor re-reads the row after
+// it.
 const (
+	// lockForTakeover locks the row FOR UPDATE, the first statement of a
+	// takeover: it waits for the write transactions in flight, whose fences hold
+	// the row FOR KEY SHARE, and makes the takeover's update one that a fence
+	// waits for. A missing row locks nothing: takeLease inserts it.
+	lockForTakeover = `SELECT 1 FROM podium_leader WHERE id = 1 FOR UPDATE`
+
 	// takeLease takes the lease when the row is free or expired, raising its
 	// epoch, also when this replica held it last, and returns the epoch taken. A
 	// row that another replica holds, unexpired, returns no row: the conflict
-	// locks it, and the WHERE leaves it.
+	// locks it, and the WHERE leaves it, a lease renewed while lockForTakeover
+	// waited included. It runs after lockForTakeover, in its transaction:
+	// statement_timestamp() is the upsert's own start, after the lock's wait,
+	// where now() would be the transaction's, before it.
 	takeLease = `INSERT INTO podium_leader (id, epoch, holder, address, expires_at)
-VALUES (1, 1, $1, $2, now() + $3::bigint * interval '1 microsecond')
+VALUES (1, 1, $1, $2, statement_timestamp() + $3::bigint * interval '1 microsecond')
 ON CONFLICT (id) DO UPDATE
    SET epoch = podium_leader.epoch + 1,
        holder = excluded.holder,
        address = excluded.address,
        expires_at = excluded.expires_at
- WHERE podium_leader.expires_at <= now()
+ WHERE podium_leader.expires_at <= statement_timestamp()
 RETURNING epoch`
 
 	// renewLease moves the expiry of the lease this replica holds at epoch $1. It
@@ -201,17 +221,33 @@ func (l *Leadership) readRow(ctx context.Context) (seen, bool, error) {
 }
 
 // take takes the lease when it is free or expired, and returns the epoch
-// taken: 0 when another replica holds it.
+// taken: 0 when another replica holds it. It runs one transaction, each of its
+// statements under the statement timeout: lockForTakeover, which waits for the
+// write transactions in flight, then takeLease. The transaction is READ
+// COMMITTED, explicitly, as the store's are: the re-read of the row after a
+// lock's wait relies on it, where a stricter level refuses a row that changed
+// while it waited.
 func (l *Leadership) take(ctx context.Context) (int64, error) {
 	var epoch int64
 	err := l.onLease(ctx, l.statementTimeout, func(ctx context.Context, conn *sql.Conn) error {
-		err := conn.QueryRowContext(ctx, takeLease, l.id, l.addr, l.lease.Microseconds()).Scan(&epoch)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
+		tx, err := conn.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+		if err != nil {
+			return err
 		}
-		return err
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, lockForTakeover); err != nil {
+			return err
+		}
+		err = tx.QueryRowContext(ctx, takeLease, l.id, l.addr, l.lease.Microseconds()).Scan(&epoch)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		return tx.Commit()
 	})
-	return epoch, err
+	if err != nil {
+		return 0, err
+	}
+	return epoch, nil
 }
 
 // renewRow renews the lease this replica holds at epoch, under timeout, and
