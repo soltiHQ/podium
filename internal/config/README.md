@@ -1168,9 +1168,11 @@ replica must share work as in raft, over the replicas the registry lists
   flight, each attempt within a sixth of `lease` and retried, so a failover
   takes `lease` plus the time those writes take to end. A transaction that a
   leader cut off mid-transaction left open holds the takeover until the server
-  ends it: at once when the server sees the connection closed, otherwise at its
-  TCP keepalives or `idle_in_transaction_session_timeout`; podium sets neither
-  (see "The fence" in `internal/cluster/database/README.md`).
+  ends it: at once when the server sees the connection closed, otherwise once it
+  notices the client vanished, after about 2 h 11 min with the Linux keepalive
+  defaults. The server's `tcp_keepalives_*` and `tcp_user_timeout`, or
+  `idle_in_transaction_session_timeout` on podium's role, shorten that; podium
+  sets none of them (see "The fence" in `internal/cluster/database/README.md`).
 - **Replication.** Prefer synchronous replication for a standby that can take
   over: the fence holds through a database failover, but rows that an
   asynchronous standby had not received are lost, and with them the writes

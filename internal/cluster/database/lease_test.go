@@ -3,11 +3,14 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // leaseRow is the lease row as a test reads it.
@@ -63,8 +66,38 @@ func expireLease(t *testing.T, admin *sql.DB) {
 	}
 }
 
+// expireLeaseUnlessLocked is expireLease with its UPDATE's wait for a lock
+// bounded to 100 ms: past that (SQLSTATE 55P03) it leaves the lease as it is.
+// An UPDATE that must wait for another update of the row in flight, as for a
+// renewal not yet committed, queues behind a takeover that waits for the row,
+// and would wait as long as that takeover.
+func expireLeaseUnlessLocked(t *testing.T, admin *sql.DB) {
+	t.Helper()
+	tx, err := admin.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("begin the expiry: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(t.Context(), `SET LOCAL lock_timeout = '100ms'`); err != nil {
+		t.Fatalf("bound the expiry's lock wait: %v", err)
+	}
+	if _, err := tx.ExecContext(t.Context(), `UPDATE podium_leader SET expires_at = now() WHERE id = 1`); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+			return
+		}
+		t.Fatalf("expire the lease: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit the expiry: %v", err)
+	}
+}
+
 // moveLease hands the lease to another replica at the next epoch, expired at
-// once, so that it is free to take again.
+// once, so that it is free to take again. It changes epoch and holder without
+// locking the row FOR UPDATE first, breaking the invariant on purpose: a fence
+// neither waits for it nor re-reads the row after it, which is safe only while
+// no fence is in flight, so no test may use it against a write in flight.
 func moveLease(t *testing.T, admin *sql.DB) {
 	t.Helper()
 	if _, err := admin.ExecContext(t.Context(), `UPDATE podium_leader
@@ -252,7 +285,7 @@ func TestSameHolderNewEpoch(t *testing.T) {
 	if row.holder != a.id || row.epoch != old.epoch+1 {
 		t.Fatalf("the lease is %s's at epoch %d, want %s's at %d", row.holder, row.epoch, a.id, old.epoch+1)
 	}
-	// The takeover's statement_timestamp() is its expires_at less the lease.
+	// The takeover's clock_timestamp() is its expires_at less the lease.
 	if took := row.expiresAt - lease.Microseconds(); took < old.expiresAt {
 		t.Errorf("replica-a took the lease again %d µs before it expired, want once it expired", old.expiresAt-took)
 	}

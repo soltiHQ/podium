@@ -44,12 +44,16 @@ database/
 compare.
 
 - A replica takes the row when it is free (no row, or a released one) or
-  expired, in one transaction that raises the epoch, also when this replica held
-  it last: `SELECT … FOR UPDATE` of the row, which waits for the old leader's
+  expired, in one statement that raises the epoch, also when this replica held
+  it last: a CTE locks the row `FOR UPDATE`, which waits for the old leader's
   writes in flight (see "The fence"), then an
-  `INSERT … ON CONFLICT DO UPDATE … WHERE expires_at <= statement_timestamp()`.
-  The lease it takes starts at that statement, after the lock's wait, where
-  `now()` would be the transaction's start, before it. A row that another
+  `INSERT … ON CONFLICT DO UPDATE … WHERE expires_at <= clock_timestamp()` whose
+  row takes its epoch from the locked row, so that the lock is a value the
+  statement stores, which no planner can drop. The server runs and commits the
+  statement within its statement timeout, whatever becomes of the replica that
+  sent it, so that no takeover holds the lock any longer. The lease it takes
+  starts once the lock is taken: `clock_timestamp()` is read after the wait,
+  where `now()` would be the statement's start, before it. A row that another
   replica holds, unexpired, is left as it is, a row renewed while the takeover
   waited for the lock included
 - The holder renews the row every third of the lease, an `UPDATE` of
@@ -124,10 +128,13 @@ takeover alone:
   flight, each until its transaction ends, and a fence that starts while a
   takeover holds the row waits for it, then re-reads the row it left: an
   ex-leader that has not yet noticed cannot commit. A renewal does not queue
-  behind a takeover that still waits for its lock: it lands, and the takeover,
-  once the writes ended, finds the lease renewed and takes nothing
-- **A statement that changes `epoch` or `holder` must run after
-  `SELECT … FOR UPDATE` of the row, in the same transaction.** An `UPDATE`
+  behind a takeover that still waits for its lock, as long as no other update of
+  the row is in flight, which podium never has: the holder runs its lease
+  statements one at a time. The renewal lands, and the takeover, once the writes
+  ended, finds the lease renewed and takes nothing
+- **A statement that changes `epoch` or `holder` must lock the row with
+  `SELECT … FOR UPDATE` first, in the same transaction.** The takeover's
+  transaction is its statement's own, whose CTE takes that lock. An `UPDATE`
   without that lock is a no-key update: a fence neither waits for it nor
   re-reads the row after it. Postgres records an update made under that lock as
   a key update, which a key-share lock waits for, and the fence's statement then
@@ -142,8 +149,11 @@ What remains:
   lease plus the time those writes take to end
 - A transaction that a leader cut off mid-transaction left open holds the
   takeover until the server ends it: at once when the server sees the connection
-  closed, otherwise when the server's TCP keepalives or
-  `idle_in_transaction_session_timeout` end it. podium sets neither
+  closed. Otherwise the server notices only that the client it waits for has
+  vanished: with the Linux keepalive defaults, after about 2 h 11 min. The
+  server's `tcp_keepalives_*` and `tcp_user_timeout`, or
+  `idle_in_transaction_session_timeout` on podium's role, shorten that; podium
+  sets none of them
 
 ## Followers
 
@@ -349,12 +359,12 @@ leases are seconds long, and they wait on conditions:
 - `TestExLeaderWriteFenced`: an ex-leader that has not seen the takeover writes
   nothing, and steps down at once
 - `TestTakeoverWaitsForAFencedWrite`: a takeover waits for the write in flight,
-  and the lease it takes lasts a full lease from its upsert
+  and the lease it takes lasts a full lease from the end of its wait
 - `TestTakeoverYieldsToARenewalWhileItWaits`: the holder's renewal lands while a
   takeover waits for a fenced write, and the takeover then takes nothing
-- `TestFenceWaitsForATakeoverInFlight`: a fence that starts while a takeover
-  holds the row waits for it, then refuses the write as the lease moved, and
-  steps the leader down
+- `TestFenceWaitsForATakeoverInFlight`: a fence that starts while a takeover,
+  the package's own statement left uncommitted, holds the row waits for it, then
+  refuses the write as the lease moved, and steps the leader down
 - `TestFencedWriteLongerThanTheLeaseKeepsTheLead`: a write that holds the
   fence's lock for three leases: the leader renews throughout, never steps down,
   and the write commits at its epoch

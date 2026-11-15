@@ -105,6 +105,8 @@ func TestFenceRefusesAnotherHolderAtTheSameEpoch(t *testing.T) {
 	storeA := openStore(t, a)
 	old := readLease(t, admin)
 
+	// A plain UPDATE of holder, without FOR UPDATE first, breaks the invariant on
+	// purpose: safe only while no fence is in flight, as here, before the write.
 	if _, err := admin.ExecContext(t.Context(), `UPDATE podium_leader SET holder = 'replica-ghost' WHERE id = 1`); err != nil {
 		t.Fatalf("hand the row to another holder: %v", err)
 	}
@@ -132,7 +134,7 @@ func TestFenceRefusesAnotherHolderAtTheSameEpoch(t *testing.T) {
 // key-share mode until the write transaction ends, and that a takeover, which
 // locks the row FOR UPDATE first, waits for the write in flight, which commits,
 // and takes the lease once it did. The lease it takes lasts a full lease from
-// its upsert, not from the start of its transaction, before the wait.
+// the end of its wait, not from the start of its statement, before it.
 func TestTakeoverWaitsForAFencedWrite(t *testing.T) {
 	databaseURL, admin := migratedDatabase(t)
 	a := newReplica(t, databaseURL, "replica-a", replicaConfig{lease: fenceLease})
@@ -170,7 +172,7 @@ func TestTakeoverWaitsForAFencedWrite(t *testing.T) {
 	}
 	waitFor(t, 5*time.Second, "replica-b leading once the write committed", b.AmLeader)
 	if left := readLease(t, admin).left; left <= fenceLease-500*time.Millisecond {
-		t.Errorf("replica-b's lease has %s left once it leads, want over %s: a lease from its upsert, not from its transaction's start, before the wait", left, fenceLease-500*time.Millisecond)
+		t.Errorf("replica-b's lease has %s left once it leads, want over %s: a lease from the end of its wait, not from its statement's start, before it", left, fenceLease-500*time.Millisecond)
 	}
 	if _, err := storeA.GetRole(ctx, role.ID()); err != nil {
 		t.Errorf("reading the fenced write back: %v", err)
@@ -215,12 +217,15 @@ func TestTakeoverYieldsToARenewalWhileItWaits(t *testing.T) {
 
 	// replica-b takes the lease once it reads it expired. A renewal of replica-a
 	// that lands before replica-b reads the row leaves it nothing to take, so the
-	// lease is expired again at each look that finds no takeover waiting.
+	// lease is expired again at each look that finds no takeover waiting. An
+	// expiry that meets a renewal in flight while the takeover already waits
+	// would queue behind the takeover: it gives up after 100 ms, and the next
+	// look finds the takeover waiting.
 	waitFor(t, 5*time.Second, "replica-b's takeover waiting for the lock", func() bool {
 		if lockWaiters(t, admin) > 0 {
 			return true
 		}
-		expireLease(t, admin)
+		expireLeaseUnlessLocked(t, admin)
 		return false
 	})
 	// A renewal lands while the takeover waits: the count grows, and the row's
@@ -251,31 +256,35 @@ func TestTakeoverYieldsToARenewalWhileItWaits(t *testing.T) {
 }
 
 // TestFenceWaitsForATakeoverInFlight checks that a fence that starts while a
-// takeover holds the lease row, locked FOR UPDATE and moved to another holder,
-// uncommitted, waits for the takeover, then reads the row it left: the write is
-// refused with the moved lease's refusal, commits nothing, and steps the leader
-// down.
+// takeover holds the lease row waits for it, then reads the row it left: the
+// takeover is the package's own statement, takeLease, run for another holder
+// in a transaction left open, which took the expired lease at the next epoch,
+// uncommitted. The write is refused with the moved lease's refusal, commits
+// nothing, and steps the leader down.
 func TestFenceWaitsForATakeoverInFlight(t *testing.T) {
 	databaseURL, admin := migratedDatabase(t)
 	a := newReplica(t, databaseURL, "replica-a", replicaConfig{lease: fenceLease})
 	a.start(t)
 	waitFor(t, 5*time.Second, "replica-a leading", a.AmLeader)
 	storeA := openStore(t, a)
+	old := readLease(t, admin)
 
-	// A takeover in flight, as take runs it: the row locked FOR UPDATE, then
-	// moved to another holder at the next epoch.
+	// The lease expires in the database's view, as a pause of replica-a's
+	// process would leave it, unaware, and replica-ghost takes it over, in a
+	// transaction left open.
+	expireLease(t, admin)
 	takeover, err := admin.BeginTx(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("begin the takeover: %v", err)
 	}
 	t.Cleanup(func() { _ = takeover.Rollback() })
-	if _, err := takeover.ExecContext(context.Background(), `SELECT 1 FROM podium_leader WHERE id = 1 FOR UPDATE`); err != nil {
-		t.Fatalf("lock the lease row: %v", err)
+	var epoch int64
+	if err := takeover.QueryRowContext(context.Background(), takeLease,
+		"replica-ghost", "replica-ghost.podium.test:7000", fenceLease.Microseconds()).Scan(&epoch); err != nil {
+		t.Fatalf("take the lease for replica-ghost: %v", err)
 	}
-	if _, err := takeover.ExecContext(context.Background(), `UPDATE podium_leader
-   SET epoch = epoch + 1, holder = 'replica-ghost', address = 'replica-ghost.podium.test:7000'
- WHERE id = 1`); err != nil {
-		t.Fatalf("move the lease: %v", err)
+	if epoch != old.epoch+1 {
+		t.Fatalf("replica-ghost took the lease at epoch %d, want %d", epoch, old.epoch+1)
 	}
 
 	ctx := t.Context()

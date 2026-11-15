@@ -8,11 +8,11 @@
 //
 // podium_leader holds one row: its epoch, its holder (a replica's ID), the
 // address the others forward writes to, and expires_at, in the database's
-// clock. A replica takes the row when it is free or expired, in one transaction
+// clock. A replica takes the row when it is free or expired, in one statement
 // that locks the row FOR UPDATE, which waits for the old leader's writes in
 // flight, then raises the epoch, also when this replica held it last: the lease
-// it takes starts at that statement. While it holds the row it renews it every
-// third of the lease, and it steps down, AmLeader false, the contexts of
+// it takes starts once the lock is taken. While it holds the row it renews it
+// every third of the lease, and it steps down, AmLeader false, the contexts of
 // WhenLeader cancelled and its writes refused, once no renewal has succeeded
 // within two thirds of the lease, counted from the send of the last renewal
 // that did: it stops before the row can expire, whatever the renewal's answer
@@ -37,10 +37,10 @@
 // that takes the row FOR NO KEY UPDATE, which the key-share lock does not hold:
 // a write transaction of any length keeps the leadership.
 //
-// The invariant: a statement that changes epoch or holder must run after
-// SELECT … FOR UPDATE of the row, in the same transaction. An UPDATE without
-// that lock is a no-key update: a fence neither waits for it nor re-reads the
-// row after it.
+// The invariant: a statement that changes epoch or holder must lock the row
+// with SELECT … FOR UPDATE first, in the same transaction; the takeover's is
+// its statement's own, whose CTE takes the lock. An UPDATE without that lock is
+// a no-key update: a fence neither waits for it nor re-reads the row after it.
 //
 // # Followers
 //

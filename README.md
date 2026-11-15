@@ -699,8 +699,9 @@ adding and removing members, a compromised node, browsers and
 Postgres database: the replicas hold no state, elect their leader through a
 lease row in the database, and forward their writes to it. It takes one replica,
 for state that survives a restart, or several, for availability: a failover
-moves the leadership within a lease, 10 s by default, and every replica serves
-reads meanwhile. The leadership, the store and the events are in
+moves the leadership within a lease, 10 s by default, and longer while the old
+leader's write transactions in flight end; every replica serves reads meanwhile.
+The leadership, the store and the events are in
 [internal/cluster/database](internal/cluster/database/README.md) and
 [internal/storage/sqlstore](internal/storage/sqlstore/README.md); the settings
 in [Database backend](internal/config/README.md#database-backend) and

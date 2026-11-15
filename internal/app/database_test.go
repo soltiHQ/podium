@@ -468,9 +468,11 @@ func TestDatabaseOutageRecovers(t *testing.T) {
 
 // A replica that knows no leader is ready: the lease of a gone leader has
 // expired, and the replica's takeover waits for a lock the test holds on the
-// lease row. Sampled back to back while the replica neither leads nor knows a
-// leader, /readyz answers 200 and /leaderz 503. Once the lock goes, the replica
-// takes the lease at the next epoch, and /leaderz answers 200.
+// lease row, fails at its statement timeout and is retried. Sampled back to
+// back while the replica neither leads nor knows a leader, from the takeover's
+// first wait seen through its retry, /readyz answers 200 and /leaderz 503. Once
+// the lock goes, the replica takes the lease at the next epoch, and /leaderz
+// answers 200.
 func TestDatabaseReadyWithoutLeader(t *testing.T) {
 	databaseURL := pgtest.NewDatabase(t)
 	admin := pgtest.Open(t, databaseURL)
@@ -494,15 +496,36 @@ VALUES (1, 7, 'replica-gone', 'replica-gone.podium.test:7000', now() - interval 
 	waitFor(t, 10*time.Second, "the ops listener binding", func() bool { return ops() != "" })
 	opsAnswers(t, ops(), "/readyz", 200, "ok")
 
-	// A sample counts only when the replica neither leads nor knows a leader
-	// before and after its reads.
+	// The replica's takeover is the only session on the database that waits for
+	// a lock, the test's.
+	takeoverWaits := func() bool {
+		var waiters int
+		if err := admin.QueryRowContext(context.Background(), `SELECT count(*) FROM pg_stat_activity
+ WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiters); err != nil {
+			t.Fatalf("count the lock waiters: %v", err)
+		}
+		return waiters > 0
+	}
+	waitFor(t, 10*time.Second, "the replica's takeover waiting for the lock", takeoverWaits)
+	firstWait := time.Now()
+
+	// The samples run until longer than a lease statement's timeout, a sixth of
+	// the lease, has passed since the takeover was first seen waiting, and its
+	// retry waits again: they span an attempt that failed at its timeout, and the
+	// retry. A sample counts only when the replica neither leads nor knows a
+	// leader before and after its reads.
+	statementTimeout := dbLease / 6
 	lead := n.app.leadership
 	leaderless := func() bool { return !lead.AmLeader() && lead.CurrentLeader() == "" }
+	samples, waitEnded, retried := 0, false, false
 	deadline := time.Now().Add(10 * time.Second)
-	for samples := 0; samples < 10; {
+	for samples < 10 || time.Since(firstWait) <= statementTimeout || !retried {
 		if time.Now().After(deadline) {
-			t.Fatalf("%d samples within 10s of %s knowing no leader, want 10", samples, n.id)
+			t.Fatalf("within 10s, %d samples while %s knew no leader, its takeover's wait ended %v and its retry waited %v; want 10 at least, over %s, through the retry", samples, n.id, waitEnded, retried, statementTimeout)
 		}
+		waiting := takeoverWaits()
+		waitEnded = waitEnded || !waiting
+		retried = retried || (waitEnded && waiting)
 		before := leaderless()
 		readyStatus, readyBody, readyErr := get(ops(), "/readyz", nil)
 		leaderStatus, leaderBody, leaderErr := get(ops(), "/leaderz", nil)
@@ -517,6 +540,7 @@ VALUES (1, 7, 'replica-gone', 'replica-gone.podium.test:7000', now() - interval 
 			t.Fatalf("sample %d, no leader known: /leaderz answered %d %q (%v), want 503", samples, leaderStatus, leaderBody, leaderErr)
 		}
 	}
+	t.Logf("%d samples while %s knew no leader, over %s from its takeover's first wait through the retry", samples, n.id, time.Since(firstWait))
 
 	if err := lock.Rollback(); err != nil {
 		t.Fatalf("release the lease row: %v", err)

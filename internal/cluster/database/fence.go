@@ -10,11 +10,11 @@ import (
 )
 
 // fenceRead reads the lease row in a write transaction, FOR KEY SHARE: a
-// takeover, which locks the row FOR UPDATE first (lockForTakeover), waits until
-// the transaction ends, and a fence that runs while a takeover holds the row
-// waits for it, then reads the row it left. The renewal and the release, which
-// change expires_at alone, take the row FOR NO KEY UPDATE, which this lock does
-// not hold: they never wait for a write.
+// takeover, whose statement locks the row FOR UPDATE first (takeLease), waits
+// until the transaction ends, and a fence that runs while a takeover holds the
+// row waits for it, then reads the row it left. The renewal and the release,
+// which change expires_at alone, take the row FOR NO KEY UPDATE, which this
+// lock does not hold: they never wait for a write.
 const fenceRead = `SELECT epoch, holder FROM podium_leader WHERE id = 1 FOR KEY SHARE`
 
 // The fence's two refusals. Both are cluster.ErrNotLeader: the fence runs

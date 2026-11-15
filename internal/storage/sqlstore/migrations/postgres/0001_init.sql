@@ -125,7 +125,7 @@ CREATE INDEX podium_executions_agent ON podium_executions (agent_id);
 CREATE INDEX podium_executions_spec ON podium_executions (spec_id);
 
 -- The database leadership's lease: one row, taken when it is free or expired
--- by a transaction that locks it FOR UPDATE and raises epoch, and renewed by
+-- by one statement that locks it FOR UPDATE, then raises epoch, and renewed by
 -- its holder. Every write transaction fences itself on epoch and holder,
 -- reading the row FOR KEY SHARE. expires_at is in the database's clock.
 CREATE TABLE podium_leader (
