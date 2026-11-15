@@ -466,6 +466,74 @@ func TestDatabaseOutageRecovers(t *testing.T) {
 	noSecrets(t, urlSecrets(t, databaseURL), map[string]string{"the log": n.logs.String()})
 }
 
+// A replica that knows no leader is ready: the lease of a gone leader has
+// expired, and the replica's takeover waits for a lock the test holds on the
+// lease row. Sampled back to back while the replica neither leads nor knows a
+// leader, /readyz answers 200 and /leaderz 503. Once the lock goes, the replica
+// takes the lease at the next epoch, and /leaderz answers 200.
+func TestDatabaseReadyWithoutLeader(t *testing.T) {
+	databaseURL := pgtest.NewDatabase(t)
+	admin := pgtest.Open(t, databaseURL)
+	if err := sqlstore.Migrate(context.Background(), admin, sqlstore.Postgres{}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	exec(t, admin, `INSERT INTO podium_leader (id, epoch, holder, address, expires_at)
+VALUES (1, 7, 'replica-gone', 'replica-gone.podium.test:7000', now() - interval '1 second')`)
+	lock, err := admin.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lock.Rollback() })
+	if _, err := lock.ExecContext(context.Background(), `SELECT 1 FROM podium_leader WHERE id = 1 FOR UPDATE`); err != nil {
+		t.Fatalf("lock the lease row: %v", err)
+	}
+
+	n := databaseNodes(t, databaseURL, "127.0.0.1")[0]
+	n.start(t)
+	ops := n.app.ops.Addr
+	waitFor(t, 10*time.Second, "the ops listener binding", func() bool { return ops() != "" })
+	opsAnswers(t, ops(), "/readyz", 200, "ok")
+
+	// A sample counts only when the replica neither leads nor knows a leader
+	// before and after its reads.
+	lead := n.app.leadership
+	leaderless := func() bool { return !lead.AmLeader() && lead.CurrentLeader() == "" }
+	deadline := time.Now().Add(10 * time.Second)
+	for samples := 0; samples < 10; {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d samples within 10s of %s knowing no leader, want 10", samples, n.id)
+		}
+		before := leaderless()
+		readyStatus, readyBody, readyErr := get(ops(), "/readyz", nil)
+		leaderStatus, leaderBody, leaderErr := get(ops(), "/leaderz", nil)
+		if !before || !leaderless() {
+			continue
+		}
+		samples++
+		if readyErr != nil || readyStatus != http.StatusOK || strings.TrimSpace(readyBody) != "ok" {
+			t.Fatalf("sample %d, no leader known: /readyz answered %d %q (%v), want 200 ok", samples, readyStatus, readyBody, readyErr)
+		}
+		if leaderErr != nil || leaderStatus != http.StatusServiceUnavailable {
+			t.Fatalf("sample %d, no leader known: /leaderz answered %d %q (%v), want 503", samples, leaderStatus, leaderBody, leaderErr)
+		}
+	}
+
+	if err := lock.Rollback(); err != nil {
+		t.Fatalf("release the lease row: %v", err)
+	}
+	opsAnswers(t, ops(), "/leaderz", 200, "ok")
+	var (
+		epoch  int64
+		holder string
+	)
+	if err := admin.QueryRowContext(context.Background(), `SELECT epoch, holder FROM podium_leader WHERE id = 1`).Scan(&epoch, &holder); err != nil {
+		t.Fatalf("read the lease row: %v", err)
+	}
+	if id := lead.(interface{ ID() string }).ID(); epoch != 8 || holder != id {
+		t.Errorf("the lease is %s's at epoch %d, want the replica's, %s, at 8", holder, epoch, id)
+	}
+}
+
 // A start retries a database it cannot reach for the startup retry, and serves
 // once the database takes connections within it; it logs one WARN for the
 // failures, naming where it connects, never the URL.

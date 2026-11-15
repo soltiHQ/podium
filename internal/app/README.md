@@ -120,7 +120,9 @@ lease" in `internal/cluster/database/README.md`). The leadership, the transport
 and the ping run on contexts of their own, which no shutdown signal ends before
 `Shutdown` does. The seed and the configuration check, whose runners read the
 database for themselves, log with the database mode's logger, which names the
-primary's host, port and database; four runners still log with the base logger.
+primary's host, port and database. The lifecycle, sync and history runners and
+the credential sweep read the database through the store, and log with the base
+logger, as the listeners do.
 
 `Migrate`, which `podium migrate` runs, opens one connection to the primary
 (`podium-migrate`), migrates within the startup retry, logs the host, the port,
@@ -132,12 +134,12 @@ its own from `pgtest`, and skip without one; the second invocation of
 `TestTwoReplicasForwardWrites`, `TestBootstrapNeedsPassword`,
 `TestDatabaseOutageRecovers`, `TestDatabaseStartRetries`,
 `TestDatabaseURLNeverLeaks`, `TestDatabaseSchemaNotOursStopsTheStart`,
-`TestDatabaseReplicaSettingsChecked`, `TestDatabaseStartRetriesTheSeedCheck` and
-`TestDatabaseFailoverUnderLoad`. `TestPoolConfig`, which needs no Postgres, pins
-each pool's `application_name`, the connect timeout of a URL without one, and
-the error of a URL that does not parse. Their startup retry and ping are
-shortened (`withDatabaseTimings`), and their leases are 1.5 s, the failover's
-4.5 s.
+`TestDatabaseReplicaSettingsChecked`, `TestDatabaseStartRetriesTheSeedCheck`,
+`TestDatabaseReadyWithoutLeader` and `TestDatabaseFailoverUnderLoad`.
+`TestPoolConfig`, which needs no Postgres, pins each pool's `application_name`,
+the connect timeout of a URL without one, and the error of a URL that does not
+parse. Their startup retry and ping are shortened (`withDatabaseTimings`), and
+their leases are 1.5 s, the failover's 4.5 s.
 
 `TestDatabaseFailoverUnderLoad` runs three apps on one database, each through a
 TCP proxy of its own, which every pool of the app and its events listener
