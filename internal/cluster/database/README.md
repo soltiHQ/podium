@@ -60,9 +60,10 @@ compare.
   (`Options.LeaseDB`, one connection), so that writers never starve them. Each
   runs under a `statement_timeout` the server enforces even on a statement that
   waits for a lock: a sixth of the lease, cut for a renewal to the time left
-  before the step-down, so that none lands after it, and never under 10 ms. A
-  context deadline a statement timeout later covers a server that does not
-  answer
+  before the step-down, so that none lands much after it (the server counts the
+  timeout from the statement's arrival, so a renewal can still land up to one
+  network delay after the step-down), and never under 10 ms. A context deadline
+  a statement timeout later covers a server that does not answer
 - When `Run`'s context ends, the replica steps down, which cancels its
   `WhenLeader` work first, waits a sixth of the lease at most for that work to
   return, then releases the row: `expires_at` becomes the database's now, epoch
@@ -113,8 +114,27 @@ the row to update it, waits for the write in flight, and a fence that runs after
 a takeover reads the row it left: an ex-leader that has not yet noticed cannot
 commit. The leader's own renewals wait for its write in flight too: a write
 transaction that holds the row past the step-down deadline steps the leader
-down, and still commits, as no takeover lands before it ends. podium's write
-transactions take milliseconds.
+down, and still commits, as no takeover lands before it ends.
+
+This is a known limit, not a fixed one. The share lock conflicts with the
+renewal's `UPDATE` of the same row, so while one write transaction holds the
+row, a renewal waits until its statement timeout (a sixth of the lease) and is
+retried a twelfth later. Once none lands within two thirds of the lease, the
+leader steps down: **a write transaction must end within about a third of the
+lease, two thirds at best**, depending on where in the renewal cycle it starts.
+With the default 10 s lease that is about 3.3 s to 6.7 s. Most of podium's
+transactions take milliseconds, but a few run one statement, one round trip
+each, per agent, with the gate and the lock held: `spec.Deploy` (about two
+statements per agent for explicit targets, one for label targets), `spec.Delete`
+(one upsert per rollout) and `agent.SweepCredentials` (two per agent). They grow
+with the fleet and the round-trip time: at 5000 agents an explicit-target
+`Deploy` reaches 3.3 s at a round trip of about 0.33 ms. The credential sweep
+runs at the start of every term: when it outlasts the bound, the step-down
+cancels it, its transaction rolls back, and the next term starts it again, so
+the sweep can loop without finishing. Raise `lease` with the fleet's size and
+the round-trip time to the database, so that the slowest of these transactions
+stays well inside a third of it; the price is a failover that takes up to that
+long.
 
 ## Followers
 

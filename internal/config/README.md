@@ -1133,10 +1133,17 @@ replica must share work as in raft, over the replicas the registry lists
   it. The role of `url` needs to create tables in it (`CREATE` on the schema),
   and runs podium's statements on them. Since Postgres 15 `public` no longer
   grants `CREATE` to every role: grant it, or give the role its own schema. The
-  role of `replica_url` only reads. The tables hold what podium's state holds,
-  the password hashes, the session IDs, the stored agent tokens and the task
-  specs among it, unencrypted: the database's access control, encryption and
-  backups are yours. podium needs no extension and no superuser.
+  role of `replica_url` only reads, but it needs `USAGE` on the schema, `SELECT`
+  on podium's tables, default privileges for the tables later migrations add
+  (`ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA <schema> GRANT SELECT ON TABLES TO <role>`),
+  and the same name resolution (`ALTER ROLE <role> SET search_path = <schema>`).
+  A read role without them gets SQLSTATE 42P01 or 42501, which podium classifies
+  as internal, and the read endpoint's fallback to the primary covers only an
+  unreachable endpoint: every GET listing answers 500. The tables hold what
+  podium's state holds, the password hashes, the session IDs, the stored agent
+  tokens and the task specs among it, unencrypted: the database's access
+  control, encryption and backups are yours. podium needs no extension and no
+  superuser.
 - **Connections.** A replica holds at most `max_open_conns` connections to the
   primary, plus the lease's one and the events listener's one, and at most
   `max_open_conns` to the replica endpoint: 12 and 10 with the default, per
@@ -1150,6 +1157,22 @@ replica must share work as in raft, over the replicas the registry lists
   transaction-mode pool, such as PgBouncer's, which hands the connection to
   another client between statements: no notification arrives, and every replica
   then sees the others' events only at its read every 5 s (see "Events" in
+  `internal/cluster/database/README.md`). Two more things break through such a
+  pooler: pgx's statement cache, which uses prepared statements that PgBouncer
+  before 1.21 rejects, and the lease connection's session-level
+  `statement_timeout`, which then leaks to the other clients of the pooled
+  server connection.
+- **The lease bounds the write transactions.** A write transaction that holds
+  the fence's row lock blocks the leader's own renewals, which update the same
+  row: it must end within about a third of `lease`, two thirds at best, or the
+  leader steps down (3.3 s to 6.7 s with the default 10 s). Transactions that
+  run a statement per agent, `Deploy`, `Delete` and the credential sweep that
+  starts every term, grow with the fleet: at 5000 agents an explicit-target
+  `Deploy` reaches 3.3 s at a round trip of about 0.33 ms, and a sweep that
+  outlasts the bound is cancelled at each step-down and started again by the
+  next term, so it can loop. This is a known limit, not a fixed one: raise
+  `lease` with the fleet's size and the round-trip time to the database; a
+  failover takes up to that long (see "The lease" in
   `internal/cluster/database/README.md`).
 - **Replication.** Prefer synchronous replication for a standby that can take
   over: the fence holds through a database failover, but rows that an

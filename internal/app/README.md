@@ -88,12 +88,12 @@ this order:
    `cluster.database.migrate` is true (`sqlstore.Migrate`, under the database
    lock), and the store on it (`sqlstore.Open`, which refuses every schema but
    this podium's), with the leadership as its fence. A database it cannot reach
-   (`storage.ErrUnavailable`) is tried again a second apart, with one WARN, for
-   30 s, after which `New` fails and main exits 1; any other failure, a schema
-   newer or, without migrations, older than this podium's included, fails `New`
-   at once. The window is one for every read of the database at start: `New`'s
-   own read of the user table (`bootstrap.CheckSeed`) takes what is left of it
-   (`databaseHooks.retry`).
+   (`storage.ErrUnavailable`) is tried again a second apart, with one WARN for
+   each database read that fails, for 30 s, after which `New` fails and main
+   exits 1; any other failure, a schema newer or, without migrations, older than
+   this podium's included, fails `New` at once. The window is one for every read
+   of the database at start: `New`'s own read of the user table
+   (`bootstrap.CheckSeed`) takes what is left of it (`databaseHooks.retry`).
 1. The events transport (`database.NewEventTransport`, with the `LISTEN` of
    `podium-events`), which becomes the hub's writer before any event can be
    emitted.
@@ -120,7 +120,7 @@ lease" in `internal/cluster/database/README.md`). The leadership, the transport
 and the ping run on contexts of their own, which no shutdown signal ends before
 `Shutdown` does. The seed and the configuration check, whose runners read the
 database for themselves, log with the database mode's logger, which names the
-primary's host, port and database, as every line of the mode does.
+primary's host, port and database; four runners still log with the base logger.
 
 `Migrate`, which `podium migrate` runs, opens one connection to the primary
 (`podium-migrate`), migrates within the startup retry, logs the host, the port,

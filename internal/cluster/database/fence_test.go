@@ -90,6 +90,42 @@ func TestExLeaderWriteFenced(t *testing.T) {
 	}
 }
 
+// TestFenceRefusesAnotherHolderAtTheSameEpoch checks that the fence compares the
+// holder as well as the epoch: after a database failover that restored an older
+// row, another replica can hold the lease at the epoch this replica's term
+// took, and two replicas must not pass one epoch. The write is refused with the
+// moved lease's refusal, commits nothing, and steps the leader down.
+func TestFenceRefusesAnotherHolderAtTheSameEpoch(t *testing.T) {
+	databaseURL, admin := migratedDatabase(t)
+	a := newReplica(t, databaseURL, "replica-a", replicaConfig{lease: fenceLease})
+	a.start(t)
+	waitFor(t, 5*time.Second, "replica-a leading", a.AmLeader)
+	storeA := openStore(t, a)
+	old := readLease(t, admin)
+
+	if _, err := admin.ExecContext(t.Context(), `UPDATE podium_leader SET holder = 'replica-ghost' WHERE id = 1`); err != nil {
+		t.Fatalf("hand the row to another holder: %v", err)
+	}
+	if row := readLease(t, admin); row.epoch != old.epoch || row.holder != "replica-ghost" {
+		t.Fatalf("the lease is %s's at epoch %d, want replica-ghost's at the leader's %d", row.holder, row.epoch, old.epoch)
+	}
+	if !a.AmLeader() {
+		t.Fatal("replica-a stepped down before its write: the test needs it unaware")
+	}
+
+	ctx := t.Context()
+	err := storeA.UpsertRole(ctx, testRole(t, "role-1"))
+	if !errors.Is(err, cluster.ErrNotLeader) || !errors.Is(err, errLeaseMoved) {
+		t.Fatalf("the write under another holder at the same epoch: %v; want the fence's refusal of a moved lease, a cluster.ErrNotLeader", err)
+	}
+	if a.AmLeader() {
+		t.Error("replica-a still leads once its write found another holder")
+	}
+	if _, err := storeA.GetRole(ctx, "role-1"); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("reading the refused write back: %v, want storage.ErrNotFound", err)
+	}
+}
+
 // TestTakeoverWaitsForAFencedWrite checks that the fence holds the lease row in
 // share mode until the write transaction ends: a takeover waits for the write in
 // flight, which commits, and takes the lease once it did.

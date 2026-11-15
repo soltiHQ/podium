@@ -4,8 +4,10 @@ import "io/fs"
 
 // Dialect is what differs between the SQL engines the store runs on. The store
 // writes its statements with ? placeholders and portable SQL, and asks the
-// dialect for the rest. A second engine is a Dialect, its migrations, and a run
-// of the storage contract suite.
+// dialect for the rest. Not everything is portable: rows.go (ON CONFLICT with
+// EXCLUDED, FOR UPDATE), the migrations and the lease, registry and events
+// statements are Postgres SQL. A second engine takes a Dialect, its migrations,
+// a review of those statements, and a run of the storage contract suite.
 type Dialect interface {
 	// Name names the engine, as "postgres".
 	Name() string

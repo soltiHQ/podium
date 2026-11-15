@@ -84,7 +84,9 @@ func (l *Leadership) runLease(ctx context.Context) {
 // renew renews the lease of t, and returns when to renew it next: a third of
 // the lease after this renewal's send, or a twelfth after a renewal that
 // failed. A renewal that changes no row finds the lease moved, and steps down at
-// once. No renewal goes out that could not answer before the step-down.
+// once. No renewal is sent with a timeout past the step-down; the server counts
+// its timeout from the statement's arrival, so a renewal can still land up to
+// one network delay after the step-down.
 func (l *Leadership) renew(ctx context.Context, t *term) time.Duration {
 	timeout := l.renewalTimeout(t)
 	if timeout <= 0 {

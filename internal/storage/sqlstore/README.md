@@ -151,8 +151,9 @@ commits. So the store refuses in Go, before any statement:
   statement
 - an insert-if-absent and `ErrAlreadyExists` go through `ON CONFLICT`, never
   through a unique violation
-- a statement that can still fail runs inside a savepoint, rolled back to on
-  failure
+- the checks run in Go before the write, the inserts use `ON CONFLICT`, and
+  `ErrNotFound` comes from the rows affected, so no statement is expected to
+  fail inside a transaction; there is no savepoint
 
 ## Reads
 

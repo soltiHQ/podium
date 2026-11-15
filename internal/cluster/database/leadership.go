@@ -109,7 +109,7 @@ var errRunTwice = errors.New("database: the leadership ran already: a Leadership
 
 // workNotEnded is what Run's end logs when the WhenLeader work it cancelled has
 // not returned within its grace, and the lease is left to expire.
-const workNotEnded = "database: the leader-only work has not ended: the lease is not released, and expires a lease after its last renewal, so that no other replica's leader-only work starts while this one's may still run"
+const workNotEnded = "database: the leader-only work has not ended: the lease is not released, and expires a lease after its last renewal, which only delays another replica's leader-only work: the process exit bounds the overlap within the shutdown deadline, and the database writes stay fenced while calls to agents do not"
 
 // Options are what New builds a Leadership from.
 type Options struct {
@@ -479,8 +479,8 @@ func (l *Leadership) Run(ctx context.Context) error {
 // replica took, if the row still holds it, and deletes its registry row. Work
 // that has not returned by then, as runners that outlived the app's drain
 // deadline, may still run: the lease is not released, and expires a lease
-// after its last renewal, so that no other replica's leader-only work starts
-// while it may (workNotEnded, at WARN). A release or a delete that fails is
+// after its last renewal, which only delays another replica's leader-only work
+// (workNotEnded, at WARN). A release or a delete that fails is
 // logged: the lease then expires, and the leader prunes the row.
 func (l *Leadership) leave() {
 	l.mu.Lock()

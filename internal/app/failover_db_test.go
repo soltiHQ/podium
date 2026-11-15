@@ -371,6 +371,8 @@ func leaderzStepDown(t *testing.T, n *clusterNode, since time.Time, want, limit 
 //     ends within that and workEndTolerance, the time the runners take to
 //     return once the step-down cancelled them, never to start again, and
 //     before the new leader's starts;
+//   - between the step-down and the takeover, while no replica leads, a
+//     follower's /readyz answers 200: readiness waits for no leader;
 //   - the first sync sent after the cut that is answered 200, through the new
 //     leader, is answered within the lease and one renewal interval (a renewal
 //     in flight at the cut may still commit, and extend the lease from the
@@ -444,6 +446,39 @@ func TestDatabaseFailoverUnderLoad(t *testing.T) {
 	if led := lastLeading.Sub(cut); led > stepDown {
 		t.Errorf("%s's /leaderz answered 200 to a request sent %s after its cut, want the step-down within %s", old.id, led, stepDown)
 	}
+	// Between the step-down and the takeover no replica leads, and from the old
+	// lease's expiry on no replica knows a leader either. The followers' /readyz
+	// must answer 200 throughout: in this mode readiness waits for no leader. A
+	// sample counts when /leaderz answered 503 on both followers before and after
+	// the /readyz reads: no replica led while they ran. The sampling ends at the
+	// takeover.
+	survivors := slices.DeleteFunc(slices.Clone(nodes), func(n *clusterNode) bool { return n == old })
+	noneLeads := func() bool {
+		for _, n := range survivors {
+			if status, _, err := get(n.app.ops.Addr(), "/leaderz", nil); err != nil || status != http.StatusServiceUnavailable {
+				return false
+			}
+		}
+		return true
+	}
+	samples := 0
+	for noneLeads() {
+		for _, n := range survivors {
+			status, body, err := get(n.app.ops.Addr(), "/readyz", nil)
+			if noneLeads() && (err != nil || status != http.StatusOK || strings.TrimSpace(body) != "ok") {
+				t.Errorf("%s's /readyz answers %d %q, %v while no replica leads, want 200 ok: readiness must not wait for a leader", n.id, status, strings.TrimSpace(body), err)
+			}
+		}
+		samples++
+		if time.Since(cut) > 2*failoverLease {
+			t.Fatalf("no replica took over within %s of the cut", 2*failoverLease)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if samples < 3 {
+		t.Errorf("sampled the followers' /readyz %d times with no replica leading, want 3 at least", samples)
+	}
+	t.Logf("the followers' /readyz sampled %d times with no replica leading, until %s after the cut", samples, time.Since(cut))
 	// The work ends once its runners return from the step-down's cancellation.
 	waitFor(t, 5*time.Second, old.id+"'s leader-only work ending", func() bool { return work[old].state().running == 0 })
 	ended := work[old].state()
@@ -451,7 +486,6 @@ func TestDatabaseFailoverUnderLoad(t *testing.T) {
 		t.Errorf("%s's leader-only work ended %s after its cut, want within %s and the scheduling tolerance of %s", old.id, took, stepDown, workEndTolerance)
 	}
 
-	survivors := slices.DeleteFunc(slices.Clone(nodes), func(n *clusterNode) bool { return n == old })
 	next, rest := databaseLeader(t, survivors)
 	tookOver := time.Now()
 	via := rest[0]

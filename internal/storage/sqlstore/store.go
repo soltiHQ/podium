@@ -30,8 +30,9 @@
 // commits. So the store refuses in Go, before any statement: the entity's
 // validation; ErrNotFound from the rows a statement affected, never from a
 // failed statement; insert-if-absent and ErrAlreadyExists through ON CONFLICT,
-// never through a unique violation. A statement that can still fail runs
-// inside a savepoint, rolled back to on failure.
+// never through a unique violation. The checks run in Go before the write, the
+// inserts use ON CONFLICT, and ErrNotFound comes from the rows affected, so no
+// statement is expected to fail inside a transaction.
 //
 // # Reads
 //
