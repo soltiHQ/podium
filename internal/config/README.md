@@ -1160,8 +1160,9 @@ replica must share work as in raft, over the replicas the registry lists
   `internal/cluster/database/README.md`). Two more things break through such a
   pooler: pgx's statement cache, which uses prepared statements that PgBouncer
   before 1.21 rejects, and the lease connection's session-level
-  `statement_timeout`, which then leaks to the other clients of the pooled
-  server connection.
+  `statement_timeout` and default isolation, which then leak to the other
+  clients of the pooled server connection, while the lease's own statements can
+  land on a server connection that has neither.
 - **A takeover waits for the old leader's writes.** A write transaction of any
   length keeps the leadership: the leader's renewals do not wait for the fence's
   lock. A takeover does: it waits for the old leader's write transactions in
