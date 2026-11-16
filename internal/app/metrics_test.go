@@ -151,12 +151,14 @@ func TestMetricsExposition(t *testing.T) {
 		`podium_grpc_requests_total{code="OK",method="/solti.discover.v1.DiscoverService/Sync"} 1`,
 		`podium_discovery_syncs_total{outcome="enrolled",transport="http"} 1`,
 		`podium_discovery_syncs_total{outcome="ok",transport="grpc"} 1`,
+		"podium_store_failed 0",
+		`podium_forwarded_writes_total{server="ui"} 0`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("the exposition lacks %q", want)
 		}
 	}
-	for _, absent := range []string{"podium_raft_"} {
+	for _, absent := range []string{"podium_raft_", "podium_database_"} {
 		if strings.Contains(body, absent) {
 			t.Errorf("a memory node exposes %s", absent)
 		}

@@ -48,17 +48,21 @@ Main listener (`app.buildMainHandler`), outermost first:
                     access-log line; CrossOrigin logs it at WARN instead. It also runs
                     before Leader, so a follower refuses such a request itself: it never
                     reaches the leader.
-      Leader     ── raft only: forwards writes to the leader, over TLS with tls.client when tls.server is set,
-                    straight to it, never through HTTP(S)_PROXY, marked X-Podium-Forwarded by its transport,
+      Leader     ── raft and the database backend only: forwards writes to the leader, over TLS with tls.client
+                    when tls.server is set, straight to it, never through HTTP(S)_PROXY, marked X-Podium-Forwarded
+                    by its transport,
                     after the reverse proxy dropped the hop-by-hop headers, and never forwards a marked write
                     again; drops the leader's CORS headers from its answer, as CORS above has set the follower's;
                     stores where the leader serves this listener in ctx (httpctx.Leader), for X-Leader
-       mux       ── wrapped by metrics.Route, which hands the matched pattern to the metrics
+       ReadOnly  ── marks GET and HEAD requests storage.MarkReadOnly: a backend with a read replica, the
+                    database mode's, may serve their listings, scans and counts from it; outside
+                    metrics.Route, which takes the route from the request it hands the mux
+        mux      ── wrapped by metrics.Route, which hands the matched pattern to the metrics
         │  per route:
   RequestID      ── installs request id + error slot (API routes and the event stream only)
    Logger        ── reads the slot back after the handler returns (same routes); logs 5xx at ERROR, but a 503 with X-Leader at WARN
     Auth / OptionalAuth / RequirePermission  ── 503 when credentials cannot be checked, logged at ERROR; a refresh that needs the
-                                                 raft leader (auth.rotate_refresh on a follower) is 503, with X-Leader when the leader is known, logged at WARN
+                                                 leader (auth.rotate_refresh on a follower) is 503, with X-Leader when the leader is known, logged at WARN
      handler/api.go | ui.go
         ├─ success → response.OK(w, r, mode, &View{Data: dto, Component: tmpl})
         │              └─ Responder from ctx → JSON (json.Marshal + sec headers)
@@ -95,7 +99,7 @@ refresh token it renews the session (`TestLoggedPathsHideTheSessionID`).
   metrics → UnaryRecovery → UnaryRequestID → UnaryLogger → UnaryLeader
         │   (the metrics interceptor counts and times every unary call, podium_grpc_*;
         │   UnaryAuth / UnaryRequirePermission exist but are not chained yet)
-        │   UnaryLeader, raft only: a follower forwards a Sync to the leader (Forwarder, never through
+        │   UnaryLeader, raft and the database backend only: a follower forwards a Sync to the leader (Forwarder, never through
         │   HTTPS_PROXY) and answers with the leader's answer; any other write is Unavailable, + x-leader when the leader is known;
         │   a call it passes on carries the means to hint the leader, for a handler's leadership error (HintLeader)
         │   UnaryLogger logs a failed call at ERROR, but a "not the leader" answer with x-leader at WARN
@@ -134,18 +138,20 @@ see `internal/config`):
   are `Secure`; `app` builds that decision once and hands it to every cookie
   writer.
 
-In raft mode the trusted proxies are `trusted_proxies` and the hosts of the
-current raft configuration (`clientip.Hosts`), since a follower forwards writes
-to the leader: the leader believes the forwarding headers of another node and of
-the proxies `trusted_proxies` lists, and of nobody else. See "Forwarding and
-trusted hosts" in `internal/raft/README.md` for the rule, names included.
+In raft mode and on the database backend the trusted proxies are
+`trusted_proxies` and the hosts of the members (`clientip.Hosts`): those of the
+current raft configuration, or of the replicas the database registry lists, by
+their `advertise_addr`, since a follower forwards writes to the leader: the
+leader believes the forwarding headers of another node and of the proxies
+`trusted_proxies` lists, and of nobody else. See "Forwarding and trusted hosts"
+in `internal/raft/README.md` for the rule, names included.
 
 RFC 7239 `Forwarded` is not supported. The login limiter,
 `middleware.StreamLimit` and HTTP discovery take the client IP from the
-resolver. gRPC discovery does too in raft mode, from the peer and its
-`x-forwarded-for` metadata, which a follower sets when it forwards a sync;
-memory-backend gRPC discovery uses the peer address, whatever metadata the call
-carries.
+resolver. gRPC discovery does too in raft mode and on the database backend, from
+the peer and its `x-forwarded-for` metadata, which a follower sets when it
+forwards a sync; memory-backend gRPC discovery uses the peer address, whatever
+metadata the call carries.
 
 ## Rate limits
 
@@ -200,9 +206,10 @@ surfaces to the user as 404 / NotFound.
 
 `X-Leader` tells an HTTP client where the cluster leader is, and it has one
 meaning: the **HTTP address of the leader, `host:port` with no scheme**. It is
-the host of the leader's raft advertise address, as written, with the port of
-the listener the request came in on, which every replica is assumed to serve
-(the same-port assumption). It is a hint to retry at, not an order.
+the host of the leader's raft advertise address, or on the database backend of
+its `cluster.database.advertise_addr`, as written, with the port of the listener
+the request came in on, which every replica is assumed to serve (the same-port
+assumption). It is a hint to retry at, not an order.
 
 It goes out on:
 
@@ -247,13 +254,14 @@ or one and none.
 
 The gRPC `x-leader` header metadata has the same meaning for the gRPC listener:
 the **gRPC address of the leader, `host:port`**, the host of the leader's raft
-advertise address, as written, with this node's gRPC port (`grpc.addr`), from
-the same derivation, so the same-port assumption holds for gRPC too. It goes out
-with the `Unavailable` of a write the follower does not forward: a write stream,
-a unary write the `Forwarder` has no call for, a call another node forwarded
-already (`x-podium-forwarded`, so a call crosses one node at most; as with
-`X-Podium-Forwarded`, a client that sends it itself only keeps its own call from
-being forwarded), and a forward the leader never answered
+advertise address, or on the database backend of its
+`cluster.database.advertise_addr`, as written, with this node's gRPC port
+(`grpc.addr`), from the same derivation, so the same-port assumption holds for
+gRPC too. It goes out with the `Unavailable` of a write the follower does not
+forward: a write stream, a unary write the `Forwarder` has no call for, a call
+another node forwarded already (`x-podium-forwarded`, so a call crosses one node
+at most; as with `X-Podium-Forwarded`, a client that sends it itself only keeps
+its own call from being forwarded), and a forward the leader never answered
 (`leader unreachable`). A `Sync` that a follower forwards gets the leader's own
 answer instead, and its hint when that answer is the `Unavailable` of a node
 that does not lead, which refused the call as a forwarded one. As for HTTP, it
@@ -290,9 +298,9 @@ for the proxy pool, for the `Leader` middleware, whose follower forwards writes
 to the leader over TLS when `tls.server` is set
 (`LeaderOptions.TLSClientConfig`), and for the gRPC `Forwarder`, which forwards
 a follower's syncs under the same rule: TLS with `tls.client` when `tls.server`
-is set, checked for the leader's raft host, with `tls.client`'s certificate
-presented when the leader asks for one. Both forwards dial the leader directly:
-the `Leader` middleware's transport has no proxy, and the `Forwarder` dials with
-`grpc.WithNoProxy`, so neither takes `HTTP_PROXY` or `HTTPS_PROXY` from the
-environment. The raft transport between nodes has TLS of its own,
-`cluster.raft.tls` (see `internal/raft`).
+is set, checked for the leader's host (of its raft, or database, advertise
+address), with `tls.client`'s certificate presented when the leader asks for
+one. Both forwards dial the leader directly: the `Leader` middleware's transport
+has no proxy, and the `Forwarder` dials with `grpc.WithNoProxy`, so neither
+takes `HTTP_PROXY` or `HTTPS_PROXY` from the environment. The raft transport
+between nodes has TLS of its own, `cluster.raft.tls` (see `internal/raft`).

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +20,8 @@ import (
 
 	"github.com/soltiHQ/control-plane/internal/buildinfo"
 	"github.com/soltiHQ/control-plane/internal/config"
+	"github.com/soltiHQ/control-plane/internal/storage/sqlstore"
+	"github.com/soltiHQ/control-plane/internal/storage/sqlstore/pgtest"
 )
 
 func TestExitCodeReflectsRunAndCleanup(t *testing.T) {
@@ -348,7 +352,7 @@ func TestHelpExitsZero(t *testing.T) {
 			if code := run([]string{flag}, &stdout, &stderr, spy.serve); code != 0 || spy.started || stderr.Len() != 0 {
 				t.Fatalf("exit %d, started %v, stderr %q; want exit 0, nothing started, no stderr", code, spy.started, stderr.String())
 			}
-			for _, want := range []string{"usage: podium [--config PATH]", "podium agent-token", "podium version"} {
+			for _, want := range []string{"usage: podium [--config PATH]", "podium agent-token", "podium migrate [--config PATH]", "podium version"} {
 				if !strings.Contains(stdout.String(), want) {
 					t.Fatalf("stdout %q, want it to hold %q", stdout.String(), want)
 				}
@@ -518,5 +522,151 @@ func TestSecondSignalExitsAtOnce(t *testing.T) {
 	}
 	if out := logs.String(); !strings.Contains(out, `"level":"warn"`) || !strings.Contains(out, "second signal") {
 		t.Fatalf("no WARN line about the second signal:\n%s", out)
+	}
+}
+
+// migrateConfig writes a config file for podium migrate, or for the server,
+// with backend database and the extra lines of the database section, and sets
+// the environment both read: the database URL, as a Secret gives it, and the
+// JWT secret the server's validation needs.
+func migrateConfig(t *testing.T, databaseURL, extra string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := "cluster:\n  backend: database\n  database:\n    lease: 2s\n" + extra
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONFIG_PATH", "")
+	t.Setenv("SOLTI_CLUSTER_DATABASE_URL", databaseURL)
+	t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("migrate-command-secret", 2))
+	return path
+}
+
+// urlForms are the forms in which the credentials of databaseURL would show in
+// output: the URL, its scheme, and the user and password as a URL holds them and
+// as a connection string names them.
+func urlForms(t *testing.T, databaseURL string) []string {
+	t.Helper()
+	u, err := url.Parse(databaseURL)
+	if err != nil {
+		t.Fatal("the database URL does not parse")
+	}
+	forms := []string{databaseURL, "postgres://"}
+	if u.User != nil {
+		forms = append(forms, "user="+u.User.Username())
+		if password, ok := u.User.Password(); ok {
+			forms = append(forms, ":"+password+"@", "password="+password)
+		}
+	}
+	return forms
+}
+
+// "podium migrate" migrates an empty database to this podium's schema and exits
+// 0, logging the host, the port, the database and the versions before and
+// after, and again on a database at its version; it needs no advertise_addr and
+// starts no server. It exits 1 on a database a newer podium migrated, naming
+// both versions, and writes nothing. With migrate: false, the server stops on a
+// database whose schema is older than its own, saying to run podium migrate:
+// the child is this test binary running the real main. No output carries the
+// URL or its credentials.
+func TestMigrateCommand(t *testing.T) {
+	const childEnv = "SOLTI_MIGRATE_MAIN_CHILD"
+	if path := os.Getenv(childEnv); path != "" {
+		os.Args = []string{"podium", "--config", path}
+		main() // exits the process
+		return
+	}
+	databaseURL := pgtest.NewDatabase(t)
+	db := pgtest.Open(t, databaseURL)
+	u, err := url.Parse(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := strings.TrimPrefix(u.Path, "/")
+	migrate := func() (int, string, string) {
+		t.Helper()
+		var spy serveSpy
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"migrate", "--config", migrateConfig(t, databaseURL, "")}, &stdout, &stderr, spy.serve)
+		if spy.started {
+			t.Fatal("podium migrate started the server")
+		}
+		return code, stdout.String(), stderr.String()
+	}
+
+	code, stdout, stderr := migrate()
+	if code != 0 {
+		t.Fatalf("podium migrate on an empty database: exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	latest, err := sqlstore.SchemaVersion(context.Background(), db)
+	if err != nil || latest < 1 {
+		t.Fatalf("the schema after podium migrate: %d, %v; want a version", latest, err)
+	}
+	for _, want := range []string{`"message":"database: migrated the schema"`, `"from_version":0`, fmt.Sprintf(`"to_version":%d`, latest), `"database":"` + name + `"`, `"host":"` + u.Hostname() + `"`, `"port":`} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("the log of podium migrate lacks %s:\n%s", want, stdout)
+		}
+	}
+	output := map[string]string{"stdout": stdout, "stderr": stderr}
+
+	code, stdout, stderr = migrate()
+	if code != 0 || !strings.Contains(stdout, "database: the schema is this podium's already") {
+		t.Fatalf("podium migrate on a migrated database: exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO podium_schema_migrations (version) VALUES (99)`); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr = migrate()
+	if code != 1 || !strings.Contains(stdout+stderr, "version 99") {
+		t.Fatalf("podium migrate on a newer schema: exit %d, want 1 naming version 99\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	if v, err := sqlstore.SchemaVersion(context.Background(), db); err != nil || v != 99 {
+		t.Fatalf("the schema after the refusal: %d, %v; want 99, untouched", v, err)
+	}
+	output["the refusal's stdout"], output["the refusal's stderr"] = stdout, stderr
+
+	// The server with migrate: false on an empty database.
+	empty := pgtest.NewDatabase(t)
+	path := migrateConfig(t, empty, "    advertise_addr: 127.0.0.1:0\n    migrate: false\n")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestMigrateCommand$")
+	child.Env = append(os.Environ(), childEnv+"="+path, "SOLTI_HTTP_ADDR=127.0.0.1:0", "SOLTI_HTTP_DISCOVERY_ADDR=127.0.0.1:0", "SOLTI_GRPC_ADDR=127.0.0.1:0", "SOLTI_OPS_ADDR=")
+	var childOut, childErr bytes.Buffer
+	child.Stdout, child.Stderr = &childOut, &childErr
+	err = child.Run()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		t.Fatalf("the server on an older schema: %v, want exit 1\nstdout: %s\nstderr: %s", err, childOut.String(), childErr.String())
+	}
+	if !strings.Contains(childOut.String(), "run podium migrate") {
+		t.Fatalf("the server's log does not say to run podium migrate:\n%s", childOut.String())
+	}
+	if v, err := sqlstore.SchemaVersion(context.Background(), pgtest.Open(t, empty)); err != nil || v != 0 {
+		t.Fatalf("the schema after the server stopped: %d, %v; want 0, untouched", v, err)
+	}
+	output["the server's stdout"], output["the server's stderr"] = childOut.String(), childErr.String()
+
+	for what, text := range output {
+		for i, form := range append(urlForms(t, databaseURL), urlForms(t, empty)...) {
+			if strings.Contains(text, form) {
+				t.Errorf("%s holds secret form %d of a database URL", what, i)
+			}
+		}
+	}
+}
+
+// podium migrate takes --config alone: another flag or an argument is a usage
+// error, exit 2, before any configuration loads.
+func TestMigrateCommandLine(t *testing.T) {
+	for _, args := range [][]string{{"migrate", "--bogus"}, {"migrate", "extra"}, {"migrate", "--config"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var spy serveSpy
+			var stdout, stderr bytes.Buffer
+			if code := run(args, &stdout, &stderr, spy.serve); code != 2 || spy.started || !strings.Contains(stderr.String(), "usage: podium") {
+				t.Fatalf("exit %d, started %v, stderr %q; want exit 2 with the usage", code, spy.started, stderr.String())
+			}
+		})
 	}
 }

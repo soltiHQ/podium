@@ -4,6 +4,22 @@ Persistence contracts for control-plane domain entities.\
 Backend-agnostic interfaces: domain and application layers depend only on these,
 never on concrete implementations.
 
+## Backends
+
+`cluster.backend` picks where the state lives; every backend keeps the same
+contract (see "Contract suite"), so a service sees the same behaviour on each,
+outages and failovers aside:
+
+| `cluster.backend` | State | Store | Reads | Writes |
+| -- | -- | -- | -- | -- |
+| `memory`, one node | in memory, lost at exit | `inmemory` | the node | the node |
+| `raft`, 3 or more nodes | in memory on every node, replicated by raft's log and snapshots (on disk) | `inmemory` through `overlay` and the raft state machine | each node's own copy | forwarded to the leader |
+| `database`, 1 or more replicas | a Postgres database, the replicas holding none | `sqlstore` | the primary, and the read endpoint for the GET listings | forwarded to the leader, which writes |
+
+Nothing writes the state to a file of its own: raft keeps its log and snapshots
+in `cluster.raft.data_dir`. How to run each is in the root `README.md` and
+`internal/config/README.md`.
+
 ## Package map
 
 ```text
@@ -17,6 +33,7 @@ storage/
 ├── pagination.go   ListResult[T], ListOptions, limits
 ├── filter.go       backend-agnostic filter markers (AgentFilter, RolloutFilter …)
 ├── validate.go     ValidateEntity — the row check the in-memory store and the overlay share
+├── readonly.go     MarkReadOnly / IsReadOnly — the contexts a backend's read replica may serve
 │
 ├── inmemory/
 │   ├── storage.go   Store — aggregates GenericStore instances, implements Storage
@@ -32,7 +49,9 @@ storage/
 │   ├── command.go   EncodeCommand / DecodeCommand — the SOLTI-CMD framing of the ops
 │   └── agent.go …   the Storage methods of Tx, one file per entity group
 │
-├── snapshot/        the versioned state codec of raft compaction and restore
+├── snapshot/        the versioned state codec of raft compaction and restore; entity.go: one entity
+│                    as the JSON of its snapshot message, the SQL store's row body
+├── sqlstore/        the SQL store of the database mode: its core and the Postgres schema (see its README)
 ├── storagecontract/ the contract suite every backend runs (Run), the in-memory store its reference
 └── storagetest/     the fixture and the measurement the storage and service benchmarks share
 ```

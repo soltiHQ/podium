@@ -244,6 +244,7 @@ func TestEnvNamesFollowYAMLPaths(t *testing.T) {
 	}
 	for _, name := range []string{
 		"SOLTI_HTTP_READ_HEADER_TIMEOUT", "SOLTI_HTTP_DISCOVERY_ADDR", "SOLTI_CLUSTER_RAFT_TLS_CA_FILE",
+		"SOLTI_CLUSTER_DATABASE_URL", "SOLTI_CLUSTER_DATABASE_REPLICA_URL", "SOLTI_CLUSTER_DATABASE_MIGRATE",
 		"SOLTI_TRUSTED_PROXIES", "SOLTI_AGENT_AUTH_ENROLL_SECRET", "SOLTI_BOOTSTRAP_ADMIN_PASSWORD",
 	} {
 		if !slices.ContainsFunc(all, func(l leaf) bool { return l.env == name }) {
@@ -258,6 +259,10 @@ func TestEnvNamesFollowYAMLPaths(t *testing.T) {
 			raw, want[l.env] = "90s", 90*time.Second
 		case typ.Kind() == reflect.Bool:
 			raw, want[l.env] = strconv.FormatBool(!l.val.Bool()), !l.val.Bool()
+		case typ.Kind() == reflect.Pointer && typ.Elem().Kind() == reflect.Bool:
+			// A *bool is unset by default: a variable sets it.
+			off := false
+			raw, want[l.env] = "false", &off
 		case typ.Kind() == reflect.Int || typ.Kind() == reflect.Int64:
 			raw, want[l.env] = "1234", 1234
 			if typ.Kind() == reflect.Int64 {
@@ -541,11 +546,12 @@ func TestStandaloneVariablesRefused(t *testing.T) {
 	}
 }
 
-// backend: standalone is no backend any more; the error names the two there are.
+// backend: standalone is no backend any more; the error names the three there
+// are.
 func TestBackendStandaloneRefused(t *testing.T) {
 	writeConfig(t, "cluster:\n  backend: standalone\n")
 	_, err := load("")
-	if err == nil || !strings.Contains(err.Error(), `"standalone"`) || !strings.Contains(err.Error(), "memory, raft") {
-		t.Fatalf("error = %v, want the backend named with memory, raft", err)
+	if err == nil || !strings.Contains(err.Error(), `"standalone"`) || !strings.Contains(err.Error(), "memory, raft, database") {
+		t.Fatalf("error = %v, want the backend named with memory, raft, database", err)
 	}
 }

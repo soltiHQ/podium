@@ -46,6 +46,14 @@ configuration loads (`TestCLIRefusesUnknownFlagBeforeStarting`):
   or `--config=PATH`.
 - `podium agent-token [--generation N] [--] <agent-id>` prints an agent's token
   (see "Enrollment secret").
+- `podium migrate [--config PATH]` migrates the schema of the database backend's
+  database, and exits (see "Database backend"). It reads the configuration as
+  the server does, as strictly, but needs no `cluster.database.advertise_addr`,
+  and refuses another backend; it connects to the primary within the startup
+  retry of 30 s, migrates under the database lock, logs the host, the port, the
+  database and the schema versions before and after, and exits 0. Any failure, a
+  schema newer than this podium's included, exits 1. It starts no listener
+  (`TestMigrateCommand`).
 - `podium version` and `podium --version` print one line,
   `podium <version> (commit <12 hex>[, modified], built <RFC 3339>, <go version> <os>/<arch>)`
   (`TestVersionCommandPrintsOneLine`), and start nothing. The version, the
@@ -208,17 +216,22 @@ HEAD, as one line of text (`ok`, or the reason) except `/version` and
 | Route | Answers |
 | -- | -- |
 | `/livez` | 200 `ok` while the process serves. |
-| `/readyz` | 200 `ok` when the node is ready, and otherwise 503 with the reason, one of `starting`, `no raft leader`, `shutting down`. |
-| `/leaderz` | 200 on the raft leader once start-up has finished, also during the shutdown delay, while the node still serves; on a memory node, 200 while it is ready. Otherwise 503, with `starting`, `not leader`, or, on a memory node, the reason it is not ready. |
+| `/readyz` | 200 `ok` when the node is ready, and otherwise 503 with the reason, one of `starting`, `storage failed`, `no raft leader`, `shutting down`. |
+| `/leaderz` | 200 on the raft leader, or on the replica of the database backend that holds the lease, once start-up has finished, also during the shutdown delay, while the node still serves, and whatever the store does; on a memory node, 200 while it is ready. Otherwise 503, with `starting`, `not leader`, or, on a memory node, the reason it is not ready. |
 | `/metrics` | The Prometheus exposition of the node's metrics, in the text format; see "Metrics" in `internal/server/README.md`. |
 | `/version` | The build information as JSON: `version`, `modified`, `go_version` and `platform` always, `commit` when the binary carries a VCS revision, `build_time` (the commit time, RFC 3339; the start-up log line calls it `built`) when it carries one. |
 
 A node is ready when start-up has finished (every listener, the ops listener
-included, is bound, and the store is open), the shutdown has not begun and, on
-raft, this node knows a leader. `/readyz` gives the first reason that applies,
-in this order: `shutting down`, `starting`, `no raft leader`
-(`TestReadinessReasonOrder`). `/livez` stays 200 while the process serves: a
-restart does not mend a raft cluster without a leader.
+included, is bound, and the store is open), the shutdown has not begun, on the
+database backend the last ping of the primary answered, and, on raft, this node
+knows a leader. `/readyz` gives the first reason that applies, in this order:
+`shutting down`, `starting`, `storage failed`, `no raft leader`
+(`TestReadinessReasonOrder`). `storage failed` comes from the database backend's
+ping of the primary, every 5 s within 2 s, which `podium_store_failed` follows
+too; memory and raft never report it. The database backend waits for no leader:
+a failover leaves every replica serving reads (see "Database backend"). `/livez`
+stays 200 while the process serves: a restart does not mend a raft cluster
+without a leader, nor a database that is gone.
 
 The gRPC listener serves `grpc.health.v1.Health` without authentication, though
 with `tls.server.client_ca_file` set the listener itself still asks every
@@ -236,8 +249,9 @@ nothing at the default `info` (see "Request lifecycle" in
 `internal/transport/README.md`).
 
 Tests: `TestReadinessFollowsShutdown`, `TestReadinessReasonOrder`,
-`TestLeaderProbeOnRaft`, `TestOpsEndpointsNeedNoAuth`,
-`TestOpsListenerDisabledWhenAddrEmpty`, `TestGRPCHealthFollowsReadiness`.
+`TestLeaderReason`, `TestLeaderProbeOnRaft`, `TestOpsEndpointsNeedNoAuth`,
+`TestOpsListenerDisabledWhenAddrEmpty`, `TestGRPCHealthFollowsReadiness`, and on
+Postgres `TestDatabaseModeServes` and `TestDatabaseOutageRecovers`.
 
 ### Shutdown
 
@@ -263,7 +277,19 @@ The first SIGINT or SIGTERM starts a graceful shutdown, in this order:
    end as it starts, so a client that holds one does not delay it
    (`TestHealthWatchDoesNotHoldShutdown`).
 1. The rest is as before: the log hub, the proxy pool, the event hub and the
-   store or raft node close, bounded by 30s, which is not configurable.
+   raft node close, or on the database backend its ping, its events transport,
+   its leadership and its pools, bounded by 30s, which is not configurable. The
+   leadership releases the lease, so that another replica takes it at its next
+   look, once the leader-only runners have stopped, which they normally have
+   within `server.shutdown_timeout`. A runner that has not stopped by then may
+   still run: the lease is not released then, and expires a lease after its last
+   renewal, which only delays another replica's takeover, and the start of its
+   leader-only runners, until then; it does not stop the stuck work (one WARN,
+   `the leader-only work has not ended`). The close of the pools waits for the
+   queries in flight, so a runner stuck in a query can outlive the lease's
+   expiry, until the 30s bound ends the process. Until then it can overlap the
+   new leader's work: its database writes stay fenced, its calls to agents are
+   not.
 
 The delay is not part of `server.shutdown_timeout`, so a termination grace
 period must cover both, and the 30s of step 4. A **second** SIGINT or SIGTERM,
@@ -376,6 +402,13 @@ default or have no value, as the section on it says.
 | `cluster.discovery.peers` | `SOLTI_CLUSTER_DISCOVERY_PEERS` | list | empty |
 | `cluster.discovery.hostname` | `SOLTI_CLUSTER_DISCOVERY_HOSTNAME` | string | empty |
 | `cluster.discovery.port` | `SOLTI_CLUSTER_DISCOVERY_PORT` | integer | empty |
+| `cluster.database.driver` | `SOLTI_CLUSTER_DATABASE_DRIVER` | string | postgres |
+| `cluster.database.url` | `SOLTI_CLUSTER_DATABASE_URL` | string | empty |
+| `cluster.database.replica_url` | `SOLTI_CLUSTER_DATABASE_REPLICA_URL` | string | empty |
+| `cluster.database.advertise_addr` | `SOLTI_CLUSTER_DATABASE_ADVERTISE_ADDR` | string | empty |
+| `cluster.database.lease` | `SOLTI_CLUSTER_DATABASE_LEASE` | duration | 10s |
+| `cluster.database.max_open_conns` | `SOLTI_CLUSTER_DATABASE_MAX_OPEN_CONNS` | integer | 10 |
+| `cluster.database.migrate` | `SOLTI_CLUSTER_DATABASE_MIGRATE` | bool | true |
 | `events.coalesce` | `SOLTI_EVENTS_COALESCE` | duration | 1s |
 | `streams.max_per_ip` | `SOLTI_STREAMS_MAX_PER_IP` | integer | 10 |
 | `streams.subscriber_buffer` | `SOLTI_STREAMS_SUBSCRIBER_BUFFER` | integer | 64 |
@@ -435,16 +468,17 @@ Env equivalents: `SOLTI_TLS_SERVER_CERT_FILE`, `SOLTI_TLS_CLIENT_CA_FILE`, etc.
 In raft mode a follower forwards the writes it gets on the HTTP and
 HTTP-discovery listeners, and the syncs it gets on the gRPC listener, to the
 leader, at the host of the leader's raft advertise address, as written, and this
-node's port of that listener (see "Cluster"). With `tls.server` set it forwards
-over TLS with `tls.client`: `ca_file` must also hold the CA of the replicas'
-server certificates, which must name each replica's raft advertise host as
-written, an IP SAN for `10.0.0.1:7000` and a DNS SAN for `podium-0.podium:7000`,
-and `cert_file`/`key_file` are presented when the leader asks for a client
-certificate, as the discovery listener does with `client_ca_file`. Without a
-`tls.client.ca_file`, the leader is verified against the system roots. A leader
-whose certificate does not verify gets no write: the follower answers 502. The
-raft transport has TLS settings of its own, with a CA of its own, see "Raft
-transport security".
+node's port of that listener (see "Cluster"); on the database backend, at the
+host of the leader's `cluster.database.advertise_addr`, likewise. With
+`tls.server` set it forwards over TLS with `tls.client`: `ca_file` must also
+hold the CA of the replicas' server certificates, which must name each replica's
+raft advertise host as written, an IP SAN for `10.0.0.1:7000` and a DNS SAN for
+`podium-0.podium:7000`, and `cert_file`/`key_file` are presented when the leader
+asks for a client certificate, as the discovery listener does with
+`client_ca_file`. Without a `tls.client.ca_file`, the leader is verified against
+the system roots. A leader whose certificate does not verify gets no write: the
+follower answers 502. The raft transport has TLS settings of its own, with a CA
+of its own, see "Raft transport security".
 
 The forwards carry logins, cookies, bearer tokens and agents' tokens, so a raft
 cluster needs `tls.server` on every node: without it a follower forwards them in
@@ -765,23 +799,25 @@ header through unchanged lets that client pick its own IP.
 
 In raft mode a follower forwards writes to the leader, which then sees the
 follower as the peer, so every node also trusts, besides this list, the hosts of
-its current raft configuration: there is no need to list the replicas. A host
-written as an IP counts as soon as the configuration holds it, and stops
-counting as soon as it leaves; a host written as a name counts at the addresses
-it resolves to, looked up every 10 s, so its trust is only as good as the DNS
-answers the node gets; where DNS cannot be trusted that far, write the advertise
-addresses as IPs. Each node must connect to the others from the address its raft
-address names, or resolves to. Any process on a node's host can then pick the
-client IP of its requests, as behind any listed proxy, so a raft host must not
-relay outside clients at L4 (a port forward, SNAT, or kube-proxy for a
-hostNetwork pod), just as a listed proxy must not pass a client's header
-through: such a client would reach the leader from the host's address and pick
-its own IP. See "Forwarding and trusted hosts" in `internal/raft/README.md`.
+its current raft configuration: there is no need to list the replicas. On the
+database backend the hosts of the replicas the registry lists, by their
+`advertise_addr`, take that place. A host written as an IP counts as soon as the
+configuration holds it, and stops counting as soon as it leaves; a host written
+as a name counts at the addresses it resolves to, looked up every 10 s, so its
+trust is only as good as the DNS answers the node gets; where DNS cannot be
+trusted that far, write the advertise addresses as IPs. Each node must connect
+to the others from the address its raft address names, or resolves to. Any
+process on a node's host can then pick the client IP of its requests, as behind
+any listed proxy, so a raft host must not relay outside clients at L4 (a port
+forward, SNAT, or kube-proxy for a hostNetwork pod), just as a listed proxy must
+not pass a client's header through: such a client would reach the leader from
+the host's address and pick its own IP. See "Forwarding and trusted hosts" in
+`internal/raft/README.md`.
 
 gRPC discovery reads the client IP from the `x-forwarded-for` metadata of a
-trusted host only in raft mode, where a follower sets it when it forwards a
-sync. On the memory backend it ignores this setting and always uses the peer
-address.
+trusted host only in raft mode and on the database backend, where a follower
+sets it when it forwards a sync. On the memory backend it ignores this setting
+and always uses the peer address.
 
 ## Browser sessions
 
@@ -792,7 +828,8 @@ that login sets (see "Rate limiting"):
 
 - `auto` (default): when the client used HTTPS, either a TLS connection or
   `X-Forwarded-Proto: https` from a proxy in `trusted_proxies`, or, in raft
-  mode, from a host of the raft configuration, which a follower that forwards a
+  mode, from a host of the raft configuration, and on the database backend from
+  the host of a replica the registry lists, which a follower that forwards a
   request is (see "Client IPs and trusted proxies").
 - `always`: on every response. Use it when the proxy that terminates TLS cannot
   be listed in `trusted_proxies`.
@@ -801,10 +838,10 @@ Any other value, an empty one included, fails configuration loading.
 
 `auth.rotate_refresh` (env `SOLTI_AUTH_ROTATE_REFRESH`, default `false`) makes
 every refresh of a browser's session replace its refresh token. The replacement
-is a write, so in raft mode only the leader can make it. A browser whose access
-token has expired (`auth.access_ttl`, 15m by default) and whose request, a GET
-included, reaches a follower gets 503 instead of a new token, with `X-Leader`
-when the follower knows its leader (see "Leader hint" in
+is a write, so in raft and database modes only the leader can make it. A browser
+whose access token has expired (`auth.access_ttl`, 15m by default) and whose
+request, a GET included, reaches a follower gets 503 instead of a new token,
+with `X-Leader` when the follower knows its leader (see "Leader hint" in
 `internal/transport/README.md`), and sets no cookie; the follower logs a WARN,
 `auth refresh needs the leader`, with the method and the path, and the access
 log of an API route records a 503 with `X-Leader` as a WARN too, so the refresh
@@ -816,14 +853,14 @@ retry at `X-Leader` refreshes the browser when it did not, and when it did, the
 browser logs in again. A refresh on a node that shuts down as the rotation
 commits has the same outcome and WARN, but its 503 carries no `X-Leader`, as the
 node knows no leader any more, so the access log of an API route records it as
-an ERROR, and a retry has to go to another node. So with rotation on, a raft
-deployment needs leader-sticky routing. The ops listener's `/leaderz` (see "Ops
-listener") answers 200 on the leader only and needs no credentials, so a
-balancer can route to the leader with it: keep rotation off in raft mode unless
-such routing is in place. See "Browsers and `auth.rotate_refresh`" in the
-runbook of `internal/raft/README.md`. Without rotation a refresh only reads, and
-works on every node, as does a request whose access token is still valid. The
-memory backend is unaffected.
+an ERROR, and a retry has to go to another node. So with rotation on, a raft or
+database deployment needs leader-sticky routing. The ops listener's `/leaderz`
+(see "Ops listener") answers 200 on the leader only and needs no credentials, so
+a balancer can route to the leader with it: keep rotation off in raft and
+database modes unless such routing is in place. See "Browsers and
+`auth.rotate_refresh`" in the runbook of `internal/raft/README.md`. Without
+rotation a refresh only reads, and works on every node, as does a request whose
+access token is still valid. The memory backend is unaffected.
 
 In raft mode every node checks an access token, and refreshes a session without
 rotation, against its own store, which follows the leader's with a lag: a
@@ -968,6 +1005,11 @@ When the user table is empty, the first start creates the administrator
 - On the memory backend there is no data directory, so the generated password is
   logged once, at WARN, with the prefix `ephemeral mode:`. No other mode logs a
   password.
+- On the database backend there is neither: a database with no administrator
+  needs `SOLTI_BOOTSTRAP_ADMIN_PASSWORD`, and a start without it stops, exit 1,
+  with an error that names the variable (`ErrAdminPasswordRequired`). The
+  replica that leads seeds, at the start of its terms, through the store, whose
+  writes only the leader makes (`TestBootstrapNeedsPassword`).
 
 Once users exist the variable is ignored, with one WARN per start: remove it
 from the environment after the first start. A raft node seeds at the start of
@@ -990,10 +1032,200 @@ file store that the earlier `standalone` backend kept in `podium.db`, and its
 settings `cluster.standalone.data_dir`, `cluster.standalone.ephemeral` and
 `cluster.standalone.snapshot_threshold`, are gone: a file that holds any of
 them, or a variable such as `SOLTI_CLUSTER_STANDALONE_DATA_DIR`, fails loading,
-and so does `cluster.backend: standalone`, whose error names the two backends
-there are, `memory, raft`. Moving to a cluster that keeps its state on disk is
-`cluster.backend: raft`, whose node keeps its log and snapshots in
-`cluster.raft.data_dir`.
+and so does `cluster.backend: standalone`, whose error names the three backends
+there are, `memory, raft, database`. Moving to a cluster that keeps its state on
+disk is `cluster.backend: raft`, whose node keeps its log and snapshots in
+`cluster.raft.data_dir`, or `cluster.backend: database`, whose replicas keep it
+in a database (see "Database backend").
+
+## Database backend
+
+```yaml
+cluster:
+  backend: database
+  database:
+    driver: postgres            # the only driver, and the default
+    url: postgres://…           # SOLTI_CLUSTER_DATABASE_URL: the primary
+    replica_url: postgres://…   # SOLTI_CLUSTER_DATABASE_REPLICA_URL: a read endpoint, optional
+    advertise_addr: 10.0.0.5:0  # how the other replicas reach this one; its port is unused
+    lease: 10s                  # 0 keeps 10s
+    max_open_conns: 10          # 0 keeps 10
+    migrate: true               # unset is true
+```
+
+The `database` backend keeps the state in a Postgres database that any number of
+replicas share; the replicas hold none, and elect their leader through the
+database. Only this backend reads `cluster.database`: memory and raft ignore it,
+valid or not. The leadership, the fence of the writes, the registry of the
+replicas and the events between them are in
+`internal/cluster/database/README.md`, the store in
+`internal/storage/sqlstore/README.md`. Configuration loading fails on a driver
+other than `postgres`, an empty `url`, an empty or invalid `advertise_addr`, a
+negative `lease` or `max_open_conns`, and a `lease` under 60 ms
+(`TestDatabaseConfigValidated`); no such error quotes a value, as an operator
+may paste a URL into the wrong key.
+
+- `url` and `replica_url` carry credentials: pass them as variables, from a
+  Secret. They reach the driver alone: no log line, error, metric or `/version`
+  carries them, nor their user, password or parameters; podium logs the host,
+  the port and the database. TLS goes through the URL (`sslmode=verify-full`,
+  `sslrootcert`). A URL that does not parse, or names a TLS file that cannot be
+  read, fails the start with an error that names the setting, never the URL
+  (`TestDatabaseURLNeverLeaks`).
+- A URL that sets no `connect_timeout`, or 0, gets 5 s, so that a host that
+  drops packets fails a connection within 5 s rather than within the operating
+  system's TCP connect timeout, and a read replica that does so holds a listing
+  that long before it falls back to the primary; a URL that sets another keeps
+  it (`TestPoolConfig`).
+- `replica_url`, when set, serves the listings of the GET requests of the UI and
+  the API; everything else reads the primary.
+- Each pool names itself to the server by `application_name`, which replaces a
+  URL's own: `podium` for the primary's, `podium-replica`, `podium-lease` for
+  the lease's one connection, `podium-events` for the events listener, and
+  `podium-migrate` for `podium migrate`.
+- `max_open_conns` caps the primary's pool and the replica's, which keep as many
+  connections idle; the lease has a pool of one connection of its own, so that
+  writers never starve it.
+- `advertise_addr` is required: `host:port`, the host a name or an IP and an
+  IPv6 host in brackets (a bracketed IPv4 host is accepted too, and the
+  forwarding strips its brackets), with a host the other replicas can dial, not
+  `0.0.0.0` or `::`, and a port number, 0 to 65535, which goes unused: every
+  replica serves `http.addr`, `http_discovery.addr` and `grpc.addr` on the same
+  ports, which the forwarding needs, as in raft (see "Cluster").
+- `migrate: true` migrates the schema at start, under a database lock, so that
+  replicas that start together migrate once. `migrate: false` makes a replica
+  refuse a schema older than its own, saying to run `podium migrate`, for
+  deployments that run `podium migrate` as a step of their own. A schema newer
+  than the replica's stops it, both versions named, and it writes nothing.
+
+At start a replica retries a database it cannot reach for 30 s, a second apart,
+with one WARN for each database read that fails, which names the SQLSTATE of a
+server's refusal, then exits 1, for the orchestrator to restart it; a schema
+that is not its own, a migration that fails, or any other failure stops it at
+once (`TestDatabaseStartRetries`, `TestDatabaseSchemaNotOursStopsTheStart`). The
+30 s are one window for every read of the database at start: the migration, the
+opening of the store, and the read of the user table that decides whether
+`SOLTI_BOOTSTRAP_ADMIN_PASSWORD` is needed
+(`TestDatabaseStartRetriesTheSeedCheck`). A database with no administrator stops
+the start unless `SOLTI_BOOTSTRAP_ADMIN_PASSWORD` is set (see "First
+administrator").
+
+Serving, a replica pings the primary every 5 s, each ping within 2 s: while the
+last ping failed, `/readyz` answers 503 `storage failed`, `podium_store_failed`
+is 1 and the gRPC health service `NOT_SERVING`, and the first ping that answers
+restores them, without a restart. Requests that reach the database meanwhile
+answer 503, and a leader that cannot renew its lease steps down
+(`TestDatabaseOutageRecovers`). `/readyz` waits for no leader on this backend: a
+failover leaves every replica serving reads. `/leaderz` answers 200 on the
+replica that holds the lease.
+
+The forwarding of writes to the leader, the trust of a forwarding replica's
+`X-Forwarded-For`, the startup WARN of plaintext forwarding
+(`database forwarding runs plaintext`) and the check of the settings every
+replica must share work as in raft, over the replicas the registry lists
+(`TestTwoReplicasForwardWrites`; see "Settings every replica must share").
+
+### Operating the database backend
+
+- **The role and the schema.** podium creates its tables and indexes in the
+  schema its connection resolves unqualified names to: the first of the role's
+  `search_path`, `public` unless the role has a schema of its own named after
+  it. The role of `url` needs to create tables in it (`CREATE` on the schema),
+  and runs podium's statements on them. Since Postgres 15 `public` no longer
+  grants `CREATE` to every role: grant it, or give the role its own schema. The
+  role of `replica_url` only reads, but it needs `USAGE` on the schema, `SELECT`
+  on podium's tables, default privileges for the tables later migrations add
+  (`ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA <schema> GRANT SELECT ON TABLES TO <role>`),
+  and the same name resolution (`ALTER ROLE <role> SET search_path = <schema>`).
+  A read role without them gets SQLSTATE 42P01 or 42501, which podium classifies
+  as internal, and the read endpoint's fallback to the primary covers only an
+  unreachable endpoint: every GET listing answers 500. The tables hold what
+  podium's state holds, the password hashes, the session IDs, the stored agent
+  tokens and the task specs among it, unencrypted: the database's access
+  control, encryption and backups are yours. podium needs no extension and no
+  superuser.
+- **Connections.** A replica holds at most `max_open_conns` connections to the
+  primary, plus the lease's one and the events listener's one, and at most
+  `max_open_conns` to the replica endpoint: 12 and 10 with the default, per
+  replica. `podium migrate` takes one. Add them up over the replicas, and over
+  the extra pod of a rolling update, against the server's `max_connections` and
+  its other clients', and size `max_open_conns` down instead of past it: a
+  replica that finds none free makes its request wait for one
+  (`podium_database_pool_wait_count_total`), and a server at its limit refuses
+  new connections. A pooler between podium and Postgres must hand out a direct
+  or session-mode connection: the events' `LISTEN` does not work through a
+  transaction-mode pool, such as PgBouncer's, which hands the connection to
+  another client between statements: no notification arrives, and every replica
+  then sees the others' events only at its read every 5 s (see "Events" in
+  `internal/cluster/database/README.md`). Two more things break through such a
+  pooler: pgx's statement cache, which uses prepared statements that PgBouncer
+  before 1.21 rejects, and the lease connection's session-level
+  `statement_timeout`, which then leaks to the other clients of the pooled
+  server connection.
+- **A takeover waits for the old leader's writes.** A write transaction of any
+  length keeps the leadership: the leader's renewals do not wait for the fence's
+  lock. A takeover does: it waits for the old leader's write transactions in
+  flight, each attempt within a sixth of `lease` and retried, so a failover
+  takes `lease` plus the time those writes take to end. A transaction that a
+  leader cut off mid-transaction left open holds the takeover until the server
+  ends it: at once when the server sees the connection closed, otherwise once it
+  notices the client vanished, after about 2 h 11 min with the Linux keepalive
+  defaults. The server's `tcp_keepalives_*` and `tcp_user_timeout`, or
+  `idle_in_transaction_session_timeout` on podium's role, shorten that; podium
+  sets none of them (see "The fence" in `internal/cluster/database/README.md`).
+- **Replication.** Prefer synchronous replication for a standby that can take
+  over: the fence holds through a database failover, but rows that an
+  asynchronous standby had not received are lost, and with them the writes
+  podium answered. podium does not detect it.
+- **A read replica lags.** `replica_url` serves the lists of the GET requests of
+  the UI and the API, which can show state older than the primary's. Two effects
+  follow. A placement preview, a GET, can read the replica while `Deploy`, a
+  POST, checks the preview's token on the primary: until the replica catches up,
+  `Deploy` can refuse a token the preview gave. And a `DeleteIssues` right after
+  a `Record` on the same replica can answer 0 where memory answers 1, as the
+  event is applied when it is read back from the database. Runners, auth and
+  every decision read the primary.
+- **Migrations only add.** A release's migrations add tables, columns and
+  indexes, and never remove or rewrite what an earlier release reads, once a
+  release has shipped them, so the version before keeps working while a rollout
+  runs, and the built-in roles follow the version of the replica that leads. A
+  replica refuses a schema newer than its own, which is what a rollback past a
+  migration meets; there is no downgrade: back the database up before an
+  upgrade, with the database's own tools. With `migrate: true`, the default, the
+  first replica of the new version migrates at start; with `migrate: false`, run
+  `podium migrate` first, such as a Kubernetes Job that runs before the rollout.
+- **`podium migrate`** loads and validates the whole configuration as the server
+  does, `advertise_addr` aside, from the same file and variables (so it needs
+  `SOLTI_AUTH_JWT_SECRET` and the rest, and `cluster.backend: database`), logs
+  the host, port and database and the schema versions before and after, and
+  exits 0, or 1 on any failure, a configuration that fails loading and an
+  unreachable database after the startup retry included (2 on a bad command
+  line).
+- **Rate limits are per replica.** The login and sync limiters live in the
+  memory of one process: logins and agent syncs are forwarded to the leader, so
+  the leader's count decides them, the stream limiter counts on the replica that
+  holds the stream, and nothing is shared through the database. A failover, like
+  a restart, starts the new leader's limiters empty, so a lockout ends, and an
+  agent's sync bucket refills. A deployment that must hold one limit across
+  replicas needs it in front of podium.
+- **`auth.rotate_refresh` and routing.** With rotation on, a refresh is a write:
+  a replica that does not lead answers 503 with `X-Leader` where it knows the
+  leader. Route browsers by `/leaderz` (200 on the lease holder only), or leave
+  rotation off, as in raft (see "Browser sessions").
+- **Rotating the database password.** Postgres keeps the sessions it
+  authenticated before `ALTER ROLE … PASSWORD`, and podium reads the URLs at
+  start and sets no connection lifetime on its pools. So: change the password in
+  the database, update the secret that carries the URLs, then restart the
+  replicas one at a time (`kubectl rollout restart`). Between the change and the
+  restart each new connection a replica opens, to replace one that ended, fails
+  with SQLSTATE 28P01, and its requests answer 503 until it restarts; the open
+  connections keep working.
+- **The agent search is linear.** The UI's agent search reads and decodes every
+  agent, so its cost grows with the fleet: about 25 µs an agent on the
+  benchmark's server, 24 ms at 1000 agents and 136 ms at 5000, against well
+  under a millisecond in memory. A sync costs the same at every size. The
+  numbers and their conditions are in "Performance" in
+  `internal/storage/sqlstore/README.md`.
 
 ## Cluster
 
@@ -1147,8 +1379,8 @@ leader and list every node.
 
 ### Settings every replica must share
 
-These settings must be the same on every node of a raft cluster, as a request
-may reach any of them:
+These settings must be the same on every node of a raft cluster, and on every
+replica of the database backend, as a request may reach any of them:
 
 - `auth.jwt_secret` (env `SOLTI_AUTH_JWT_SECRET`), `auth.cookie_secure`,
   `auth.issuer` and `auth.audience`: a token one node signed fails on another,
@@ -1166,8 +1398,12 @@ may reach any of them:
   differ from node to node.
 
 Every raft node digests them, group by group, and its `config-check` runner
-compares the digests with its leader's at each change of leader. A node whose
-settings differ logs one ERROR per leader,
+compares the digests with its leader's at each change of leader; a replica of
+the database backend heartbeats its digests into the registry, and its
+`config-check` runner reads its leader's from there, with the same rules and
+lines, its `node_id` the replica's random ID
+(`TestDatabaseReplicaSettingsChecked`). A node whose settings differ logs one
+ERROR per leader,
 `configuration check: this node's configuration differs from the leader's in settings that every replica must share`,
 naming the groups that differ (`auth`, `agent auth`, `proxies`, `CORS`,
 `agent TLS`) and never a value; a drifted leader is reported by each of its
@@ -1178,9 +1414,9 @@ Settings that apply alike count alike: `trusted_proxies` and
 empty or set to the defaults it gets, an empty `auth.issuer` or `auth.audience`
 and its default, and the same CA bundle at another path. Overlapping proxy
 prefixes are not merged, though: write the lists alike on every node. A raft
-node reads `tls.server.client_ca_file` before it starts: a bundle it cannot
-read, or that holds no certificate, fails the start with the same error as it
-does on the memory backend.
+node, or a database replica, reads `tls.server.client_ca_file` before it starts:
+a bundle it cannot read, or that holds no certificate, fails the start with the
+same error as it does on the memory backend.
 
 Whoever reads the fingerprint and knows the other settings can confirm a guess
 of a weak `jwt_secret` or `enroll_secret` offline, as the fingerprint of every

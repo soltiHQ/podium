@@ -44,11 +44,33 @@ import (
 // options are the settings of [New] that production never changes.
 type options struct {
 	passwordCost int
+	// database are the database mode's intervals, which tests shorten.
+	database databaseTimings
+	// leaderWork, a test hook, wraps the work that each leader-only runner runs
+	// under WhenLeader (watchedLeadership), so that a test sees that work start
+	// and end; nil leaves it as it is.
+	leaderWork func(work func(context.Context) error) func(context.Context) error
+}
+
+// watchedLeadership is a leadership whose WhenLeader runs fn through watch:
+// what the leader-only runners run under when a test watches their work
+// (options.leaderWork). The rest is the leadership's own.
+type watchedLeadership struct {
+	cluster.Leadership
+	watch func(work func(context.Context) error) func(context.Context) error
+}
+
+// WhenLeader runs fn, through watch, as the leadership runs it.
+func (w watchedLeadership) WhenLeader(ctx context.Context, fn func(context.Context) error) error {
+	if fn == nil {
+		return w.Leadership.WhenLeader(ctx, nil)
+	}
+	return w.Leadership.WhenLeader(ctx, w.watch(fn))
 }
 
 // defaultOptions are the production settings.
 func defaultOptions() options {
-	return options{passwordCost: authcred.DefaultBcryptCost}
+	return options{passwordCost: authcred.DefaultBcryptCost, database: defaultDatabaseTimings()}
 }
 
 // Option changes how [New] assembles the App.
@@ -65,10 +87,13 @@ func WithPasswordCost(cost int) Option {
 type App struct {
 	logger zerolog.Logger
 
-	store        storage.Storage
-	leadership   cluster.Leadership
-	cluster      *clustersvc.Service // a test hook: only tests read it; the raft node's cluster service, nil in memory
-	eventHub     *event.Hub
+	store      storage.Storage
+	leadership cluster.Leadership
+	cluster    *clustersvc.Service // a test hook: only tests read it; the raft node's cluster service, nil in memory and in the database mode
+	eventHub   *event.Hub
+	// raftShutdown releases the cluster's resources: a raft node's, or the
+	// database mode's (buildDatabase), each with the lookups of the members'
+	// host names and the gRPC sync forwarder.
 	raftShutdown func()
 	proxyPool    *proxy.Pool
 	authModel    *kit.Auth
@@ -94,31 +119,46 @@ type App struct {
 }
 
 // New assembles all dependencies. The memory backend seeds the initial data
-// here. A raft node waits for no leader: it checks what a seed needs, and once
-// it runs, seeds at the start of each of its leadership terms (see
-// [seedingRunner]). Returned [App] is ready to [Run]. Caller must call
-// [Shutdown] to release deferred resources (Raft node, proxy pool, event hub).
+// here. A raft node, or a replica of the database mode, waits for no leader: it
+// checks what a seed needs, and once it runs, seeds at the start of each of its
+// leadership terms (see [seedingRunner]); a first start of the database mode
+// without the administrator's password stops here. The database mode retries
+// its database here, within the startup retry, bounded by ctx too. Returned
+// [App] is ready to [Run]. Caller must call [Shutdown] to release deferred
+// resources (Raft node or database pools, proxy pool, event hub).
 func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...Option) (*App, error) {
 	o := defaultOptions()
 	for _, opt := range opts {
 		opt(&o)
 	}
 	raftMode := cfg.Cluster.Backend == cluster.BackendRaft
-	var hooks probeHooks
+	databaseMode := cfg.Cluster.Backend == cluster.BackendDatabase
+	// elected: the replicas elect their leader, which alone seeds and writes, and
+	// must share some settings.
+	elected := raftMode || databaseMode
+	var (
+		hooks   probeHooks
+		dbHooks databaseHooks
+	)
 	m := metrics.New(buildinfo.Read())
-	clusterOpts := []clusterOption{withHubOptions(hubOptions(cfg)...), withProbes(&hooks), withMetrics(m)}
-	// A raft node digests the settings that every replica must share, answers
-	// its peers' configuration requests with the digests, and checks them
-	// against its leader's (raftpkg.Admin.ConfigCheck); memory does neither.
+	clusterOpts := []clusterOption{
+		withHubOptions(hubOptions(cfg)...), withProbes(&hooks), withMetrics(m),
+		withStartContext(ctx), withTimings(o.database), withDatabaseHooks(&dbHooks),
+	}
+	// A raft node, and a replica of the database mode, digests the settings that
+	// every replica must share, and checks them against its leader's (configCheckRunner):
+	// a raft node answers its peers' configuration requests with the digests, a
+	// database replica heartbeats them into the registry. Memory does neither.
 	var (
 		digests cluster.Digests
-		// clientCAs is the agents' CA bundle that a raft node reads once, for its
-		// digests and for the pool of its discovery listeners (agentListenerTLS).
+		// clientCAs is the agents' CA bundle that a raft node or a database
+		// replica reads once, for its digests and for the pool of its discovery
+		// listeners (agentListenerTLS).
 		clientCAs []*x509.Certificate
 	)
-	if raftMode {
-		// A raft node cannot know at start whether a term of its own will seed:
-		// it checks before anything starts what any seed needs, which would
+	if elected {
+		// A replica cannot know at start whether a term of its own will seed: it
+		// checks before anything starts what any seed needs, which would
 		// otherwise fail at every term it leads.
 		if err := bootstrapOptions(cfg).Check(); err != nil {
 			return nil, err
@@ -133,7 +173,11 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 			return nil, err
 		}
 		digests = shared.Digests()
-		clusterOpts = append(clusterOpts, withConfigDigests(digests))
+		if raftMode {
+			clusterOpts = append(clusterOpts, withConfigDigests(digests))
+		} else {
+			clusterOpts = append(clusterOpts, withSharedSettings(shared))
+		}
 	}
 
 	store, leadership, eventHub, raftShutdown, admin, err := buildCluster(cfg.Cluster, logger, clusterOpts...)
@@ -157,9 +201,22 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 
 	// Default users/roles/credentials seeding must run through the store, on the
 	// leader. The memory backend always leads: it seeds here, and a seed that
-	// fails fails the start. A raft node leads in some terms only; its seeding
-	// runner seeds at the start of each, and the seed replicates to the others.
-	if !raftMode {
+	// fails fails the start. A raft node, or a database replica, leads in some
+	// terms only; its seeding runner seeds at the start of each, and the seed
+	// replicates to the others, or lands in the database they share. A database
+	// with no administrator needs SOLTI_BOOTSTRAP_ADMIN_PASSWORD: a start without
+	// it stops here, naming it, rather than failing every term. Its read of the
+	// user table takes the rest of the startup retry, as the store's opening did.
+	if databaseMode {
+		err = dbHooks.retry(ctx, func(ctx context.Context) error {
+			return bootstrap.CheckSeed(ctx, bootstrapOptions(cfg), svc.user, svc.credential)
+		})
+		if err != nil {
+			closeOnError(raftShutdown, eventHub)
+			return nil, err
+		}
+	}
+	if !elected {
 		if err = bootstrap.Run(ctx, logger, bootstrapOptions(cfg), svc.role, svc.user, svc.credential); err != nil {
 			closeOnError(raftShutdown, eventHub)
 			return nil, err
@@ -171,9 +228,10 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 	// but WITHOUT a client-certificate requirement, so enabling mTLS for agents does
 	// not lock browsers (which have no client cert) out of the dashboard. One client
 	// config for outbound calls: to agents, and from a follower to the leader when it
-	// forwards a write. All opt-in (nil = plaintext). A raft node builds the
-	// agent-facing listeners' pool from the bundle it read for its digests.
-	serverTLS, err := agentListenerTLS(cfg, raftMode, clientCAs)
+	// forwards a write. All opt-in (nil = plaintext). A raft node, or a database
+	// replica, builds the agent-facing listeners' pool from the bundle it read for
+	// its digests.
+	serverTLS, err := agentListenerTLS(cfg, elected, clientCAs)
 	if err != nil {
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
@@ -198,13 +256,14 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		Bool("client_mtls", cfg.TLS.Client.CertFile != "").
 		Msg("tls configuration")
 	warnOpenDiscovery(logger, cfg)
-	if raftMode {
-		warnForwarding(logger, cfg)
+	if elected {
+		warnForwarding(logger, cfg, cfg.Cluster.Backend)
 	}
 
-	// In raft mode the resolver trusts the hosts of the raft configuration too, so
-	// the leader believes the client a follower forwards a write for. Those hosts
-	// live as long as the raft node, and close with it.
+	// With an elected leader the resolver trusts the hosts of the members too, the
+	// raft configuration's or the database registry's, so the leader believes the
+	// client a follower forwards a write for. Those hosts live as long as the
+	// cluster, and close with it.
 	resolver, closeHosts, err := clientResolver(cfg, leadership)
 	if err != nil {
 		closeOnError(raftShutdown, eventHub)
@@ -224,14 +283,21 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 	response.ErrorPageRenderer = pageSystem.ErrorPage
 	responder.LoginPath = routepath.PageLogin
 
-	lifecycleRunner, err := lifecycle.New(cfg.Lifecycle, logger, store, proxyPool, eventHub, leadership)
+	// The leader-only runners run their work under WhenLeader: through
+	// watchedLeadership when a test watches that work.
+	leaderOnly := leadership
+	if o.leaderWork != nil {
+		leaderOnly = watchedLeadership{Leadership: leadership, watch: o.leaderWork}
+	}
+
+	lifecycleRunner, err := lifecycle.New(cfg.Lifecycle, logger, store, proxyPool, eventHub, leaderOnly)
 	if err != nil {
 		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
 
-	syncRunner, err := syncrunner.New(cfg.Sync, logger, store, proxyPool, svc.agent, eventHub, svc.history, leadership)
+	syncRunner, err := syncrunner.New(cfg.Sync, logger, store, proxyPool, svc.agent, eventHub, svc.history, leaderOnly)
 	if err != nil {
 		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
@@ -240,7 +306,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 
 	syncRunner.ObserveTurns(m.SyncTurn)
 
-	historyRunner, err := historyrunner.New(cfg.History.Collector, logger, store, proxyPool, svc.agent, svc.history, leadership)
+	historyRunner, err := historyrunner.New(cfg.History.Collector, logger, store, proxyPool, svc.agent, svc.history, leaderOnly)
 	if err != nil {
 		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)
@@ -251,6 +317,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 	// registered on the gRPC listener below, without auth like the ops routes.
 	ready := newReadiness(hooks)
 	grpcHealth := newGRPCHealth(ready)
+	m.StoreFailed(func() bool { return ready.failure != nil && ready.failure() != nil })
 
 	mainHandler, logHub := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership, resolver, clientTLS, m)
 	httpCfg := cfg.HTTP
@@ -322,15 +389,22 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		runners = append(runners, opsRunner)
 	}
 	if cfg.AgentAuth.Require {
-		runners = append(runners, credentialSweepRunner(logger, leadership, svc.agent))
+		runners = append(runners, credentialSweepRunner(logger, leaderOnly, svc.agent))
 	}
-	if raftMode {
-		runners = append(runners, seedingRunner(cfg, logger, leadership, svc))
-		// While another node leads, the check compares this node's digests with
-		// the leader's, at each change of leader.
-		if check := admin.ConfigCheck(logger); check != nil {
-			runners = append(runners, check)
-		}
+	// The runners that read or write the cluster's state for themselves, the seed
+	// and the check of the shared settings, log as the cluster does: in the
+	// database mode, naming the primary's host, port and database.
+	clusterLogger := logger
+	if databaseMode {
+		clusterLogger = dbHooks.logger
+	}
+	if elected {
+		runners = append(runners, seedingRunner(cfg, replicaLogger(cfg, clusterLogger, leadership), leaderOnly, svc))
+	}
+	// While another replica leads, the check compares this replica's digests
+	// with the leader's, at each change of leader.
+	if check := configCheckRunner(clusterLogger, admin, leadership, digests); check != nil {
+		runners = append(runners, check)
 	}
 	srv, err := server.New(cfg.Server, logger, runners...)
 	if err != nil {
@@ -442,11 +516,14 @@ func sleepCtx(ctx context.Context, d time.Duration) {
 }
 
 // Shutdown releases the resources [New] acquired, in this order: the log hub,
-// the proxy pool, the event hub, then a raft node's gRPC sync forwarder, its
-// lookups of the raft hosts' names and the node itself. Bounded by ctx — if
-// any step (Raft fsync, hub drain, pool close) hangs past the deadline,
-// Shutdown returns and the process exits dirty. The caller logs that case;
-// subsequent calls are no-ops.
+// the proxy pool, the event hub, then a raft node's or a database replica's
+// gRPC sync forwarder, its lookups of the members' host names and the cluster
+// itself: the raft node, or the database mode's ping, events transport,
+// leadership, whose end releases the lease, and pools. Run, which returns
+// first, stopped the leader-only work. Bounded by ctx — if any step (Raft
+// fsync, hub drain, pool close) hangs past the deadline, Shutdown returns and
+// the process exits dirty. The caller logs that case; subsequent calls are
+// no-ops.
 //
 // Returns an error if the deadline elapses before cleanup completes.
 func (a *App) Shutdown(ctx context.Context) error {

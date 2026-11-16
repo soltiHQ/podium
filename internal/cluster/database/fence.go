@@ -1,0 +1,72 @@
+package database
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+
+	"github.com/soltiHQ/control-plane/internal/cluster"
+)
+
+// fenceRead reads the lease row in a write transaction, FOR KEY SHARE: a
+// takeover, whose statement locks the row FOR UPDATE first (takeLease), waits
+// until the transaction ends, and a fence that runs while a takeover holds the
+// row waits for it, then reads the row it left. The renewal and the release,
+// which change expires_at alone, take the row FOR NO KEY UPDATE, which this
+// lock does not hold: they never wait for a write.
+const fenceRead = `SELECT epoch, holder FROM podium_leader WHERE id = 1 FOR KEY SHARE`
+
+// The fence's two refusals. Both are cluster.ErrNotLeader: the fence runs
+// before the transaction's first write, so nothing was written, as raft refuses
+// a write whose term moved before it proposed it.
+var (
+	// errNotHolder refuses a write of a replica that does not hold the lease,
+	// without a statement.
+	errNotHolder = fmt.Errorf("database: this replica does not hold the lease: %w", cluster.ErrNotLeader)
+	// errLeaseMoved refuses a write of a replica whose lease another replica
+	// took, which it had not seen yet.
+	errLeaseMoved = fmt.Errorf("database: the lease moved to another replica: %w", cluster.ErrNotLeader)
+)
+
+// Check implements sqlstore.Fence. It runs at the start of each write
+// transaction of the store, before its first write, and refuses the
+// transaction of a replica that does not hold the lease with errNotHolder. The
+// holder reads the lease row FOR KEY SHARE and compares its epoch and holder
+// with its own term's: a row that moved, a missing one included, is refused
+// with errLeaseMoved, and steps this replica down at once. The key-share lock
+// holds the row against a takeover until the transaction ends, so that none
+// lands while the write runs; the renewals do not wait for it, so that a write
+// of any length keeps the leadership. A statement that fails answers as failed
+// classifies it.
+func (l *Leadership) Check(ctx context.Context, tx *sql.Tx) error {
+	t := l.current()
+	if t == nil {
+		return errNotHolder
+	}
+	var (
+		epoch  int64
+		holder string
+	)
+	err := tx.QueryRowContext(ctx, fenceRead).Scan(&epoch, &holder)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// The row is gone: this replica holds nothing.
+	case err != nil:
+		return failed(ctx, err)
+	}
+	if epoch != t.epoch || holder != l.id {
+		if l.stepDown(t) {
+			l.logger.Warn().Int64("epoch", t.epoch).Int64("lease_epoch", epoch).Str("holder_id", holder).
+				Msg("database: a write found the lease moved to another replica: stepping down")
+			observe(l.observer.Lost)
+		}
+		return errLeaseMoved
+	}
+	// A step-down while the row was read leaves the write to the replica that
+	// takes over; the key-share lock then holds that takeover until the rollback.
+	if l.current() != t {
+		return errNotHolder
+	}
+	return nil
+}

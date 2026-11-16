@@ -74,12 +74,13 @@ each kind to the clients at most once per window:
 
 The window holds pulses back in `ApplyLocalNotify`, where a pulse reaches the
 clients of a replica: from a `Notify` of the memory backend, from the state
-machine of every Raft replica that applies a replicated pulse, and from the
-local fallback of a follower. Each replica thus bounds the traffic to its own
-clients whichever node sent the burst, and delivers its trailing pulse from what
-it applied itself, also after leadership moved. `Notify` still submits one
-command per pulse to the `Writer`: coalescing does not reduce replication
-traffic.
+machine of every Raft replica that applies a replicated pulse, from the local
+fallback of a follower, and, in the database mode, from the events transport of
+every replica as it reads the pulse's row back (`internal/cluster/database`).
+Each replica thus bounds the traffic to its own clients whichever node sent the
+burst, and delivers its trailing pulse from what it applied itself, also after
+leadership moved. `Notify` still submits one command per pulse to the `Writer`:
+coalescing does not reduce replication traffic.
 
 The trailing delivery runs on a timer, never on the caller; it only writes to
 local channels without blocking, so no timer calls into the replication

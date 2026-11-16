@@ -2,6 +2,8 @@ package metrics
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -9,6 +11,7 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -190,6 +193,7 @@ func TestMetricsExposition(t *testing.T) {
 	m.Login(LoginOK)
 	m.SyncTurn(TurnAnswered, 20*time.Millisecond)
 	m.StoreCommit("raft")(2 * time.Millisecond)
+	m.Forwarded(ServerUI)
 
 	store := inmemory.New()
 	a, err := model.NewAgent("agent-1", "agent-1", "http://10.0.0.1:8085")
@@ -215,6 +219,7 @@ func TestMetricsExposition(t *testing.T) {
 		"podium_sync_turns_total":              {"counter", "outcome"},
 		"podium_sync_turn_duration_seconds":    {"histogram", ""},
 		"podium_store_commit_duration_seconds": {"histogram", "backend"},
+		"podium_forwarded_writes_total":        {"counter", "server"},
 	}
 	for name, w := range want {
 		if e.types[name] != w.typ {
@@ -238,6 +243,11 @@ func TestMetricsExposition(t *testing.T) {
 	}
 	if v, ok := e.value("podium_discovery_syncs_total", map[string]string{"transport": "grpc", "outcome": "unavailable"}); !ok || v != 0 {
 		t.Errorf("a sync outcome that never happened: %v, %v; want a series at 0", v, ok)
+	}
+	for server, want := range map[string]float64{ServerUI: 1, ServerDiscovery: 0, ServerGRPC: 0} {
+		if v, ok := e.value("podium_forwarded_writes_total", map[string]string{"server": server}); !ok || v != want {
+			t.Errorf("forwarded writes of %s: %v, %v; want a series at %v", server, v, ok, want)
+		}
 	}
 	if e.types["go_goroutines"] == "" {
 		t.Error("the Go collector is not registered")
@@ -412,6 +422,11 @@ func TestNilMetricsIsInert(t *testing.T) {
 	m.SyncTurn(TurnAnswered, time.Second)
 	m.StoreCommit("raft")(time.Second)
 	m.Inventory(inmemory.New())
+	m.Forwarded(ServerGRPC)
+	m.StoreFailed(func() bool { return true })
+	m.Database(nil, nil, nil, func() bool { return true }, func() uint64 { return 1 })
+	m.LeaseRenewed()
+	m.LeaseLost()
 	w := httptest.NewRecorder()
 	h := m.HTTP("ui")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) }))
 	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -421,5 +436,104 @@ func TestNilMetricsIsInert(t *testing.T) {
 	info := &grpc.UnaryServerInfo{FullMethod: "/x/Y"}
 	if _, err := m.UnaryInterceptor()(context.Background(), nil, info, func(context.Context, any) (any, error) { return 7, nil }); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// noDatabase is a database/sql connector that never connects: a pool over it
+// has statistics and no connection.
+type noDatabase struct{}
+
+func (noDatabase) Connect(context.Context) (driver.Conn, error) {
+	return nil, errors.New("no database")
+}
+func (noDatabase) Driver() driver.Driver            { return noDatabase{} }
+func (noDatabase) Open(string) (driver.Conn, error) { return nil, errors.New("no database") }
+
+// podium_store_failed is 1 while the store fails, as readiness reads it, and 0
+// otherwise, read at scrape.
+func TestStoreFailedGauge(t *testing.T) {
+	m := New(buildinfo.Info{})
+	var failed atomic.Bool
+	m.StoreFailed(failed.Load)
+	for _, want := range []float64{0, 1, 0} {
+		failed.Store(want == 1)
+		e := scrape(t, m)
+		if e.types["podium_store_failed"] != "gauge" {
+			t.Fatalf("podium_store_failed is a %q, want a gauge", e.types["podium_store_failed"])
+		}
+		if v, ok := e.value("podium_store_failed", map[string]string{}); !ok || v != want {
+			t.Fatalf("podium_store_failed = %v, %v; want %v", v, ok, want)
+		}
+	}
+}
+
+// The database mode's metrics: the leader gauge and the dropped events, read at
+// scrape; the lease's renewals and losses, counted; and the statistics of each
+// pool under its pool label, primary, replica or lease, a pool that is not set
+// having no series. No label takes any other value.
+func TestDatabaseMetrics(t *testing.T) {
+	m := New(buildinfo.Info{})
+	primary, lease := sql.OpenDB(noDatabase{}), sql.OpenDB(noDatabase{})
+	t.Cleanup(func() { _ = primary.Close(); _ = lease.Close() })
+	primary.SetMaxOpenConns(10)
+	lease.SetMaxOpenConns(1)
+	var leads atomic.Bool
+	var dropped atomic.Uint64
+	m.Database(primary, nil, lease, leads.Load, dropped.Load)
+	m.LeaseRenewed()
+	m.LeaseRenewed()
+	m.LeaseLost()
+	leads.Store(true)
+	dropped.Store(3)
+
+	e := scrape(t, m)
+	want := map[string]struct{ typ, labels string }{
+		"podium_database_leader":                           {"gauge", ""},
+		"podium_database_lease_renewals_total":             {"counter", ""},
+		"podium_database_lease_losses_total":               {"counter", ""},
+		"podium_database_events_dropped_total":             {"counter", ""},
+		"podium_database_pool_max_open_connections":        {"gauge", "pool"},
+		"podium_database_pool_open_connections":            {"gauge", "pool"},
+		"podium_database_pool_in_use_connections":          {"gauge", "pool"},
+		"podium_database_pool_idle_connections":            {"gauge", "pool"},
+		"podium_database_pool_wait_count_total":            {"counter", "pool"},
+		"podium_database_pool_wait_duration_seconds_total": {"counter", "pool"},
+	}
+	for name, w := range want {
+		if e.types[name] != w.typ {
+			t.Errorf("%s is a %q, want a %q", name, e.types[name], w.typ)
+			continue
+		}
+		if got := e.labelNames(t, name); got != w.labels {
+			t.Errorf("%s has labels %q, want %q", name, got, w.labels)
+		}
+	}
+	for name := range e.types {
+		if _, ok := want[name]; !ok && strings.HasPrefix(name, "podium_database_") {
+			t.Errorf("%s is exposed and not in the table of this test", name)
+		}
+	}
+	for name, v := range map[string]float64{
+		"podium_database_leader":               1,
+		"podium_database_lease_renewals_total": 2,
+		"podium_database_lease_losses_total":   1,
+		"podium_database_events_dropped_total": 3,
+	} {
+		if got, ok := e.value(name, map[string]string{}); !ok || got != v {
+			t.Errorf("%s = %v, %v; want %v", name, got, ok, v)
+		}
+	}
+	for pool, max := range map[string]float64{PoolPrimary: 10, PoolLease: 1} {
+		if got, ok := e.value("podium_database_pool_max_open_connections", map[string]string{"pool": pool}); !ok || got != max {
+			t.Errorf("the cap of the %s pool: %v, %v; want %v", pool, got, ok, max)
+		}
+		if got, ok := e.value("podium_database_pool_open_connections", map[string]string{"pool": pool}); !ok || got != 0 {
+			t.Errorf("the open connections of the %s pool: %v, %v; want 0", pool, got, ok)
+		}
+	}
+	for _, s := range e.samples {
+		if p, ok := s.labels["pool"]; ok && p != PoolPrimary && p != PoolLease {
+			t.Errorf("%s has the pool %q: a pool that is not set has no series", s.name, p)
+		}
 	}
 }

@@ -2,7 +2,6 @@ package inmemory
 
 import (
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -51,24 +50,12 @@ func (f *AgentFilter) ByArch(arch string) *AgentFilter {
 
 // Query matches agents by id/name/endpoint (case-insensitive substring).
 func (f *AgentFilter) Query(q string) *AgentFilter {
-	q = strings.ToLower(strings.TrimSpace(q))
-	if q == "" {
+	query := storage.NewTextQuery(q)
+	if query.Empty() {
 		return f
 	}
 	f.predicates = append(f.predicates, func(a *model.Agent) bool {
-		if a == nil {
-			return false
-		}
-		if strings.Contains(strings.ToLower(a.ID()), q) {
-			return true
-		}
-		if strings.Contains(strings.ToLower(a.Name()), q) {
-			return true
-		}
-		if strings.Contains(strings.ToLower(a.Endpoint()), q) {
-			return true
-		}
-		return false
+		return a != nil && query.Matches(a.ID(), a.Name(), a.Endpoint())
 	})
 	return f
 }
@@ -169,24 +156,12 @@ func (f *UserFilter) Matches(u *model.User) bool {
 
 // Query matches users by subject/name/email (case-insensitive substring).
 func (f *UserFilter) Query(q string) *UserFilter {
-	q = strings.ToLower(strings.TrimSpace(q))
-	if q == "" {
+	query := storage.NewTextQuery(q)
+	if query.Empty() {
 		return f
 	}
 	f.predicates = append(f.predicates, func(u *model.User) bool {
-		if u == nil {
-			return false
-		}
-		if strings.Contains(strings.ToLower(u.Subject()), q) {
-			return true
-		}
-		if strings.Contains(strings.ToLower(u.Name()), q) {
-			return true
-		}
-		if strings.Contains(strings.ToLower(u.Email()), q) {
-			return true
-		}
-		return false
+		return u != nil && query.Matches(u.Subject(), u.Name(), u.Email())
 	})
 	return f
 }
@@ -251,21 +226,12 @@ func NewSpecFilter() *SpecFilter {
 
 // Query matches task specs by name/slot (case-insensitive substring).
 func (f *SpecFilter) Query(q string) *SpecFilter {
-	q = strings.ToLower(strings.TrimSpace(q))
-	if q == "" {
+	query := storage.NewTextQuery(q)
+	if query.Empty() {
 		return f
 	}
 	f.predicates = append(f.predicates, func(ts *model.Spec) bool {
-		if ts == nil {
-			return false
-		}
-		if strings.Contains(strings.ToLower(ts.Name()), q) {
-			return true
-		}
-		if strings.Contains(strings.ToLower(ts.Slot()), q) {
-			return true
-		}
-		return false
+		return ts != nil && query.Matches(ts.Name(), ts.Slot())
 	})
 	return f
 }

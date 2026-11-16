@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"strings"
 	"time"
 
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -88,4 +89,34 @@ type AgentQueryCriteria struct {
 type UserQueryCriteria struct {
 	// Query is a case-insensitive substring of the user subject, name or email.
 	Query string
+}
+
+// TextQuery is the search the Query criteria of the agent, user and spec filters
+// stand for: a case-insensitive substring of any of an entity's fields. It is
+// the one predicate every backend applies, so that a query answers alike
+// whatever stores the rows. The query is trimmed with strings.TrimSpace and
+// folded with strings.ToLower; a field matches when its strings.ToLower
+// contains it. Nothing in it is special: `%`, `_` and `\` match themselves.
+type TextQuery struct{ needle string }
+
+// NewTextQuery returns the search for q.
+func NewTextQuery(q string) TextQuery {
+	return TextQuery{needle: strings.ToLower(strings.TrimSpace(q))}
+}
+
+// Empty reports whether the query is no query: nothing, or spaces alone. An
+// empty query matches every row.
+func (q TextQuery) Empty() bool { return q.needle == "" }
+
+// Matches reports whether any of fields contains the query.
+func (q TextQuery) Matches(fields ...string) bool {
+	if q.needle == "" {
+		return true
+	}
+	for _, f := range fields {
+		if strings.Contains(strings.ToLower(f), q.needle) {
+			return true
+		}
+	}
+	return false
 }

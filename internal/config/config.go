@@ -199,7 +199,10 @@ func Default() Config {
 }
 
 // Validate reports an error if any sub-config has invalid or unsafe values.
-func (c Config) Validate() error {
+func (c Config) Validate() error { return c.validate(cluster.Config.Validate) }
+
+// validate is Validate with checkCluster the check of the cluster section.
+func (c Config) validate(checkCluster func(cluster.Config) error) error {
 	if err := c.HTTP.Validate(); err != nil {
 		return fmt.Errorf("config.http: %w", err)
 	}
@@ -233,7 +236,7 @@ func (c Config) Validate() error {
 	if err := c.History.Collector.Validate(); err != nil {
 		return fmt.Errorf("config.history.collector: %w", err)
 	}
-	if err := c.Cluster.Validate(); err != nil {
+	if err := checkCluster(c.Cluster); err != nil {
 		return fmt.Errorf("config.cluster: %w", err)
 	}
 	if err := c.Events.Validate(); err != nil {
@@ -269,6 +272,20 @@ func (c Config) Validate() error {
 // each setting of the file that a variable overrides. Refuses to return a Config
 // that fails [Config.Validate].
 func Load(path string, log zerolog.Logger) (Config, error) {
+	return loadChecked(path, log, Config.Validate)
+}
+
+// LoadForMigration reads the configuration of podium migrate as [Load] reads
+// the server's, as strictly, and validates it as Load does but for the cluster
+// section, which [cluster.Config.ValidateMigration] checks: the backend must be
+// database, and cluster.database.advertise_addr, which a migration does not
+// use, may be empty.
+func LoadForMigration(path string, log zerolog.Logger) (Config, error) {
+	return loadChecked(path, log, func(c Config) error { return c.validate(cluster.Config.ValidateMigration) })
+}
+
+// loadChecked is Load with validate the check of the configuration it read.
+func loadChecked(path string, log zerolog.Logger, validate func(Config) error) (Config, error) {
 	cfg := Default()
 	if path == "" {
 		path = os.Getenv("CONFIG_PATH")
@@ -288,7 +305,7 @@ func Load(path string, log zerolog.Logger) (Config, error) {
 		return Config{}, fmt.Errorf("config: env: %w", err)
 	}
 	logOverrides(&cfg, fileKeys, os.LookupEnv, log)
-	if err := cfg.Validate(); err != nil {
+	if err := validate(cfg); err != nil {
 		return Config{}, fmt.Errorf("config: %w", err)
 	}
 	return cfg, nil

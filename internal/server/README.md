@@ -131,7 +131,19 @@ other labels take the fixed values below.
 | `podium_rollouts` | gauge | `status` (`pending`, `synced`, `drift`, `failed`, `unknown`) | Rollouts in this node's store, read at scrape. |
 | `podium_sync_turns_total` | counter | `outcome` (`answered`, `unanswered`, `local`) | Agent turns of the sync runner, which runs on the leader only: `answered` when the agent answered a call, `unanswered` when a call got no answer, `local` when the turn needed no call. A tick that is cancelled reports none. |
 | `podium_sync_turn_duration_seconds` | histogram | none | The duration of those turns. |
-| `podium_store_commit_duration_seconds` | histogram | `backend` (`raft`) | A raft write from proposal to answer, which only the leader makes. Buckets from 0.5 ms to 1 s. The memory backend has none. |
+| `podium_store_commit_duration_seconds` | histogram | `backend` (`raft`) | A raft write from proposal to answer, which only the leader makes. Buckets from 0.5 ms to 1 s. The memory and database backends have none. |
+| `podium_store_failed` | gauge | none | 1 while the store has failed, as `/readyz` reports `storage failed`: on the database backend, while the last ping of the primary failed; 0 otherwise, and always on memory and raft. |
+| `podium_forwarded_writes_total` | counter | `server` (`ui`, `discovery`, `grpc`) | Writes a follower sent to the leader, by the listener they came in on, whatever the leader answered, one it could not reach included, which the sync outcomes count as `unavailable` too. Raft followers and the database backend's; memory forwards nothing. |
+| `podium_database_leader` | gauge | none | Database backend only, as every `podium_database_*` series: 1 while this replica holds the lease, read at scrape. |
+| `podium_database_lease_renewals_total` | counter | none | Renewals of the lease that landed. |
+| `podium_database_lease_losses_total` | counter | none | Terms of this replica that ended before its stop: no renewal landed within two thirds of the lease, or a renewal or a write found the lease moved. A clean stop, which releases the lease, is none. |
+| `podium_database_events_dropped_total` | counter | none | Events that never reached the database, each applied on this replica alone: the queue was full, the write failed, or the transport had stopped. |
+| `podium_database_pool_max_open_connections` | gauge | `pool` (`primary`, `replica`, `lease`) | The cap of each pool, from its `database/sql` statistics, read at scrape; `replica` exists only with `cluster.database.replica_url`. |
+| `podium_database_pool_open_connections` | gauge | `pool` | Each pool's connections, in use and idle. |
+| `podium_database_pool_in_use_connections` | gauge | `pool` | Each pool's connections in use. |
+| `podium_database_pool_idle_connections` | gauge | `pool` | Each pool's idle connections. |
+| `podium_database_pool_wait_count_total` | counter | `pool` | Connections a pool's callers waited for, the pool at its cap. |
+| `podium_database_pool_wait_duration_seconds_total` | counter | `pool` | Seconds a pool's callers waited for a connection. |
 
 The outcomes of `podium_discovery_syncs_total`:
 
@@ -151,8 +163,11 @@ the follower, and a follower counts only the ones it refuses itself
 (`TestFollowerCountsRefusedSyncsAsUnavailable`); `enrolled` and `ok` are decided
 by a read of the agent's row before the write, so two first syncs of one agent
 that race can both count as `enrolled`. The series of
-`podium_discovery_syncs_total`, `podium_logins_total` and
-`podium_sync_turns_total` exist from the start at 0.
+`podium_discovery_syncs_total`, `podium_logins_total`, `podium_sync_turns_total`
+and `podium_forwarded_writes_total` exist from the start at 0, and so does
+`podium_store_failed`; the `podium_database_*` series exist on the database
+backend alone (`TestDatabaseMetrics`), where no label or value carries a URL, a
+host or a parameter of one.
 
 `podium_agents` and `podium_rollouts` are read when the scrape runs, each with
 one read of the store that counts the rows where they live (`storage.Counter`),

@@ -35,10 +35,12 @@ func main() {
 // usage is what -h prints, and what follows an error of the command line.
 const usage = `usage: podium [--config PATH]
        podium agent-token [--generation N] [--] <agent-id>
+       podium migrate [--config PATH]
        podium version
 
 podium [--config PATH] runs the server; the config file is PATH, or CONFIG_PATH.
 podium agent-token prints the token of an agent ID, derived from the enrollment secret.
+podium migrate migrates the schema of the database mode's database, and exits.
 podium version, or podium --version, prints the version.
 `
 
@@ -59,6 +61,12 @@ func run(args []string, stdout, stderr io.Writer, serve func(configPath string) 
 				return usageError(stderr, errors.New("version takes no arguments"))
 			}
 			return printVersion(stdout, stderr)
+		case "migrate":
+			path, ok := migrateArgs(args[1:], stderr)
+			if !ok {
+				return 2
+			}
+			return migrate(path, stdout)
 		}
 	}
 	var (
@@ -87,6 +95,55 @@ func run(args []string, stdout, stderr io.Writer, serve func(configPath string) 
 		return printVersion(stdout, stderr)
 	}
 	return serve(path)
+}
+
+// migrateArgs reads the command line of "podium migrate": --config PATH, in any
+// spelling of the flag, or nothing. Anything else prints the error and the
+// usage to stderr and reports false.
+func migrateArgs(args []string, stderr io.Writer) (string, bool) {
+	var (
+		path string
+		fs   = flag.NewFlagSet("podium migrate", flag.ContinueOnError)
+	)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&path, "config", "", "")
+	if err := fs.Parse(args); err != nil {
+		usageError(stderr, fmt.Errorf("migrate: %w", err))
+		return "", false
+	}
+	if fs.NArg() > 0 {
+		usageError(stderr, fmt.Errorf("migrate: unexpected argument %q", fs.Arg(0)))
+		return "", false
+	}
+	return path, true
+}
+
+// migrate runs "podium migrate" with the config file at configPath ("" for
+// CONFIG_PATH or none), logging to stdout, and returns the exit code: it reads
+// the configuration as the server does, as strictly, but needs no
+// cluster.database.advertise_addr (config.LoadForMigration), connects to the
+// primary within the startup retry, migrates the schema under the database lock
+// and logs the host, the port, the database and the versions before and after
+// (app.Migrate). It exits 0 once the schema is this podium's, and 1 on any
+// failure, a schema newer than this podium's included. It starts no listener.
+func migrate(configPath string, stdout io.Writer) int {
+	bootstrap := zerolog.New(stdout).Level(zerolog.InfoLevel).With().Timestamp().Logger()
+	logStart(bootstrap, buildinfo.Read())
+
+	cfg, err := config.LoadForMigration(configPath, bootstrap)
+	if err != nil {
+		bootstrap.Error().Err(err).Msg("failed to load config")
+		return 1
+	}
+	logger := newLogger(cfg.Log, stdout)
+	ctx, stop := notifyShutdown(logger, os.Exit)
+	defer stop()
+	if err := app.Migrate(ctx, cfg, logger); err != nil {
+		logger.Error().Err(err).Msg("podium migrate failed")
+		return 1
+	}
+	logger.Info().Msg("podium migrate done")
+	return 0
 }
 
 // usageError prints err and the usage to stderr and returns 2.

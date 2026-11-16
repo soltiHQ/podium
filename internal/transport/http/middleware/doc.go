@@ -11,4 +11,5 @@
 //     a 429 with Retry-After, a throttle, is a DEBUG.
 //   - Recovery            catches panics and renders a 503 response.
 //   - CORS                configurable cross-origin resource sharing.
+//   - ReadOnly            marks GET and HEAD requests storage.MarkReadOnly, whose listings a read replica may serve.
 package middleware

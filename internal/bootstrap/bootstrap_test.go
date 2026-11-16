@@ -958,6 +958,9 @@ func TestCheckRefusesWhatEverySeedNeeds(t *testing.T) {
 		{"password that passes the policy", Options{DataDir: "/data", AdminPassword: "operator-chosen-password"}, nil},
 		{"neither data directory nor ephemeral", Options{}, ErrNoDataDir},
 		{"neither, with a password", Options{AdminPassword: "operator-chosen-password"}, ErrNoDataDir},
+		{"a password required", Options{PasswordRequired: true}, nil},
+		{"a password required, and set", Options{PasswordRequired: true, AdminPassword: "operator-chosen-password"}, nil},
+		{"a password required, which breaks the policy", Options{PasswordRequired: true, AdminPassword: "Sh0rt-pw-11"}, auth.ErrWeakPassword},
 		{"password too short", Options{DataDir: "/data", AdminPassword: "Sh0rt-pw-11"}, auth.ErrWeakPassword},
 		{"password too long", Options{Ephemeral: true, AdminPassword: strings.Repeat("long-password-", 6)}, auth.ErrWeakPassword},
 	} {
@@ -979,5 +982,52 @@ func TestCheckRefusesWhatEverySeedNeeds(t *testing.T) {
 				t.Fatalf("error %q does not name %s", err, AdminPasswordEnv)
 			}
 		})
+	}
+}
+
+// With PasswordRequired, the mode without a data directory where the password
+// must come from SOLTI_BOOTSTRAP_ADMIN_PASSWORD, a seed that is due fails with
+// ErrAdminPasswordRequired, which names the variable, before anything is stored
+// and without a password in any log; CheckSeed says so before a seed runs, on
+// the user table as it is. With the password set the administrator is seeded
+// with it, and once users exist the password is needed no more.
+func TestPasswordRequiredWithoutAPassword(t *testing.T) {
+	f := newFixture()
+	ctx := context.Background()
+	required := Options{PasswordRequired: true}
+	if err := CheckSeed(ctx, required, f.users, f.creds); !errors.Is(err, ErrAdminPasswordRequired) || !strings.Contains(err.Error(), AdminPasswordEnv) {
+		t.Fatalf("CheckSeed on an empty user table: %v, want ErrAdminPasswordRequired naming %s", err, AdminPasswordEnv)
+	}
+	if err := f.run(required); !errors.Is(err, ErrAdminPasswordRequired) {
+		t.Fatalf("Run: %v, want ErrAdminPasswordRequired", err)
+	}
+	if _, err := f.store.GetUser(ctx, adminUserID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("user-admin was created without a password: %v", err)
+	}
+	for _, e := range f.entries(t) {
+		if e.Password != "" {
+			t.Fatalf("a password was logged: %+v", e)
+		}
+	}
+	// CheckSeed needs nothing without PasswordRequired, or with the password.
+	for _, opts := range []Options{{Ephemeral: true}, {DataDir: "/data"}, {PasswordRequired: true, AdminPassword: "operator-chosen-password"}} {
+		if err := CheckSeed(ctx, opts, f.users, f.creds); err != nil {
+			t.Fatalf("CheckSeed(%+v): %v, want nil", opts, err)
+		}
+	}
+
+	const password = "operator-chosen-password"
+	if err := f.run(Options{PasswordRequired: true, AdminPassword: password}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(f.logs.String(), password) {
+		t.Fatal("the log holds the password")
+	}
+	login(t, f.store, password)
+	if err := CheckSeed(ctx, required, f.users, f.creds); err != nil {
+		t.Fatalf("CheckSeed once the administrator exists: %v, want nil", err)
+	}
+	if err := f.run(required); err != nil {
+		t.Fatalf("Run once the administrator exists, without the password: %v", err)
 	}
 }

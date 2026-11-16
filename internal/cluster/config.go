@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Backend picks the storage + replication strategy at startup.
@@ -23,6 +24,11 @@ const (
 	// in-memory stores in sync via hashicorp/raft, which keeps its log and
 	// snapshots in Raft.DataDir.
 	BackendRaft Backend = "raft"
+
+	// BackendDatabase runs any number of replicas on a database, PostgreSQL:
+	// the state lives in the database, the replicas hold none, and they elect
+	// their leader through it (internal/cluster/database).
+	BackendDatabase Backend = "database"
 )
 
 // Config is the top-level cluster configuration.
@@ -30,6 +36,7 @@ type Config struct {
 	Backend   Backend         `yaml:"backend"`
 	Raft      RaftConfig      `yaml:"raft"`
 	Discovery DiscoveryConfig `yaml:"discovery"`
+	Database  DatabaseConfig  `yaml:"database"`
 }
 
 // The defaults of the raft log compaction settings of [RaftConfig]: they are
@@ -153,6 +160,118 @@ func (r RaftConfig) advertise() string {
 	return r.BindAddr
 }
 
+// DatabaseConfig parametrises the database backend; no other backend reads it.
+// URL is the primary's connection URL, which every write and every decision
+// reads, and ReplicaURL, when set, a read endpoint for the listings of the GET
+// requests of the UI and the API. Both carry credentials: they reach the
+// driver alone, and no log line, error or metric carries them; TLS goes
+// through them (sslmode, sslrootcert). A URL that sets no connect_timeout gets
+// one of 5 s. AdvertiseAddr is how the other replicas reach this one,
+// host:port, its port unused (see [CheckAdvertiseAddr]).
+//
+// Lease is the leader's lease, MinDatabaseLease at least: 0 keeps the
+// leadership's default of 10 s. MaxOpenConns caps the primary's pool and the
+// replica's, each keeping as many idle: 0 keeps DefaultDatabaseMaxOpenConns.
+// Migrate, true when unset, has podium migrate the schema at start; false
+// makes it refuse a schema older than its own, for deployments that run
+// podium migrate as a step of their own. A negative lease or MaxOpenConns is
+// refused.
+type DatabaseConfig struct {
+	Driver        string        `yaml:"driver"`         // "postgres"
+	URL           string        `yaml:"url"`            // secret
+	ReplicaURL    string        `yaml:"replica_url"`    // secret, optional
+	AdvertiseAddr string        `yaml:"advertise_addr"` // required
+	Lease         time.Duration `yaml:"lease"`          // default 10s
+	MaxOpenConns  int           `yaml:"max_open_conns"` // default 10
+	Migrate       *bool         `yaml:"migrate"`        // default true
+}
+
+// DatabaseDriverPostgres is the [DatabaseConfig.Driver] of PostgreSQL, the only
+// driver.
+const DatabaseDriverPostgres = "postgres"
+
+// The limits and defaults of [DatabaseConfig].
+const (
+	// MinDatabaseLease is the shortest lease the database leadership takes: a
+	// sixth of the lease bounds a statement of the lease, which needs 10 ms at
+	// least.
+	MinDatabaseLease = 60 * time.Millisecond
+	// DefaultDatabaseMaxOpenConns is the cap of a pool that max_open_conns
+	// leaves at 0.
+	DefaultDatabaseMaxOpenConns = 10
+)
+
+// OpenConns returns the cap of the primary's pool, and of the replica's:
+// MaxOpenConns, or DefaultDatabaseMaxOpenConns when it is 0.
+func (d DatabaseConfig) OpenConns() int {
+	if d.MaxOpenConns == 0 {
+		return DefaultDatabaseMaxOpenConns
+	}
+	return d.MaxOpenConns
+}
+
+// Migrates reports whether podium migrates the schema at start: Migrate, true
+// when unset.
+func (d DatabaseConfig) Migrates() bool { return d.Migrate == nil || *d.Migrate }
+
+// validate checks the database settings before anything connects: the driver is
+// postgres, the URL is set, neither the lease nor max_open_conns is negative, a
+// lease is MinDatabaseLease at least, and advertise_addr, which needAdvertise
+// requires, passes CheckAdvertiseAddr when set. No error quotes a value: an
+// operator may paste a URL, which carries a password, into the wrong key. The
+// URLs are parsed where they are used, never here.
+func (d DatabaseConfig) validate(needAdvertise bool) error {
+	switch {
+	case d.Driver != DatabaseDriverPostgres:
+		return fmt.Errorf("database.driver is not %s, the only driver", DatabaseDriverPostgres)
+	case strings.TrimSpace(d.URL) == "":
+		return fmt.Errorf("database.url: %w", ErrDatabaseRequired)
+	case d.Lease < 0:
+		return errors.New("database.lease must not be negative")
+	case d.Lease > 0 && d.Lease < MinDatabaseLease:
+		return fmt.Errorf("database.lease %s is under %s: a sixth of the lease bounds a statement of the lease, which needs 10 ms at least; 0 keeps 10s", d.Lease, MinDatabaseLease)
+	case d.MaxOpenConns < 0:
+		return errors.New("database.max_open_conns must not be negative")
+	}
+	switch {
+	case d.AdvertiseAddr == "" && needAdvertise:
+		return fmt.Errorf("database.advertise_addr: %w", ErrDatabaseRequired)
+	case d.AdvertiseAddr == "":
+		return nil
+	}
+	if err := CheckAdvertiseAddr(d.AdvertiseAddr); err != nil {
+		return fmt.Errorf("database.advertise_addr: %w", err)
+	}
+	return nil
+}
+
+// CheckAdvertiseAddr says what is wrong with addr as the advertise address of a
+// replica of the database backend, if anything: it must be host:port, an IPv6
+// host in brackets, with a port number from 0 to 65535, which goes unused, as
+// every replica serves the same ports, and a host the other replicas can dial,
+// not none or every interface, in UTF-8 without NUL, as the registry's text
+// column holds it. The configuration and the database leadership check it
+// alike. Its errors never quote addr.
+func CheckAdvertiseAddr(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	switch {
+	case err != nil:
+		// The error of SplitHostPort quotes addr.
+		return errors.New("not host:port, an IPv6 host in brackets")
+	case !utf8.ValidString(addr) || strings.ContainsRune(addr, 0):
+		return errors.New("not UTF-8 without NUL, which the registry's text column needs")
+	case host == "":
+		return errors.New("no host for the other replicas to dial")
+	}
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		return errors.New("the port is not a number from 0 to 65535")
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		return errors.New("every interface, which no other replica can dial")
+	}
+	return nil
+}
+
 // DiscoveryConfig picks the Discovery driver a raft node bootstraps from, and
 // its parameters; no other backend reads it.
 type DiscoveryConfig struct {
@@ -200,6 +319,10 @@ var (
 
 	// ErrDuplicatePeer indicates a peer list that names an ID or an address twice.
 	ErrDuplicatePeer = errors.New("a peer ID or address is listed twice")
+
+	// ErrDatabaseRequired indicates an empty database.url, or an empty
+	// database.advertise_addr, with backend database.
+	ErrDatabaseRequired = errors.New("required when backend is database")
 )
 
 // StaticPeers parses Peers, the list of the static driver. An entry is
@@ -290,7 +413,8 @@ func ServerList(peers []Peer, nodeID, advertise string) ([]Peer, error) {
 }
 
 // DefaultConfig returns a memory config. Its raft settings are the defaults of
-// the compaction settings; the other raft settings have none.
+// the compaction settings; the other raft settings have none. Its database
+// settings name the postgres driver, and leave the rest to their defaults.
 func DefaultConfig() Config {
 	return Config{
 		Backend: BackendMemory,
@@ -299,20 +423,35 @@ func DefaultConfig() Config {
 			SnapshotThreshold: DefaultRaftSnapshotThreshold,
 			TrailingLogs:      DefaultRaftTrailingLogs,
 		},
+		Database: DatabaseConfig{Driver: DatabaseDriverPostgres},
 	}
 }
 
-// Validate checks the backend: memory reads no other setting, and backend raft
-// checks its own settings and the peers (see validateRaft).
+// Validate checks the backend: memory reads no other setting, backend raft
+// checks its own settings and the peers (see validateRaft), and backend
+// database its own (see DatabaseConfig).
 func (c Config) Validate() error {
 	switch c.Backend {
 	case "", BackendMemory:
 	case BackendRaft:
 		return c.validateRaft()
+	case BackendDatabase:
+		return c.Database.validate(true)
 	default:
-		return fmt.Errorf("unknown backend %q: it must be one of %s, %s", c.Backend, BackendMemory, BackendRaft)
+		return fmt.Errorf("unknown backend %q: it must be one of %s, %s, %s", c.Backend, BackendMemory, BackendRaft, BackendDatabase)
 	}
 	return nil
+}
+
+// ValidateMigration checks what podium migrate reads: the backend must be
+// database, and its settings pass as Validate checks them, but for
+// database.advertise_addr, which a migration does not use and which is checked
+// only when set.
+func (c Config) ValidateMigration() error {
+	if c.Backend != BackendDatabase {
+		return fmt.Errorf("podium migrate migrates the schema of backend %s, and the backend is %q", BackendDatabase, c.Backend)
+	}
+	return c.Database.validate(false)
 }
 
 // validateRaft fails a raft node before it opens anything: node_id, bind_addr
@@ -524,7 +663,8 @@ func everyInterface(host string) bool {
 }
 
 // DataDir returns the data directory of the selected backend: Raft.DataDir in
-// raft mode, "" for memory, which writes nothing to disk.
+// raft mode, "" for memory, which writes nothing to disk, and for database,
+// whose state lives in the database.
 func (c Config) DataDir() string {
 	if c.Backend == BackendRaft {
 		return c.Raft.DataDir
