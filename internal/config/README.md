@@ -425,6 +425,8 @@ default or have no value, as the section on it says.
 | `tls.client.ca_file` | `SOLTI_TLS_CLIENT_CA_FILE` | string | empty |
 | `tls.client.cert_file` | `SOLTI_TLS_CLIENT_CERT_FILE` | string | empty |
 | `tls.client.key_file` | `SOLTI_TLS_CLIENT_KEY_FILE` | string | empty |
+| `tls.forward.ca_file` | `SOLTI_TLS_FORWARD_CA_FILE` | string | empty |
+| `tls.forward.server_name` | `SOLTI_TLS_FORWARD_SERVER_NAME` | string | empty |
 | `agent_auth.require` | `SOLTI_AGENT_AUTH_REQUIRE` | bool | true |
 | not in a file | `SOLTI_AGENT_AUTH_ENROLL_SECRET` | string | no default |
 | `log.level` | `SOLTI_LOG_LEVEL` | string | info |
@@ -450,6 +452,12 @@ against the system roots.
 - `tls.client` (`ca_file`, `cert_file`, `key_file`) — the CP as a client when
   dialing agents (proxy). `ca_file` verifies agent certs; `cert_file`/`key_file`
   present a client cert for mTLS.
+- `tls.forward` (`ca_file`, `server_name`) — how a follower checks the leader it
+  forwards a write to, with `tls.server` set: `ca_file` verifies the leader's
+  certificate in place of `tls.client.ca_file`, and `server_name` is the name
+  the leader's certificate must carry in place of the leader's advertise host.
+  The client certificate a follower presents stays `tls.client`'s. It requires
+  `tls.server`, and `server_name` is a DNS name or an IP address.
 
 ```yaml
 tls:
@@ -458,17 +466,20 @@ tls:
     key_file:  /etc/solti/tls/server.key
     client_ca_file: /etc/solti/tls/agents-ca.crt   # optional: agents need a client certificate
   client:
-    ca_file:   /etc/solti/tls/client-ca.crt        # verifies agents' endpoints; raft: also the nodes' server certificates
+    ca_file:   /etc/solti/tls/client-ca.crt        # verifies agents' endpoints; raft: also the nodes' server certificates, without tls.forward.ca_file
     cert_file: /etc/solti/tls/cp-client.crt        # presented when asked; raft with client_ca_file: required, of the agents' CA
     key_file:  /etc/solti/tls/cp-client.key
+  forward:                                         # optional: a follower's check of the leader
+    ca_file:     /etc/solti/tls/nodes-ca.crt       # the CA of the nodes' server certificates
+    server_name: podium.podium.svc                 # a name every node's server certificate carries
 ```
 
 On the memory backend, `tls.client.ca_file` only verifies the agents' endpoints.
-In a raft cluster it also holds the CA of the nodes' server certificates, and
-with `client_ca_file` set each node needs a `tls.client.cert_file` and
-`key_file` that chain to the agents' CA, or every sync that reaches a follower
-fails: a follower forwards to the leader as a client of `tls.client`, as the
-paragraphs below say.
+In a raft cluster, or the database mode, it also holds the CA of the nodes'
+server certificates unless `tls.forward.ca_file` does, and with `client_ca_file`
+set each node needs a `tls.client.cert_file` and `key_file` that chain to the
+agents' CA, or every sync that reaches a follower fails: a follower forwards to
+the leader as a client of `tls.client`, as the paragraphs below say.
 
 Env equivalents: `SOLTI_TLS_SERVER_CERT_FILE`, `SOLTI_TLS_CLIENT_CA_FILE`, etc.
 
@@ -477,15 +488,23 @@ HTTP-discovery listeners, and the syncs it gets on the gRPC listener, to the
 leader, at the host of the leader's raft advertise address, as written, and this
 node's port of that listener (see "Cluster"); on the database backend, at the
 host of the leader's `cluster.database.advertise_addr`, likewise. With
-`tls.server` set it forwards over TLS with `tls.client`: `ca_file` must also
-hold the CA of the replicas' server certificates, which must name each replica's
-raft advertise host as written, an IP SAN for `10.0.0.1:7000` and a DNS SAN for
-`podium-0.podium:7000`, and `cert_file`/`key_file` are presented when the leader
-asks for a client certificate, as the discovery listener does with
-`client_ca_file`. Without a `tls.client.ca_file`, the leader is verified against
-the system roots. A leader whose certificate does not verify gets no write: the
-follower answers 502. The raft transport has TLS settings of its own, with a CA
-of its own, see "Raft transport security".
+`tls.server` set it forwards over TLS as a client of `tls.client`, whose
+`cert_file`/`key_file` are presented when the leader asks for a client
+certificate, as the discovery listener does with `client_ca_file`. It checks the
+leader's certificate against `tls.forward.ca_file`, or `tls.client.ca_file`
+without one, or the system roots without either, and for
+`tls.forward.server_name`, or without one for the leader's advertise host as
+written: an IP SAN for `10.0.0.1:7000`, a DNS SAN for `podium-0.podium:7000`.
+Replicas whose addresses change, the pod IPs of a Deployment, share one
+certificate that names one host, such as their Service's, and set that host as
+`tls.forward.server_name`. A leader whose certificate does not verify gets no
+write: the follower answers 502, and logs why, at ERROR. A forward that fails to
+connect sent nothing, as at a handover, where the leader that left refuses the
+connection or its pod is gone (a connect gives up after 2 s): the follower waits
+up to 3 s for its view of the leader to move, and serves the write itself once
+it leads, or sends it to the next leader once; a forward that connected is never
+sent again. The raft transport has TLS settings of its own, with a CA of its
+own, see "Raft transport security".
 
 The forwards carry logins, cookies, bearer tokens and agents' tokens, so a raft
 cluster needs `tls.server` on every node: without it a follower forwards them in

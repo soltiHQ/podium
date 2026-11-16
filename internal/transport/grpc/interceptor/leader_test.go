@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	discoverv1 "github.com/soltiHQ/control-plane/api/gen/solti/discover/v1"
+	"github.com/soltiHQ/control-plane/internal/cluster"
 )
 
 // leaderStub is a leadership whose leader a test can move.
@@ -176,7 +177,8 @@ func syncForwarder(t *testing.T) *Forwarder {
 // hears each write it refuses.
 func followerOf(t *testing.T, leadership *leaderStub, port int, forwarder *Forwarder, refused ...func()) *node {
 	t.Helper()
-	opts := LeaderOptions{Port: port, Forwarder: forwarder}
+	// The stub's view of the leader moves only when a test moves it: no wait for a handover.
+	opts := LeaderOptions{Port: port, Forwarder: forwarder, HandoverWait: -1}
 	if len(refused) > 0 {
 		opts.Refused = refused[0]
 	}
@@ -399,7 +401,7 @@ func TestUnaryLeaderAnswersWithTheLeadersGRPCAddress(t *testing.T) {
 				forwarder = syncForwarder(t)
 			}
 			refused := 0
-			opts := LeaderOptions{Port: tc.port, Forwarder: forwarder, IsWrite: func(string) bool { return tc.isWrite }, Refused: func() { refused++ }}
+			opts := LeaderOptions{Port: tc.port, Forwarder: forwarder, IsWrite: func(string) bool { return tc.isWrite }, Refused: func() { refused++ }, HandoverWait: -1}
 			n := serve(t, nil, UnaryLeader(tc.leadership, opts))
 			ctx := context.Background()
 			if tc.incoming != nil {
@@ -517,7 +519,7 @@ func TestUnaryLeaderCountsTheWritesItForwards(t *testing.T) {
 	forwarder := syncForwarder(t)
 	var forwarded, refused atomic.Int32
 	opts := LeaderOptions{
-		Port: leader.port, Forwarder: forwarder,
+		Port: leader.port, Forwarder: forwarder, HandoverWait: -1,
 		Forwarded: func() { forwarded.Add(1) }, Refused: func() { refused.Add(1) },
 	}
 	client := serve(t, nil, UnaryLeader(leadership, opts)).client(t)
@@ -544,5 +546,144 @@ func TestUnaryLeaderCountsTheWritesItForwards(t *testing.T) {
 	}
 	if forwarded.Load() != 2 || refused.Load() != 2 {
 		t.Fatalf("a write that could not reach the leader: %d forwards and %d refusals heard, want 2 and 2", forwarded.Load(), refused.Load())
+	}
+}
+
+// stepUp makes the stub lead.
+func (l *leaderStub) stepUp() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.leading, l.leader = true, ""
+}
+
+// serveAt is serve on the loopback host, at port: a discovery that answers
+// every Sync with success. It skips the test where host is not a loopback
+// address of this machine.
+func serveAt(t *testing.T, host string, port int) *node {
+	t.Helper()
+	lis, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		t.Skipf("cannot listen on %s:%d: %v", host, port, err)
+	}
+	n := &node{
+		port:      lis.Addr().(*net.TCPAddr).Port,
+		discovery: &discovery{calls: make(chan served, 16)},
+		listener:  &countingListener{Listener: lis},
+	}
+	srv := grpc.NewServer(grpc.ChainUnaryInterceptor(UnaryRequestID()))
+	discoverv1.RegisterDiscoverServiceServer(srv, n.discovery)
+	go func() { _ = srv.Serve(n.listener) }()
+	t.Cleanup(srv.Stop)
+	return n
+}
+
+// A Sync whose forward the leader never answers, as at a handover, when the
+// leader that left refuses the connection, waits for the follower's view of
+// the leader to move: it goes to the next leader once, or this node serves it
+// once it leads, a Sync being safe to repeat. The caller gets that answer with
+// no x-leader hint of the leader that left, one forward is counted and no
+// refusal. A view that does not move within HandoverWait leaves "leader
+// unreachable", with the hint of the leader it tried.
+func TestUnaryLeaderSendsASyncAgainAfterAHandover(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		move    func(*leaderStub) // what becomes of the view 200 ms into the call, nil for nothing
+		wait    time.Duration
+		code    codes.Code
+		next    int // the syncs the next leader served
+		here    int // the syncs this node served
+		refused int32
+		hint    bool // the answer carries the x-leader hint of the leader that left
+		minTook time.Duration
+	}{
+		{"to the next leader", func(l *leaderStub) { l.moveTo("127.0.0.2:7000") }, 5 * time.Second, codes.OK, 1, 0, 0, false, 200 * time.Millisecond},
+		{"to this node", (*leaderStub).stepUp, 5 * time.Second, codes.OK, 0, 1, 0, false, 200 * time.Millisecond},
+		{"a view that stays", nil, 300 * time.Millisecond, codes.Unavailable, 0, 0, 1, true, 300 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The next leader serves at 127.0.0.2, on the port nothing serves at 127.0.0.1.
+			next := serveAt(t, "127.0.0.2", 0)
+			if probe, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(next.port))); err != nil {
+				t.Skipf("port %d is taken on 127.0.0.1: %v", next.port, err)
+			} else {
+				_ = probe.Close()
+			}
+			leadership := &leaderStub{leader: "127.0.0.1:7000"}
+			var forwarded, refused atomic.Int32
+			opts := LeaderOptions{
+				Port: next.port, Forwarder: syncForwarder(t), HandoverWait: tc.wait,
+				Forwarded: func() { forwarded.Add(1) }, Refused: func() { refused.Add(1) },
+			}
+			here := serve(t, nil, UnaryLeader(leadership, opts))
+			if tc.move != nil {
+				time.AfterFunc(200*time.Millisecond, func() { tc.move(leadership) })
+			}
+			var header metadata.MD
+			start := time.Now()
+			_, err := here.client(t).Sync(context.Background(), syncRequest(), grpc.Header(&header))
+			took := time.Since(start)
+			if status.Code(err) != tc.code {
+				t.Fatalf("Sync: %v, want %v", err, tc.code)
+			}
+			if len(next.discovery.calls) != tc.next || len(here.discovery.calls) != tc.here {
+				t.Fatalf("the next leader served %d syncs and this node %d, want %d and %d", len(next.discovery.calls), len(here.discovery.calls), tc.next, tc.here)
+			}
+			if forwarded.Load() != 1 || refused.Load() != tc.refused {
+				t.Fatalf("heard %d forwards and %d refusals, want 1 and %d", forwarded.Load(), refused.Load(), tc.refused)
+			}
+			hint := header.Get(LeaderKey)
+			if want := "127.0.0.1:" + strconv.Itoa(next.port); tc.hint != (len(hint) == 1 && hint[0] == want) || (!tc.hint && len(hint) != 0) {
+				t.Fatalf("x-leader %q, want the leader that left: %v", hint, tc.hint)
+			}
+			if took < tc.minTook {
+				t.Fatalf("answered after %s, before %s", took, tc.minTook)
+			}
+		})
+	}
+}
+
+// A leader that takes the connection and never speaks gRPC on it, as a node
+// that hangs does, fails a forward within about cluster.ForwardDialTimeout,
+// which bounds the whole connect, handshakes included, as "leader
+// unreachable": the follower does not wait grpc-go's 20 seconds, or the
+// caller's whole deadline.
+func TestForwarderGivesUpOnALeaderThatNeverAnswers(t *testing.T) {
+	silent, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = silent.Close() })
+	var held []net.Conn
+	var mu sync.Mutex
+	go func() {
+		for {
+			conn, err := silent.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, conn)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			_ = c.Close()
+		}
+	})
+	leadership := &leaderStub{leader: "127.0.0.1:7000"}
+	client := followerOf(t, leadership, silent.Addr().(*net.TCPAddr).Port, syncForwarder(t)).client(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err = client.Sync(ctx, syncRequest())
+	took := time.Since(start)
+	if status.Code(err) != codes.Unavailable || status.Convert(err).Message() != "leader unreachable" {
+		t.Fatalf("Sync: %v after %s, want Unavailable leader unreachable", err, took)
+	}
+	if took > 3*cluster.ForwardDialTimeout {
+		t.Fatalf("Sync failed after %s, want about %s", took, cluster.ForwardDialTimeout)
 	}
 }

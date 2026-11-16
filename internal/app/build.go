@@ -483,6 +483,8 @@ func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, au
 	// route from the request Route hands to the mux.
 	leaderOpts := leaderOptions(addrPort(cfg.HTTP.Addr), cfg.TLS.Server.Enabled(), forwardTLS)
 	leaderOpts.Forwarded = func() { m.Forwarded(metrics.ServerUI) }
+	// No access log wraps the forwards of this listener: the Leader middleware logs the writes it cannot send.
+	leaderOpts.Log = logger
 	h := metrics.Route(mux)
 	h = middleware.ReadOnly(h)
 	h = middleware.Leader(leadership, leaderOpts)(h)
@@ -600,10 +602,28 @@ func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, event
 	return h
 }
 
+// outboundTLS builds the client sides of podium's outbound TLS from cfg: client,
+// tls.client's configuration, for the calls to agents, and forward, the same
+// with tls.forward's CA and server name over it, for the forwards of a follower
+// to the leader. Each is nil when nothing configures it: podium then dials
+// agents in plaintext, an https:// endpoint aside, and a follower verifies a
+// leader that serves TLS against the system roots, for the leader's host.
+func outboundTLS(cfg config.Config) (client, forward *tls.Config, err error) {
+	if client, err = cfg.TLS.Client.Build(); err != nil {
+		return nil, nil, err
+	}
+	if forward, err = cfg.TLS.Forward.Build(client); err != nil {
+		return nil, nil, err
+	}
+	return client, forward, nil
+}
+
 // leaderOptions makes a follower forward writes to port on the leader's host:
-// over TLS when tls.server is set (targetTLS), with forwardTLS, the tls.client
-// configuration, which verifies the leader's certificate against
-// tls.client.ca_file and presents tls.client's certificate when it has one.
+// over TLS when tls.server is set (targetTLS), with forwardTLS, the forward
+// configuration of outboundTLS, which verifies the leader's certificate against
+// tls.forward.ca_file, or tls.client.ca_file without one, for
+// tls.forward.server_name, or the leader's host without one, and presents
+// tls.client's certificate when it has one.
 func leaderOptions(port int, targetTLS bool, forwardTLS *tls.Config) middleware.LeaderOptions {
 	return middleware.LeaderOptions{ForwardPort: port, TargetTLS: targetTLS, TLSClientConfig: forwardTLS}
 }

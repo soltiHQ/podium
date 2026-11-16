@@ -405,18 +405,25 @@ tls:
     key_file:  /etc/solti/tls/server.key
     client_ca_file: /etc/solti/tls/agents-ca.crt   # optional: agents need a client certificate
   client:
-    ca_file:   /etc/solti/tls/client-ca.crt        # verifies agents' endpoints; raft: also the nodes' server certificates
+    ca_file:   /etc/solti/tls/client-ca.crt        # verifies agents' endpoints; raft: also the nodes' server certificates, without tls.forward.ca_file
     cert_file: /etc/solti/tls/cp-client.crt        # presented when asked; raft with client_ca_file: required, of the agents' CA
     key_file:  /etc/solti/tls/cp-client.key
+  forward:                                         # optional: a follower's check of the leader
+    ca_file:     /etc/solti/tls/nodes-ca.crt       # the CA of the nodes' server certificates
+    server_name: podium.podium.svc                 # a name every node's server certificate carries
 ```
 
-In a raft cluster a follower forwards writes and agents' syncs to the leader,
-over TLS as a client of `tls.client` once `tls.server` is set.
-`tls.client.ca_file` must then also hold the CA of the nodes' server
-certificates, which name each node's raft advertise host as written (without a
-`ca_file` the leader is checked against the system roots): a leader whose
-certificate does not verify gets no write, and the follower answers 502 over
-HTTP and `leader unreachable` over gRPC. With `client_ca_file` set too, the
+In a raft cluster, or the database mode, a follower forwards writes and agents'
+syncs to the leader, over TLS as a client of `tls.client` once `tls.server` is
+set. It checks the leader's certificate against `tls.forward.ca_file`, or
+`tls.client.ca_file` without one (the system roots without either), for
+`tls.forward.server_name`, or without one for the leader's advertise host as
+written. Replicas whose addresses change, such as a Deployment's pods, share one
+certificate for one name, their Service's say, and set it as
+`tls.forward.server_name`. A leader whose certificate does not verify gets no
+write, and the follower answers 502 over HTTP and `leader unreachable` over
+gRPC, and logs why. A forward that fails to connect, as at a handover, waits up
+to 3 s for the next leader and goes there. With `client_ca_file` set too, the
 leader's discovery listeners ask a forwarding follower for a certificate of the
 agents' CA, so each node's `tls.client.cert_file` and `key_file` must chain to
 that CA: without `tls.client.cert_file`, every sync that reaches a follower
@@ -667,13 +674,13 @@ adding and removing members, a compromised node, browsers and
   `tls.client`. See
   [Raft transport security](internal/config/README.md#raft-transport-security).
 - Set `tls.server` on every node, with certificates that name each node's raft
-  advertise host as written, and put their CA in every node's
-  `tls.client.ca_file`: a follower forwards the writes it gets, logins, cookies
-  and tokens included, and the agents' syncs to the leader, in plaintext without
-  `tls.server`, and each node logs a WARN at start that says so. With
-  `tls.server.client_ca_file`, give every node a `tls.client.cert_file` and
-  `key_file` that chain to the agents' CA, or every sync that reaches a follower
-  fails: see [TLS](#tls).
+  advertise host as written, or one name set as `tls.forward.server_name`, and
+  put their CA in every node's `tls.forward.ca_file`, or `tls.client.ca_file`: a
+  follower forwards the writes it gets, logins, cookies and tokens included, and
+  the agents' syncs to the leader, in plaintext without `tls.server`, and each
+  node logs a WARN at start that says so. With `tls.server.client_ca_file`, give
+  every node a `tls.client.cert_file` and `key_file` that chain to the agents'
+  CA, or every sync that reaches a follower fails: see [TLS](#tls).
 - Some settings must be the same on every node: `auth.jwt_secret`,
   `auth.cookie_secure`, `auth.issuer`, `auth.audience`, `agent_auth.require`,
   the enrollment secret, `trusted_proxies`, `cors.*` and
@@ -780,10 +787,11 @@ podium --config podium.yaml
 - **Forwarding and TLS.** A replica that does not lead forwards the writes it
   gets, logins, cookies and tokens included, and the agents' syncs, to the
   leader at the same ports, in plaintext without `tls.server`, with one WARN at
-  start that says so. Set `tls.server` on every replica, and the CA of the
-  replicas' certificates in every `tls.client.ca_file`, as in
-  [Raft cluster](#raft-cluster). Some settings must be the same on every
-  replica, which each checks against its leader's: see
+  start that says so. Set `tls.server` on every replica, the CA of the replicas'
+  certificates in every `tls.forward.ca_file`, and, as the pod IPs of a
+  Deployment change, one name that every replica's certificate carries as
+  `tls.forward.server_name`: see [TLS](#tls). Some settings must be the same on
+  every replica, which each checks against its leader's: see
   [Settings every replica must share](internal/config/README.md#settings-every-replica-must-share).
 - **Rate limits are per replica**, in memory, not shared through the database: a
   failover starts the new leader's limiters empty. See

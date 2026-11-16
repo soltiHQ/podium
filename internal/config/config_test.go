@@ -579,3 +579,48 @@ func TestLoadDatabaseCluster(t *testing.T) {
 		})
 	}
 }
+
+// tls.forward loads from SOLTI_TLS_FORWARD_CA_FILE and
+// SOLTI_TLS_FORWARD_SERVER_NAME. It tunes the forwards over TLS, which only
+// tls.server turns on, so loading fails without tls.server, rather than let an
+// operator believe the forwards are checked, and with a server name no
+// certificate can carry.
+func TestLoadTLSForward(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		server  bool
+		forward map[string]string
+		want    string // the error's text, "" for none
+	}{
+		{"a CA and a server name", true, map[string]string{"CA_FILE": "/etc/podium-tls/forward/ca.crt", "SERVER_NAME": "podium.podium.svc"}, ""},
+		{"a server name alone", true, map[string]string{"SERVER_NAME": "10.0.0.1"}, ""},
+		{"no tls.server", false, map[string]string{"SERVER_NAME": "podium.podium.svc"}, "config.tls.forward: requires tls.server"},
+		{"no tls.server, a CA alone", false, map[string]string{"CA_FILE": "/etc/podium-tls/forward/ca.crt"}, "config.tls.forward: requires tls.server"},
+		{"a server name with a port", true, map[string]string{"SERVER_NAME": "podium.podium.svc:8080"}, "config.tls.forward: tls forward: server_name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CONFIG_PATH", "")
+			t.Setenv("SOLTI_AUTH_JWT_SECRET", strings.Repeat("x", 32))
+			if tc.server {
+				t.Setenv("SOLTI_TLS_SERVER_CERT_FILE", "/etc/podium-tls/server/tls.crt")
+				t.Setenv("SOLTI_TLS_SERVER_KEY_FILE", "/etc/podium-tls/server/tls.key")
+			}
+			for key, value := range tc.forward {
+				t.Setenv("SOLTI_TLS_FORWARD_"+key, value)
+			}
+			cfg, err := load("")
+			if tc.want != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("load() = %v, want an error with %q", err, tc.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.TLS.Forward.CAFile != tc.forward["CA_FILE"] || cfg.TLS.Forward.ServerName != tc.forward["SERVER_NAME"] {
+				t.Fatalf("tls.forward = %+v, want %v", cfg.TLS.Forward, tc.forward)
+			}
+		})
+	}
+}

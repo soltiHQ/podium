@@ -41,11 +41,14 @@ const (
 )
 
 // TLSConfig groups the control-plane's TLS settings: the server identity used by
-// the HTTP and gRPC listeners, and the client identity used when dialing agents.
-// Both are opt-in — empty means plaintext.
+// the HTTP and gRPC listeners, the client identity used when dialing agents, and
+// how a follower checks the leader it forwards writes to. All are opt-in — empty
+// means plaintext, and a follower that forwards over TLS, with tls.server set,
+// checks the leader with tls.client, for the leader's host.
 type TLSConfig struct {
-	Server tlsconf.ServerConfig `yaml:"server"`
-	Client tlsconf.ClientConfig `yaml:"client"`
+	Server  tlsconf.ServerConfig  `yaml:"server"`
+	Client  tlsconf.ClientConfig  `yaml:"client"`
+	Forward tlsconf.ForwardConfig `yaml:"forward"`
 }
 
 // EnrollSecretEnv is the environment variable that carries
@@ -259,6 +262,12 @@ func (c Config) validate(checkCluster func(cluster.Config) error) error {
 	}
 	if err := c.TLS.Client.Validate(); err != nil {
 		return fmt.Errorf("config.tls.client: %w", err)
+	}
+	if err := c.TLS.Forward.Validate(); err != nil {
+		return fmt.Errorf("config.tls.forward: %w", err)
+	}
+	if c.TLS.Forward.Enabled() && !c.TLS.Server.Enabled() {
+		return errors.New("config.tls.forward: requires tls.server: a follower forwards to the leader over TLS only with tls.server set, and in plaintext without it")
 	}
 	if _, err := clientip.New(c.TrustedProxies); err != nil {
 		return fmt.Errorf("config.trusted_proxies: %w", err)

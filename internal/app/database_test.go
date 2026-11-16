@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -28,6 +30,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/sqlstore"
 	"github.com/soltiHQ/control-plane/internal/storage/sqlstore/pgtest"
+	"github.com/soltiHQ/control-plane/internal/transport/tlsconf"
 )
 
 // The tests of the database mode run whole apps, as main runs them, on a
@@ -356,6 +359,45 @@ func TestTwoReplicasForwardWrites(t *testing.T) {
 		case <-deadline:
 			t.Fatalf("%s's streams got no %s pulse within 10s", follower.id, event.RefreshUsers)
 		}
+	}
+}
+
+// Two replicas with tls.server share one certificate, which names the host
+// podium.test and no IP, as a Deployment's replicas share the Secret of a
+// certificate for their Service: with tls.forward's CA and server name, a write
+// sent to the follower over TLS reaches the leader at its loopback IP, whose
+// certificate the follower checks for podium.test, and lands. Neither replica
+// warns of plaintext forwarding.
+func TestDatabaseReplicasForwardOverTLSByServerName(t *testing.T) {
+	databaseURL := pgtest.NewDatabase(t)
+	ca := newTestCA(t)
+	certFile, keyFile := ca.issue(t, "podium.test")
+	nodes := databaseNodes(t, databaseURL, loopbackIPs(t, 2)...)
+	for _, n := range nodes {
+		n.cfg.TLS.Server = tlsconf.ServerConfig{CertFile: certFile, KeyFile: keyFile}
+		n.cfg.TLS.Forward = tlsconf.ForwardConfig{CAFile: ca.file, ServerName: "podium.test"}
+		n.start(t)
+	}
+	serving(t, nodes...)
+	leader, followers := databaseLeader(t, nodes)
+	follower := followers[0]
+	for _, n := range nodes {
+		if got := n.logged(t, map[string]any{"level": "warn", "message": databaseForwardingWarning}); len(got) != 0 {
+			t.Fatalf("%s warned of plaintext forwarding %d times with tls.server set", n.id, len(got))
+		}
+	}
+
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.cert)
+	client := httpClient()
+	client.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, ServerName: "podium.test"}}
+	token := bearerFor(t, leader.app, leader.cfg, "operator", enum.UsersGet, enum.UsersAdd)
+	resp, body := send(t, client, http.MethodPost, "https://"+follower.cfg.HTTP.Addr+"/api/v1/users", jsonType, `{"subject":"erin"}`, token, nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /api/v1/users through %s over TLS: %d %q, want the leader's 204", follower.id, resp.StatusCode, body)
+	}
+	if _, err := follower.app.store.GetUserBySubject(context.Background(), "erin"); err != nil {
+		t.Fatalf("erin read back on %s: %v", follower.id, err)
 	}
 }
 

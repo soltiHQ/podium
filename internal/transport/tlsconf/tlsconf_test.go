@@ -342,3 +342,99 @@ func TestClientConfigValidate(t *testing.T) {
 		t.Fatalf("ca-only should be valid, got %v", err)
 	}
 }
+
+// A forward's server name is a host name a certificate can carry, as a DNS
+// subject alternative name, or an IP address: anything else fails, so that a
+// follower never starts with a name no leader's certificate can match.
+func TestForwardConfigValidate(t *testing.T) {
+	for _, name := range []string{
+		"", "podium", "podium.podium.svc", "podium.podium.svc.cluster.local", "podium-agents.ns-1.svc",
+		"10.0.0.1", "::1", "fd00::1", strings.Repeat("a", 63) + ".svc",
+	} {
+		if err := (ForwardConfig{ServerName: name}).Validate(); err != nil {
+			t.Errorf("Validate() of server_name %q = %v, want nil", name, err)
+		}
+	}
+	for _, name := range []string{
+		"podium.svc.", ".podium.svc", "podium..svc", "*.podium.svc", "pod_ium.svc", "-podium.svc", "podium-.svc",
+		"podium.svc:8080", "[::1]", "https://podium.svc", "podium svc", " podium.svc", strings.Repeat("a", 64) + ".svc",
+		strings.Repeat("a.", 127) + "aa",
+	} {
+		if err := (ForwardConfig{ServerName: name}).Validate(); err == nil {
+			t.Errorf("Validate() of server_name %q = nil, want an error", name)
+		}
+	}
+}
+
+// The forwards to the leader take tls.client's configuration, client
+// certificate included, with tls.forward's CA in place of tls.client's and its
+// server name, and leave tls.client's own configuration as it was, for the
+// calls to agents. Without either, they verify the leader against the system
+// roots, as an empty tls.client does: nil.
+func TestForwardConfigBuild(t *testing.T) {
+	clientCA, _ := writeSelfSigned(t)
+	forwardCA, _ := writeSelfSigned(t)
+	cert, key := writeSelfSigned(t)
+	client := func(t *testing.T) *tls.Config {
+		t.Helper()
+		cfg, err := ClientConfig{CAFile: clientCA, CertFile: cert, KeyFile: key}.Build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+	pool := func(t *testing.T, path string) *x509.CertPool {
+		t.Helper()
+		p, err := loadCAPool(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	t.Run("nothing set", func(t *testing.T) {
+		if cfg, err := (ForwardConfig{}).Build(nil); err != nil || cfg != nil {
+			t.Fatalf("Build(nil) = (%v, %v), want (nil, nil)", cfg, err)
+		}
+	})
+	t.Run("tls.client alone", func(t *testing.T) {
+		base := client(t)
+		cfg, err := ForwardConfig{}.Build(base)
+		switch {
+		case err != nil:
+			t.Fatal(err)
+		case cfg == base:
+			t.Fatal("Build returned tls.client's configuration itself, want a copy")
+		case !cfg.RootCAs.Equal(pool(t, clientCA)) || len(cfg.Certificates) != 1 || cfg.ServerName != "":
+			t.Fatalf("Build() = roots of tls.client %v, %d certificates, server name %q; want tls.client's roots, its certificate, no name",
+				cfg.RootCAs.Equal(pool(t, clientCA)), len(cfg.Certificates), cfg.ServerName)
+		}
+	})
+	t.Run("a server name alone", func(t *testing.T) {
+		cfg, err := ForwardConfig{ServerName: "podium.podium.svc"}.Build(nil)
+		switch {
+		case err != nil:
+			t.Fatal(err)
+		case cfg == nil || cfg.ServerName != "podium.podium.svc" || cfg.RootCAs != nil || cfg.MinVersion != tls.VersionTLS12:
+			t.Fatalf("Build(nil) = %+v, want server name podium.podium.svc, the system roots and TLS 1.2 at least", cfg)
+		}
+	})
+	t.Run("a CA and a server name over tls.client", func(t *testing.T) {
+		base := client(t)
+		cfg, err := ForwardConfig{CAFile: forwardCA, ServerName: "podium.podium.svc"}.Build(base)
+		switch {
+		case err != nil:
+			t.Fatal(err)
+		case !cfg.RootCAs.Equal(pool(t, forwardCA)) || len(cfg.Certificates) != 1 || cfg.ServerName != "podium.podium.svc":
+			t.Fatalf("Build() = roots of tls.forward %v, %d certificates, server name %q; want tls.forward's roots, tls.client's certificate, podium.podium.svc",
+				cfg.RootCAs.Equal(pool(t, forwardCA)), len(cfg.Certificates), cfg.ServerName)
+		case !base.RootCAs.Equal(pool(t, clientCA)) || base.ServerName != "":
+			t.Fatal("Build changed tls.client's configuration")
+		}
+	})
+	t.Run("a CA that cannot be read", func(t *testing.T) {
+		if _, err := (ForwardConfig{CAFile: forwardCA + ".missing"}).Build(nil); err == nil || !strings.Contains(err.Error(), "tls forward: CA") {
+			t.Fatalf("Build() = %v, want an error of the forward CA", err)
+		}
+	})
+}

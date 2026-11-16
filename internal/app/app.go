@@ -226,8 +226,9 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 	// TLS: agent-facing listeners (HTTP-discovery, gRPC) get the full server config,
 	// including mTLS when a client CA is set. The human-facing UI gets the SAME cert
 	// but WITHOUT a client-certificate requirement, so enabling mTLS for agents does
-	// not lock browsers (which have no client cert) out of the dashboard. One client
-	// config for outbound calls: to agents, and from a follower to the leader when it
+	// not lock browsers (which have no client cert) out of the dashboard. Two client
+	// configs for outbound calls: tls.client's to agents, and tls.client's with
+	// tls.forward's CA and server name over it from a follower to the leader when it
 	// forwards a write. All opt-in (nil = plaintext). A raft node, or a database
 	// replica, builds the agent-facing listeners' pool from the bundle it read for
 	// its digests.
@@ -241,7 +242,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
 	}
-	clientTLS, err := cfg.TLS.Client.Build()
+	clientTLS, forwardTLS, err := outboundTLS(cfg)
 	if err != nil {
 		closeOnError(raftShutdown, eventHub)
 		return nil, err
@@ -254,6 +255,8 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		Bool("server_mtls", cfg.TLS.Server.ClientCAFile != "").
 		Bool("client_tls", cfg.TLS.Client.Enabled()).
 		Bool("client_mtls", cfg.TLS.Client.CertFile != "").
+		Bool("forward_ca", cfg.TLS.Forward.CAFile != "").
+		Str("forward_server_name", cfg.TLS.Forward.ServerName).
 		Msg("tls configuration")
 	warnOpenDiscovery(logger, cfg)
 	if elected {
@@ -319,7 +322,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 	grpcHealth := newGRPCHealth(ready)
 	m.StoreFailed(func() bool { return ready.failure != nil && ready.failure() != nil })
 
-	mainHandler, logHub := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership, resolver, clientTLS, m)
+	mainHandler, logHub := buildMainHandler(cfg, logger, svc, authModel, proxyPool, eventHub, leadership, resolver, forwardTLS, m)
 	httpCfg := cfg.HTTP
 	httpCfg.TLSConfig = uiServerTLS
 	// The streams end as the UI listener starts to shut down, so that one that
@@ -341,11 +344,11 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 
 	// A follower forwards its gRPC discovery syncs to the leader over one client
 	// connection, which closes with the raft node, after the listeners stopped.
-	forwarder := syncForwarder(cfg, leadership, clientTLS)
+	forwarder := syncForwarder(cfg, leadership, forwardTLS)
 	if forwarder != nil {
 		raftShutdown = before(func() { _ = forwarder.Close() }, raftShutdown)
 	}
-	discoveryHandler, grpcSrv := buildDiscoveryListeners(logger, svc.agent, eventHub, leadership, cfg, resolver, serverTLS, clientTLS, forwarder, m)
+	discoveryHandler, grpcSrv := buildDiscoveryListeners(logger, svc.agent, eventHub, leadership, cfg, resolver, serverTLS, forwardTLS, forwarder, m)
 	discoveryCfg := cfg.HTTPDiscovery
 	discoveryCfg.TLSConfig = serverTLS
 	httpDiscoveryRunner, err := httpserver.New(discoveryCfg, logger, discoveryHandler)

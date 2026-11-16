@@ -224,7 +224,14 @@ It goes out on:
 - the 503 of a discovery sync that met a leadership error on the node that
   served it (`response.StoreFailed`);
 - the 502 the `Leader` middleware answers when it cannot reach the leader it
-  forwards a write to;
+  forwards a write to. A forward that fails to connect sent nothing, as at a
+  handover: the follower first waits up to `cluster.HandoverWait`, 3 s, for its
+  view of the leader to move, and serves the write itself once it leads, or
+  sends it to the next leader once (`TestLeaderSendsAWriteAgainAfterAHandover`);
+  a forward that connected is never sent again. A connect gives up after
+  `cluster.ForwardDialTimeout`, 2 s. The middleware puts why it refused a write
+  in the error slot, and logs it through `LeaderOptions.Log` on the UI listener,
+  which no access log wraps (`TestLeaderLogsTheWritesItRefuses`);
 - the 503 the `Leader` middleware of a follower answers for a write another node
   forwarded already: a forward carries `X-Podium-Forwarded`, and a follower
   never forwards a write that carries it again, so a write crosses one node at
@@ -262,11 +269,16 @@ forward: a write stream, a unary write the `Forwarder` has no call for, a call
 another node forwarded already (`x-podium-forwarded`, so a call crosses one node
 at most; as with `X-Podium-Forwarded`, a client that sends it itself only keeps
 its own call from being forwarded), and a forward the leader never answered
-(`leader unreachable`). A `Sync` that a follower forwards gets the leader's own
-answer instead, and its hint when that answer is the `Unavailable` of a node
-that does not lead, which refused the call as a forwarded one. As for HTTP, it
-is not sent when no leader is known or the gRPC port is unknown, and the raft
-address is never sent in its place.
+(`leader unreachable`), once the follower waited up to 3 s for its view of the
+leader to move and it did not: a view that moves has the follower serve the
+`Sync` itself or send it to the next leader, a `Sync` being safe to repeat
+(`TestUnaryLeaderSendsASyncAgainAfterAHandover`). A connect to the leader,
+handshakes included, gives up after 2 s
+(`TestForwarderGivesUpOnALeaderThatNeverAnswers`). A `Sync` that a follower
+forwards gets the leader's own answer instead, and its hint when that answer is
+the `Unavailable` of a node that does not lead, which refused the call as a
+forwarded one. As for HTTP, it is not sent when no leader is known or the gRPC
+port is unknown, and the raft address is never sent in its place.
 
 A `not the leader` answer with the hint is a routing condition, so `UnaryLogger`
 logs it at WARN, where any other failure is an ERROR: an `Unavailable` without

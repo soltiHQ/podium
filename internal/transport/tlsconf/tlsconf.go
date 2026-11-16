@@ -6,7 +6,9 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"strings"
 )
 
 // ServerConfig is the server-side TLS configuration (PEM file paths).
@@ -151,6 +153,82 @@ func (c ClientConfig) Build() (*tls.Config, error) {
 		cfg.Certificates = []tls.Certificate{cert}
 	}
 	return cfg, nil
+}
+
+// ForwardConfig is how a follower checks the leader it forwards a write to,
+// over TLS, as it does with tls.server set: the client side of a forward that
+// tls.client does not cover, as the agents and the leader rarely share a CA and
+// a name. CAFile, when set, verifies the leader's certificate in place of
+// tls.client.ca_file, for the forwards alone. ServerName, when set, is the name
+// the leader's certificate must carry, in place of the host of the leader's
+// advertise address: one name, such as the Service's, that every replica's
+// certificate carries, where a replica's address, a pod IP, changes. The client
+// certificate a follower presents when the leader asks for one stays
+// tls.client's.
+type ForwardConfig struct {
+	CAFile     string `yaml:"ca_file"`
+	ServerName string `yaml:"server_name"`
+}
+
+// Enabled reports whether a forward setting is set.
+func (c ForwardConfig) Enabled() bool { return c.CAFile != "" || c.ServerName != "" }
+
+// Validate checks ServerName, when set: a DNS name of letters, digits and
+// hyphens, without a wildcard or a trailing dot, or an IP address, as a
+// certificate names a host. A name that is neither could match no certificate.
+func (c ForwardConfig) Validate() error {
+	if c.ServerName != "" && !hostName(c.ServerName) {
+		return errors.New("tls forward: server_name is neither a DNS name nor an IP address")
+	}
+	return nil
+}
+
+// Build returns the client *tls.Config of the forwards to the leader: a copy of
+// client, the configuration that [ClientConfig.Build] gave for tls.client, with
+// the certificates of CAFile as its roots when CAFile is set, and ServerName as
+// its server name. client stays as it was, for the calls to agents. With
+// neither client nor a forward setting, it returns (nil, nil): the follower
+// verifies the leader against the system roots, for the leader's host.
+func (c ForwardConfig) Build(client *tls.Config) (*tls.Config, error) {
+	cfg := client.Clone()
+	if !c.Enabled() {
+		return cfg, nil
+	}
+	if cfg == nil {
+		cfg = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	if c.CAFile != "" {
+		pool, err := loadCAPool(c.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("tls forward: CA: %w", err)
+		}
+		cfg.RootCAs = pool
+	}
+	cfg.ServerName = c.ServerName
+	return cfg, nil
+}
+
+// hostName reports whether name is an IP address, or a DNS name: labels of 1
+// to 63 letters, digits and hyphens, none at a label's start or end, joined by
+// dots, 253 characters at most.
+func hostName(name string) bool {
+	if net.ParseIP(name) != nil {
+		return true
+	}
+	if len(name) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(name, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // loadCAPool reads a PEM CA bundle into a *x509.CertPool.

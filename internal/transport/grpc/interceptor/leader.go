@@ -8,8 +8,10 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -64,16 +66,25 @@ type LeaderOptions struct {
 	Refused func()
 
 	// Forwarded, when set, is called once for each write that UnaryLeader sends to the leader, as it sends it,
-	// whatever the leader answers: a leader it cannot reach included, which Refused hears as well.
+	// whatever the leader answers: a leader it cannot reach included, which Refused hears as well. A write sent
+	// again after a handover counts once.
 	Forwarded func()
+
+	// HandoverWait bounds how long UnaryLeader waits, once the leader never answered a forward, for this node's
+	// view of the leader to move (cluster.AwaitMove): to this node, which then serves the write itself, or to
+	// another leader, to which it forwards the write once more. A view that has not moved by then leaves "leader
+	// unreachable". Zero keeps cluster.HandoverWait; less than zero looks once and waits for nothing.
+	HandoverWait time.Duration
 }
 
 // UnaryLeader routes the write RPCs that reach a follower, as the HTTP Leader middleware routes writes:
 //   - Reads, and writes on the leader: pass through.
 //   - A write that LeaderOptions.Forwarder forwards, on a follower that knows the leader's gRPC address: sent there
 //     (see Forwarder), and the leader's answer, an error included, is the answer, with the x-leader hint of an
-//     Unavailable that carries one. A forward the leader never answers is codes.Unavailable "leader unreachable"
-//     with the x-leader hint.
+//     Unavailable that carries one. A forward the leader never answers, as at a handover, waits for this node's
+//     view of the leader to move, up to LeaderOptions.HandoverWait, and is served here once this node leads, or
+//     sent to the next leader once; a view that does not move leaves codes.Unavailable "leader unreachable" with
+//     the x-leader hint of the leader it tried.
 //   - Any other write on a follower, one that another node forwarded included (see ForwardedKey):
 //     codes.Unavailable "not the leader" with the x-leader hint.
 //
@@ -101,16 +112,40 @@ func UnaryLeader(leadership cluster.Leadership, opts LeaderOptions) grpc.UnarySe
 		return cluster.LeaderAddr(leadership.CurrentLeader(), opts.Port)
 	}
 
+	handoverWait := opts.HandoverWait
+	if handoverWait == 0 {
+		handoverWait = cluster.HandoverWait
+	}
+
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		if !isWrite(info.FullMethod) || leadership.AmLeader() {
 			return handler(context.WithValue(ctx, leaderKey{}, leaderOf), req)
 		}
-		leader := cluster.LeaderAddr(leadership.CurrentLeader(), opts.Port)
+		raft := leadership.CurrentLeader()
+		leader := cluster.LeaderAddr(raft, opts.Port)
 		if leader != "" && opts.Forwarder.forwards(info.FullMethod) && !forwardedHere(ctx) {
 			forwarded()
 			resp, err := opts.Forwarder.forward(ctx, leader, info.FullMethod, req)
 			if err == errLeaderUnreachable {
+				// A handover, most likely: the leader that left takes no call. The methods a Forwarder forwards
+				// are safe to repeat, so the write goes where the view of the leader moves, whatever the leader
+				// that left did with it.
+				leading, moved := cluster.AwaitMove(ctx, leadership, raft, handoverWait)
+				switch next := cluster.LeaderAddr(moved, opts.Port); {
+				case leading:
+					transportctx.SetError(ctx, "")
+					return handler(context.WithValue(ctx, leaderKey{}, leaderOf), req)
+				case next != "":
+					transportctx.SetError(ctx, "")
+					leader = next
+					resp, err = opts.Forwarder.forward(ctx, next, info.FullMethod, req)
+				}
+			}
+			if err == errLeaderUnreachable {
 				refused()
+				// The hint without the not-leader mark: a leader this node cannot reach is a failure, logged at
+				// ERROR, as the HTTP forward logs its 502.
+				setLeaderHint(ctx, leader)
 			}
 			return resp, err
 		}
@@ -183,7 +218,9 @@ func forwardedHere(ctx context.Context) bool {
 type ForwardFunc func(ctx context.Context, conn grpc.ClientConnInterface, req any, opts ...grpc.CallOption) (any, error)
 
 // Forwarder sends the writes of a follower to the leader over one client connection, which it keeps while the
-// leader keeps its address, and replaces when the leader moves. Close closes it.
+// leader keeps its address, and replaces when the leader moves. Close closes it. The methods it forwards must be
+// safe to repeat, as a Sync is: UnaryLeader sends a write the leader never answered to the next leader after a
+// handover, and the leader that left may have run it.
 type Forwarder struct {
 	creds credentials.TransportCredentials
 	calls map[string]ForwardFunc // by full method name
@@ -219,8 +256,8 @@ func (f *Forwarder) forwards(method string) bool {
 
 // forward sends the call ctx carries to the leader at leader, its gRPC address, before the caller's own deadline,
 // and returns the leader's answer, an error included. A call the leader never answered, as it could not be
-// reached, is codes.Unavailable "leader unreachable" with the x-leader hint, and the error slot says why; one
-// whose caller gave up is the caller's own Canceled or DeadlineExceeded.
+// reached, is errLeaderUnreachable, and the error slot says why; the caller sets the x-leader hint once it gives
+// up on the call. One whose caller gave up is the caller's own Canceled or DeadlineExceeded.
 func (f *Forwarder) forward(ctx context.Context, leader, method string, req any) (any, error) {
 	conn, err := f.conn(leader)
 	if err == nil {
@@ -242,9 +279,6 @@ func (f *Forwarder) forward(ctx context.Context, leader, method string, req any)
 		return nil, status.FromContextError(ctxErr).Err()
 	}
 	transportctx.SetError(ctx, "forward to the leader at "+leader+": "+status.Convert(err).Message())
-	// The hint without the not-leader mark: a leader this node cannot reach is a failure, logged at ERROR, as
-	// the HTTP forward logs its 502.
-	setLeaderHint(ctx, leader)
 	return nil, errLeaderUnreachable
 }
 
@@ -261,8 +295,11 @@ func (f *Forwarder) conn(addr string) (*grpc.ClientConn, error) {
 	}
 	// Straight to the leader, never through the proxy that HTTPS_PROXY names: grpc-go would take it from the
 	// environment, and the leader would then see the proxy as the peer, which it trusts for no forwarding
-	// metadata, and every forwarded agent as one client of its limiter.
-	conn, err := grpc.NewClient("passthrough:///"+addr, grpc.WithTransportCredentials(f.creds), grpc.WithNoProxy())
+	// metadata, and every forwarded agent as one client of its limiter. A connect, handshakes included, that
+	// has not completed within cluster.ForwardDialTimeout fails the calls that wait on it, where grpc-go would
+	// wait 20 seconds for a leader whose pod is gone.
+	conn, err := grpc.NewClient("passthrough:///"+addr, grpc.WithTransportCredentials(f.creds), grpc.WithNoProxy(),
+		grpc.WithConnectParams(grpc.ConnectParams{Backoff: backoff.DefaultConfig, MinConnectTimeout: cluster.ForwardDialTimeout}))
 	if err != nil {
 		return nil, err
 	}
