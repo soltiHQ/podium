@@ -155,7 +155,8 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 		Proxy:                 nil,
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: timeout,
-		// A leader that takes the connection and stalls the handshake is gone too, as one that takes none is.
+		// A leader that takes the connection and stalls the handshake fails the forward too, with a 502 at once:
+		// unlike a failed connect, it may have been up, so the write is not sent again (see unsent).
 		TLSHandshakeTimeout: cluster.ForwardDialTimeout,
 		// A clone: other clients, such as the proxy pool, share the configuration.
 		TLSClientConfig: opts.TLSClientConfig.Clone(),

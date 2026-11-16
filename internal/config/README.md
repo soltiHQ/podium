@@ -501,14 +501,16 @@ certificate that names one host, such as their Service's, and set that host as
 write: the follower answers 502 over HTTP, `leader unreachable` over gRPC, and
 logs why, at ERROR. A forward that fails to connect sent nothing, as at a
 handover, where the leader that left refuses the connection or its pod is gone
-(a connect or a TLS handshake gives up after 2 s): the follower waits up to 3 s
-for its view of the leader to move, and serves the write itself once it leads,
-or sends it to the next leader once. A write that reaches a follower while it
-knows no leader waits for one the same way. Over HTTP a forward that was ever
-handed a connection is never sent again; over gRPC a `Sync` that the leader
-never answered goes to the next leader too, as it is safe to repeat. The raft
-transport has TLS settings of its own, with a CA of its own, see "Raft transport
-security".
+(a connect gives up after 2 s): the follower waits up to 3 s for its view of the
+leader to move, and serves the write itself once it leads, or sends it to the
+next leader once. A write that reaches a follower while it knows no leader waits
+for one the same way. The two waits are separate: a write that met both can take
+up to about 12 s before its answer. Over HTTP a forward that was ever handed a
+connection is never sent again, and a TLS handshake that has not completed
+within 2 s answers 502 at once; over gRPC a `Sync` that the leader never
+answered, a stalled handshake included, goes to the next leader too, as it is
+safe to repeat. The raft transport has TLS settings of its own, with a CA of its
+own, see "Raft transport security".
 
 The forwards carry logins, cookies, bearer tokens and agents' tokens, so a raft
 cluster needs `tls.server` on every node: without it a follower forwards them in

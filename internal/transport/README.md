@@ -229,12 +229,14 @@ It goes out on:
   view of the leader to move, and serves the write itself once it leads, or
   sends it to the next leader once (`TestLeaderSendsAWriteAgainAfterAHandover`);
   a forward that was ever handed a connection is never sent again
-  (`TestUnsentNeedsNoConnection`). A connect, and a TLS handshake, give up after
-  `cluster.ForwardDialTimeout`, 2 s. A write that reaches a follower while it
-  knows no leader waits for one the same way, and gets the 503 without
-  `X-Leader` below when none comes (`TestLeaderWaitsForALeaderWhenItKnowsNone`).
-  The middleware puts why it refused a write in the error slot, and logs it
-  through `LeaderOptions.Log` on the UI listener, which no access log wraps
+  (`TestUnsentNeedsNoConnection`). A connect gives up after
+  `cluster.ForwardDialTimeout`, 2 s; so does a TLS handshake, which then answers
+  the 502 at once, without the wait, as the leader may be up. A write that
+  reaches a follower while it knows no leader waits for one the same way, and
+  gets the 503 without `X-Leader` below when none comes
+  (`TestLeaderWaitsForALeaderWhenItKnowsNone`). The middleware puts why it
+  refused a write in the error slot, and logs it through `LeaderOptions.Log` on
+  the UI listener, which no access log wraps
   (`TestLeaderLogsTheWritesItRefuses`);
 - the 503 the `Leader` middleware of a follower answers for a write another node
   forwarded already: a forward carries `X-Podium-Forwarded`, and a follower
