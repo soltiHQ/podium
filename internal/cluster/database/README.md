@@ -28,7 +28,7 @@ database/
 ├── leadership.go   Options, New, Leadership: AmLeader, CurrentLeader, WhenLeader,
 │                   Run; the terms and the step-down; the package doc
 ├── lease.go        the lease's statements: take, renew, release, the followers'
-│                   read; the statement timeout
+│                   read; the session's statement timeout and isolation
 ├── fence.go        Check, the fence of the store's write transactions
 ├── registry.go     the replica registry: the heartbeat, Members, the pruning
 └── events.go       EventTransport, the event.Writer through podium_events: the
@@ -49,13 +49,15 @@ compare.
   writes in flight (see "The fence"), then an
   `INSERT … ON CONFLICT DO UPDATE … WHERE expires_at <= clock_timestamp()` whose
   row takes its epoch from the locked row, so that the lock is a value the
-  statement stores, which no planner can drop. The server runs and commits the
-  statement within its statement timeout, whatever becomes of the replica that
-  sent it, so that no takeover holds the lock any longer. The lease it takes
-  starts once the lock is taken: `clock_timestamp()` is read after the wait,
-  where `now()` would be the statement's start, before it. A row that another
-  replica holds, unexpired, is left as it is, a row renewed while the takeover
-  waited for the lock included
+  statement stores, which no planner can drop. The server runs the statement
+  within its statement timeout and commits it with no further round trip to the
+  replica that sent it, so that no takeover holds the lock waiting on a replica,
+  whatever becomes of it. The commit itself is outside the timeout: it can wait
+  for the WAL's flush and, under synchronous replication, for the standby, the
+  lock held meanwhile. The lease it takes starts once the lock is taken:
+  `clock_timestamp()` is read after the wait, where `now()` would be the
+  statement's start, before it. A row that another replica holds, unexpired, is
+  left as it is, a row renewed while the takeover waited for the lock included
 - The holder renews the row every third of the lease, an `UPDATE` of
   `expires_at` that matches its epoch and its ID. A renewal that changes no row
   finds the lease moved, and steps the replica down at once
@@ -73,6 +75,15 @@ compare.
   timeout from the statement's arrival, so a renewal can still land up to one
   network delay after the step-down), and never under 10 ms. A context deadline
   a statement timeout later covers a server that does not answer
+- The lease's statements run at `READ COMMITTED`, whatever the default isolation
+  of the database or the role, set on the session with the statement timeout: a
+  statement that waited for the row's lock reads the row's newest version once
+  the lock is free, so a renewal that waited for a takeover finds the lease
+  moved and steps down at once, and a takeover whose row a renewal changed while
+  it waited finds the lease renewed and takes nothing. At `REPEATABLE READ` or
+  `SERIALIZABLE` both would fail instead, as the row changed since they began
+  (SQLSTATE 40001), each with a warning and a retry: the renewal's step-down
+  comes a retry late
 - When `Run`'s context ends, the replica steps down, which cancels its
   `WhenLeader` work first, waits a sixth of the lease at most for that work to
   return, then releases the row: `expires_at` becomes the database's now, epoch
@@ -368,6 +379,11 @@ leases are seconds long, and they wait on conditions:
 - `TestFencedWriteLongerThanTheLeaseKeepsTheLead`: a write that holds the
   fence's lock for three leases: the leader renews throughout, never steps down,
   and the write commits at its epoch
+- `TestLeaseStatementsRunAtReadCommitted`,
+  `TestRenewalWaitingForATakeoverStepsDownAtOnce`: on a database whose sessions
+  start at `REPEATABLE READ`, a lease statement runs at `READ COMMITTED`, and a
+  renewal that waited for a takeover in flight steps the leader down at once,
+  with no statement failed
 - `TestSameHolderNewEpoch`: a replica that takes the lease again raises the
   epoch, once the row expired
 - `TestStepDownBeforeExpiry`: a slow renewal lands, then renewals stop landing:
