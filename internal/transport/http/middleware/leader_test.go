@@ -486,7 +486,8 @@ func TestLeaderLogsTheWritesItRefuses(t *testing.T) {
 	t.Run("without Log", func(t *testing.T) {
 		next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("a write reached the handler of a follower") })
 		w := httptest.NewRecorder()
-		Leader(stubLeadership{}, LeaderOptions{ForwardPort: 8080})(next).ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/", nil))
+		// The stub never knows a leader: no wait for one.
+		Leader(stubLeadership{}, LeaderOptions{ForwardPort: 8080, HandoverWait: -1})(next).ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/", nil))
 		if w.Code != http.StatusServiceUnavailable {
 			t.Fatalf("answered %d, want 503", w.Code)
 		}
@@ -796,5 +797,70 @@ func TestLeaderGivesUpOnALeaderThatStallsTheHandshake(t *testing.T) {
 	}
 	if took > 3*cluster.ForwardDialTimeout {
 		t.Fatalf("answered after %s, want about %s", took, cluster.ForwardDialTimeout)
+	}
+}
+
+// A write that the transport sent on a reused connection is never sent to the
+// next leader, even when the transport itself retried it on a new dial that
+// failed: here a replayable write, a body-less POST with Idempotency-Key, which
+// the leader that left read and then dropped the connection of, as it closed
+// its listener, so the transport's own retry met a refused connection. The
+// follower answers 502, and the next leader never gets the write.
+func TestLeaderNeverResendsAWriteThatAReusedConnectionCarried(t *testing.T) {
+	port, nextLis := handoverHosts(t)
+	var nextGot atomic.Int32
+	next := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		nextGot.Add(1)
+		w.WriteHeader(http.StatusCreated)
+	})}
+	go func() { _ = next.Serve(nextLis) }()
+	t.Cleanup(func() { _ = next.Close() })
+
+	view := &movingLeadership{leader: "127.0.0.1:7000"}
+	old, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = old.Close() })
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		conn, err := old.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		reader := bufio.NewReader(conn)
+		// The first write: answered, on a connection kept alive.
+		req, err := http.ReadRequest(reader)
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, req.Body)
+		_, _ = io.WriteString(conn, "HTTP/1.1 204 No Content\r\n\r\n")
+		// The leader leaves: no new connection, and the second write, read on the
+		// kept connection, is dropped unanswered once the view has moved.
+		_ = old.Close()
+		if _, err := http.ReadRequest(reader); err != nil {
+			return
+		}
+		view.move(false, "127.0.0.2:7000")
+	}()
+
+	refused := 0
+	h := Leader(view, LeaderOptions{ForwardPort: port, HandoverWait: 5 * time.Second, Refused: func() { refused++ }})(
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("a write reached the handler of a follower") }))
+	first := httptest.NewRecorder()
+	h.ServeHTTP(first, httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader("{}")))
+	if first.Code != http.StatusNoContent {
+		t.Fatalf("the first write answered %d, want the leader's 204", first.Code)
+	}
+	second := httptest.NewRequest(http.MethodPost, "/api/v1/agents/agent-a/restart", nil)
+	second.Header.Set("Idempotency-Key", "restart-1")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, second)
+	<-served
+	if w.Code != http.StatusBadGateway || nextGot.Load() != 0 || refused != 1 {
+		t.Fatalf("the second write answered %d, the next leader got %d writes, %d refusals; want 502, 0, 1", w.Code, nextGot.Load(), refused)
 	}
 }
