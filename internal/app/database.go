@@ -44,10 +44,11 @@ const connectTimeout = 5 * time.Second
 // The application_name of each pool of the database mode, which names its
 // connections in pg_stat_activity; the events listener's is podium-events.
 const (
-	primaryName = "podium"
-	replicaName = "podium-replica"
-	leaseName   = "podium-lease"
-	migrateName = "podium-migrate"
+	primaryName    = "podium"
+	replicaName    = "podium-replica"
+	leaseName      = "podium-lease"
+	migrateName    = "podium-migrate"
+	dropSchemaName = "podium-drop-schema"
 )
 
 // What the database mode logs, besides the leadership and the events transport.
@@ -413,6 +414,79 @@ func (p *storePing) ping(ctx context.Context) {
 	}
 	if p.last.Swap(&err) == nil {
 		p.logger.Warn().Err(err).Msg(pingFailed)
+	}
+}
+
+// dropWaiting is the WARN of podium drop-schema while replicas run on the
+// database.
+const dropWaiting = "database: replicas still run on the database: waiting for them to stop"
+
+// DropSchema drops the schema of the database of cfg, as podium drop-schema
+// does: on a pool of one connection to the primary, application_name
+// podium-drop-schema, it drops every table of podium's, and the data in them,
+// in one transaction under the lock on the migrations (sqlstore.DropSchema),
+// once no replica runs on the database (database.CheckStopped). While replicas
+// run it waits for them up to wait, logging one WARN, and then fails with
+// database.ErrRunning, as it fails at once with no wait. Each attempt reaches the
+// primary within the startup retry. It logs the host, the port, the database,
+// the version before and the tables it dropped, or that there was no schema to
+// drop. A schema newer than this podium's fails it at once, and nothing is
+// dropped. It runs nothing else: no listener, no leadership, no advertise_addr.
+// cfg is what config.LoadForMigration loaded.
+func DropSchema(ctx context.Context, cfg config.Config, logger zerolog.Logger, wait time.Duration, opts ...Option) error {
+	o := defaultOptions()
+	for _, opt := range opts {
+		opt(&o)
+	}
+	db, where, err := openPool("cluster.database.url", cfg.Cluster.Database.URL, dropSchemaName, 1)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	logger = where.logger(logger)
+	logger.Info().Dur("wait", wait).Msg("database: dropping the schema")
+	stopWaiting := time.Now().Add(wait)
+	waited := false
+	for {
+		var (
+			from    int
+			dropped []string
+		)
+		err := reach(ctx, logger, where, newStartWindow(o.database), func(ctx context.Context) error {
+			version, err := sqlstore.SchemaVersion(ctx, db)
+			if err != nil {
+				return err
+			}
+			from = version
+			dropped, err = sqlstore.DropSchema(ctx, db, sqlstore.Postgres{}, database.CheckStopped)
+			return err
+		})
+		switch {
+		case err == nil && len(dropped) == 0:
+			logger.Info().Msg("database: no schema to drop")
+			return nil
+		case err == nil:
+			logger.Info().Int("from_version", from).Strs("tables", dropped).Msg("database: dropped the schema")
+			return nil
+		case !errors.Is(err, database.ErrRunning):
+			return err
+		case !time.Now().Before(stopWaiting):
+			if waited {
+				return fmt.Errorf("%w, after waiting %s for them to stop", err, wait)
+			}
+			return err
+		}
+		if !waited {
+			logger.Warn().Err(err).Dur("wait", wait).Msg(dropWaiting)
+			waited = true
+		}
+		pause := time.NewTimer(min(o.database.pause, time.Until(stopWaiting)))
+		select {
+		case <-ctx.Done():
+			pause.Stop()
+			return ctx.Err()
+		case <-pause.C:
+		}
 	}
 }
 

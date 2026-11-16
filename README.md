@@ -247,10 +247,11 @@ podium --config podium.yaml
 ### Command line
 
 ```text
-podium [--config PATH]                                runs the server
-podium agent-token [--generation N] [--] <agent-id>   prints an agent's token, derived from SOLTI_AGENT_AUTH_ENROLL_SECRET
-podium migrate [--config PATH]                        migrates the schema of the database backend's database, and exits
-podium version                                        prints the version, as podium --version does
+podium [--config PATH]                                       runs the server
+podium agent-token [--generation N] [--] <agent-id>          prints an agent's token, derived from SOLTI_AGENT_AUTH_ENROLL_SECRET
+podium migrate [--config PATH]                               migrates the schema of the database backend's database, and exits
+podium drop-schema --yes [--config PATH] [--wait DURATION]   drops that schema, and all the state in it, once no replica runs, and exits
+podium version                                               prints the version, as podium --version does
 ```
 
 The command line is parsed before anything starts: an unknown flag or subcommand
@@ -462,10 +463,10 @@ a disposable deployment.
 
 The state is the database's: back it up with Postgres's own tools, a base backup
 or a dump, and test the restore. podium neither runs nor backs it up, and
-`podium migrate` is no backup. A restore returns the whole state to its time:
-the sessions, the rollouts and the credentials too. Take a backup before every
-upgrade, as the schema has no downgrade (see
-[Database cluster](#database-cluster)).
+`podium migrate` is no backup, and `podium drop-schema` drops the whole state
+for good. A restore returns the whole state to its time: the sessions, the
+rollouts and the credentials too. Take a backup before every upgrade, as the
+schema has no downgrade (see [Database cluster](#database-cluster)).
 
 ### What a backup holds
 
@@ -761,6 +762,15 @@ podium --config podium.yaml
   own, run `podium migrate [--config PATH]` first, such as a Kubernetes Job, and
   set `migrate: false`: it validates the same configuration, and exits 0, or 1
   on any failure. The version before keeps working while a rollout runs.
+- **Dropping the schema.**
+  `podium drop-schema --yes [--config PATH] [--wait DURATION]` drops every table
+  of podium's, and all the state in them, in one transaction, once no replica
+  runs on the database: none heartbeated within three seconds and the lease is
+  not held. It waits up to `--wait` for them, 0 by default, and fails if one
+  still runs. It drops no other table, no schema of the database's and not the
+  database, refuses a schema newer than its own, exits 0 once the schema is gone
+  or when there was none, and 1 on any failure. See
+  [Database backend](internal/config/README.md#database-backend).
 - **Readiness.** `/readyz` answers 503 `storage failed` while the primary does
   not answer a ping, and recovers with it, without a restart; it never waits for
   a leader, so a failover leaves every replica serving reads. `/leaderz` answers
@@ -796,9 +806,10 @@ podium --config podium.yaml
 - **Kubernetes.** The [`podium` chart](https://github.com/soltiHQ/charts) runs
   both modes: `mode: memory` (the default, one replica, no volume) and
   `mode: database` (a Deployment of `replicas`, the URLs from a Secret, the pod
-  IP as the advertise address, and an optional pre-install and pre-upgrade Job
-  that runs `podium migrate`). Its image must be built from a release with the
-  database mode.
+  IP as the advertise address, an optional pre-install and pre-upgrade Job that
+  runs `podium migrate`, and an optional post-delete Job that runs
+  `podium drop-schema` at `helm uninstall`). Its image must be built from a
+  release with the database mode.
 
 ## Develop
 

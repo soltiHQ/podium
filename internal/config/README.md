@@ -54,6 +54,12 @@ configuration loads (`TestCLIRefusesUnknownFlagBeforeStarting`):
   database and the schema versions before and after, and exits 0. Any failure, a
   schema newer than this podium's included, exits 1. It starts no listener
   (`TestMigrateCommand`).
+- `podium drop-schema --yes [--config PATH] [--wait DURATION]` drops that
+  schema, every table of podium's and all the state in them, and exits (see
+  "Database backend"). It reads the configuration as `podium migrate` does, and
+  needs `--yes`: without it, it is a usage error. `--wait` is how long it waits
+  for the replicas that run on the database, 0 by default
+  (`TestDropSchemaCommand`).
 - `podium version` and `podium --version` print one line,
   `podium <version> (commit <12 hex>[, modified], built <RFC 3339>, <go version> <os>/<arch>)`
   (`TestVersionCommandPrintsOneLine`), and start nothing. The version, the
@@ -1081,8 +1087,9 @@ may paste a URL into the wrong key.
   the API; everything else reads the primary.
 - Each pool names itself to the server by `application_name`, which replaces a
   URL's own: `podium` for the primary's, `podium-replica`, `podium-lease` for
-  the lease's one connection, `podium-events` for the events listener, and
-  `podium-migrate` for `podium migrate`.
+  the lease's one connection, `podium-events` for the events listener,
+  `podium-migrate` for `podium migrate`, and `podium-drop-schema` for
+  `podium drop-schema`.
 - `max_open_conns` caps the primary's pool and the replica's, which keep as many
   connections idle; the lease has a pool of one connection of its own, so that
   writers never starve it.
@@ -1147,14 +1154,14 @@ replica must share work as in raft, over the replicas the registry lists
 - **Connections.** A replica holds at most `max_open_conns` connections to the
   primary, plus the lease's one and the events listener's one, and at most
   `max_open_conns` to the replica endpoint: 12 and 10 with the default, per
-  replica. `podium migrate` takes one. Add them up over the replicas, and over
-  the extra pod of a rolling update, against the server's `max_connections` and
-  its other clients', and size `max_open_conns` down instead of past it: a
-  replica that finds none free makes its request wait for one
-  (`podium_database_pool_wait_count_total`), and a server at its limit refuses
-  new connections. A pooler between podium and Postgres must hand out a direct
-  or session-mode connection: the events' `LISTEN` does not work through a
-  transaction-mode pool, such as PgBouncer's, which hands the connection to
+  replica. `podium migrate` and `podium drop-schema` take one each. Add them up
+  over the replicas, and over the extra pod of a rolling update, against the
+  server's `max_connections` and its other clients', and size `max_open_conns`
+  down instead of past it: a replica that finds none free makes its request wait
+  for one (`podium_database_pool_wait_count_total`), and a server at its limit
+  refuses new connections. A pooler between podium and Postgres must hand out a
+  direct or session-mode connection: the events' `LISTEN` does not work through
+  a transaction-mode pool, such as PgBouncer's, which hands the connection to
   another client between statements: no notification arrives, and every replica
   then sees the others' events only at its read every 5 s (see "Events" in
   `internal/cluster/database/README.md`). Two more things break through such a
@@ -1202,6 +1209,22 @@ replica must share work as in raft, over the replicas the registry lists
   exits 0, or 1 on any failure, a configuration that fails loading and an
   unreachable database after the startup retry included (2 on a bad command
   line).
+- **`podium drop-schema --yes`** drops every table of podium's, and all the
+  state in them, which only a backup brings back. It loads the configuration as
+  `podium migrate` does, and drops in one transaction, under the lock on the
+  migrations, once no replica runs on the database: none heartbeated its
+  registry row within three seconds, and the lease is not held, by the
+  database's clock. A replica that stops cleanly deletes its row and releases
+  the lease, so it no longer runs at once; one that is killed runs until its
+  lease expires. While replicas run it waits for them up to `--wait`, logging
+  one WARN, and then exits 1 with nothing dropped, as a replica of another
+  deployment on the same database keeps it from dropping that deployment's
+  state. It drops no other table, no schema of the database's and not the
+  database, needs the role that owns the tables, refuses a schema newer than its
+  own (that podium's tables it does not know), logs the host, the port, the
+  database and the tables it dropped, and exits 0, also when there was no schema
+  to drop. A database migrated again afterwards starts empty. The chart runs it
+  as a `post-delete` hook at `helm uninstall`, under a flag.
 - **Rate limits are per replica.** The login and sync limiters live in the
   memory of one process: logins and agent syncs are forwarded to the leader, so
   the leader's count decides them, the stream limiter counts on the replica that

@@ -275,11 +275,11 @@ func Load(path string, log zerolog.Logger) (Config, error) {
 	return loadChecked(path, log, Config.Validate)
 }
 
-// LoadForMigration reads the configuration of podium migrate as [Load] reads
-// the server's, as strictly, and validates it as Load does but for the cluster
-// section, which [cluster.Config.ValidateMigration] checks: the backend must be
-// database, and cluster.database.advertise_addr, which a migration does not
-// use, may be empty.
+// LoadForMigration reads the configuration of podium migrate and podium
+// drop-schema as [Load] reads the server's, as strictly, and validates it as
+// Load does but for the cluster section, which
+// [cluster.Config.ValidateMigration] checks: the backend must be database, and
+// cluster.database.advertise_addr, which neither uses, may be empty.
 func LoadForMigration(path string, log zerolog.Logger) (Config, error) {
 	return loadChecked(path, log, func(c Config) error { return c.validate(cluster.Config.ValidateMigration) })
 }

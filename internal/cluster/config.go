@@ -443,13 +443,13 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// ValidateMigration checks what podium migrate reads: the backend must be
-// database, and its settings pass as Validate checks them, but for
-// database.advertise_addr, which a migration does not use and which is checked
-// only when set.
+// ValidateMigration checks what podium migrate and podium drop-schema read: the
+// backend must be database, and its settings pass as Validate checks them, but
+// for database.advertise_addr, which neither uses and which is checked only when
+// set.
 func (c Config) ValidateMigration() error {
 	if c.Backend != BackendDatabase {
-		return fmt.Errorf("podium migrate migrates the schema of backend %s, and the backend is %q", BackendDatabase, c.Backend)
+		return fmt.Errorf("podium migrate and podium drop-schema work on the schema of backend %s, and the backend is %q", BackendDatabase, c.Backend)
 	}
 	return c.Database.validate(false)
 }

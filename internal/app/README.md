@@ -6,9 +6,9 @@ with a clean **Build / Run / Shutdown** contract.
 
 `cmd/main.go` is a thin entry point: it parses the command line, answers
 `podium agent-token` and `podium version` itself, runs `podium migrate` through
-`app.Migrate`, and to serve builds the loggers and the signal handling around:
-load config → `app.New` → `app.Run` → `app.Shutdown`. Everything else lives
-here.
+`app.Migrate` and `podium drop-schema` through `app.DropSchema`, and to serve
+builds the loggers and the signal handling around: load config → `app.New` →
+`app.Run` → `app.Shutdown`. Everything else lives here.
 
 ## Package map
 
@@ -30,6 +30,7 @@ func New(ctx, cfg, logger, opts...) (*App, error) // build; memory seeds here, r
 func (a *App) Run(ctx) error               // start runners; block until ctx done or runner exits
 func (a *App) Shutdown(ctx) error          // release resources; idempotent
 func Migrate(ctx, cfg, logger, opts...) error // podium migrate: the database mode's schema, and nothing else
+func DropSchema(ctx, cfg, logger, wait, opts...) error // podium drop-schema: drops that schema once no replica runs
 ```
 
 - `New` returns a ready-to-run \[`App`\]. The memory backend seeds the initial
@@ -128,6 +129,17 @@ logger, as the listeners do.
 (`podium-migrate`), migrates within the startup retry, logs the host, the port,
 the database and the versions before and after, and runs nothing else.
 
+`DropSchema`, which `podium drop-schema` runs, opens one connection to the
+primary (`podium-drop-schema`) and drops every table of podium's in one
+transaction (`sqlstore.DropSchema`) once no replica runs on the database
+(`database.CheckStopped`, which it asks in that transaction, under the lock on
+the migrations). While replicas run it waits for them up to its wait, logging
+one WARN, each attempt within the startup retry and a pause apart, then fails
+with `database.ErrRunning`; with no wait it fails at once. A schema newer than
+this podium's fails it at once, and nothing is dropped. It logs the host, the
+port, the database, the version before and the tables it dropped, or that there
+was no schema to drop, and runs nothing else (`TestDatabaseDropSchema`).
+
 The tests of the database mode run whole apps on Postgres, each on a database of
 its own from `pgtest`, and skip without one; the second invocation of
 `task ci/golang/test/postgres` runs them: `TestDatabaseModeServes`,
@@ -135,11 +147,11 @@ its own from `pgtest`, and skip without one; the second invocation of
 `TestDatabaseOutageRecovers`, `TestDatabaseStartRetries`,
 `TestDatabaseURLNeverLeaks`, `TestDatabaseSchemaNotOursStopsTheStart`,
 `TestDatabaseReplicaSettingsChecked`, `TestDatabaseStartRetriesTheSeedCheck`,
-`TestDatabaseReadyWithoutLeader` and `TestDatabaseFailoverUnderLoad`.
-`TestPoolConfig`, which needs no Postgres, pins each pool's `application_name`,
-the connect timeout of a URL without one, and the error of a URL that does not
-parse. Their startup retry and ping are shortened (`withDatabaseTimings`), and
-their leases are 1.5 s, the failover's 4.5 s.
+`TestDatabaseReadyWithoutLeader`, `TestDatabaseFailoverUnderLoad` and
+`TestDatabaseDropSchema`. `TestPoolConfig`, which needs no Postgres, pins each
+pool's `application_name`, the connect timeout of a URL without one, and the
+error of a URL that does not parse. Their startup retry and ping are shortened
+(`withDatabaseTimings`), and their leases are 1.5 s, the failover's 4.5 s.
 
 `TestDatabaseFailoverUnderLoad` runs three apps on one database, each through a
 TCP proxy of its own, which every pool of the app and its events listener

@@ -31,6 +31,8 @@ database/
 │                   read; the session's statement timeout and isolation
 ├── fence.go        Check, the fence of the store's write transactions
 ├── registry.go     the replica registry: the heartbeat, Members, the pruning
+├── stopped.go      CheckStopped, whether a replica runs: the guard of podium
+│                   drop-schema
 └── events.go       EventTransport, the event.Writer through podium_events: the
                     queue, the writer, the reader, the pruning; Waker and
                     NewPostgresWaker, the LISTEN that wakes it
@@ -202,6 +204,17 @@ leader's, the replica `Leader` names, at each change of leader that
 `WatchLeader` reports, and compares them with this replica's own, with raft's
 handling of a mismatch (see "Configuration drift" in `internal/raft/README.md`).
 A replica without a row is an error, which the check retries.
+
+`CheckStopped` reads, through a transaction it is given, whether a replica runs
+on the database: one that heartbeated its row within three heartbeats, as long
+as `Members` keeps it, or a lease that has not expired, both by the database's
+clock at the statement. It answers `ErrRunning`, naming how many replicas
+heartbeated and whether the lease is held; a missing table holds no replica. A
+replica that stops cleanly deletes its row and releases the lease, so it stops
+running at once; one that crashed runs until its row is three heartbeats old and
+its lease expired. It is the guard of `podium drop-schema`, which
+`sqlstore.DropSchema` asks in its own transaction, under the lock on the
+migrations, before it drops anything.
 
 ## Events
 
@@ -406,6 +419,11 @@ leases are seconds long, and they wait on conditions:
   a write, which HTTP answers 503
 - `TestWhenLeaderRaftSemantics`: `fn` runs again at each acquisition, and while
   it returns early
+- `TestCheckStopped`, `TestCheckStoppedWithAReplica`,
+  `TestCheckStoppedReadsTheTransaction`: a replica seen within three heartbeats
+  and an unexpired lease run, an older row, an expired lease, no row and no
+  table do not; a running replica runs until it stops, then at once no longer;
+  and the rows the transaction wrote count
 
 The events transport's tests turn the reads on an interval off, or shorten them,
 so that only the path under test can deliver an event:

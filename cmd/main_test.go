@@ -352,7 +352,7 @@ func TestHelpExitsZero(t *testing.T) {
 			if code := run([]string{flag}, &stdout, &stderr, spy.serve); code != 0 || spy.started || stderr.Len() != 0 {
 				t.Fatalf("exit %d, started %v, stderr %q; want exit 0, nothing started, no stderr", code, spy.started, stderr.String())
 			}
-			for _, want := range []string{"usage: podium [--config PATH]", "podium agent-token", "podium migrate [--config PATH]", "podium version"} {
+			for _, want := range []string{"usage: podium [--config PATH]", "podium agent-token", "podium migrate [--config PATH]", "podium drop-schema --yes [--config PATH] [--wait DURATION]", "podium version"} {
 				if !strings.Contains(stdout.String(), want) {
 					t.Fatalf("stdout %q, want it to hold %q", stdout.String(), want)
 				}
@@ -666,6 +666,131 @@ func TestMigrateCommandLine(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			if code := run(args, &stdout, &stderr, spy.serve); code != 2 || spy.started || !strings.Contains(stderr.String(), "usage: podium") {
 				t.Fatalf("exit %d, started %v, stderr %q; want exit 2 with the usage", code, spy.started, stderr.String())
+			}
+		})
+	}
+}
+
+// "podium drop-schema --yes" drops the schema of a migrated database and exits
+// 0, logging the host, the port, the database and the tables it dropped; run
+// again, it finds nothing to drop and exits 0. Without --yes it is a usage
+// error, exit 2, that names --yes and drops nothing; on a schema a newer podium
+// migrated it exits 1, naming both versions, and drops nothing. It needs no
+// advertise_addr and starts no server, and no output carries the URL or its
+// credentials.
+func TestDropSchemaCommand(t *testing.T) {
+	databaseURL := pgtest.NewDatabase(t)
+	db := pgtest.Open(t, databaseURL)
+	ctx := context.Background()
+	u, err := url.Parse(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := strings.TrimPrefix(u.Path, "/")
+	path := migrateConfig(t, databaseURL, "")
+	command := func(args ...string) (int, string, string) {
+		t.Helper()
+		var spy serveSpy
+		var stdout, stderr bytes.Buffer
+		code := run(args, &stdout, &stderr, spy.serve)
+		if spy.started {
+			t.Fatalf("podium %s started the server", args[0])
+		}
+		return code, stdout.String(), stderr.String()
+	}
+	tableCount := func() int {
+		t.Helper()
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM information_schema.tables
+			WHERE table_schema = current_schema() AND table_name LIKE 'podium\_%'`).Scan(&count); err != nil {
+			t.Fatalf("count the tables: %v", err)
+		}
+		return count
+	}
+	output := map[string]string{}
+
+	if code, stdout, stderr := command("migrate", "--config", path); code != 0 {
+		t.Fatalf("podium migrate: exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	migrated := tableCount()
+
+	code, stdout, stderr := command("drop-schema", "--config", path)
+	if code != 2 || !strings.Contains(stderr, "--yes") || !strings.Contains(stderr, "usage: podium") {
+		t.Fatalf("podium drop-schema without --yes: exit %d, want 2 naming --yes\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	if got := tableCount(); got != migrated {
+		t.Fatalf("%d tables after drop-schema without --yes, want %d, untouched", got, migrated)
+	}
+
+	code, stdout, stderr = command("drop-schema", "--yes", "--config", path)
+	if code != 0 {
+		t.Fatalf("podium drop-schema --yes: exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	if got := tableCount(); got != 0 {
+		t.Errorf("%d tables of podium's after drop-schema, want none", got)
+	}
+	for _, want := range []string{`"message":"database: dropped the schema"`, `"podium_agents"`, `"database":"` + name + `"`, `"host":"` + u.Hostname() + `"`, `"port":`, `"message":"podium drop-schema done"`} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("the log of podium drop-schema lacks %s:\n%s", want, stdout)
+		}
+	}
+	output["stdout"], output["stderr"] = stdout, stderr
+
+	code, stdout, stderr = command("drop-schema", "--yes", "--config", path)
+	if code != 0 || !strings.Contains(stdout, "database: no schema to drop") {
+		t.Fatalf("podium drop-schema on a dropped schema: exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+
+	if code, stdout, stderr := command("migrate", "--config", path); code != 0 {
+		t.Fatalf("podium migrate again: exit %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO podium_schema_migrations (version) VALUES (99)`); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr = command("drop-schema", "--yes", "--config", path)
+	if code != 1 || !strings.Contains(stdout+stderr, "version 99") || !strings.Contains(stdout, "podium drop-schema failed") {
+		t.Fatalf("podium drop-schema on a newer schema: exit %d, want 1 naming version 99\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	if got := tableCount(); got != migrated {
+		t.Errorf("%d tables after the refusal, want %d, untouched", got, migrated)
+	}
+	output["the refusal's stdout"], output["the refusal's stderr"] = stdout, stderr
+
+	for what, text := range output {
+		for i, form := range urlForms(t, databaseURL) {
+			if strings.Contains(text, form) {
+				t.Errorf("%s holds secret form %d of the database URL", what, i)
+			}
+		}
+	}
+}
+
+// podium drop-schema takes --yes, --config and --wait alone, --wait a duration
+// of 0 or more: anything else, and the lack of --yes, is a usage error of its
+// own, exit 2, before any configuration loads.
+func TestDropSchemaCommandLine(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		says string
+	}{
+		{[]string{"drop-schema"}, "pass --yes to confirm"},
+		{[]string{"drop-schema", "--config", "podium.yaml"}, "pass --yes to confirm"},
+		{[]string{"drop-schema", "--yes", "--bogus"}, "drop-schema: flag provided but not defined: -bogus"},
+		{[]string{"drop-schema", "--yes", "extra"}, `drop-schema: unexpected argument "extra"`},
+		{[]string{"drop-schema", "--yes", "--config"}, "drop-schema: flag needs an argument: -config"},
+		{[]string{"drop-schema", "--yes", "--wait", "soon"}, `drop-schema: invalid value "soon" for flag -wait`},
+		{[]string{"drop-schema", "--yes", "--wait", "-1s"}, "drop-schema: --wait -1s is negative"},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			t.Setenv("CONFIG_PATH", "")
+			var spy serveSpy
+			var stdout, stderr bytes.Buffer
+			code := run(tc.args, &stdout, &stderr, spy.serve)
+			if code != 2 || spy.started || !strings.Contains(stderr.String(), tc.says) || !strings.Contains(stderr.String(), "usage: podium") {
+				t.Fatalf("exit %d, started %v, stderr %q; want exit 2 saying %q, with the usage", code, spy.started, stderr.String(), tc.says)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout %q, want nothing: no configuration loads", stdout.String())
 			}
 		})
 	}

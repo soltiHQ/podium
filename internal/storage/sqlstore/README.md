@@ -23,6 +23,7 @@ sqlstore/
 ├── postgres.go     Postgres: $n placeholders, the SQLSTATE classification, NOTIFY and the
 │                   events' advisory lock, the embedded migrations
 ├── migrate.go      Migrate, SchemaVersion, the migration files
+├── drop.go         DropSchema, and the tables of the schema it drops
 ├── migrations/postgres/0001_init.sql   the Postgres schema
 ├── tx.go           the write transactions: the gate, the fence, nesting, WithTx
 ├── readonly.go     the read routing: the replica for marked listings, the primary otherwise
@@ -319,6 +320,21 @@ stops that replica (`ErrSchemaNewer`). The role that migrates needs to create
 tables in its schema; `internal/config/README.md`, "Operating the database
 backend", has the operator's side: privileges, connections, replicas that lag
 and the password.
+
+`DropSchema` drops the schema: every table the migrations create, listed in
+`drop.go` next to them (a migration that adds a table adds it there, which
+`TestMigrateCreatesSchema` checks), the rows with them, and nothing else, no
+other table, no schema of the database's, not the database. It runs in one
+transaction at READ COMMITTED: with none of the tables present it ends, dropping
+nothing; otherwise it locks `podium_schema_migrations`
+`IN ACCESS EXCLUSIVE MODE`, which waits for a migrator in flight and holds off
+the next one and the read of `SchemaVersion` with which a replica opens the
+store; reads the version under the lock and refuses a newer schema with
+`ErrSchemaNewer`, as it can hold tables this podium does not know; asks its
+guard, in the transaction, under the lock, whose refusal comes back as it is
+(`database.CheckStopped` for `podium drop-schema`, which refuses while a replica
+runs); then drops the tables in one statement. It returns the tables it dropped.
+A database it dropped is an empty one to `Open` and to `Migrate`.
 
 Until the database mode is released, `0001_init.sql` stays the only migration
 and is edited in place: no installation exists. The lock statement and the
