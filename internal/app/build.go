@@ -545,7 +545,7 @@ func warnOpenDiscovery(logger zerolog.Logger, cfg config.Config) {
 func warnForwarding(logger zerolog.Logger, cfg config.Config, backend cluster.Backend) {
 	if !cfg.TLS.Server.Enabled() {
 		logger.Warn().
-			Msg(string(backend) + " forwarding runs plaintext: without tls.server a follower forwards the writes it gets, logins, cookies and tokens included, and the agents' syncs to the leader over plain HTTP and gRPC; set tls.server on every node, and tls.client.ca_file to the CA of the nodes' server certificates")
+			Msg(string(backend) + " forwarding runs plaintext: without tls.server a follower forwards the writes it gets, logins, cookies and tokens included, and the agents' syncs to the leader over plain HTTP and gRPC; set tls.server on every node, tls.forward.ca_file to the CA of the nodes' server certificates, and tls.forward.server_name to a name every one of them carries when the nodes' addresses change")
 		return
 	}
 	if cfg.TLS.Server.ClientCAFile != "" && cfg.TLS.Client.CertFile == "" {
@@ -734,8 +734,8 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *e
 
 // syncForwarder returns the forwarder of a follower's gRPC discovery syncs with
 // an elected leader, in raft mode and in the database mode, nil in memory. It
-// sends a Sync through the generated client, over TLS
-// with forwardTLS, the tls.client configuration, when the gRPC listener serves TLS
+// sends a Sync through the generated client, over TLS with forwardTLS, the
+// forward configuration of outboundTLS, when the gRPC listener serves TLS
 // (tls.server), as the HTTP listeners forward their writes. The caller closes it.
 func syncForwarder(cfg config.Config, leadership cluster.Leadership, forwardTLS *tls.Config) *interceptor.Forwarder {
 	if _, raft := leadership.(cluster.Membership); !raft {

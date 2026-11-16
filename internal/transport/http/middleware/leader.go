@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"net/url"
 	"strings"
@@ -64,9 +65,10 @@ type LeaderOptions struct {
 	TargetTLS bool
 
 	// TLSClientConfig is the client side of a forward to a TLS target: the CAs
-	// that verify the leader's certificate, for the leader's host, and the
-	// client certificate presented when the leader asks for one. Nil verifies
-	// the leader against the system roots, with no client certificate.
+	// that verify the leader's certificate, for its ServerName, or the leader's
+	// host without one, and the client certificate presented when the leader
+	// asks for one. Nil verifies the leader against the system roots, for its
+	// host, with no client certificate.
 	TLSClientConfig *tls.Config
 
 	// HandoverWait bounds how long a follower waits, once a forward failed to
@@ -117,8 +119,10 @@ type LeaderOptions struct {
 //   - A forward that fails to connect sent nothing of the write, as at a handover, when the leader that left
 //     refuses the connection, or its pod is gone (cluster.ForwardDialTimeout): the follower waits for its view of
 //     the leader to move, up to LeaderOptions.HandoverWait, and serves the write itself once it leads, or sends it
-//     to the next leader, once; the 502 stays for a view that does not move. A forward that connected is never
-//     sent again, whatever happened to it: the leader may have run the write.
+//     to the next leader, once; the 502 stays for a view that does not move. A forward that was ever handed a
+//     connection is never sent again, whatever happened to it: the leader may have run the write.
+//   - A write that a follower could forward while it knows no leader, as between a release and the takeover,
+//     waits for a leader the same way, and the 503 without X-Leader stays for none known by then.
 //
 // A request that passes through carries, in its context, where the leader serves this listener
 // (httpctx.Leader, see leaderAddress), so that a write that reaches a follower anyway, such as a
@@ -151,6 +155,8 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 		Proxy:                 nil,
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: timeout,
+		// A leader that takes the connection and stalls the handshake is gone too, as one that takes none is.
+		TLSHandshakeTimeout: cluster.ForwardDialTimeout,
 		// A clone: other clients, such as the proxy pool, share the configuration.
 		TLSClientConfig: opts.TLSClientConfig.Clone(),
 	}}
@@ -188,6 +194,18 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 				return
 			}
 			leaderAddr := leadership.CurrentLeader()
+			if leaderAddr == "" && opts.ForwardPort != 0 && len(r.Header.Values(ForwardedHeader)) == 0 {
+				// No leader known, as between a leader's release and the takeover: the write went nowhere, and
+				// waits for a leader as it does after a forward that failed to connect.
+				leading, known := cluster.AwaitMove(r.Context(), leadership, "", handoverWait)
+				if leading {
+					opts.Log.Info().Str("method", r.Method).Str("path", logPath(r.URL.Path)).
+						Msg("write served here once this node led")
+					serve(w, r)
+					return
+				}
+				leaderAddr = known
+			}
 			if leaderAddr == "" {
 				refuse(w, r, http.StatusServiceUnavailable, "", "cluster: no leader", "no leader is known")
 				return
@@ -210,13 +228,18 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 				return
 			}
 			// The body stays open, and unread, through a forward that fails to connect, for the next leader or this
-			// node; it closes once the write is answered, as the reverse proxy would close it.
+			// node; it closes once the write is answered, as the reverse proxy would close it. The trace hears
+			// whether the transport ever handed the forward a connection, which may have carried the write.
 			body := &unsentBody{ReadCloser: r.Body}
 			defer func() { _ = r.Body.Close() }()
+			var connected atomic.Bool
+			traced := r.WithContext(httptrace.WithClientTrace(r.Context(), &httptrace.ClientTrace{
+				GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+			}))
 			// The transport marks what the proxy sends (markForwarded).
 			forwarded()
-			err = proxyWrite(w, r, body, target, transport)
-			if err != nil && unsent(r, body, err) {
+			err = proxyWrite(w, traced, body, target, transport)
+			if err != nil && unsent(r, body, connected.Load(), err) {
 				leading, moved := cluster.AwaitMove(r.Context(), leadership, leaderAddr, handoverWait)
 				switch {
 				case leading:
@@ -231,7 +254,7 @@ func Leader(leadership cluster.Leadership, opts LeaderOptions) func(http.Handler
 							Str("leader", leaderHTTPAddr(leaderAddr, opts.ForwardPort)).Str("next_leader", nextTarget.Host).
 							Str("error", err.Error()).Msg("write sent to the next leader after a handover")
 						leaderAddr = moved
-						err = proxyWrite(w, r, body, nextTarget, transport)
+						err = proxyWrite(w, traced, body, nextTarget, transport)
 					}
 				}
 			}
@@ -275,12 +298,14 @@ func (b *unsentBody) Read(p []byte) (int, error) {
 func (*unsentBody) Close() error { return nil }
 
 // unsent reports whether err, the error of a forward of r, says that the leader got nothing of the write: the dial
-// failed, so nothing was sent, not a byte of body was read, and the client still waits. Any other failure, a
-// handshake that a leader's certificate fails included, is final: a write that may have reached the leader is
-// never sent again, and a leader that the follower cannot verify is no handover.
-func unsent(r *http.Request, body *unsentBody, err error) bool {
+// failed, the transport never handed the forward a connection (connected), so nothing was sent, not a byte of body
+// was read, and the client still waits. A connection handed out may have carried the write, even when the
+// transport then retried on a new dial that failed, as it does for a replayable request on an idle connection the
+// leader closed. Any other failure, a handshake that a leader's certificate fails included, is final: a write that
+// may have reached the leader is never sent again, and a leader that the follower cannot verify is no handover.
+func unsent(r *http.Request, body *unsentBody, connected bool, err error) bool {
 	var op *net.OpError
-	return r.Context().Err() == nil && body.read.Load() == 0 && errors.As(err, &op) && op.Op == "dial"
+	return r.Context().Err() == nil && !connected && body.read.Load() == 0 && errors.As(err, &op) && op.Op == "dial"
 }
 
 // markForwarded is the transport of the forwards to the leader: it sets ForwardedHeader on every request it sends,

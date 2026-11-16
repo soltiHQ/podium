@@ -422,13 +422,13 @@ written. Replicas whose addresses change, such as a Deployment's pods, share one
 certificate for one name, their Service's say, and set it as
 `tls.forward.server_name`. A leader whose certificate does not verify gets no
 write, and the follower answers 502 over HTTP and `leader unreachable` over
-gRPC, and logs why. A forward that fails to connect, as at a handover, waits up
-to 3 s for the next leader and goes there. With `client_ca_file` set too, the
-leader's discovery listeners ask a forwarding follower for a certificate of the
-agents' CA, so each node's `tls.client.cert_file` and `key_file` must chain to
-that CA: without `tls.client.cert_file`, every sync that reaches a follower
-fails, 502 over HTTP and `leader unreachable` over gRPC, and each node logs a
-WARN at start.
+gRPC, and logs why. A forward that fails to connect, as at a handover, and a
+write that reaches a follower while it knows no leader, wait up to 3 s for the
+next leader and go there. With `client_ca_file` set too, the leader's discovery
+listeners ask a forwarding follower for a certificate of the agents' CA, so each
+node's `tls.client.cert_file` and `key_file` must chain to that CA: without
+`tls.client.cert_file`, every sync that reaches a follower fails, 502 over HTTP
+and `leader unreachable` over gRPC, and each node logs a WARN at start.
 
 podium reads its certificate files at start only, so a renewed certificate takes
 effect at the next start. Behind a reverse proxy that terminates TLS, list the

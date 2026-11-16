@@ -14,7 +14,15 @@ import (
 // nothing answers at its address at all. A forward that fails to connect sent
 // nothing of the write, so the follower waits for its view of the leader to
 // move (AwaitMove), and then serves the write itself, as the next leader, or
-// sends it to the next leader once more, instead of answering 502.
+// sends it to the next leader once more, instead of answering 502. A write
+// that reaches a follower while it knows no leader, between a release and the
+// takeover, waits for a leader the same way.
+//
+// The wait assumes that the leader that left releases its lease soon after its
+// listeners close. It releases it once they have drained, within
+// server.shutdown_timeout, and once its leader-only work has returned: a drain
+// that takes longer than HandoverWait leaves the writes that met the closed
+// listeners refused, 502 over HTTP, as before.
 const (
 	// ForwardDialTimeout bounds the connect of a forward to the leader. Within a
 	// cluster a connect takes milliseconds: a leader that has not answered within

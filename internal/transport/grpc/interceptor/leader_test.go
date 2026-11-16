@@ -580,25 +580,37 @@ func serveAt(t *testing.T, host string, port int) *node {
 // A Sync whose forward the leader never answers, as at a handover, when the
 // leader that left refuses the connection, waits for the follower's view of
 // the leader to move: it goes to the next leader once, or this node serves it
-// once it leads, a Sync being safe to repeat. The caller gets that answer with
-// no x-leader hint of the leader that left, one forward is counted and no
-// refusal. A view that does not move within HandoverWait leaves "leader
-// unreachable", with the hint of the leader it tried.
+// once it leads, a Sync being safe to repeat. A Sync that reaches a follower
+// that knows no leader waits for one the same way. The caller gets that answer
+// with no x-leader hint of the leader that left, one forward is counted per
+// Sync sent, and no refusal. A view that does not move within HandoverWait
+// leaves "leader unreachable", with the hint of the leader it tried, or "not
+// the leader" without one when none is known; a caller that gives up first
+// gets its own deadline, which is no refusal.
 func TestUnaryLeaderSendsASyncAgainAfterAHandover(t *testing.T) {
+	const gone = "127.0.0.1:7000"
 	for _, tc := range []struct {
-		name    string
-		move    func(*leaderStub) // what becomes of the view 200 ms into the call, nil for nothing
-		wait    time.Duration
-		code    codes.Code
-		next    int // the syncs the next leader served
-		here    int // the syncs this node served
-		refused int32
-		hint    bool // the answer carries the x-leader hint of the leader that left
-		minTook time.Duration
+		name      string
+		start     string            // the view's leader at the start
+		move      func(*leaderStub) // what becomes of the view 200 ms into the call, nil for nothing
+		wait      time.Duration
+		deadline  time.Duration // the caller's, 0 for none
+		code      codes.Code
+		message   string
+		next      int // the syncs the next leader served
+		here      int // the syncs this node served
+		forwarded int32
+		refused   int32
+		hint      bool // the answer carries the x-leader hint of the leader that left
+		minTook   time.Duration
 	}{
-		{"to the next leader", func(l *leaderStub) { l.moveTo("127.0.0.2:7000") }, 5 * time.Second, codes.OK, 1, 0, 0, false, 200 * time.Millisecond},
-		{"to this node", (*leaderStub).stepUp, 5 * time.Second, codes.OK, 0, 1, 0, false, 200 * time.Millisecond},
-		{"a view that stays", nil, 300 * time.Millisecond, codes.Unavailable, 0, 0, 1, true, 300 * time.Millisecond},
+		{"to the next leader", gone, func(l *leaderStub) { l.moveTo("127.0.0.2:7000") }, 5 * time.Second, 0, codes.OK, "", 1, 0, 1, 0, false, 200 * time.Millisecond},
+		{"to this node", gone, (*leaderStub).stepUp, 5 * time.Second, 0, codes.OK, "", 0, 1, 1, 0, false, 200 * time.Millisecond},
+		{"a view that stays", gone, nil, 300 * time.Millisecond, 0, codes.Unavailable, "leader unreachable", 0, 0, 1, 1, true, 300 * time.Millisecond},
+		{"a caller that gives up", gone, nil, 5 * time.Second, 300 * time.Millisecond, codes.DeadlineExceeded, "", 0, 0, 1, 0, false, 300 * time.Millisecond},
+		{"no leader, then the next leader", "", func(l *leaderStub) { l.moveTo("127.0.0.2:7000") }, 5 * time.Second, 0, codes.OK, "", 1, 0, 1, 0, false, 200 * time.Millisecond},
+		{"no leader, then this node", "", (*leaderStub).stepUp, 5 * time.Second, 0, codes.OK, "", 0, 1, 0, 0, false, 200 * time.Millisecond},
+		{"no leader comes", "", nil, 300 * time.Millisecond, 0, codes.Unavailable, "not the leader", 0, 0, 0, 1, false, 300 * time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// The next leader serves at 127.0.0.2, on the port nothing serves at 127.0.0.1.
@@ -608,28 +620,43 @@ func TestUnaryLeaderSendsASyncAgainAfterAHandover(t *testing.T) {
 			} else {
 				_ = probe.Close()
 			}
-			leadership := &leaderStub{leader: "127.0.0.1:7000"}
+			leadership := &leaderStub{leader: tc.start}
 			var forwarded, refused atomic.Int32
 			opts := LeaderOptions{
 				Port: next.port, Forwarder: syncForwarder(t), HandoverWait: tc.wait,
 				Forwarded: func() { forwarded.Add(1) }, Refused: func() { refused.Add(1) },
 			}
-			here := serve(t, nil, UnaryLeader(leadership, opts))
+			var returned atomic.Bool
+			watched := func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+				defer returned.Store(true)
+				return UnaryLeader(leadership, opts)(ctx, req, info, handler)
+			}
+			here := serve(t, nil, watched)
 			if tc.move != nil {
 				time.AfterFunc(200*time.Millisecond, func() { tc.move(leadership) })
 			}
+			ctx := context.Background()
+			if tc.deadline > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.deadline)
+				defer cancel()
+			}
 			var header metadata.MD
 			start := time.Now()
-			_, err := here.client(t).Sync(context.Background(), syncRequest(), grpc.Header(&header))
+			_, err := here.client(t).Sync(ctx, syncRequest(), grpc.Header(&header))
 			took := time.Since(start)
-			if status.Code(err) != tc.code {
-				t.Fatalf("Sync: %v, want %v", err, tc.code)
+			if status.Code(err) != tc.code || (tc.message != "" && status.Convert(err).Message() != tc.message) {
+				t.Fatalf("Sync: %v, want %v %q", err, tc.code, tc.message)
+			}
+			// The interceptor of a caller that gave up returns once its context ends, after the caller's.
+			for deadline := time.Now().Add(2 * time.Second); !returned.Load() && time.Now().Before(deadline); {
+				time.Sleep(10 * time.Millisecond)
 			}
 			if len(next.discovery.calls) != tc.next || len(here.discovery.calls) != tc.here {
 				t.Fatalf("the next leader served %d syncs and this node %d, want %d and %d", len(next.discovery.calls), len(here.discovery.calls), tc.next, tc.here)
 			}
-			if forwarded.Load() != 1 || refused.Load() != tc.refused {
-				t.Fatalf("heard %d forwards and %d refusals, want 1 and %d", forwarded.Load(), refused.Load(), tc.refused)
+			if forwarded.Load() != tc.forwarded || refused.Load() != tc.refused {
+				t.Fatalf("heard %d forwards and %d refusals, want %d and %d", forwarded.Load(), refused.Load(), tc.forwarded, tc.refused)
 			}
 			hint := header.Get(LeaderKey)
 			if want := "127.0.0.1:" + strconv.Itoa(next.port); tc.hint != (len(hint) == 1 && hint[0] == want) || (!tc.hint && len(hint) != 0) {

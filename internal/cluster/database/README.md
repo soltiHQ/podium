@@ -420,7 +420,8 @@ leases are seconds long, and they wait on conditions:
 - `TestLeaderWatched`: `Leader` and the wake-ups of `WatchLeader` as a follower
   reads the holder, and as it takes the lease once the holder stopped
 - `TestFollowerWriteWithoutLeaderIs503`: a follower that knows no leader refuses
-  a write, which HTTP answers 503
+  a write, which HTTP answers 503 once no leader comes within the `Leader`
+  middleware's handover wait
 - `TestWhenLeaderRaftSemantics`: `fn` runs again at each acquisition, and while
   it returns early
 - `TestCheckStopped`, `TestCheckStoppedWithAReplica`,

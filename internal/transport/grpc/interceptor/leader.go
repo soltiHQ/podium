@@ -84,7 +84,9 @@ type LeaderOptions struct {
 //     Unavailable that carries one. A forward the leader never answers, as at a handover, waits for this node's
 //     view of the leader to move, up to LeaderOptions.HandoverWait, and is served here once this node leads, or
 //     sent to the next leader once; a view that does not move leaves codes.Unavailable "leader unreachable" with
-//     the x-leader hint of the leader it tried.
+//     the x-leader hint of the leader it tried. A forwardable write on a follower that knows no leader waits
+//     for one the same way. A caller that gives up while its write waits gets its own Canceled or
+//     DeadlineExceeded, which is no refusal.
 //   - Any other write on a follower, one that another node forwarded included (see ForwardedKey):
 //     codes.Unavailable "not the leader" with the x-leader hint.
 //
@@ -122,8 +124,22 @@ func UnaryLeader(leadership cluster.Leadership, opts LeaderOptions) grpc.UnarySe
 			return handler(context.WithValue(ctx, leaderKey{}, leaderOf), req)
 		}
 		raft := leadership.CurrentLeader()
+		forwardable := opts.Port != 0 && opts.Forwarder.forwards(info.FullMethod) && !forwardedHere(ctx)
+		if raft == "" && forwardable {
+			// No leader known, as between a release and the takeover: the call went nowhere, and waits for a
+			// leader as it does after a forward the leader never answered.
+			leading, known := cluster.AwaitMove(ctx, leadership, "", handoverWait)
+			switch {
+			case leading:
+				return handler(context.WithValue(ctx, leaderKey{}, leaderOf), req)
+			case ctx.Err() != nil:
+				// The caller gave up: its own Canceled or DeadlineExceeded, no refusal.
+				return nil, status.FromContextError(ctx.Err()).Err()
+			}
+			raft = known
+		}
 		leader := cluster.LeaderAddr(raft, opts.Port)
-		if leader != "" && opts.Forwarder.forwards(info.FullMethod) && !forwardedHere(ctx) {
+		if leader != "" && forwardable {
 			forwarded()
 			resp, err := opts.Forwarder.forward(ctx, leader, info.FullMethod, req)
 			if err == errLeaderUnreachable {
@@ -135,6 +151,8 @@ func UnaryLeader(leadership cluster.Leadership, opts LeaderOptions) grpc.UnarySe
 				case leading:
 					transportctx.SetError(ctx, "")
 					return handler(context.WithValue(ctx, leaderKey{}, leaderOf), req)
+				case ctx.Err() != nil:
+					return nil, status.FromContextError(ctx.Err()).Err()
 				case next != "":
 					transportctx.SetError(ctx, "")
 					leader = next
@@ -232,10 +250,11 @@ type Forwarder struct {
 }
 
 // NewForwarder returns the Forwarder of the methods of calls. targetTLS says whether the leader's gRPC listener
-// serves TLS, as this node's does with tls.server: it then dials the leader over TLS with tlsConfig, the
-// tls.client configuration, which verifies the leader's certificate for the host it dials, the leader's raft host,
-// and presents tls.client's certificate when the leader asks for one, as the HTTP Leader middleware does. A nil
-// tlsConfig verifies the leader against the system roots. Without targetTLS it dials plaintext.
+// serves TLS, as this node's does with tls.server: it then dials the leader over TLS with tlsConfig, the forward
+// configuration of tls.client and tls.forward, which verifies the leader's certificate for tls.forward's server
+// name, or the host it dials, the leader's raft host, without one, and presents tls.client's certificate when the
+// leader asks for one, as the HTTP Leader middleware does. A nil tlsConfig verifies the leader against the system
+// roots. Without targetTLS it dials plaintext.
 func NewForwarder(targetTLS bool, tlsConfig *tls.Config, calls map[string]ForwardFunc) *Forwarder {
 	creds := insecure.NewCredentials()
 	if targetTLS {
@@ -295,9 +314,10 @@ func (f *Forwarder) conn(addr string) (*grpc.ClientConn, error) {
 	}
 	// Straight to the leader, never through the proxy that HTTPS_PROXY names: grpc-go would take it from the
 	// environment, and the leader would then see the proxy as the peer, which it trusts for no forwarding
-	// metadata, and every forwarded agent as one client of its limiter. A connect, handshakes included, that
-	// has not completed within cluster.ForwardDialTimeout fails the calls that wait on it, where grpc-go would
-	// wait 20 seconds for a leader whose pod is gone.
+	// metadata, and every forwarded agent as one client of its limiter. The first connect to a leader,
+	// handshakes included, that has not completed within cluster.ForwardDialTimeout fails the calls that wait on
+	// it, where grpc-go would wait 20 seconds for a leader whose pod is gone; later attempts on the same
+	// connection wait as long as grpc-go's backoff then allows, at least that.
 	conn, err := grpc.NewClient("passthrough:///"+addr, grpc.WithTransportCredentials(f.creds), grpc.WithNoProxy(),
 		grpc.WithConnectParams(grpc.ConnectParams{Backoff: backoff.DefaultConfig, MinConnectTimeout: cluster.ForwardDialTimeout}))
 	if err != nil {

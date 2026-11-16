@@ -23,6 +23,7 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"github.com/soltiHQ/control-plane/internal/cluster"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
 	"github.com/soltiHQ/control-plane/internal/transport/httpctx"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
@@ -652,5 +653,148 @@ func TestLeaderSendsAWriteAgainAfterAHandover(t *testing.T) {
 				t.Fatalf("logged %v, want one line %q", lines, tc.logMessage)
 			}
 		})
+	}
+}
+
+// A follower that knows no leader, as between a leader's release and the
+// takeover, holds a write it can forward for up to HandoverWait, as it does
+// after a forward that failed to connect: it forwards the write once a leader
+// is known, serves it once it leads, and answers 503 when no leader comes.
+// A write another node forwarded already is refused at once.
+func TestLeaderWaitsForALeaderWhenItKnowsNone(t *testing.T) {
+	const payload = `{"subject":"dave"}`
+	leaderSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != payload {
+			t.Errorf("the leader got %q, want %q", body, payload)
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(leaderSrv.Close)
+	port := leaderSrv.Listener.Addr().(*net.TCPAddr).Port
+	for _, tc := range []struct {
+		name    string
+		move    func(*movingLeadership) // 200 ms into the write, nil for nothing
+		marked  bool
+		wait    time.Duration
+		status  int
+		refused int
+		minTook time.Duration
+	}{
+		{"a leader becomes known", func(l *movingLeadership) { l.move(false, "127.0.0.1:7000") }, false, 5 * time.Second, http.StatusCreated, 0, 200 * time.Millisecond},
+		{"this node comes to lead", func(l *movingLeadership) { l.move(true, "") }, false, 5 * time.Second, http.StatusNoContent, 0, 200 * time.Millisecond},
+		{"no leader comes", nil, false, 300 * time.Millisecond, http.StatusServiceUnavailable, 1, 300 * time.Millisecond},
+		{"a write forwarded already", func(l *movingLeadership) { l.move(false, "127.0.0.1:7000") }, true, 5 * time.Second, http.StatusServiceUnavailable, 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			view := &movingLeadership{}
+			if tc.move != nil {
+				time.AfterFunc(200*time.Millisecond, func() { tc.move(view) })
+			}
+			here := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if body, _ := io.ReadAll(r.Body); string(body) != payload {
+					t.Errorf("this node served %q, want %q", body, payload)
+				}
+				w.WriteHeader(http.StatusNoContent)
+			})
+			refused := 0
+			opts := LeaderOptions{ForwardPort: port, HandoverWait: tc.wait, Refused: func() { refused++ }}
+			r := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(payload))
+			if tc.marked {
+				r.Header.Set(ForwardedHeader, "1")
+			}
+			w := httptest.NewRecorder()
+			start := time.Now()
+			Leader(view, opts)(here).ServeHTTP(w, r)
+			took := time.Since(start)
+			if w.Code != tc.status || refused != tc.refused {
+				t.Fatalf("answered %d with %d refusals, want %d with %d", w.Code, refused, tc.status, tc.refused)
+			}
+			if took < tc.minTook || (tc.marked && took > 100*time.Millisecond) {
+				t.Fatalf("answered after %s, want %s at least, and at once for a marked write", took, tc.minTook)
+			}
+		})
+	}
+}
+
+// A forward counts as unsent, which may go to the next leader, only when its
+// dial failed, no connection was ever handed to it, not a byte of its body was
+// read, and its client still waits. A connection handed out, even one that the
+// transport then dropped to retry on a new dial, may have carried the write.
+func TestUnsentNeedsNoConnection(t *testing.T) {
+	dialErr := &net.OpError{Op: "dial", Net: "tcp", Err: fmt.Errorf("connection refused")}
+	readErr := &net.OpError{Op: "read", Net: "tcp", Err: fmt.Errorf("connection reset by peer")}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name      string
+		ctx       context.Context
+		read      int64
+		connected bool
+		err       error
+		want      bool
+	}{
+		{"a dial that failed", context.Background(), 0, false, dialErr, true},
+		{"a dial that failed after a connection was handed out", context.Background(), 0, true, dialErr, false},
+		{"a body read in part", context.Background(), 3, false, dialErr, false},
+		{"a read that failed", context.Background(), 0, false, readErr, false},
+		{"a client that gave up", cancelled, 0, false, dialErr, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequestWithContext(tc.ctx, http.MethodPost, "/", nil)
+			body := &unsentBody{ReadCloser: http.NoBody}
+			body.read.Store(tc.read)
+			if got := unsent(r, body, tc.connected, tc.err); got != tc.want {
+				t.Fatalf("unsent() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A leader that takes the connection and never answers the TLS handshake, as a
+// node that hangs does, fails the forward within about
+// cluster.ForwardDialTimeout as a 502 that says so, not after the client's own
+// deadline.
+func TestLeaderGivesUpOnALeaderThatStallsTheHandshake(t *testing.T) {
+	silent, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = silent.Close() })
+	var mu sync.Mutex
+	var held []net.Conn
+	go func() {
+		for {
+			conn, err := silent.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, conn)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			_ = c.Close()
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	r := httptest.NewRequestWithContext(ctx, http.MethodPost, "/api/v1/users", strings.NewReader("{}"))
+	r = r.WithContext(transportctx.WithErrorSlot(r.Context()))
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("a write reached the handler of a follower") })
+	opts := LeaderOptions{ForwardPort: silent.Addr().(*net.TCPAddr).Port, TargetTLS: true, HandoverWait: -1}
+	w := httptest.NewRecorder()
+	start := time.Now()
+	Leader(stubLeadership{leader: "127.0.0.1:7000"}, opts)(next).ServeHTTP(w, r)
+	took := time.Since(start)
+	if w.Code != http.StatusBadGateway || !strings.Contains(transportctx.TryError(r.Context()), "TLS handshake timeout") {
+		t.Fatalf("answered %d after %s with %q, want 502 for a TLS handshake timeout", w.Code, took, transportctx.TryError(r.Context()))
+	}
+	if took > 3*cluster.ForwardDialTimeout {
+		t.Fatalf("answered after %s, want about %s", took, cluster.ForwardDialTimeout)
 	}
 }

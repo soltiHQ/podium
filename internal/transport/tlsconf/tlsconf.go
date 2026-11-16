@@ -223,12 +223,17 @@ func hostName(name string) bool {
 			return false
 		}
 		for _, r := range label {
-			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+			if !hostNameChar(r) {
 				return false
 			}
 		}
 	}
 	return true
+}
+
+// hostNameChar reports whether r may stand in a label of a DNS name: a letter, a digit or a hyphen.
+func hostNameChar(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-'
 }
 
 // loadCAPool reads a PEM CA bundle into a *x509.CertPool.

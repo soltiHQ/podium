@@ -57,7 +57,7 @@ const (
 	dbAdminPassword = "database-admin-password"
 	// databaseForwardingWarning is the WARN of a replica of the database mode
 	// that forwards in plaintext.
-	databaseForwardingWarning = "database forwarding runs plaintext: without tls.server a follower forwards the writes it gets, logins, cookies and tokens included, and the agents' syncs to the leader over plain HTTP and gRPC; set tls.server on every node, and tls.client.ca_file to the CA of the nodes' server certificates"
+	databaseForwardingWarning = "database forwarding runs plaintext: without tls.server a follower forwards the writes it gets, logins, cookies and tokens included, and the agents' syncs to the leader over plain HTTP and gRPC; set tls.server on every node, tls.forward.ca_file to the CA of the nodes' server certificates, and tls.forward.server_name to a name every one of them carries when the nodes' addresses change"
 )
 
 // databaseNodes returns one replica of the database mode per host, none

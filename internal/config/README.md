@@ -498,13 +498,17 @@ written: an IP SAN for `10.0.0.1:7000`, a DNS SAN for `podium-0.podium:7000`.
 Replicas whose addresses change, the pod IPs of a Deployment, share one
 certificate that names one host, such as their Service's, and set that host as
 `tls.forward.server_name`. A leader whose certificate does not verify gets no
-write: the follower answers 502, and logs why, at ERROR. A forward that fails to
-connect sent nothing, as at a handover, where the leader that left refuses the
-connection or its pod is gone (a connect gives up after 2 s): the follower waits
-up to 3 s for its view of the leader to move, and serves the write itself once
-it leads, or sends it to the next leader once; a forward that connected is never
-sent again. The raft transport has TLS settings of its own, with a CA of its
-own, see "Raft transport security".
+write: the follower answers 502 over HTTP, `leader unreachable` over gRPC, and
+logs why, at ERROR. A forward that fails to connect sent nothing, as at a
+handover, where the leader that left refuses the connection or its pod is gone
+(a connect or a TLS handshake gives up after 2 s): the follower waits up to 3 s
+for its view of the leader to move, and serves the write itself once it leads,
+or sends it to the next leader once. A write that reaches a follower while it
+knows no leader waits for one the same way. Over HTTP a forward that was ever
+handed a connection is never sent again; over gRPC a `Sync` that the leader
+never answered goes to the next leader too, as it is safe to repeat. The raft
+transport has TLS settings of its own, with a CA of its own, see "Raft transport
+security".
 
 The forwards carry logins, cookies, bearer tokens and agents' tokens, so a raft
 cluster needs `tls.server` on every node: without it a follower forwards them in
