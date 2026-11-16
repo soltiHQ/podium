@@ -96,3 +96,59 @@ func TestDatabaseDropSchema(t *testing.T) {
 	}
 	noSecrets(t, urlSecrets(t, databaseURL), map[string]string{"the log": logs.String()})
 }
+
+// The work of podium drop-schema while another session holds a lock on a table
+// of the schema, as pg_dump does, and no replica runs: with no wait it refuses
+// with sqlstore.ErrLocked once its lock timeout passed, and drops nothing; with
+// a wait it waits for the lock, logging one WARN that says so, and drops once
+// the lock is free.
+func TestDatabaseDropSchemaWaitsForALock(t *testing.T) {
+	databaseURL := pgtest.NewDatabase(t)
+	db := pgtest.Open(t, databaseURL)
+	ctx := context.Background()
+	if err := sqlstore.Migrate(ctx, db, sqlstore.Postgres{}); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := pgtest.Open(t, databaseURL).BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.Rollback() }()
+	if _, err := holder.ExecContext(ctx, `LOCK TABLE podium_agents IN ACCESS SHARE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	cfg := databaseNodes(t, databaseURL, "127.0.0.1")[0].cfg
+	var logs syncBuffer
+	logger := zerolog.New(&logs)
+	// The startup retry outlasts the drop's lock timeout of 5 s, as in
+	// production, where it is 30 s: a lock wait ends in ErrLocked, not in the
+	// attempt's deadline.
+	timings := dbTimings
+	timings.retry = 10 * time.Second
+
+	if err := DropSchema(ctx, cfg, logger, 0, withDatabaseTimings(timings)); !errors.Is(err, sqlstore.ErrLocked) {
+		t.Fatalf("DropSchema without a wait while a lock is held: %v; want sqlstore.ErrLocked", err)
+	}
+	if v, err := sqlstore.SchemaVersion(ctx, db); err != nil || v < 1 {
+		t.Fatalf("the schema after the refusal: %d, %v; want it untouched", v, err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- DropSchema(ctx, cfg, logger, 60*time.Second, withDatabaseTimings(timings)) }()
+	waitFor(t, 20*time.Second, "the drop waits for the lock", func() bool {
+		return strings.Contains(logs.String(), "database: another session holds a lock on a table of podium's schema: waiting for it")
+	})
+	if err := holder.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := receiveErr(t, done, 20*time.Second); err != nil {
+		t.Fatalf("DropSchema once the lock is free: %v", err)
+	}
+	if v, err := sqlstore.SchemaVersion(ctx, db); err != nil || v != 0 {
+		t.Errorf("SchemaVersion after the drop = %d, %v; want 0", v, err)
+	}
+	if waits := strings.Count(logs.String(), "waiting for it"); waits != 1 {
+		t.Errorf("%d WARN lines about the lock, want one:\n%s", waits, logs.String())
+	}
+	noSecrets(t, urlSecrets(t, databaseURL), map[string]string{"the log": logs.String()})
+}

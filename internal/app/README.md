@@ -133,12 +133,15 @@ the database and the versions before and after, and runs nothing else.
 primary (`podium-drop-schema`) and drops every table of podium's in one
 transaction (`sqlstore.DropSchema`) once no replica runs on the database
 (`database.CheckStopped`, which it asks in that transaction, under the lock on
-the migrations). While replicas run it waits for them up to its wait, logging
-one WARN, each attempt within the startup retry and a pause apart, then fails
-with `database.ErrRunning`; with no wait it fails at once. A schema newer than
-this podium's fails it at once, and nothing is dropped. It logs the host, the
-port, the database, the version before and the tables it dropped, or that there
-was no schema to drop, and runs nothing else (`TestDatabaseDropSchema`).
+the migrations). While replicas run, or another session holds a lock on a table
+past the drop's lock timeout of 5 s, it waits up to its wait, logging one WARN
+for each, each attempt within a startup retry of its own and a pause apart, then
+fails with `database.ErrRunning` or `sqlstore.ErrLocked`; with no wait it fails
+at once. A schema newer than this podium's, or tables with podium's names but
+not its schema, fail it at once, and nothing is dropped. It logs the host, the
+port, the database, the version it dropped and the tables, or that there was no
+schema to drop, and runs nothing else (`TestDatabaseDropSchema`,
+`TestDatabaseDropSchemaWaitsForALock`).
 
 The tests of the database mode run whole apps on Postgres, each on a database of
 its own from `pgtest`, and skip without one; the second invocation of
@@ -147,11 +150,12 @@ its own from `pgtest`, and skip without one; the second invocation of
 `TestDatabaseOutageRecovers`, `TestDatabaseStartRetries`,
 `TestDatabaseURLNeverLeaks`, `TestDatabaseSchemaNotOursStopsTheStart`,
 `TestDatabaseReplicaSettingsChecked`, `TestDatabaseStartRetriesTheSeedCheck`,
-`TestDatabaseReadyWithoutLeader`, `TestDatabaseFailoverUnderLoad` and
-`TestDatabaseDropSchema`. `TestPoolConfig`, which needs no Postgres, pins each
-pool's `application_name`, the connect timeout of a URL without one, and the
-error of a URL that does not parse. Their startup retry and ping are shortened
-(`withDatabaseTimings`), and their leases are 1.5 s, the failover's 4.5 s.
+`TestDatabaseReadyWithoutLeader`, `TestDatabaseFailoverUnderLoad`,
+`TestDatabaseDropSchema` and `TestDatabaseDropSchemaWaitsForALock`.
+`TestPoolConfig`, which needs no Postgres, pins each pool's `application_name`,
+the connect timeout of a URL without one, and the error of a URL that does not
+parse. Their startup retry and ping are shortened (`withDatabaseTimings`), and
+their leases are 1.5 s, the failover's 4.5 s.
 
 `TestDatabaseFailoverUnderLoad` runs three apps on one database, each through a
 TCP proxy of its own, which every pool of the app and its events listener

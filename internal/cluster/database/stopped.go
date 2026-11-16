@@ -40,8 +40,11 @@ const (
 // longer runs at once; one that crashed runs until its row is three heartbeats
 // old and its lease expired.
 //
-// It is the guard of podium drop-schema, which sqlstore.DropSchema asks in its
-// transaction, under the lock on the migrations, before it drops anything.
+// It is the guard of podium drop-schema, which sqlstore.DropSchema asks twice
+// in its transaction, under the lock on the migrations: with the tables
+// unlocked, then with every table of the schema locked, so that nothing a
+// replica writes lands between the second answer and the drop. A replica that
+// is starting and has not heartbeated yet is not seen.
 func CheckStopped(ctx context.Context, tx *sql.Tx) error {
 	var found []string
 	exists, err := tablePresent(ctx, tx, "podium_replicas")

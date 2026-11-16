@@ -212,9 +212,13 @@ clock at the statement. It answers `ErrRunning`, naming how many replicas
 heartbeated and whether the lease is held; a missing table holds no replica. A
 replica that stops cleanly deletes its row and releases the lease, so it stops
 running at once; one that crashed runs until its row is three heartbeats old and
-its lease expired. It is the guard of `podium drop-schema`, which
-`sqlstore.DropSchema` asks in its own transaction, under the lock on the
-migrations, before it drops anything.
+its lease expired: a crashed follower three heartbeats after its last, a crashed
+leader once its lease expires. It is the guard of `podium drop-schema`, which
+`sqlstore.DropSchema` asks twice in its own transaction, under the lock on the
+migrations: with the tables unlocked, then with every table of the schema
+locked, so that nothing changes between the second answer and the drop. It sees
+the replicas that run, not one that is starting and has not heartbeated yet:
+only replicas that run keep a database from being dropped.
 
 ## Events
 

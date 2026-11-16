@@ -766,10 +766,11 @@ podium --config podium.yaml
   `podium drop-schema --yes [--config PATH] [--wait DURATION]` drops every table
   of podium's, and all the state in them, in one transaction, once no replica
   runs on the database: none heartbeated within three seconds and the lease is
-  not held. It waits up to `--wait` for them, 0 by default, and fails if one
-  still runs. It drops no other table, no schema of the database's and not the
-  database, refuses a schema newer than its own, exits 0 once the schema is gone
-  or when there was none, and 1 on any failure. See
+  not held. It waits up to `--wait` for them, and for a lock another session
+  holds on a table, 0 by default, and fails if one still runs: only replicas
+  that run protect a database. It drops no other table, no schema of the
+  database's and not the database, refuses a schema newer than its own, exits 0
+  once the schema is gone or when there was none, and 1 on any failure. See
   [Database backend](internal/config/README.md#database-backend).
 - **Readiness.** `/readyz` answers 503 `storage failed` while the primary does
   not answer a ping, and recovers with it, without a restart; it never waits for

@@ -67,7 +67,8 @@ configuration loads (`TestCLIRefusesUnknownFlagBeforeStarting`):
   the binary, and nothing is injected at link time: `dev` stands for a build
   that has no module version, and `unknown` for a commit or a time a build
   without VCS information lacks. The time is the commit's.
-- `-h` and `--help` print the usage to stdout and exit 0 (`TestHelpExitsZero`).
+- `-h` and `--help` print the usage to stdout and exit 0 (`TestHelpExitsZero`);
+  after a subcommand, `podium migrate -h` say, they are a usage error, exit 2.
 - An unknown flag, an unknown subcommand, a flag without its value or an
   argument that belongs to no command prints the error and the usage to stderr
   and exits 2. A subcommand is the first argument:
@@ -1214,17 +1215,27 @@ replica must share work as in raft, over the replicas the registry lists
   `podium migrate` does, and drops in one transaction, under the lock on the
   migrations, once no replica runs on the database: none heartbeated its
   registry row within three seconds, and the lease is not held, by the
-  database's clock. A replica that stops cleanly deletes its row and releases
-  the lease, so it no longer runs at once; one that is killed runs until its
-  lease expires. While replicas run it waits for them up to `--wait`, logging
-  one WARN, and then exits 1 with nothing dropped, as a replica of another
-  deployment on the same database keeps it from dropping that deployment's
-  state. It drops no other table, no schema of the database's and not the
-  database, needs the role that owns the tables, refuses a schema newer than its
-  own (that podium's tables it does not know), logs the host, the port, the
-  database and the tables it dropped, and exits 0, also when there was no schema
-  to drop. A database migrated again afterwards starts empty. The chart runs it
-  as a `post-delete` hook at `helm uninstall`, under a flag.
+  database's clock. It checks that twice, the second time with every table
+  locked, so that nothing lands between the check and the drop. A replica that
+  stops cleanly deletes its row and releases the lease, so it no longer runs at
+  once; a killed follower runs until its row is three seconds old, a killed
+  leader until its lease expires. Only replicas that run protect a database: a
+  replica of another deployment on the same database keeps it from dropping that
+  deployment's state, a deployment that runs none at that moment does not, and
+  neither does a replica that is starting and has not heartbeated yet. Each lock
+  it waits for is bounded by 5 s: a session that holds one longer, a `pg_dump`
+  or a transaction left open, makes it wait as a replica that runs does. While
+  either lasts it waits up to `--wait`, logging one WARN for each, and then
+  exits 1 with nothing dropped. It drops no other table, no view, no schema of
+  the database's and not the database, needs the role that owns the tables,
+  refuses a schema newer than its own (that podium's tables it does not know)
+  and tables with podium's names in a database without
+  `podium_schema_migrations`, logs the host, the port, the database, the version
+  and the tables it dropped, and exits 0, also when there was no schema to drop.
+  A database migrated again afterwards starts empty. A signal that ends it while
+  the drop commits can leave the schema dropped with exit 1: run it again, which
+  finds no schema and exits 0. The chart runs it as a `post-delete` hook at
+  `helm uninstall`, under a flag.
 - **Rate limits are per replica.** The login and sync limiters live in the
   memory of one process: logins and agent syncs are forwarded to the leader, so
   the leader's count decides them, the stream limiter counts on the replica that
