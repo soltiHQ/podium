@@ -15,6 +15,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/domain/wire"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
@@ -410,10 +411,11 @@ func (s *Service) validateSpec(ctx context.Context, ts *model.Spec) error {
 }
 
 // validateWorkload requires a workload and checks it against the catalog: the
-// fingerprint is known, podium does not refuse its schema, and the body
-// satisfies the schema. The type is not compared with the one the catalog stored
-// with the schema: two types may share one schema, and the catalog keeps the
-// first type it saw. A refusal is a [WorkloadError].
+// fingerprint is known, podium does not refuse its schema, the body satisfies
+// the schema, and every number of the body can be stored as it is written. The
+// type is not compared with the one the catalog stored with the schema: two
+// types may share one schema, and the catalog keeps the first type it saw. A
+// refusal is a [WorkloadError].
 func (s *Service) validateWorkload(ctx context.Context, w model.Workload) error {
 	if w.APIVersion == "" || w.Kind == "" || w.SchemaFingerprint == "" {
 		return &WorkloadError{Message: "the workload requires api_version, kind and schema_fingerprint"}
@@ -438,7 +440,27 @@ func (s *Service) validateWorkload(ctx context.Context, w model.Workload) error 
 	if body == nil {
 		body = map[string]any{}
 	}
-	return workloadRefusal(schema.Validate(body))
+	if err := workloadRefusal(schema.Validate(body)); err != nil {
+		return err
+	}
+	// After Validate, which bounds the digits and the exponent of every number.
+	return numberRefusal(wire.CheckWorkloadBody(body))
+}
+
+// numberRefusal turns what the storage encoding refuses in a valid body into
+// the error a save returns: nil when it refuses nothing, a [WorkloadError] that
+// names the path of a number it cannot keep, as every storage mode refuses it,
+// the memory mode included.
+func numberRefusal(err error) error {
+	var nerr *wire.NumberError
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &nerr):
+		return &WorkloadError{Message: nerr.Error()}
+	default:
+		return &WorkloadError{Message: err.Error()}
+	}
 }
 
 // workloadRefusal turns the result of validating a body into the error a save

@@ -1,6 +1,8 @@
 package wire_test
 
 import (
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/soltiHQ/control-plane/domain/model"
@@ -51,5 +53,26 @@ func TestWorkloadBodyRejectsLossyIntegers(t *testing.T) {
 	setBody(spec, map[string]any{"value": int64(9007199254740992), "fraction": 0.125})
 	if _, err := wire.SpecToProto(spec); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A number the body cannot keep is refused with its RFC 6901 path, the first in
+// key order, so that a save can say where it is.
+func TestWorkloadBodyNamesThePathOfALossyNumber(t *testing.T) {
+	for _, tc := range []struct {
+		body map[string]any
+		path string
+	}{
+		{map[string]any{"value": int64(9007199254740993)}, "/value"},
+		{map[string]any{"a": map[string]any{"b": []any{1, uint64(18446744073709551615)}}}, "/a/b/1"},
+		{map[string]any{"z": int64(9007199254740993), "a/b": map[string]any{"~": int64(9007199254740995)}}, "/a~1b/~0"},
+	} {
+		spec, _ := model.NewSpec("spec", "Large", "slot")
+		setBody(spec, tc.body)
+		_, err := wire.SpecToProto(spec)
+		var nerr *wire.NumberError
+		if !errors.As(err, &nerr) || nerr.Path != tc.path || !strings.Contains(err.Error(), tc.path+": ") {
+			t.Errorf("%v: %v, want a number error at %s", tc.body, err, tc.path)
+		}
 	}
 }

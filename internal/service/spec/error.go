@@ -73,9 +73,10 @@ func (e *IncompatibleTargetsError) Unwrap() error { return storage.ErrInvalidArg
 var ErrPlacementChanged = errors.New("placement changed since preview")
 
 // WorkloadError is a workload the service refuses: it is missing, unknown to the
-// catalog, or rejected by its schema. Message
-// is for the client; for a body the schema rejects it lists "path: message"
-// problems, the first 20, separated by "; ".
+// catalog, refused by podium with its schema, rejected by its schema, or holds a
+// number the store cannot keep. Message is for the client; for a body the
+// schema rejects it lists "path: message" problems, the first 20, separated by
+// "; ", and for a number it names the number's path.
 type WorkloadError struct{ Message string }
 
 func (e *WorkloadError) Error() string { return "invalid workload: " + e.Message }

@@ -1013,3 +1013,46 @@ func TestSaveNamingARefusedSchemaIsAWorkloadError(t *testing.T) {
 		}
 	}
 }
+
+// A body integer that a protobuf Struct, which holds the body in the raft and
+// database modes, cannot keep exactly is refused at the save in every mode, as
+// a 400 that names its path; the store never sees it. Integers within ±2^53 are
+// kept.
+func TestSaveRefusesAnIntegerTheStoreWouldChange(t *testing.T) {
+	ctx := context.Background()
+	svc, store := mkService(t)
+	svc.store = noSpecWrites{Storage: store, t: t}
+	permissive := seedSchema(t, store, permissiveSchema)
+	for name, tc := range map[string]struct {
+		body map[string]any
+		path string
+	}{
+		"top level":       {map[string]any{"image": "x", "replicas": json.Number("9007199254740993")}, "/replicas"},
+		"negative":        {map[string]any{"image": "x", "replicas": json.Number("-9007199254740993")}, "/replicas"},
+		"in an array":     {map[string]any{"ids": []any{json.Number("1"), json.Number("18446744073709551615")}}, "/ids/1"},
+		"in a nested key": {map[string]any{"a/b": map[string]any{"c~d": json.Number("1e300")}}, "/a~1b/c~0d"},
+	} {
+		w := testWorkload(t)
+		w.SchemaFingerprint = permissive
+		w.Body = tc.body
+		var bad *WorkloadError
+		if err := svc.Create(ctx, workloadSpec(t, "sp-big", w)); !errors.As(err, &bad) || !strings.Contains(bad.Message, tc.path+": ") || !strings.Contains(bad.Message, "2^53") {
+			t.Errorf("%s: %v, want a workload error naming %s", name, err, tc.path)
+		}
+	}
+}
+
+// noSpecWrites fails the test on a spec write.
+type noSpecWrites struct {
+	storage.Storage
+	t *testing.T
+}
+
+func (n noSpecWrites) WithTx(ctx context.Context, fn func(storage.Storage) error) error {
+	return n.Storage.WithTx(ctx, func(tx storage.Storage) error { return fn(noSpecWrites{Storage: tx, t: n.t}) })
+}
+
+func (n noSpecWrites) UpsertSpec(context.Context, *model.Spec) error {
+	n.t.Error("a refused spec reached the store")
+	return errors.New("refused spec written")
+}

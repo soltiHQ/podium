@@ -456,7 +456,7 @@ func configStruct(m map[string]any, what string) (*structpb.Struct, error) {
 	if err := decoder.Decode(&normalized); err != nil {
 		return nil, fmt.Errorf("wire: normalize %s: %w", what, err)
 	}
-	if err := normalizeConfigNumbers(normalized); err != nil {
+	if err := normalizeConfigNumbers(normalized, ""); err != nil {
 		return nil, fmt.Errorf("wire: represent %s: %w", what, err)
 	}
 	out, err := structpb.NewStruct(normalized)
