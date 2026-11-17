@@ -256,8 +256,6 @@ func TestCompileRefusesRemoteAndFileRefs(t *testing.T) {
 		"file $ref to a schema": `{"$ref":"file://` + filepath.ToSlash(file) + `"}`,
 		"relative $ref":         `{"$id":"https://` + closed + `/root.json","$ref":"defs.json"}`,
 		"nested $ref":           `{"properties":{"name":{"$ref":"https://` + closed + `/defs.json#/$defs/name"}}}`,
-		"$dynamicRef":           `{"$dynamicRef":"https://` + closed + `/defs.json#node"}`,
-		"$schema":               `{"$schema":"https://` + closed + `/meta.json"}`,
 	} {
 		within(t, name, func() {
 			_, err := Compile([]byte(schema))
@@ -266,12 +264,25 @@ func TestCompileRefusesRemoteAndFileRefs(t *testing.T) {
 			}
 		})
 	}
-	// A reference inside the document resolves: by pointer, by anchor, or by
-	// an $id the document holds.
+	// A $dynamicRef, a $schema of another draft and an $id below the root are
+	// refused for what they are, before any of them could name a URL
+	// (TestCompileRefusesWhatTheSubsetLeavesOut has more).
+	for name, tc := range map[string]struct{ schema, says string }{
+		"$dynamicRef":  {`{"$dynamicRef":"https://` + closed + `/defs.json#node"}`, `"$dynamicRef" at "#"`},
+		"$schema":      {`{"$schema":"https://` + closed + `/meta.json"}`, `"$schema" at "#"`},
+		"embedded $id": {`{"$id":"https://` + closed + `/root.json","$defs":{"port":{"$id":"port.json","type":"integer"}},"properties":{"port":{"$ref":"port.json"}}}`, `"$id" at "#/$defs/port"`},
+	} {
+		within(t, name, func() {
+			_, err := Compile([]byte(tc.schema))
+			if err == nil || !strings.Contains(err.Error(), tc.says) {
+				t.Errorf("Compile(%s) = %v, want an error that says %s", name, err, tc.says)
+			}
+		})
+	}
+	// A reference inside the document resolves: by pointer or by anchor.
 	for name, schema := range map[string]string{
-		"pointer":      `{"$defs":{"port":{"type":"integer"}},"properties":{"port":{"$ref":"#/$defs/port"}}}`,
-		"anchor":       `{"$defs":{"port":{"$anchor":"port","type":"integer"}},"properties":{"port":{"$ref":"#port"}}}`,
-		"embedded $id": `{"$id":"https://` + closed + `/root.json","$defs":{"port":{"$id":"port.json","type":"integer"}},"properties":{"port":{"$ref":"port.json"}}}`,
+		"pointer": `{"$defs":{"port":{"type":"integer"}},"properties":{"port":{"$ref":"#/$defs/port"}}}`,
+		"anchor":  `{"$defs":{"port":{"$anchor":"port","type":"integer"}},"properties":{"port":{"$ref":"#port"}}}`,
 	} {
 		s, err := Compile([]byte(schema))
 		if err != nil {
@@ -324,11 +335,11 @@ func TestCompileHandlesARefCycleAndDeepNesting(t *testing.T) {
 	}
 }
 
-// TestCompileBoundsTheWidestAndDeepestSchemas holds the compiler to the two
-// shapes that its time grows with, far within 64 KiB: many subschemas, and
-// deep nesting. Compile refuses a schema one past either bound at once, the
-// 64 KiB ones included, and compiles the worst schemas within both bounds
-// inside boundedBudget.
+// TestCompileBoundsTheWidestAndDeepestSchemas holds Compile to its two bounds
+// on a schema's shape, far within 64 KiB: many subschemas, and deep nesting.
+// It refuses a schema one past either bound at once, the 64 KiB ones
+// included, and compiles and validates against the worst schemas within both
+// bounds inside hostileBudget.
 func TestCompileBoundsTheWidestAndDeepestSchemas(t *testing.T) {
 	// wide is n values under allOf, with the root object one more.
 	wide := func(n int, value string) string {
@@ -371,7 +382,7 @@ func TestCompileBoundsTheWidestAndDeepestSchemas(t *testing.T) {
 		"the deepest chain":    chain(maxSchemaDepth),
 		"the most such chains": `{"allOf":[` + strings.Join(parts, ",") + `]}`,
 	} {
-		withinBudget(t, name, boundedBudget, func() {
+		within(t, name, func() {
 			s, err := Compile([]byte(schema))
 			if err != nil {
 				t.Errorf("Compile(%s): %v", name, err)
@@ -388,14 +399,19 @@ func TestCompileDefaultsToDraft2020(t *testing.T) {
 	// prefixItems is a keyword of draft 2020-12, which draft-07 ignores.
 	const items = `"properties":{"args":{"prefixItems":[{"type":"string"}]}}`
 	body := map[string]any{"args": []any{float64(1)}}
-	got := problems(t, mustCompile(t, `{`+items+`}`), body)
-	if want := []Problem{{Path: "/args/0", Message: "got number, want string"}}; !slices.Equal(got, want) {
-		t.Errorf("problems %v, want %v", got, want)
+	want := []Problem{{Path: "/args/0", Message: "got number, want string"}}
+	for name, schema := range map[string]string{
+		"no $schema":      `{` + items + `}`,
+		"draft 2020-12's": `{"$schema":"https://json-schema.org/draft/2020-12/schema",` + items + `}`,
+	} {
+		if got := problems(t, mustCompile(t, schema), body); !slices.Equal(got, want) {
+			t.Errorf("%s: problems %v, want %v", name, got, want)
+		}
 	}
-	// A schema that names its draft is compiled as that draft.
-	draft7 := mustCompile(t, `{"$schema":"http://json-schema.org/draft-07/schema#",`+items+`}`)
-	if err := draft7.Validate(body); err != nil {
-		t.Errorf("Validate against draft-07: %v, want nil", err)
+	// A schema that names another draft is refused, not compiled as that
+	// draft.
+	if _, err := Compile([]byte(`{"$schema":"http://json-schema.org/draft-07/schema#",` + items + `}`)); err == nil || !strings.Contains(err.Error(), `"$schema" at "#"`) {
+		t.Errorf("Compile of a draft-07 schema = %v, want its $schema refused", err)
 	}
 }
 
@@ -486,7 +502,7 @@ func TestValidateIsSafeForConcurrentUse(t *testing.T) {
 }
 
 // anyOfChain is levels definitions, each an anyOf of two $refs to the next,
-// down to false: the validator takes 2^levels steps on any body.
+// down to false: evaluating it takes 2^levels steps on any body.
 func anyOfChain(levels int) string {
 	var b strings.Builder
 	b.WriteString(`{"$defs":{`)
@@ -495,12 +511,4 @@ func anyOfChain(levels int) string {
 	}
 	fmt.Fprintf(&b, `"d%d":false},"$ref":"#/$defs/d0"}`, levels)
 	return b.String()
-}
-
-// shortBudget sets the validation budget to d for the rest of the test.
-func shortBudget(t *testing.T, d time.Duration) {
-	t.Helper()
-	saved := validationBudget
-	validationBudget = d
-	t.Cleanup(func() { validationBudget = saved })
 }
