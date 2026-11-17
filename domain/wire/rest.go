@@ -149,6 +149,9 @@ func SpecToREST(ts *model.Spec) restv1.Spec {
 		CreatedAt: ts.CreatedAt().Format(time.RFC3339),
 		UpdatedAt: ts.UpdatedAt().Format(time.RFC3339),
 	}
+	if w := ts.Workload(); !w.IsZero() {
+		out.Workload = &restv1.Workload{APIVersion: w.APIVersion, Kind: w.Kind, SchemaFingerprint: w.SchemaFingerprint, Body: w.Body}
+	}
 	if p, err := proxy.SpecToProto(ts); err == nil {
 		if preview, perr := proxy.CreateSpecWirePreview(p); perr == nil && len(preview) > 0 {
 			out.CreateSpec = json.RawMessage(preview)

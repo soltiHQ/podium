@@ -39,6 +39,7 @@ type Spec struct {
 	backoff      BackoffConfig
 	kindConfig   map[string]any
 	runnerLabels map[string]string
+	workload     Workload
 }
 
 // NewSpec creates a new Spec domain entity with sensible defaults.
@@ -138,6 +139,18 @@ func (ts *Spec) KindConfig() map[string]any {
 		out[k] = cloneConfigValue(v)
 	}
 	return out
+}
+
+// Workload returns a deep copy of the spec's workload.
+func (ts *Spec) Workload() Workload { return ts.workload.Clone() }
+
+// SetWorkload replaces the workload with a deep copy (runtime field).
+func (ts *Spec) SetWorkload(w Workload) {
+	if ts.workload.Equal(w) {
+		return
+	}
+	ts.workload = w.Clone()
+	ts.updatedAt = time.Now()
 }
 
 // Targets return a copy of the target agent IDs.
@@ -326,6 +339,7 @@ func (ts *Spec) Clone() *Spec {
 		intervalMs:   ts.intervalMs,
 		backoff:      ts.backoff,
 		runnerLabels: runnerLabels,
+		workload:     ts.workload.Clone(),
 	}
 }
 
@@ -345,7 +359,20 @@ func (ts *Spec) RuntimeEquals(other *Spec) bool {
 	if !stringMapEqual(ts.runnerLabels, other.runnerLabels) {
 		return false
 	}
+	if !ts.workload.Equal(other.workload) {
+		return false
+	}
 	return anyMapEqual(ts.kindConfig, other.kindConfig)
+}
+
+// ContentEquals reports whether two specs carry the same editable content: the
+// runtime fields and the metadata (name, targets, target labels).
+func (ts *Spec) ContentEquals(other *Spec) bool {
+	if ts == nil || other == nil {
+		return ts == other
+	}
+	return ts.RuntimeEquals(other) && ts.name == other.name &&
+		slices.Equal(ts.targets, other.targets) && stringMapEqual(ts.targetLabels, other.targetLabels)
 }
 
 func stringMapEqual(a, b map[string]string) bool {

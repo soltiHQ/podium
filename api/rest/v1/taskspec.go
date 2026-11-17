@@ -4,8 +4,18 @@ import (
 	"encoding/json"
 )
 
+// Workload is the workload a spec runs: its type, the fingerprint of the
+// schema its body was validated against, and the body.
+type Workload struct {
+	APIVersion        string         `json:"api_version"`
+	Kind              string         `json:"kind"`
+	SchemaFingerprint string         `json:"schema_fingerprint"`
+	Body              map[string]any `json:"body"`
+}
+
 // Spec is the REST representation of a task specification.
 type Spec struct {
+	Workload     *Workload         `json:"workload,omitempty"`
 	KindConfig   map[string]any    `json:"kind_config,omitempty"`
 	TargetLabels map[string]string `json:"target_labels,omitempty"`
 	RunnerLabels map[string]string `json:"runner_labels,omitempty"`
@@ -44,6 +54,7 @@ type ListSpecsResponse struct {
 
 // SpecCreateRequest is the request body for creating/updating a spec.
 type SpecCreateRequest struct {
+	Workload     *Workload         `json:"workload,omitempty"`
 	TargetLabels map[string]string `json:"target_labels,omitempty"`
 	RunnerLabels map[string]string `json:"runner_labels,omitempty"`
 	KindConfig   map[string]any    `json:"kind_config,omitempty"`

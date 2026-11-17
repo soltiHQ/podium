@@ -85,14 +85,15 @@ func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history
 	if !agentAuth.Require {
 		agentOpts = append(agentOpts, agent.WithAuthDisabled())
 	}
+	workloadSVC := workload.New(store, logger)
 	return services{
 		history:    historySVC,
 		access:     access.New(authModel, store, logger),
 		credential: credential.New(store, logger, passwordCost),
 		session:    session.New(store, logger),
 		agent:      agent.New(store, logger, agentOpts...),
-		workload:   workload.New(store, logger),
-		spec:       spec.New(store, logger),
+		workload:   workloadSVC,
+		spec:       spec.New(store, logger, spec.WithSchemaSource(workloadSVC)),
 		role:       role.New(store, logger),
 		user:       user.New(store, logger),
 	}, nil

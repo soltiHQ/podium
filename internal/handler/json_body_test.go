@@ -5,15 +5,44 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
+	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
 	"github.com/soltiHQ/control-plane/domain/enum"
+	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/workloadschema"
 )
 
+// handlerSchema is the workload schema the API fixture's catalog holds.
+const handlerSchema = `{"type":"object","required":["image"],"properties":{"image":{"type":"string"}},"additionalProperties":false}`
+
+// handlerFingerprint is the fingerprint of handlerSchema.
+var handlerFingerprint = func() string {
+	fp, err := workloadschema.Fingerprint([]byte(handlerSchema))
+	if err != nil {
+		panic(err)
+	}
+	return fp
+}()
+
 // validKind is the workload of a spec that passes validation.
-const validKind = `"kind_type":"subprocess","kind_config":{"mode":{"command":{"command":"echo"}}}`
+var validKind = `"workload":{"api_version":"solti.io/v1","kind":"Container","schema_fingerprint":"` + handlerFingerprint + `","body":{"image":"busybox"}}`
+
+// seedHandlerSchema puts handlerSchema into the catalog of the store.
+func seedHandlerSchema(t *testing.T, store storage.Storage) {
+	t.Helper()
+	entry, err := model.NewWorkloadSchema(handlerFingerprint, "solti.io/v1", "Container", []byte(handlerSchema), "agent-1", time.Unix(1700000000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertWorkloadSchema(context.Background(), entry); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // Endpoints that read a JSON body require Content-Type application/json, a
 // type an HTML form cannot send: anything else is 415 and changes nothing.
@@ -29,6 +58,7 @@ func TestDecodeJSONRequiresContentType(t *testing.T) {
 	} {
 		t.Run(e.method+" "+e.target, func(t *testing.T) {
 			f := newAPIFixture(t)
+			seedHandlerSchema(t, f.store)
 			f.user(t, "target")
 			f.spec(t, "spec-1")
 			for _, contentType := range []string{
@@ -58,5 +88,51 @@ func TestDecodeJSONRequiresContentType(t *testing.T) {
 				t.Fatalf("Content-Type with a charset: HTTP %d %s, want the body read", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+// A spec the schema rejects, or whose schema is unknown, is 400 with the problems.
+func TestSpecUpsertAnswersWorkloadProblemsWith400(t *testing.T) {
+	admin := &identity.Identity{UserID: "admin", Permissions: enum.All}
+	f := newAPIFixture(t)
+	seedHandlerSchema(t, f.store)
+	wl := func(fp, body string) string {
+		return `"workload":{"api_version":"solti.io/v1","kind":"Container","schema_fingerprint":"` + fp + `","body":` + body + `}`
+	}
+	for _, tc := range []struct{ name, body, want string }{
+		{"body rejected", `{"name":"S","slot":"s1",` + wl(handlerFingerprint, `{"image":7,"extra":1}`) + `}`, "/image: "},
+		{"unknown schema", `{"name":"S","slot":"s2",` + wl(strings.Repeat("0", 64), `{"image":"x"}`) + `}`, "not in the catalog"},
+		{"no workload", `{"name":"S","slot":"s3"}`, "requires api_version"},
+		{"not an object", `{"name":"S","slot":"s4","workload":"x"}`, "invalid request"},
+	} {
+		w := f.do(http.MethodPost, "/api/v1/specs", tc.body, admin)
+		var got struct {
+			Message string `json:"message"`
+		}
+		if w.Code != http.StatusBadRequest || json.Unmarshal(w.Body.Bytes(), &got) != nil || !strings.Contains(got.Message, tc.want) {
+			t.Errorf("%s: HTTP %d %s, want 400 mentioning %q", tc.name, w.Code, w.Body.String(), tc.want)
+		}
+	}
+
+	// A good one is created and read back with its workload.
+	w := f.do(http.MethodPost, "/api/v1/specs", `{"name":"Good","slot":"good",`+validKind+`}`, admin)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("create: HTTP %d %s", w.Code, w.Body.String())
+	}
+	list := f.do(http.MethodGet, "/api/v1/specs", "", admin)
+	var page struct {
+		Items []restv1.Spec `json:"items"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, it := range page.Items {
+		if it.Slot == "good" {
+			found = it.Workload != nil && it.Workload.Kind == "Container" && it.Workload.SchemaFingerprint == handlerFingerprint && it.Workload.Body["image"] == "busybox"
+		}
+	}
+	if !found {
+		t.Fatalf("the created spec does not carry its workload: %s", list.Body.String())
 	}
 }

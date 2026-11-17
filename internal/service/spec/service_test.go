@@ -2,9 +2,11 @@ package spec
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/service/workload"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 )
@@ -20,7 +23,8 @@ func mkService(t *testing.T) (*Service, *inmemory.Store) {
 	t.Helper()
 	store := inmemory.New()
 	log := zerolog.New(io.Discard)
-	return New(store, log), store
+	seedTestSchema(t, store)
+	return New(store, log, WithSchemaSource(workload.New(store, log))), store
 }
 
 func mkSpec(t *testing.T, svc *Service, store *inmemory.Store, id string, targets []string) *model.Spec {
@@ -31,6 +35,7 @@ func mkSpec(t *testing.T, svc *Service, store *inmemory.Store, id string, target
 	}
 	ts.SetTargets(targets)
 	ts.SetKindConfig(map[string]any{"command": map[string]any{"command": "echo"}})
+	ts.SetWorkload(testWorkload(t))
 	if err = store.UpsertSpec(context.Background(), ts); err != nil {
 		t.Fatalf("UpsertSpec: %v", err)
 	}
@@ -770,4 +775,152 @@ func listRollouts(t *testing.T, store *inmemory.Store, specID string) []*model.R
 		}
 	}
 	return out
+}
+
+// workloadSpec is a new spec whose workload is w.
+func workloadSpec(t *testing.T, id string, w model.Workload) *model.Spec {
+	t.Helper()
+	ts, err := model.NewSpec(id, "n-"+id, "slot-"+id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts.SetWorkload(w)
+	return ts
+}
+
+func TestCreateStoresTheWorkload(t *testing.T) {
+	svc, store := mkService(t)
+	w := testWorkload(t)
+	w.Body["replicas"] = json.Number("2")
+	if err := svc.Create(context.Background(), workloadSpec(t, "sp-1", w)); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	got, err := store.GetSpec(context.Background(), "sp-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Workload().Equal(w) {
+		t.Fatalf("stored workload = %+v, want %+v", got.Workload(), w)
+	}
+}
+
+func TestCreateRefusesAnUnknownFingerprint(t *testing.T) {
+	svc, store := mkService(t)
+	w := testWorkload(t)
+	w.SchemaFingerprint = strings.Repeat("0", 64)
+	err := svc.Create(context.Background(), workloadSpec(t, "sp-1", w))
+	var bad *WorkloadError
+	if !errors.As(err, &bad) || !errors.Is(err, storage.ErrInvalidArgument) || !strings.Contains(bad.Message, "not in the catalog") {
+		t.Fatalf("Create = %v", err)
+	}
+	if _, err := store.GetSpec(context.Background(), "sp-1"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("a refused spec was stored: %v", err)
+	}
+}
+
+func TestCreateRefusesABodyTheSchemaRejects(t *testing.T) {
+	svc, _ := mkService(t)
+	w := testWorkload(t)
+	w.Body = map[string]any{"image": 7, "extra": true}
+	err := svc.Create(context.Background(), workloadSpec(t, "sp-1", w))
+	var bad *WorkloadError
+	if !errors.As(err, &bad) || !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("Create = %v", err)
+	}
+	if !strings.Contains(bad.Message, "/image: ") || !strings.Contains(bad.Message, "; ") {
+		t.Fatalf("message lists no paths: %q", bad.Message)
+	}
+}
+
+func TestCreateRefusesAGVKThatDiffersFromTheSchemas(t *testing.T) {
+	for name, mutate := range map[string]func(*model.Workload){
+		"kind":        func(w *model.Workload) { w.Kind = "Other" },
+		"api version": func(w *model.Workload) { w.APIVersion = "solti.io/v2" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			svc, _ := mkService(t)
+			w := testWorkload(t)
+			mutate(&w)
+			err := svc.Create(context.Background(), workloadSpec(t, "sp-1", w))
+			var bad *WorkloadError
+			if !errors.As(err, &bad) || !strings.Contains(bad.Message, "differs from the type of its schema") {
+				t.Fatalf("Create = %v", err)
+			}
+		})
+	}
+}
+
+func TestCreateRequiresAWorkload(t *testing.T) {
+	svc, _ := mkService(t)
+	for name, w := range map[string]model.Workload{
+		"none":           {},
+		"no fingerprint": {APIVersion: testAPIVersion, Kind: testKind},
+		"bad api":        {APIVersion: "v1", Kind: testKind, SchemaFingerprint: testFingerprint(t)},
+	} {
+		if err := svc.Create(context.Background(), workloadSpec(t, "sp-1", w)); !errors.Is(err, storage.ErrInvalidArgument) {
+			t.Errorf("%s: Create = %v", name, err)
+		}
+	}
+}
+
+func TestUpsertValidatesTheWorkload(t *testing.T) {
+	svc, store := mkService(t)
+	ts := mkSpec(t, svc, store, "sp-1", nil)
+	bad := ts.Clone()
+	w := bad.Workload()
+	w.Body = map[string]any{"image": 1}
+	bad.SetWorkload(w)
+	var werr *WorkloadError
+	if err := svc.Upsert(context.Background(), bad, 0); !errors.As(err, &werr) {
+		t.Fatalf("Upsert = %v", err)
+	}
+	if got, _ := store.GetSpec(context.Background(), "sp-1"); got.Version() != 1 || !got.Workload().Equal(testWorkload(t)) {
+		t.Fatalf("a refused update changed the spec: v%d %+v", got.Version(), got.Workload())
+	}
+}
+
+// TestRuntimeEqualsSeesABodyChangeThroughTheService is Review Focus 4 in the
+// service's upsert path: a change of the workload body alone bumps the
+// generation, and a save that changes nothing bumps neither counter.
+func TestRuntimeEqualsSeesABodyChangeThroughTheService(t *testing.T) {
+	ctx := context.Background()
+	svc, store := mkService(t)
+	ts := mkSpec(t, svc, store, "sp-1", nil)
+
+	same := ts.Clone()
+	if err := svc.Upsert(ctx, same, 0); err != nil {
+		t.Fatalf("Upsert unchanged: %v", err)
+	}
+	got, _ := store.GetSpec(ctx, "sp-1")
+	if got.Version() != 1 || got.Generation() != 1 {
+		t.Fatalf("an unchanged spec moved to v%d g%d", got.Version(), got.Generation())
+	}
+	if same.Version() != 1 || same.Generation() != 1 {
+		t.Fatalf("the caller's unchanged spec reads v%d g%d", same.Version(), same.Generation())
+	}
+
+	changed := got.Clone()
+	w := changed.Workload()
+	w.Body["replicas"] = json.Number("5")
+	changed.SetWorkload(w)
+	if err := svc.Upsert(ctx, changed, 1); err != nil {
+		t.Fatalf("Upsert body change: %v", err)
+	}
+	got, _ = store.GetSpec(ctx, "sp-1")
+	if got.Version() != 2 || got.Generation() != 2 {
+		t.Fatalf("a body-only change gave v%d g%d, want v2 g2", got.Version(), got.Generation())
+	}
+	if _, ok := got.Workload().Body["replicas"]; !ok {
+		t.Fatalf("the new body was not stored: %+v", got.Workload())
+	}
+
+	renamed := got.Clone()
+	renamed.SetName("other")
+	if err := svc.Upsert(ctx, renamed, 2); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = store.GetSpec(ctx, "sp-1")
+	if got.Version() != 3 || got.Generation() != 2 {
+		t.Fatalf("a rename gave v%d g%d, want v3 g2", got.Version(), got.Generation())
+	}
 }

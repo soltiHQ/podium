@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -173,6 +174,19 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 
+	// Workload
+	if raw, present := fields["workload"]; present && string(raw) != "null" {
+		// Numbers stay exact: the body is decoded with json.Number.
+		var wl restv1.Workload
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		if err := dec.Decode(&wl); err != nil {
+			response.BadRequestMsg(w, r, mode, "The workload is not a valid object.")
+			return
+		}
+		ts.SetWorkload(model.Workload{APIVersion: wl.APIVersion, Kind: wl.Kind, SchemaFingerprint: wl.SchemaFingerprint, Body: wl.Body})
+	}
+
 	// Kind
 	if in.KindType != "" {
 		ts.SetKindType(enum.TaskKindType(in.KindType))
@@ -231,6 +245,11 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 
 	if action == modeCreate {
 		if err := a.specSVC.Create(r.Context(), ts); err != nil {
+			var bad *spec.WorkloadError
+			if errors.As(err, &bad) {
+				response.BadRequestMsg(w, r, mode, bad.Message)
+				return
+			}
 			a.failure(err).Msg("spec create failed")
 			response.FromError(w, r, mode, err)
 			return
@@ -251,6 +270,11 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 				Int("actual", conflict.Actual).
 				Msg("spec update rejected: version conflict")
 			response.Conflict(w, r, mode, conflict.Error())
+			return
+		}
+		var bad *spec.WorkloadError
+		if errors.As(err, &bad) {
+			response.BadRequestMsg(w, r, mode, bad.Message)
 			return
 		}
 		if errors.Is(err, storage.ErrInvalidArgument) {

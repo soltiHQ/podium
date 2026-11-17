@@ -62,6 +62,7 @@ func TestWriteHandlersAnswerLeadershipErrorsWithTheLeader(t *testing.T) {
 			t.Run(failure.name+", "+tc.name, func(t *testing.T) {
 				var logs bytes.Buffer
 				f := newAPIFixtureLogging(t, func(s storage.Storage) storage.Storage { return writesFail{Storage: s, err: failure.err} }, zerolog.New(&logs))
+				seedHandlerSchema(t, f.store)
 				admin := f.user(t, "admin", enum.RoleAdminID)
 				f.user(t, "reader", enum.RoleUserReaderID)
 				saved, err := model.NewSpec("saved", "Saved spec", "lane")

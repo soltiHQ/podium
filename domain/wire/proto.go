@@ -406,24 +406,16 @@ func SpecToProto(ts *model.Spec) (*raftv1.SpecMsg, error) {
 		rl[k] = v
 	}
 	b := ts.Backoff()
-	// JSON normalization supports typed slices/maps from domain callers while
-	// retaining explicit errors for functions, channels and non-finite numbers.
-	raw, err := json.Marshal(ts.KindConfig())
+	kc, err := configStruct(ts.KindConfig(), "spec config")
 	if err != nil {
-		return nil, fmt.Errorf("wire: encode spec config: %w", err)
+		return nil, err
 	}
-	var normalized map[string]any
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(&normalized); err != nil {
-		return nil, fmt.Errorf("wire: normalize spec config: %w", err)
-	}
-	if err := normalizeConfigNumbers(normalized); err != nil {
-		return nil, fmt.Errorf("wire: represent spec config: %w", err)
-	}
-	kc, err := structpb.NewStruct(normalized)
-	if err != nil {
-		return nil, fmt.Errorf("wire: represent spec config: %w", err)
+	w := ts.Workload()
+	var body *structpb.Struct
+	if w.Body != nil {
+		if body, err = configStruct(w.Body, "workload body"); err != nil {
+			return nil, err
+		}
 	}
 	return &raftv1.SpecMsg{
 		Id:                ts.ID(),
@@ -434,6 +426,10 @@ func SpecToProto(ts *model.Spec) (*raftv1.SpecMsg, error) {
 		DeletionRequested: ts.DeletionRequested(),
 		KindType:          string(ts.KindType()),
 		KindConfig:        kc,
+		WorkloadApiVersion:        w.APIVersion,
+		WorkloadKind:              w.Kind,
+		WorkloadBody:              body,
+		WorkloadSchemaFingerprint: w.SchemaFingerprint,
 		TimeoutMs:         ts.TimeoutMs(),
 		RestartType:       string(ts.RestartType()),
 		IntervalMs:        ts.IntervalMs(),
@@ -451,6 +447,30 @@ func SpecToProto(ts *model.Spec) (*raftv1.SpecMsg, error) {
 	}, nil
 }
 
+// configStruct converts a JSON-compatible map to a protobuf Struct. JSON
+// normalization supports typed slices and maps from domain callers while
+// retaining explicit errors for functions, channels and non-finite numbers.
+func configStruct(m map[string]any, what string) (*structpb.Struct, error) {
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return nil, fmt.Errorf("wire: encode %s: %w", what, err)
+	}
+	var normalized map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&normalized); err != nil {
+		return nil, fmt.Errorf("wire: normalize %s: %w", what, err)
+	}
+	if err := normalizeConfigNumbers(normalized); err != nil {
+		return nil, fmt.Errorf("wire: represent %s: %w", what, err)
+	}
+	out, err := structpb.NewStruct(normalized)
+	if err != nil {
+		return nil, fmt.Errorf("wire: represent %s: %w", what, err)
+	}
+	return out, nil
+}
+
 // SpecFromProto reconstructs a model.Spec from its Raft representation.
 func SpecFromProto(p *raftv1.SpecMsg) (*model.Spec, error) {
 	if p == nil {
@@ -462,6 +482,14 @@ func SpecFromProto(p *raftv1.SpecMsg) (*model.Spec, error) {
 	}
 	ts.SetKindType(enum.TaskKindType(p.GetKindType()))
 	ts.SetKindConfig(p.GetKindConfig().AsMap())
+	if p.GetWorkloadApiVersion() != "" || p.GetWorkloadKind() != "" || p.GetWorkloadSchemaFingerprint() != "" || p.GetWorkloadBody() != nil {
+		ts.SetWorkload(model.Workload{
+			APIVersion:        p.GetWorkloadApiVersion(),
+			Kind:              p.GetWorkloadKind(),
+			SchemaFingerprint: p.GetWorkloadSchemaFingerprint(),
+			Body:              p.GetWorkloadBody().AsMap(),
+		})
+	}
 	ts.SetTimeoutMs(p.GetTimeoutMs())
 	ts.SetRestartType(enum.RestartType(p.GetRestartType()))
 	ts.SetIntervalMs(p.GetIntervalMs())

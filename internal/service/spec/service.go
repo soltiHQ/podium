@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/internal/proxy"
+	"github.com/soltiHQ/control-plane/internal/workloadschema"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -17,21 +18,41 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
+// SchemaSource gives the compiled schema of a fingerprint in the workload
+// catalog. The bool is false when the catalog does not know the fingerprint.
+type SchemaSource interface {
+	Compiled(ctx context.Context, fingerprint string) (*workloadschema.Schema, bool, error)
+}
+
+// Option configures a Service.
+type Option func(*Service)
+
+// WithSchemaSource sets the catalog the service validates workloads against.
+// Without one, the service refuses to create or change a spec.
+func WithSchemaSource(src SchemaSource) Option {
+	return func(s *Service) { s.schemas = src }
+}
+
 // Service provides task spec management operations.
 type Service struct {
-	logger zerolog.Logger
-	store  storage.Storage
+	logger  zerolog.Logger
+	store   storage.Storage
+	schemas SchemaSource
 }
 
 // New creates a new task spec service.
-func New(store storage.Storage, logger zerolog.Logger) *Service {
+func New(store storage.Storage, logger zerolog.Logger, opts ...Option) *Service {
 	if store == nil {
 		panic("spec.Service: store is nil")
 	}
-	return &Service{
+	s := &Service{
 		logger: logger.With().Str("service", "specs").Logger(),
 		store:  store,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // List returns a page of task specs matching the query.
@@ -60,7 +81,7 @@ func (s *Service) Get(ctx context.Context, id string) (*model.Spec, error) {
 
 // Create persists a new spec.
 func (s *Service) Create(ctx context.Context, ts *model.Spec) error {
-	if err := validateSpec(ts); err != nil {
+	if err := s.validateSpec(ctx, ts); err != nil {
 		return err
 	}
 	if ts.DeletionRequested() {
@@ -86,17 +107,20 @@ func (s *Service) Create(ctx context.Context, ts *model.Spec) error {
 
 // Upsert persists changes to an existing task spec. `Version` bumps on every save (edits counter).
 // `Generation` bumps only if the **runtime** fields - those that end up in `SpecToProto`: actually changed;
-// metadata-only edits (rename, target-list) never rotate live tasks.
+// metadata-only edits (rename, target-list) never rotate live tasks. A save that changes nothing bumps neither.
 //
 // `expectedVersion` is the optimistic-concurrency CAS token:
 // the client sends the version it last read, and Upsert rejects with a [ConflictError] if the stored version has advanced in the meantime.
 // Pass `0` to opt out of the check (background jobs with no rival writer); interactive UI flows should always pass the observed version.
 func (s *Service) Upsert(ctx context.Context, ts *model.Spec, expectedVersion int) error {
-	if err := validateSpec(ts); err != nil {
+	if err := s.validateSpec(ctx, ts); err != nil {
 		return err
 	}
 
-	var runtimeChanged bool
+	var (
+		runtimeChanged bool
+		unchanged      bool
+	)
 	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
 		old, err := tx.GetSpec(ctx, ts.ID())
 		if err != nil {
@@ -115,6 +139,12 @@ func (s *Service) Upsert(ctx context.Context, ts *model.Spec, expectedVersion in
 		ts.SetVersion(old.Version())
 		ts.SetGeneration(old.Generation())
 		ts.SetCreatedAt(old.CreatedAt())
+		if !runtimeChanged && old.ContentEquals(ts) {
+			// Nothing changed: neither counter moves and nothing is written.
+			unchanged = true
+			ts.SetUpdatedAt(old.UpdatedAt())
+			return nil
+		}
 		ts.IncrementVersion()
 		if runtimeChanged {
 			ts.BumpGeneration()
@@ -123,6 +153,10 @@ func (s *Service) Upsert(ctx context.Context, ts *model.Spec, expectedVersion in
 	})
 	if err != nil {
 		return err
+	}
+
+	if unchanged {
+		return nil
 	}
 
 	s.logger.Debug().
@@ -342,17 +376,85 @@ func (s *Service) Deploy(ctx context.Context, specID string, planTokens []string
 	return nil
 }
 
-func validateSpec(ts *model.Spec) error {
+func (s *Service) validateSpec(ctx context.Context, ts *model.Spec) error {
 	if ts == nil || strings.TrimSpace(ts.Name()) == "" {
 		return fmt.Errorf("%w: spec name is required", storage.ErrInvalidArgument)
 	}
-	if _, err := proxy.SpecToProto(ts); err != nil {
-		return fmt.Errorf("%w: %v", storage.ErrInvalidArgument, err)
+	// Expand step: a spec that still carries a kind config keeps its kind
+	// checks; a spec without one is checked through its workload alone.
+	if len(ts.KindConfig()) > 0 {
+		if _, err := proxy.SpecToProto(ts); err != nil {
+			return fmt.Errorf("%w: %v", storage.ErrInvalidArgument, err)
+		}
 	}
 	for k, v := range ts.TargetLabels() {
 		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
 			return fmt.Errorf("%w: target selector key/value required", storage.ErrInvalidArgument)
 		}
 	}
-	return nil
+	return s.validateWorkload(ctx, ts.Workload())
 }
+
+// validateWorkload requires a workload and checks it against the catalog: the
+// fingerprint is known, the type is the one the schema was offered for, and the
+// body satisfies the schema. A refusal is a [WorkloadError].
+func (s *Service) validateWorkload(ctx context.Context, w model.Workload) error {
+	if w.APIVersion == "" || w.Kind == "" || w.SchemaFingerprint == "" {
+		return &WorkloadError{Message: "the workload requires api_version, kind and schema_fingerprint"}
+	}
+	if _, err := w.GVK(); err != nil {
+		return &WorkloadError{Message: err.Error()}
+	}
+	if s.schemas == nil {
+		return errors.New("spec: no workload schema source is configured")
+	}
+	schema, known, err := s.schemas.Compiled(ctx, w.SchemaFingerprint)
+	if err != nil {
+		return err
+	}
+	if !known {
+		return &WorkloadError{Message: fmt.Sprintf("the workload schema %q is not in the catalog", w.SchemaFingerprint)}
+	}
+	entry, err := s.store.GetWorkloadSchema(ctx, w.SchemaFingerprint)
+	if errors.Is(err, storage.ErrNotFound) {
+		return &WorkloadError{Message: fmt.Sprintf("the workload schema %q is not in the catalog", w.SchemaFingerprint)}
+	}
+	if err != nil {
+		return err
+	}
+	if entry.APIVersion() != w.APIVersion || entry.Kind() != w.Kind {
+		return &WorkloadError{Message: fmt.Sprintf("the workload type %s %s differs from the type of its schema, %s %s",
+			w.APIVersion, w.Kind, entry.APIVersion(), entry.Kind())}
+	}
+
+	body := w.Body
+	if body == nil {
+		body = map[string]any{}
+	}
+	err = schema.Validate(body)
+	var verr *workloadschema.ValidationError
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &verr):
+		problems := verr.Problems
+		if len(problems) > maxProblems {
+			problems = problems[:maxProblems]
+		}
+		parts := make([]string, len(problems))
+		for i, p := range problems {
+			parts[i] = p.Path + ": " + p.Message
+			if p.Path == "" {
+				parts[i] = p.Message
+			}
+		}
+		return &WorkloadError{Message: strings.Join(parts, "; ")}
+	case errors.Is(err, workloadschema.ErrValidationTooExpensive):
+		return &WorkloadError{Message: "the workload schema is too expensive to validate this body"}
+	default:
+		return &WorkloadError{Message: err.Error()}
+	}
+}
+
+// maxProblems is how many schema problems a refusal lists.
+const maxProblems = 20

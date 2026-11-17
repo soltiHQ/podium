@@ -56,3 +56,12 @@ func (e *UnsupportedTargetsError) Unwrap() error { return storage.ErrInvalidArgu
 // changed eligibility or selected runner, or another deploy created rollouts.
 // Deploy writes nothing; the caller previews again.
 var ErrPlacementChanged = errors.New("placement changed since preview")
+
+// WorkloadError is a workload the service refuses: it is missing, unknown to the
+// catalog, of another type than its schema, or rejected by its schema. Message
+// is for the client; for a body the schema rejects it lists "path: message"
+// problems, the first 20, separated by "; ".
+type WorkloadError struct{ Message string }
+
+func (e *WorkloadError) Error() string { return "invalid workload: " + e.Message }
+func (e *WorkloadError) Unwrap() error { return storage.ErrInvalidArgument }
