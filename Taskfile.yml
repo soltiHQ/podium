@@ -125,6 +125,7 @@ vars:
     internal/transport/README.md
     internal/transportctx/README.md
     internal/uikit/README.md
+    migrations/README.md
     ui/README.md
 
 tasks:

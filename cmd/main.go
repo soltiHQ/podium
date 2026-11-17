@@ -37,6 +37,8 @@ const usage = `usage: podium [--config PATH]
        podium agent-token [--generation N] [--] <agent-id>
        podium migrate [--config PATH]
        podium drop-schema --yes [--config PATH] [--wait DURATION]
+       podium schema version
+       podium schema export --dir DIR
        podium version
 
 podium [--config PATH] runs the server; the config file is PATH, or CONFIG_PATH.
@@ -44,6 +46,10 @@ podium agent-token prints the token of an agent ID, derived from the enrollment 
 podium migrate migrates the schema of the database mode's database, and exits.
 podium drop-schema drops that schema, every table of podium's and all its data, once no
   replica runs on the database, waiting up to --wait for them, and exits.
+podium schema version prints the version of that schema this podium runs on.
+podium schema export writes podium's SQL migrations into DIR, for a tool of the deployment's
+  own to apply, as Bytebase; a file there with the same content stays, and one with other
+  content stops it before it writes anything.
 podium version, or podium --version, prints the version.
 `
 
@@ -76,6 +82,9 @@ func run(args []string, stdout, stderr io.Writer, serve func(configPath string) 
 				return 2
 			}
 			return dropSchema(c, stdout)
+		case "schema":
+			// The subcommands need no configuration.
+			return schema(args[1:], stdout, stderr)
 		}
 	}
 	var (

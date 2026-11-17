@@ -21,10 +21,9 @@ sqlstore/
 ├── store.go        Store, Options, Open (no migration), Fence, AllowAll; the package doc
 ├── dialect.go      Dialect: Name, Rebind, Classify, NotifySQL, EventLockSQL, Migrations
 ├── postgres.go     Postgres: $n placeholders, the SQLSTATE classification, NOTIFY and the
-│                   events' advisory lock, the embedded migrations
-├── migrate.go      Migrate, SchemaVersion, the migration files
+│                   events' advisory lock, the migrations of the repository's migrations/
+├── migrate.go      Migrate, SchemaVersion, LatestVersion, the migration files and their checks
 ├── drop.go         DropSchema, and the tables of the schema it drops
-├── migrations/postgres/0001_init.sql   the Postgres schema
 ├── tx.go           the write transactions: the gate, the fence, nesting, WithTx
 ├── readonly.go     the read routing: the replica for marked listings, the primary otherwise
 │                   and when the replica is unavailable
@@ -39,20 +38,22 @@ sqlstore/
 ├── agents.go, agent_credentials.go, specs.go, rollouts.go, executions.go,
 │   users.go, credentials.go, verifiers.go, sessions.go, roles.go
 │                   one entity group each: its codec, its columns, its methods
-├── contract_test.go   storagecontract.Run on a Postgres database
+├── contract_test.go   storagecontract.Run on a Postgres database, through a role that only
+│                      reads and writes rows
 ├── bench_test.go   BenchmarkAgentSyncs, against the in-memory store (see Performance)
 └── pgtest/         a fresh Postgres database per test, for the tests of the database mode
 ```
 
 ## Schema
 
-`0001_init.sql` creates one table per entity group — `podium_agents`,
-`podium_agent_credentials`, `podium_users`, `podium_credentials`,
-`podium_verifiers`, `podium_sessions`, `podium_roles`, `podium_specs`,
-`podium_rollouts`, `podium_executions` — and `podium_leader` (the database
-leadership's lease), `podium_replicas` (the replica registry), `podium_events`
-(the events every replica applies) and `podium_schema_migrations` (the
-migrations applied).
+`0001_init.sql`, in the repository's `migrations/postgres` (see
+[migrations](../../../migrations/README.md)), creates one table per entity group
+— `podium_agents`, `podium_agent_credentials`, `podium_users`,
+`podium_credentials`, `podium_verifiers`, `podium_sessions`, `podium_roles`,
+`podium_specs`, `podium_rollouts`, `podium_executions` — and `podium_leader`
+(the database leadership's lease), `podium_replicas` (the replica registry),
+`podium_events` (the events every replica applies) and
+`podium_schema_migrations` (the migrations applied).
 
 An entity's row is its ID, its creation time, the columns its lookups, criteria
 and counts read, and its body:
@@ -297,14 +298,21 @@ carries a statement's arguments.
 ## Migrations
 
 `Migrate` brings a database's schema to the latest of the dialect's migrations,
-`NNNN_name.sql` files embedded per dialect, versions 1, 2, 3… without a gap. It
-applies each missing file in a transaction of its own, under a lock on
-`podium_schema_migrations` (`LOCK TABLE … IN EXCLUSIVE MODE`), and records it
-there, so replicas that start together migrate once. The migrator creates
-`podium_schema_migrations` before the first migration, as it must lock it; two
-sessions that create one table at once can fail in Postgres on a unique index of
-the catalog (`pg_type`), which the migrator takes for the table being there. A
-database already at the latest version gets no statement but reads.
+`NNNN_name.sql` files, versions 1, 2, 3… without a gap: Postgres's are the
+repository's `migrations/postgres`, whose README holds the contract of a file.
+It applies each missing file in a transaction of its own, under a lock on
+`podium_schema_migrations` (`LOCK TABLE … IN EXCLUSIVE MODE`), so replicas that
+start together migrate once. Each file records its own version there, as its
+last statement, and the migrator records nothing: a tool of the deployment's own
+that applies the files instead, as Bytebase, leaves the schema at the version
+podium reads. The migrator refuses files without that statement, or with a
+second insert into the table, before it runs any, and rolls back a file that
+leaves the schema at another version than its own. `LatestVersion` is the
+version of the newest file, which `podium schema version` prints. The migrator
+creates `podium_schema_migrations` before the first migration, as it must lock
+it; two sessions that create one table at once can fail in Postgres on a unique
+index of the catalog (`pg_type`), which the migrator takes for the table being
+there. A database already at the latest version gets no statement but reads.
 
 `Open` migrates nothing and refuses a schema other than the latest:
 `ErrSchemaNewer` for a newer one, which a later podium wrote (a rollback, or two
@@ -348,10 +356,9 @@ timeout of 5 s, past which it answers `ErrLocked`:
 It returns the version, read under the lock, and the tables it dropped. A
 database it dropped is an empty one to `Open` and to `Migrate`.
 
-Until the database mode is released, `0001_init.sql` stays the only migration
-and is edited in place: no installation exists. The lock statement and the
-catalog lookup of `SchemaVersion` (`to_regclass`) are Postgres's; a second
-engine brings its own with its dialect.
+A released migration never changes, which the checksums of the migrations' tests
+pin. The lock statement and the catalog lookup of `SchemaVersion`
+(`to_regclass`) are Postgres's; a second engine brings its own with its dialect.
 
 ## Tests and the Postgres gate
 
@@ -359,8 +366,10 @@ The tests that need Postgres take a database from `pgtest`: `NewDatabase`
 creates an empty database on the server `PODIUM_TEST_POSTGRES_URL` names
 (`postgres://user:password@host:port/database`, a user that may create
 databases) and drops it when the test ends, `Open` opens a pool on one, `Fresh`
-does both. While the variable is unset those tests skip, so
-`task ci/golang/test` runs without Postgres.
+does both, and `DMLRole` makes a role that may only read and write the rows of a
+database's tables, as podium runs with its schema migrated by another tool; the
+user must then also be allowed to create roles. While the variable is unset
+those tests skip, so `task ci/golang/test` runs without Postgres.
 
 `task ci/golang/test/postgres` runs them with the race detector against a
 Postgres container: it removes what a killed run left behind, creates a docker

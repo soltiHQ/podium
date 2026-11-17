@@ -251,6 +251,8 @@ podium [--config PATH]                                       runs the server
 podium agent-token [--generation N] [--] <agent-id>          prints an agent's token, derived from SOLTI_AGENT_AUTH_ENROLL_SECRET
 podium migrate [--config PATH]                               migrates the schema of the database backend's database, and exits
 podium drop-schema --yes [--config PATH] [--wait DURATION]   drops that schema, and all the state in it, once no replica runs, and exits
+podium schema version                                        prints the version of that schema this podium runs on
+podium schema export --dir DIR                               writes podium's SQL migrations into DIR, for a tool of your own
 podium version                                               prints the version, as podium --version does
 ```
 
@@ -755,6 +757,8 @@ podium --config podium.yaml
   and the same name resolution (`ALTER ROLE <role> SET search_path = <schema>`).
   Without them every GET listing answers 500: podium falls back to the primary
   only when the read endpoint is unreachable, not when it refuses a statement.
+  With the schema migrated by another role, podium runs on a role that only
+  reads and writes rows: see [Migrations](migrations/README.md).
 - **`LISTEN` needs a direct or session-mode connection** to the primary: podium
   shares its events through it, and a pooler in transaction mode, PgBouncer's,
   delivers none, so that the replicas see each other's events only every 5 s.
@@ -768,7 +772,11 @@ podium --config podium.yaml
   version migrates at start, under a database lock. To migrate as a step of your
   own, run `podium migrate [--config PATH]` first, such as a Kubernetes Job, and
   set `migrate: false`: it validates the same configuration, and exits 0, or 1
-  on any failure. The version before keeps working while a rollout runs.
+  on any failure. The version before keeps working while a rollout runs. A tool
+  of your own, as Bytebase, can apply podium's migrations instead, with
+  `migrate: false`: each file records its own version, and
+  `podium schema export --dir DIR` writes them out. See
+  [Migrations](migrations/README.md).
 - **Dropping the schema.**
   `podium drop-schema --yes [--config PATH] [--wait DURATION]` drops every table
   of podium's, and all the state in them, in one transaction, once no replica
@@ -815,8 +823,9 @@ podium --config podium.yaml
 - **Kubernetes.** The [`podium` chart](https://github.com/soltiHQ/charts) runs
   both modes: `mode: memory` (the default, one replica, no volume) and
   `mode: database` (a Deployment of `replicas`, the URLs from a Secret, the pod
-  IP as the advertise address, an optional pre-install and pre-upgrade Job that
-  runs `podium migrate`, and an optional post-delete Job that runs
+  IP as the advertise address, the schema migrated by each replica, by a
+  pre-install and pre-upgrade Job that runs `podium migrate`, or by a tool of
+  your own (`migrate.mode`), and an optional post-delete Job that runs
   `podium drop-schema` at `helm uninstall`). Its image must be built from a
   release with the database mode.
 
@@ -916,6 +925,7 @@ together: see [Verification](ui/README.md#verification).
 | [internal/config](internal/config/README.md) | Every setting and its variable, the command line, logging, the ops listener, shutdown, TLS, agent authentication and enrollment, trusted proxies, browser sessions, rate limits, storage and cluster settings, and upgrading a raft node. |
 | [internal/cluster/database](internal/cluster/database/README.md) | The database mode's lease, fence, replica registry and events, its timings and the failover window. |
 | [internal/storage/sqlstore](internal/storage/sqlstore/README.md) | The SQL store of the database mode: schema, migrations, reads and writes, and its benchmark. |
+| [migrations](migrations/README.md) | The SQL migrations of the database mode, the contract of a file, and applying them with a tool of your own, as Bytebase. |
 | [internal/raft](internal/raft/README.md) | The runbook of a three-node cluster, transport security, membership, configuration drift, follower reads and writes, and a raft node's metrics and logs. |
 | [internal/bootstrap](internal/bootstrap/README.md) | The built-in roles and the first administrator. |
 | [internal/auth](internal/auth/README.md) | Logins, sessions, passwords, login rate limiting and device cookies. |

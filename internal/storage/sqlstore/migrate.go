@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 // The migrator is podium's own. It applies a dialect's migrations in version
@@ -16,6 +17,13 @@ import (
 // replicas that start together migrate once: each waits for the lock, then
 // reads the version the others reached. The lock statement and the catalog
 // lookup of SchemaVersion are Postgres's.
+//
+// Each file records its own version, as its last statement (stampMigration),
+// and the migrator records nothing itself: so a tool of the deployment's own
+// that applies the files instead, as Bytebase, leaves the schema at the version
+// podium reads, as the migrator does. A file whose last statement records its
+// version holds the whole migration once it is recorded, whoever ran it, and a
+// tool that stops at the first failing statement records nothing.
 
 const (
 	// createMigrationsTable creates podium_schema_migrations. The migrator
@@ -36,12 +44,22 @@ const (
 	// statement would, through the search path.
 	migrationsTableExists = `SELECT to_regclass('podium_schema_migrations') IS NOT NULL`
 
-	appliedVersion  = `SELECT coalesce(max(version), 0) FROM podium_schema_migrations`
-	recordMigration = `INSERT INTO podium_schema_migrations (version) VALUES (?)`
+	appliedVersion = `SELECT coalesce(max(version), 0) FROM podium_schema_migrations`
+
+	// stampMigration is the last statement of migration file N, N for its %d,
+	// on a line of its own: the file records its own version. ON CONFLICT
+	// leaves a version the table holds already as it is.
+	stampMigration = `INSERT INTO podium_schema_migrations (version) VALUES (%d) ON CONFLICT (version) DO NOTHING;`
 )
 
-// migrationName is the name of a migration file, its version first.
-var migrationName = regexp.MustCompile(`^([0-9]{4})_[a-z0-9_]+\.sql$`)
+var (
+	// migrationName is the name of a migration file, its version first.
+	migrationName = regexp.MustCompile(`^([0-9]{4})_[a-z0-9_]+\.sql$`)
+
+	// insertsVersion finds the statements that insert into
+	// podium_schema_migrations: a file has one, stampMigration.
+	insertsVersion = regexp.MustCompile(`(?i)\binsert\s+into\s+podium_schema_migrations\b`)
+)
 
 // migration is one file of a dialect's migrations.
 type migration struct {
@@ -51,7 +69,8 @@ type migration struct {
 }
 
 // migrationFiles reads the migrations at the root of fsys, in version order:
-// each named NNNN_name.sql, versions 1, 2, 3… without a gap or a repeat.
+// each named NNNN_name.sql, versions 1, 2, 3… without a gap or a repeat, and
+// stamped (checkStamp).
 func migrationFiles(fsys fs.FS) ([]migration, error) {
 	if fsys == nil {
 		return nil, errors.New("sqlstore: the dialect has no migrations")
@@ -75,12 +94,49 @@ func migrationFiles(fsys fs.FS) ([]migration, error) {
 		if err != nil {
 			return nil, fmt.Errorf("sqlstore: read migration %q: %w", e.Name(), err)
 		}
-		files = append(files, migration{version: version, name: e.Name(), sql: string(body)})
+		file := migration{version: version, name: e.Name(), sql: string(body)}
+		if err := checkStamp(file); err != nil {
+			return nil, err
+		}
+		files = append(files, file)
 	}
 	if len(files) == 0 {
 		return nil, errors.New("sqlstore: the dialect has no migrations")
 	}
 	return files, nil
+}
+
+// checkStamp checks that m records its own version: that its last line other
+// than a blank line or a -- comment is stampMigration of its version, and that
+// no other statement of it inserts into podium_schema_migrations.
+func checkStamp(m migration) error {
+	var code []string // m's lines, each without its -- comment
+	for line := range strings.Lines(m.sql) {
+		if i := strings.Index(line, "--"); i >= 0 {
+			line = line[:i]
+		}
+		if line = strings.TrimSpace(line); line != "" {
+			code = append(code, line)
+		}
+	}
+	want := fmt.Sprintf(stampMigration, m.version)
+	if len(code) == 0 || code[len(code)-1] != want {
+		return fmt.Errorf("sqlstore: migration %q does not end with the statement that records its version, on a line of its own: %s", m.name, want)
+	}
+	if n := len(insertsVersion.FindAllStringIndex(strings.Join(code, "\n"), -1)); n != 1 {
+		return fmt.Errorf("sqlstore: migration %q inserts into podium_schema_migrations %d times: once, with its last statement, which records its version", m.name, n)
+	}
+	return nil
+}
+
+// LatestVersion returns the version of d's newest migration: the version of
+// the schema this podium runs on. It checks d's migrations as Migrate does.
+func LatestVersion(d Dialect) (int, error) {
+	files, err := migrationFiles(d.Migrations())
+	if err != nil {
+		return 0, err
+	}
+	return len(files), nil
 }
 
 // SchemaVersion returns the version of db's schema: the latest migration
@@ -106,8 +162,10 @@ func SchemaVersion(ctx context.Context, db *sql.DB) (int, error) {
 // is there already gets no statement but SchemaVersion's reads; one whose schema
 // is newer gets none either, and Migrate answers ErrSchemaNewer. Otherwise it
 // applies each missing migration in a transaction of its own, under the lock on
-// podium_schema_migrations, and records it there: a migration that fails rolls
-// back alone, the ones before it kept. Migrators that run at once take turns.
+// podium_schema_migrations, where the migration records its version: a
+// migration that fails rolls back alone, the ones before it kept, and so does
+// one that leaves the schema at another version than its own. Migrators that
+// run at once take turns.
 func Migrate(ctx context.Context, db *sql.DB, d Dialect) error {
 	files, err := migrationFiles(d.Migrations())
 	if err != nil {
@@ -175,8 +233,14 @@ func migrateNext(ctx context.Context, db *sql.DB, d Dialect, files []migration) 
 	if _, err := tx.ExecContext(ctx, next.sql); err != nil {
 		return false, fmt.Errorf("sqlstore: migration %s: %w", next.name, classify(ctx, d, err))
 	}
-	if _, err := tx.ExecContext(ctx, d.Rebind(recordMigration), next.version); err != nil {
-		return false, fmt.Errorf("sqlstore: record migration %s: %w", next.name, classify(ctx, d, err))
+	// The file recorded its version, as its last statement: the schema is at
+	// it now, or the file did something else than it says, and rolls back.
+	var reached int
+	if err := tx.QueryRowContext(ctx, appliedVersion).Scan(&reached); err != nil {
+		return false, fmt.Errorf("sqlstore: read the schema version after migration %s: %w", next.name, classify(ctx, d, err))
+	}
+	if reached != next.version {
+		return false, fmt.Errorf("sqlstore: migration %s left the schema at version %d, want %d", next.name, reached, next.version)
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("sqlstore: commit migration %s: %w", next.name, classify(ctx, d, err))

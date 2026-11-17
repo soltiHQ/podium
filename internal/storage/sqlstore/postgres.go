@@ -2,7 +2,6 @@ package sqlstore
 
 import (
 	"context"
-	"embed"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -12,20 +11,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/migrations"
 )
-
-//go:embed migrations/postgres/*.sql
-var postgresFiles embed.FS
-
-// postgresMigrations are the migrations of the Postgres dialect, at the root.
-var postgresMigrations = func() fs.FS {
-	sub, err := fs.Sub(postgresFiles, "migrations/postgres")
-	if err != nil {
-		// fs.Sub fails for an invalid path alone, and this one is a constant.
-		panic(err)
-	}
-	return sub
-}()
 
 // Postgres is the Dialect of PostgreSQL, through pgx's database/sql driver
 // (github.com/jackc/pgx/v5/stdlib, registered as "pgx").
@@ -183,5 +170,6 @@ func quoteIdentifier(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
-// Migrations returns the migrations of the Postgres schema.
-func (Postgres) Migrations() fs.FS { return postgresMigrations }
+// Migrations returns the migrations of the Postgres schema, the files of the
+// repository's migrations/postgres.
+func (Postgres) Migrations() fs.FS { return migrations.Postgres() }

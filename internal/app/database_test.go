@@ -840,6 +840,56 @@ func TestDatabaseSchemaNotOursStopsTheStart(t *testing.T) {
 	}
 }
 
+// Two replicas on a role that may only read and write rows, pgtest.DMLRole,
+// with cluster.database.migrate off, as a deployment whose migrations a tool of
+// its own applies runs podium: the database's owner migrated it before. They
+// elect a leader through the lease and register, the leader seeds the
+// administrator, and a write sent to the follower lands through the leader,
+// whose event reaches the follower's hub: the lease, the registry, the fence,
+// the store and the events of the database mode need nothing beyond the rows.
+func TestDatabaseRunsOnARoleThatOnlyReadsAndWritesRows(t *testing.T) {
+	databaseURL := pgtest.NewDatabase(t)
+	// Before the migration: the tables get the role's grants as they are made.
+	dmlURL := pgtest.DMLRole(t, databaseURL)
+	if err := sqlstore.Migrate(t.Context(), pgtest.Open(t, databaseURL), sqlstore.Postgres{}); err != nil {
+		t.Fatalf("migrate as the owner: %v", err)
+	}
+	migrate := false
+	nodes := databaseNodes(t, dmlURL, loopbackIPs(t, 2)...)
+	for _, n := range nodes {
+		n.cfg.Cluster.Database.Migrate = &migrate
+		n.start(t)
+	}
+	serving(t, nodes...)
+	leader, followers := databaseLeader(t, nodes)
+	follower := followers[0]
+	waitFor(t, 10*time.Second, "the leader seeding the administrator", func() bool { return adminSeeded(leader.app.store, dbAdminPassword) })
+
+	token := bearerFor(t, leader.app, leader.cfg, "operator", enum.UsersGet, enum.UsersAdd)
+	resp, body := send(t, httpClient(), http.MethodPost, "http://"+follower.cfg.HTTP.Addr+"/api/v1/users", jsonType, `{"subject":"erin"}`, token, nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("POST /api/v1/users through %s: %d %q, want the leader's 204", follower.id, resp.StatusCode, body)
+	}
+	erin, err := follower.app.store.GetUserBySubject(context.Background(), "erin")
+	if err != nil {
+		t.Fatalf("erin read back on %s: %v", follower.id, err)
+	}
+	waitFor(t, 10*time.Second, follower.id+"'s hub holding the creation", func() bool {
+		for _, rec := range follower.app.eventHub.RecentEvents(event.RingSize) {
+			if rec.Kind == event.UserCreated && rec.Payload.ID == erin.ID() {
+				return true
+			}
+		}
+		return false
+	})
+	for _, n := range nodes {
+		// 42501 is insufficient_privilege, which the errors name.
+		if logs := n.logs.String(); strings.Contains(logs, "42501") {
+			t.Errorf("%s logged a statement the role may not run:\n%s", n.id, logs)
+		}
+	}
+}
+
 // Replicas of the database mode check the settings every replica must share
 // against their leader's, from the registry: a replica whose JWT secret
 // differs from the leader's logs the ERROR of its configuration check, naming

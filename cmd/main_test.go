@@ -352,7 +352,7 @@ func TestHelpExitsZero(t *testing.T) {
 			if code := run([]string{flag}, &stdout, &stderr, spy.serve); code != 0 || spy.started || stderr.Len() != 0 {
 				t.Fatalf("exit %d, started %v, stderr %q; want exit 0, nothing started, no stderr", code, spy.started, stderr.String())
 			}
-			for _, want := range []string{"usage: podium [--config PATH]", "podium agent-token", "podium migrate [--config PATH]", "podium drop-schema --yes [--config PATH] [--wait DURATION]", "podium version"} {
+			for _, want := range []string{"usage: podium [--config PATH]", "podium agent-token", "podium migrate [--config PATH]", "podium drop-schema --yes [--config PATH] [--wait DURATION]", "podium schema version", "podium schema export --dir DIR", "podium version"} {
 				if !strings.Contains(stdout.String(), want) {
 					t.Fatalf("stdout %q, want it to hold %q", stdout.String(), want)
 				}
