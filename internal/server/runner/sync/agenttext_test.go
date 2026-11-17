@@ -92,7 +92,7 @@ func TestAgentErrorTextIsCapped(t *testing.T) {
 			r.pool = pool
 			pushed := seedRollout(t, s, "sp-pushed", "agent-a", enum.RolloutIntentInstall, "")
 			observed := seedRollout(t, s, "sp-observed", "agent-a", enum.RolloutIntentNoop, "task-observed")
-			ag, err := model.NewAgentFrom(model.AgentParams{ID: "agent-a", Name: "agent-a", Endpoint: endpoint, EndpointType: endpointType, APIVersion: 1})
+			ag, err := model.NewAgentFrom(model.AgentParams{ID: "agent-a", Name: "agent-a", Endpoint: endpoint, EndpointType: endpointType, APIVersion: 1, Capabilities: seedCapabilities()})
 			if err != nil {
 				t.Fatal(err)
 			}

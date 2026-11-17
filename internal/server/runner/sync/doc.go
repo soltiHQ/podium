@@ -8,6 +8,9 @@
 //     reconnect, only uninstalls that need no call run.
 //     - Install    → ApplyTask(spec)                               → save TaskId
 //     - Update     → ApplyTask(spec)                               → save new TaskId
+//     Before either, the target is checked as placement does (spec.CheckTarget): one that is no longer
+//     compatible gets no call, and the rollout is marked failed with the reason. A task the agent runs is not
+//     touched, and one it lost is not reinstalled.
 //     - Uninstall  → DeleteTask(actualTaskID) (or noop if empty)   → drop rollout
 //     - Noop       → ListTasks (every page, once per agent)        → reinstall what the agent lost
 //     A page starts at 1000 tasks. One that the proxy refuses as too large, or as holding more elements than it

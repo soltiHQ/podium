@@ -38,6 +38,25 @@ func (s *Service) PreviewPlacement(ctx context.Context, specID string) (*model.P
 	return plan, err
 }
 
+// CheckTarget evaluates agent a as a target of spec ts, as a placement does:
+// the runner the agent routes the workload to (see [model.PlacementTarget]),
+// and that runner's schema against the body, through schemas. It reads the
+// catalog and validates outside any store transaction, writes nothing and
+// contacts no agent; logger takes a schema that cannot be loaded. A nil agent is
+// missing_agent. The sync runner checks each target with it before every push.
+func CheckTarget(ctx context.Context, schemas SchemaSource, logger zerolog.Logger, ts *model.Spec, a *model.Agent, now time.Time) model.PlacementTarget {
+	agents := []*model.Agent{a}
+	if a == nil {
+		agents = nil
+	}
+	cmp := &schemaCompat{workload: ts.Workload(), outcomes: outcomesFor(ctx, schemas, logger, ts, agents)}
+	t := planTarget(a, ts, now, cmp)
+	if a != nil {
+		t.AgentID = a.ID()
+	}
+	return t
+}
+
 // loadPlacement reads the inventory and the spec's rollouts, and returns the
 // plan with its token and the steps Deploy executes for it. Preview and Deploy
 // both call it, so the same stored state gives them the same token.

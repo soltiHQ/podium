@@ -300,7 +300,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 		return nil, err
 	}
 
-	syncRunner, err := syncrunner.New(cfg.Sync, logger, store, proxyPool, svc.agent, eventHub, svc.history, leaderOnly)
+	syncRunner, err := syncrunner.New(cfg.Sync, logger, store, proxyPool, svc.agent, svc.workload, eventHub, svc.history, leaderOnly)
 	if err != nil {
 		_ = proxyPool.Close()
 		closeOnError(raftShutdown, eventHub)

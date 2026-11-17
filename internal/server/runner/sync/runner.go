@@ -23,6 +23,8 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service"
 	agentsvc "github.com/soltiHQ/control-plane/internal/service/agent"
 	historysvc "github.com/soltiHQ/control-plane/internal/service/history"
+	specsvc "github.com/soltiHQ/control-plane/internal/service/spec"
+	workloadsvc "github.com/soltiHQ/control-plane/internal/service/workload"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
 )
@@ -46,6 +48,8 @@ type Runner struct {
 	tokens  tokenSource
 	hub     *event.Hub
 	history *historysvc.Service
+	// schemas is the workload catalog each push checks its target against.
+	schemas specsvc.SchemaSource
 
 	logger zerolog.Logger
 	store  storage.Storage
@@ -91,8 +95,9 @@ type agentBackoff struct {
 }
 
 // New creates a sync runner. It presents to each agent the token agents gives
-// for it (agent.Service.AgentToken).
-func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.Pool, agents *agentsvc.Service, hub *event.Hub, history *historysvc.Service, leadership cluster.Leadership) (*Runner, error) {
+// for it (agent.Service.AgentToken), and checks the target of every push
+// against the schemas of catalog, the workload catalog discovery feeds.
+func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.Pool, agents *agentsvc.Service, catalog *workloadsvc.Service, hub *event.Hub, history *historysvc.Service, leadership cluster.Leadership) (*Runner, error) {
 	if store == nil {
 		return nil, fmt.Errorf("sync: %w", storage.ErrNilStore)
 	}
@@ -101,6 +106,9 @@ func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.P
 	}
 	if agents == nil {
 		return nil, fmt.Errorf("sync: %w", service.ErrNilService)
+	}
+	if catalog == nil {
+		return nil, fmt.Errorf("sync: workload catalog: %w", service.ErrNilService)
 	}
 	if hub == nil {
 		return nil, fmt.Errorf("sync: %w", event.ErrNilHub)
@@ -118,6 +126,7 @@ func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.P
 		store:   store,
 		pool:    pool,
 		tokens:  agents,
+		schemas: catalog,
 		cfg:     cfg,
 		hub:     hub,
 		history: history,
@@ -529,8 +538,17 @@ func (r *Runner) reconcileSubmit(ctx context.Context, ss *model.Rollout) outcome
 	return answered
 }
 
-// prepareSubmit loads spec + agent + proxy + proto conversion.
-// Any failure at this stage calls markFailed and returns ok=false.
+// prepareSubmit loads spec + agent, checks the target, then proxy + proto
+// conversion. Any failure at this stage calls markFailed and returns ok=false.
+//
+// The target is checked before every push, whether it pushes a new generation,
+// retries one or reinstalls what an observation found missing: as placement
+// does (spec.CheckTarget), the runner the agent routes the workload to must be
+// compatible, its schema read from the catalog outside any store transaction. A
+// target that changed since the deploy (its schema, its runners, its labels)
+// and is no longer compatible gets no call: the rollout is marked failed with
+// the reason and the runner's detail, and a task the agent runs is left as it
+// runs.
 func (r *Runner) prepareSubmit(ctx context.Context, ss *model.Rollout) (*model.Spec, proxy.AgentProxy, *taskv1.TaskManifest, bool) {
 	ts, err := r.store.GetSpec(ctx, ss.SpecID())
 	if err != nil {
@@ -545,7 +563,15 @@ func (r *Runner) prepareSubmit(ctx context.Context, ss *model.Rollout) (*model.S
 		r.markFailed(ctx, ss, "spec changed since deployment; deploy the current generation to continue")
 		return nil, nil, nil, false
 	}
-	ap, ok := r.getProxy(ctx, ss)
+	ag, ok := r.agentOf(ctx, ss)
+	if !ok {
+		return nil, nil, nil, false
+	}
+	if target := specsvc.CheckTarget(ctx, r.schemas, r.logger, ts, ag, r.now()); !target.Eligible {
+		r.markFailed(ctx, ss, targetRefusal(target))
+		return nil, nil, nil, false
+	}
+	ap, ok := r.proxyFor(ctx, ss, ag)
 	if !ok {
 		return nil, nil, nil, false
 	}
@@ -559,13 +585,38 @@ func (r *Runner) prepareSubmit(ctx context.Context, ss *model.Rollout) (*model.S
 	return ts, ap, protoSpec, true
 }
 
+// targetRefusal is the error a rollout records when its target fails the check
+// before a push: the placement reason and, for a refusal of the runner the agent
+// routes the workload to, that runner's detail, cut as a placement cuts it.
+func targetRefusal(t model.PlacementTarget) string {
+	msg := "target not compatible: " + t.EligibilityReason
+	if r, ok := t.EvaluatedRunner(); ok && r.Detail != "" {
+		msg += ": " + model.BoundPlacementDetail(r.Detail)
+	}
+	return msg
+}
+
 // getProxy resolves an AgentProxy for the rollout's target agent.
 func (r *Runner) getProxy(ctx context.Context, ss *model.Rollout) (proxy.AgentProxy, bool) {
+	ag, ok := r.agentOf(ctx, ss)
+	if !ok {
+		return nil, false
+	}
+	return r.proxyFor(ctx, ss, ag)
+}
+
+// agentOf reads the row of the rollout's target agent.
+func (r *Runner) agentOf(ctx context.Context, ss *model.Rollout) (*model.Agent, bool) {
 	ag, err := r.store.GetAgent(ctx, ss.AgentID())
 	if err != nil {
 		r.markFailed(ctx, ss, "agent not found: "+err.Error())
 		return nil, false
 	}
+	return ag, true
+}
+
+// proxyFor resolves an AgentProxy for ag, the rollout's target agent.
+func (r *Runner) proxyFor(ctx context.Context, ss *model.Rollout, ag *model.Agent) (proxy.AgentProxy, bool) {
 	token, err := r.agentToken(ctx, ss.AgentID())
 	if err != nil {
 		r.markFailed(ctx, ss, "agent credential lookup: "+err.Error())

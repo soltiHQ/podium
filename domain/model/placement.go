@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"time"
+	"unicode/utf8"
+)
 
 // PlacementPlan describes the saved desired state against observed discovery
 // inventory. It is an advisory plan, not a reservation or execution result.
@@ -76,6 +79,25 @@ type PlacementRunner struct {
 	Reason string
 	// Detail says more about a refusal: the first schema problems, that the body
 	// was too expensive to validate, that podium refused the schema, or that it
-	// could not be loaded. It is empty for other reasons.
+	// could not be loaded. It is empty for other reasons. Where it leaves podium
+	// it is cut to PlacementDetailMaxBytes (BoundPlacementDetail).
 	Detail string
+}
+
+// PlacementDetailMaxBytes bounds the detail of a runner where it leaves podium:
+// in a placement over REST, and in the error of a rollout whose push the sync
+// runner refused.
+const PlacementDetailMaxBytes = 1 << 10
+
+// BoundPlacementDetail cuts a detail to PlacementDetailMaxBytes at a rune
+// boundary.
+func BoundPlacementDetail(s string) string {
+	if len(s) <= PlacementDetailMaxBytes {
+		return s
+	}
+	cut := PlacementDetailMaxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
