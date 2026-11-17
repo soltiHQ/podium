@@ -1,6 +1,7 @@
 package spec
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/service/workload"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/workloadschema"
 )
@@ -440,9 +442,9 @@ func (f flakySource) Compiled(ctx context.Context, fingerprint string) (*workloa
 	return f.SchemaSource.Compiled(ctx, fingerprint)
 }
 
-// A schema that cannot be loaded marks its runner schema_incompatible with the
-// error as the detail; it does not fail the plan, and a schema of an unrelated
-// type on the same agent is not even looked at.
+// A schema that cannot be loaded marks its runner schema_incompatible with a
+// generic detail; it does not fail the plan, and a schema of an unrelated type
+// on the same agent is not even looked at.
 func TestPlacementSurvivesASchemaThatCannotBeLoaded(t *testing.T) {
 	svc, store := mkService(t)
 	ctx := context.Background()
@@ -464,7 +466,7 @@ func TestPlacementSurvivesASchemaThatCannotBeLoaded(t *testing.T) {
 		t.Fatalf("the plan failed on a broken schema: %v", err)
 	}
 	runners := plan.Targets[0].Runners
-	if runners[1].Reason != "schema_incompatible" || !strings.Contains(runners[1].Detail, "no longer compiles") {
+	if runners[1].Reason != "schema_incompatible" || runners[1].Detail != "the schema could not be loaded" {
 		t.Fatalf("own-broken: %+v", runners[1])
 	}
 	if runners[2].Reason != "workload_unsupported" || runners[2].Detail != "" {
@@ -503,14 +505,14 @@ func TestDeployRefusesAWorkloadChangedAfterThePrefetch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err = loadPlacement(ctx, store, nil, ts, time.Now(), pre); err != nil {
+	if _, _, err = loadPlacement(ctx, store, nil, zerolog.Nop(), ts, time.Now(), pre); err != nil {
 		t.Fatalf("an unchanged workload: %v", err)
 	}
 	changed := ts.Clone()
 	w := changed.Workload()
 	w.Body = map[string]any{"image": "other"}
 	changed.SetWorkload(w)
-	if _, _, err = loadPlacement(ctx, store, nil, changed, time.Now(), pre); !errors.Is(err, ErrPlacementChanged) {
+	if _, _, err = loadPlacement(ctx, store, nil, zerolog.Nop(), changed, time.Now(), pre); !errors.Is(err, ErrPlacementChanged) {
 		t.Fatalf("a workload changed after the prefetch: %v", err)
 	}
 }
@@ -538,4 +540,98 @@ func TestBlockedDeployLeavesTheRolloutOfARunningTarget(t *testing.T) {
 	if len(after) != 1 || len(before) != 1 || after[0].Intent() != before[0].Intent() || !after[0].UpdatedAt().Equal(before[0].UpdatedAt()) || after[0].Status() != before[0].Status() {
 		t.Fatal("a blocked deploy changed the rollout of a running target")
 	}
+}
+
+// brokenSchema has a fingerprint of its own, and Compile refuses it.
+const brokenSchema = `{"type":"nonsense"}`
+
+// A schema podium refused, at the exchange or when it compiled one stored by
+// another version, makes its runner schema_incompatible, with the reason as the
+// detail, instead of a schema_pending that never ends.
+func TestPlacementShowsARefusedSchema(t *testing.T) {
+	ctx := context.Background()
+	brokenFP, err := workloadschema.Fingerprint([]byte(brokenSchema))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, refuse := range map[string]func(t *testing.T, catalog *workload.Service, store storage.Storage){
+		"offered": func(t *testing.T, catalog *workload.Service, _ storage.Storage) {
+			declared := []model.RunnerCapability{containerRunner("r", brokenFP)}
+			catalog.Exchange(ctx, "agent", declared, []workload.OfferedSchema{{Fingerprint: brokenFP, Schema: []byte(brokenSchema)}})
+		},
+		"stored": func(t *testing.T, _ *workload.Service, store storage.Storage) {
+			entry, err := model.NewWorkloadSchema(brokenFP, testAPIVersion, testKind, []byte(brokenSchema), "older-podium", time.Unix(1700000000, 0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = store.UpsertWorkloadSchema(ctx, entry); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			svc, store := mkService(t)
+			catalog := workload.New(store, zerolog.Nop())
+			svc.schemas = catalog
+			ts := mkSpec(t, svc, store, "refused", []string{"agent"})
+			refuse(t, catalog, store)
+			a, _ := store.GetAgent(ctx, "agent")
+			a.SetCapabilities([]model.RunnerCapability{containerRunner("r", brokenFP)})
+			if err := store.UpsertAgent(ctx, a); err != nil {
+				t.Fatal(err)
+			}
+			plan, err := svc.PreviewPlacement(ctx, ts.ID())
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := plan.Targets[0]
+			r := target.Runners[0]
+			if target.Eligible || target.EligibilityReason != "schema_incompatible" || r.Reason != "schema_incompatible" ||
+				!strings.HasPrefix(r.Detail, "podium refused this schema: ") || !strings.Contains(r.Detail, "nonsense") {
+				t.Fatalf("target %s, runner %s %q; want schema_incompatible, detail naming the refusal", target.EligibilityReason, r.Reason, r.Detail)
+			}
+		})
+	}
+}
+
+// A store error behind a schema shows as a generic detail: the error itself,
+// which may say more than a reader of the placement should see, goes to the log
+// with the fingerprint.
+func TestPlacementHidesAStoreErrorBehindAGenericDetail(t *testing.T) {
+	svc, store := mkService(t)
+	ctx := context.Background()
+	logs := &bytes.Buffer{}
+	svc.logger = zerolog.New(logs)
+	ts := mkSpec(t, svc, store, "store-error", []string{"agent"})
+	broken := seedSchema(t, store, portSchema)
+	svc.schemas = failingSource{SchemaSource: svc.schemas, fail: map[string]error{broken: errors.New("pq: connection to 10.0.0.7 refused")}}
+	a, _ := store.GetAgent(ctx, "agent")
+	a.SetCapabilities([]model.RunnerCapability{containerRunner("r", broken)})
+	if err := store.UpsertAgent(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := svc.PreviewPlacement(ctx, ts.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := plan.Targets[0].Runners[0]; r.Reason != "schema_incompatible" || r.Detail != "the schema could not be loaded" {
+		t.Fatalf("runner %s %q, want schema_incompatible with the generic detail", r.Reason, r.Detail)
+	}
+	if !strings.Contains(logs.String(), "10.0.0.7") || !strings.Contains(logs.String(), broken) {
+		t.Fatalf("the log does not hold the error and the fingerprint: %s", logs.String())
+	}
+}
+
+// failingSource wraps the catalog and fails to load the fingerprints in fail,
+// each with its error.
+type failingSource struct {
+	SchemaSource
+	fail map[string]error
+}
+
+func (f failingSource) Compiled(ctx context.Context, fingerprint string) (*workloadschema.Schema, bool, error) {
+	if err, ok := f.fail[fingerprint]; ok {
+		return nil, false, err
+	}
+	return f.SchemaSource.Compiled(ctx, fingerprint)
 }

@@ -459,7 +459,7 @@ func TestPlanTokenIgnoresObservationTimes(t *testing.T) {
 		a.SetLastSeenAt(now)
 		a.SetStaleAt(now.Add(30 * time.Second))
 	})
-	before, _, err := loadPlacement(ctx, store, nil, ts, now, nil)
+	before, _, err := loadPlacement(ctx, store, nil, zerolog.Nop(), ts, now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +471,7 @@ func TestPlanTokenIgnoresObservationTimes(t *testing.T) {
 		a.SetStaleAt(now.Add(90 * time.Second))
 		a.SetUptimeSeconds(3600)
 	})
-	after, _, err := loadPlacement(ctx, store, nil, ts, now.Add(time.Hour), nil)
+	after, _, err := loadPlacement(ctx, store, nil, zerolog.Nop(), ts, now.Add(time.Hour), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -975,5 +975,41 @@ func TestRuntimeEqualsSeesABodyChangeThroughTheService(t *testing.T) {
 	got, _ = store.GetSpec(ctx, "sp-1")
 	if got.Version() != 3 || got.Generation() != 2 {
 		t.Fatalf("a rename gave v%d g%d, want v3 g2", got.Version(), got.Generation())
+	}
+}
+
+// A save that names a schema podium refuses, here one stored by another version
+// that this binary cannot compile, is a 400 that names the fingerprint and the
+// reason, not a store failure.
+func TestSaveNamingARefusedSchemaIsAWorkloadError(t *testing.T) {
+	svc, store := mkService(t)
+	ctx := context.Background()
+	const broken = `{"type":"nonsense"}`
+	fp, err := workloadschema.Fingerprint([]byte(broken))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := model.NewWorkloadSchema(fp, testAPIVersion, testKind, []byte(broken), "older-podium", time.Unix(1700000000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.UpsertWorkloadSchema(ctx, entry); err != nil {
+		t.Fatal(err)
+	}
+	w := testWorkload(t)
+	w.SchemaFingerprint = fp
+	for name, save := range map[string]func() error{
+		"create": func() error { return svc.Create(ctx, workloadSpec(t, "sp-new", w)) },
+		"update": func() error {
+			ts := mkSpec(t, svc, store, "sp-old", nil)
+			ts.SetWorkload(w)
+			_, err := svc.Upsert(ctx, ts, ts.Version())
+			return err
+		},
+	} {
+		var bad *WorkloadError
+		if err := save(); !errors.As(err, &bad) || !errors.Is(err, storage.ErrInvalidArgument) || !strings.Contains(bad.Message, fp) || !strings.Contains(bad.Message, "nonsense") {
+			t.Errorf("%s: %v, want a workload error naming %s and the reason", name, err, fp)
+		}
 	}
 }

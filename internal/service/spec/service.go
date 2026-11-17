@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/internal/proxy"
+	"github.com/soltiHQ/control-plane/internal/service/workload"
 	"github.com/soltiHQ/control-plane/internal/workloadschema"
 
 	"github.com/rs/zerolog"
@@ -19,7 +20,8 @@ import (
 )
 
 // SchemaSource gives the compiled schema of a fingerprint in the workload
-// catalog. The bool is false when the catalog does not know the fingerprint.
+// catalog. The bool is false when the catalog does not know the fingerprint. A
+// schema podium refuses is a *workload.RefusedError.
 type SchemaSource interface {
 	Compiled(ctx context.Context, fingerprint string) (*workloadschema.Schema, bool, error)
 }
@@ -313,7 +315,7 @@ func (s *Service) Deploy(ctx context.Context, specID string, planTokens []string
 			return storage.ErrInvalidArgument
 		}
 		generation = ts.Generation()
-		plan, steps, err := loadPlacement(ctx, tx, nil, ts, time.Now(), pre)
+		plan, steps, err := loadPlacement(ctx, tx, nil, s.logger, ts, time.Now(), pre)
 		if err != nil {
 			return err
 		}
@@ -406,10 +408,10 @@ func (s *Service) validateSpec(ctx context.Context, ts *model.Spec) error {
 }
 
 // validateWorkload requires a workload and checks it against the catalog: the
-// fingerprint is known and the body satisfies the schema. The type is not
-// compared with the one the catalog stored with the schema: two types may share
-// one schema, and the catalog keeps the first type it saw. A refusal is a
-// [WorkloadError].
+// fingerprint is known, podium does not refuse its schema, and the body
+// satisfies the schema. The type is not compared with the one the catalog stored
+// with the schema: two types may share one schema, and the catalog keeps the
+// first type it saw. A refusal is a [WorkloadError].
 func (s *Service) validateWorkload(ctx context.Context, w model.Workload) error {
 	if w.APIVersion == "" || w.Kind == "" || w.SchemaFingerprint == "" {
 		return &WorkloadError{Message: "the workload requires api_version, kind and schema_fingerprint"}
@@ -421,10 +423,13 @@ func (s *Service) validateWorkload(ctx context.Context, w model.Workload) error 
 		return errors.New("spec: no workload schema source is configured")
 	}
 	schema, known, err := s.schemas.Compiled(ctx, w.SchemaFingerprint)
-	if err != nil {
+	var refused *workload.RefusedError
+	switch {
+	case errors.As(err, &refused):
+		return &WorkloadError{Message: fmt.Sprintf("podium refused the workload schema %q: %s", refused.Fingerprint, refused.Reason)}
+	case err != nil:
 		return err
-	}
-	if !known {
+	case !known:
 		return &WorkloadError{Message: fmt.Sprintf("the workload schema %q is not in the catalog", w.SchemaFingerprint)}
 	}
 	body := w.Body

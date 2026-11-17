@@ -10,7 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/internal/service/workload"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/workloadschema"
 )
@@ -30,7 +33,7 @@ func (s *Service) PreviewPlacement(ctx context.Context, specID string) (*model.P
 	if err != nil {
 		return nil, err
 	}
-	plan, _, err := loadPlacement(ctx, s.store, s.schemas, ts, time.Now(), nil)
+	plan, _, err := loadPlacement(ctx, s.store, s.schemas, s.logger, ts, time.Now(), nil)
 	return plan, err
 }
 
@@ -41,8 +44,9 @@ func (s *Service) PreviewPlacement(ctx context.Context, specID string) (*model.P
 // The body is validated against the runners' schemas outside any transaction:
 // with pre set (Deploy's prefetch) loadPlacement validates nothing and compiles
 // nothing, and answers [ErrPlacementChanged] when the spec's workload is no longer
-// the one the outcomes were computed for; with pre nil it computes them from schemas.
-func loadPlacement(ctx context.Context, store storage.Storage, schemas SchemaSource, ts *model.Spec, now time.Time, pre *prefetched) (*model.PlacementPlan, []deployStep, error) {
+// the one the outcomes were computed for; with pre nil it computes them from
+// schemas, and logger takes a schema that cannot be loaded.
+func loadPlacement(ctx context.Context, store storage.Storage, schemas SchemaSource, logger zerolog.Logger, ts *model.Spec, now time.Time, pre *prefetched) (*model.PlacementPlan, []deployStep, error) {
 	agents, err := placementAgents(ctx, store, ts)
 	if err != nil {
 		return nil, nil, err
@@ -54,7 +58,7 @@ func loadPlacement(ctx context.Context, store storage.Storage, schemas SchemaSou
 		}
 		outcomes = pre.outcomes
 	} else {
-		outcomes = outcomesFor(ctx, schemas, ts.Workload(), agents)
+		outcomes = outcomesFor(ctx, schemas, logger, ts.Workload(), agents)
 	}
 	rollouts, err := storage.AllRollouts(ctx, store, store.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: ts.ID()}))
 	if err != nil {
@@ -122,7 +126,7 @@ func (s *Service) prefetch(ctx context.Context, specID string) (*prefetched, err
 		return nil, err
 	}
 	w := ts.Workload()
-	return &prefetched{workload: w, outcomes: outcomesFor(ctx, s.schemas, w, agents)}, nil
+	return &prefetched{workload: w, outcomes: outcomesFor(ctx, s.schemas, s.logger, w, agents)}, nil
 }
 
 // deployAction is what Deploy does with one agent's rollout of the spec.
@@ -327,10 +331,10 @@ func (c *schemaCompat) check(fingerprint string) compat {
 
 // outcomesFor validates the workload's body against the schema of each runner
 // fingerprint of the agents, once per fingerprint. Only runners that declare the
-// workload's exact type count. A schema that cannot be loaded or compiled makes
-// that fingerprint schema_incompatible, with the error as its detail; it never
-// fails the plan. A nil source knows no schema, so every fingerprint is pending.
-func outcomesFor(ctx context.Context, schemas SchemaSource, w model.Workload, agents []*model.Agent) compatOutcomes {
+// workload's exact type count. A schema podium refuses, or that cannot be
+// loaded, makes that fingerprint schema_incompatible; it never fails the plan.
+// A nil source knows no schema, so every fingerprint is pending.
+func outcomesFor(ctx context.Context, schemas SchemaSource, logger zerolog.Logger, w model.Workload, agents []*model.Agent) compatOutcomes {
 	out := compatOutcomes{}
 	want, err := w.GVK()
 	if err != nil || schemas == nil {
@@ -347,7 +351,7 @@ func outcomesFor(ctx context.Context, schemas SchemaSource, w model.Workload, ag
 					continue
 				}
 				if _, done := out[fp]; !done {
-					out[fp] = outcomeFor(ctx, schemas, fp, w.Body)
+					out[fp] = outcomeFor(ctx, schemas, logger, fp, w.Body)
 				}
 			}
 		}
@@ -355,13 +359,19 @@ func outcomesFor(ctx context.Context, schemas SchemaSource, w model.Workload, ag
 	return out
 }
 
-// outcomeFor checks the body against the schema of one fingerprint.
-func outcomeFor(ctx context.Context, schemas SchemaSource, fingerprint string, body map[string]any) compat {
+// outcomeFor checks the body against the schema of one fingerprint. A schema
+// podium refuses shows its reason; an error behind a schema that cannot be
+// loaded goes to the log with the fingerprint, and the detail stays generic.
+func outcomeFor(ctx context.Context, schemas SchemaSource, logger zerolog.Logger, fingerprint string, body map[string]any) compat {
 	schema, known, err := schemas.Compiled(ctx, fingerprint)
-	if err != nil {
-		return compat{reason: "schema_incompatible", detail: "the schema could not be loaded: " + err.Error()}
-	}
-	if !known {
+	var refused *workload.RefusedError
+	switch {
+	case errors.As(err, &refused):
+		return compat{reason: "schema_incompatible", detail: "podium refused this schema: " + refused.Reason}
+	case err != nil:
+		logger.Error().Err(err).Str("fingerprint", fingerprint).Msg("placement: the workload schema could not be loaded")
+		return compat{reason: "schema_incompatible", detail: "the schema could not be loaded"}
+	case !known:
 		return compat{reason: "schema_pending"}
 	}
 	if body == nil {

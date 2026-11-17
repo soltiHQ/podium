@@ -12,11 +12,14 @@ type WorkloadType struct {
 }
 
 // WorkloadFingerprint is one schema fingerprint of a workload type, the agents
-// that declare it and whether its schema has arrived in the catalog.
+// that declare it and whether its schema has arrived in the catalog. Refused,
+// when set, is why podium refuses the schema: it quotes agent-supplied schema
+// text, at most 512 bytes of it.
 type WorkloadFingerprint struct {
 	Fingerprint string   `json:"fingerprint"`
 	Agents      []string `json:"agents"`
 	Received    bool     `json:"received"`
+	Refused     string   `json:"refused,omitempty"`
 }
 
 // WorkloadTypeDetail is GET /api/v1/workload-types/{group}/{version}/{kind}:
@@ -34,5 +37,6 @@ type WorkloadFingerprintDetail struct {
 	Fingerprint string          `json:"fingerprint"`
 	Agents      []string        `json:"agents"`
 	Received    bool            `json:"received"`
+	Refused     string          `json:"refused,omitempty"`
 	Schema      json.RawMessage `json:"schema,omitempty"`
 }

@@ -322,3 +322,89 @@ func runnerReason(tg restv1.PlacementTarget) string {
 	}
 	return tg.Runners[0].Reason
 }
+
+// e2eRefusedSchema is a schema whose fingerprint is its own and that podium
+// refuses: $dynamicRef is outside the subset it accepts.
+const e2eRefusedSchema = `{"type":"object","$dynamicRef":"#meta"}`
+
+// An agent declares a schema podium refuses. It sends it once, when asked:
+// podium does not ask for it again, the catalog says why, and a spec that
+// targets the agent is placed there as schema_incompatible with that reason.
+func TestRefusedWorkloadSchemaEndToEnd(t *testing.T) {
+	r := startApp(t, func(c *config.Config) { c.AgentAuth.Require = false }, nil)
+	waitFor(t, 10*time.Second, "the listeners bind", func() bool { return r.app.ui.Addr() != "" && r.app.grpc.Addr() != "" })
+	conn, err := grpc.NewClient("passthrough:///"+r.app.grpc.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	discovery := discoverv1.NewDiscoverServiceClient(conn)
+	rest := e2eREST{t: t, base: "http://" + r.app.ui.Addr(), token: bearerFor(t, r.app, r.cfg, "e2e-admin", enum.All...)}
+	f1, err := workloadschema.Fingerprint([]byte(e2eSchemaS1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused, err := workloadschema.Fingerprint([]byte(e2eRefusedSchema))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := newE2EAgent(t, "agent-a", discovery)
+	a.schemas[f1] = []byte(e2eSchemaS1)
+	a.sync(f1)
+	if want := a.sync(f1, f1); len(want) != 0 {
+		t.Fatalf("A sent its schema and is asked for %v", want)
+	}
+	d := newE2EAgent(t, "agent-d", discovery)
+	d.schemas[refused] = []byte(e2eRefusedSchema)
+	if want := d.sync(refused); !slices.Equal(want, []string{refused}) {
+		t.Fatalf("first sync of D wants %v, want [%s]", want, refused)
+	}
+	if want := d.sync(refused, refused); len(want) != 0 {
+		t.Fatalf("D sent a schema podium refuses, and is asked for %v", want)
+	}
+	if want := d.sync(refused); len(want) != 0 {
+		t.Fatalf("the next sync of D asks for %v, want nothing", want)
+	}
+
+	code, out := rest.do(http.MethodGet, "/api/v1/workload-types", "", nil)
+	var types []struct {
+		Kind         string `json:"kind"`
+		Fingerprints []struct {
+			Fingerprint string `json:"fingerprint"`
+			Received    bool   `json:"received"`
+			Refused     string `json:"refused"`
+		} `json:"fingerprints"`
+	}
+	if code != http.StatusOK || json.Unmarshal(out, &types) != nil {
+		t.Fatalf("workload types: HTTP %d %s", code, out)
+	}
+	found := false
+	for _, ty := range types {
+		for _, fp := range ty.Fingerprints {
+			switch fp.Fingerprint {
+			case refused:
+				found = true
+				if fp.Received || !strings.Contains(fp.Refused, "dynamicRef") {
+					t.Fatalf("the catalog shows the refused fingerprint as %+v, want refused with the reason", fp)
+				}
+			case f1:
+				if !fp.Received || fp.Refused != "" {
+					t.Fatalf("the catalog shows the accepted fingerprint as %+v", fp)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("the catalog does not list the refused fingerprint: %s", out)
+	}
+
+	if code, out = rest.do(http.MethodPost, "/api/v1/specs", e2eSpec("to-d", f1, e2eBody, "agent-d"), nil); code != http.StatusNoContent {
+		t.Fatalf("spec for D: HTTP %d %s", code, out)
+	}
+	tg := rest.placement(rest.specID("to-d"))["agent-d"]
+	if tg.Eligible || tg.EligibilityReason != "schema_incompatible" || len(tg.Runners) != 1 ||
+		!strings.HasPrefix(tg.Runners[0].Detail, "podium refused this schema: ") || !strings.Contains(tg.Runners[0].Detail, "dynamicRef") {
+		t.Fatalf("placement of D = %+v, want schema_incompatible with the refusal", tg)
+	}
+}
