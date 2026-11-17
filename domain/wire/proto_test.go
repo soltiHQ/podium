@@ -89,8 +89,7 @@ func TestUser_ProtoRoundtrip(t *testing.T) {
 
 func TestSpec_ProtoRoundtrip(t *testing.T) {
 	ts, _ := model.NewSpec("s1", "my-spec", "slot-a")
-	ts.SetKindType(enum.TaskKindType("subprocess"))
-	ts.SetKindConfig(map[string]any{"cmd": "echo"})
+	setBody(ts, map[string]any{"cmd": "echo"})
 	ts.SetTimeoutMs(1000)
 	ts.SetTargets([]string{"a1", "a2"})
 	ts.SetVersion(3)
@@ -117,13 +116,13 @@ func TestSpec_ProtoRoundtrip(t *testing.T) {
 	}
 }
 
-// TestSpec_KindConfigNestedRoundtrip — typical POST /api/v1/specs comes
-// with KindConfig of shape {"env": {...}, "args": [...]} — after JSON
+// TestSpec_WorkloadBodyNestedRoundtrip — typical POST /api/v1/specs comes
+// with a workload body of shape {"env": {...}, "args": [...]} — after JSON
 // unmarshal it carries map[string]any / []any. Verify structpb passes it
 // through proto Marshal+Unmarshal without losing structure.
-func TestSpec_KindConfigNestedRoundtrip(t *testing.T) {
+func TestSpec_WorkloadBodyNestedRoundtrip(t *testing.T) {
 	ts, _ := model.NewSpec("s1", "my-spec", "slot")
-	ts.SetKindConfig(map[string]any{
+	setBody(ts, map[string]any{
 		"cmd":    "echo",
 		"args":   []any{"hello", "world"},
 		"env":    map[string]any{"KEY": "value", "PORT": 8080},
@@ -148,7 +147,7 @@ func TestSpec_KindConfigNestedRoundtrip(t *testing.T) {
 		t.Fatalf("FromProto: %v", err)
 	}
 
-	kc := back.KindConfig()
+	kc := back.Workload().Body
 	if kc["cmd"] != "echo" {
 		t.Fatalf("cmd lost: %v", kc["cmd"])
 	}

@@ -130,9 +130,6 @@ func SpecToREST(ts *model.Spec) restv1.Spec {
 		Generation:        ts.Generation(),
 		DeletionRequested: ts.DeletionRequested(),
 
-		KindType:   string(ts.KindType()),
-		KindConfig: ts.KindConfig(),
-
 		TimeoutMs:      ts.TimeoutMs(),
 		IntervalMs:     ts.IntervalMs(),
 		BackoffFirstMs: ts.Backoff().FirstMs,

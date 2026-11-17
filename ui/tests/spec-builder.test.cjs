@@ -11,7 +11,7 @@ function withFetch(fn,body){const old=global.fetch;global.fetch=fn;return Promis
 
 test('shortFingerprint is the first 12 characters',()=>{assert.equal(shortFingerprint(FP1),'aaaaaaaaaaaa');assert.equal(shortFingerprint('abc'),'abc');});
 
-test('create mode starts with an empty object body and no kind fields',()=>{const b=builder(null,[],'/agents','/types');assert.equal(b.body_json,'{}');assert.equal(b.type_key,'');for(const k of ['kind_type','kind_config','script_body','wasm_json','container_json','subprocess_mode','env_rows'])assert.equal(k in b,false,k);});
+test('create mode starts with an empty object body and no kind fields',()=>{const b=builder(null,[],'/agents','/types');assert.equal(b.body_json,'{}');assert.equal(b.type_key,'');for(const k of ['script_body','wasm_json','container_json','subprocess_mode','env_rows'])assert.equal(k in b,false,k);});
 
 test('type loading selects nothing and lists received fingerprints with agent counts',async()=>{const b=builder(null,[],'/agents','/types');await withFetch(async()=>({ok:true,json:async()=>catalog}),()=>b.loadTypes());assert.equal(b.types.length,2);b.type_key=b.typeOptions.find(o=>o.label==='solti.io/v1 Wasm').key;const fps=b.fingerprintOptions;assert.equal(fps.length,2);assert.match(fps[0].label,/^aaaaaaaaaaaa · 2 agents$/);assert.match(fps[1].label,/^bbbbbbbbbbbb · 1 agent$/);assert.equal(fps.some(f=>f.value===FP3),false);});
 
@@ -24,7 +24,7 @@ test('edit preselects the type and fingerprint and pretty-prints the body',()=>{
 test('an edited fingerprint missing from the catalog stays selectable, marked as having no agents',()=>{const seed={...sample,workload:{...sample.workload,schema_fingerprint:'d'.repeat(64)}};const b=withTypes(seed);const o=b.fingerprintOptions.find(f=>f.value==='d'.repeat(64));assert.ok(o);assert.match(o.label,/no agents/);assert.equal(b.createSpec.workload.schema_fingerprint,'d'.repeat(64));
   const gone={...sample,workload:{api_version:'x.io/v2',kind:'Gone',schema_fingerprint:FP2,body:{}}};const g=withTypes(gone);assert.equal(g.typeOptions.find(o=>o.key===g.type_key).label,'x.io/v2 Gone');assert.match(g.fingerprintOptions[0].label,/no agents/);});
 
-test('the request carries only the workload and the envelope, never kind fields',()=>{const b=withTypes(sample);const s=b.createSpec;assert.equal('kind_type' in s,false);assert.equal('kind_config' in s,false);assert.deepEqual(Object.keys(s.workload).sort(),['api_version','body','kind','schema_fingerprint']);});
+test('the request carries only the workload and the envelope, never other fields',()=>{const b=withTypes(sample);const s=b.createSpec;assert.deepEqual(Object.keys(s).filter(k=>!['name','slot','jitter','restart_type','timeout_ms','interval_ms','backoff_first_ms','backoff_max_ms','backoff_factor','targets','target_labels','runner_labels','version','workload'].includes(k)),[]);assert.deepEqual(Object.keys(s.workload).sort(),['api_version','body','kind','schema_fingerprint']);});
 
 test('invalid JSON, arrays and scalars block save',()=>{const b=withTypes(sample);for(const bad of ['{oops','[]','"s"','3','null','']){b.body_json=bad;assert.throws(()=>b.validate(),/JSON/,bad);}b.body_json='{"a":1}';assert.deepEqual(b.validate().workload.body,{a:1});});
 

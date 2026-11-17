@@ -1,7 +1,6 @@
 package model
 
 import (
-	"reflect"
 	"slices"
 	"time"
 
@@ -32,12 +31,10 @@ type Spec struct {
 	updatedAt         time.Time
 
 	slot         string
-	kindType     enum.TaskKindType
 	restartType  enum.RestartType
 	timeoutMs    int64
 	intervalMs   int64
 	backoff      BackoffConfig
-	kindConfig   map[string]any
 	runnerLabels map[string]string
 	workload     Workload
 }
@@ -63,7 +60,6 @@ func NewSpec(id, name, slot string) (*Spec, error) {
 
 		targets:      nil,
 		targetLabels: make(map[string]string),
-		kindType:     enum.TaskKindSubprocess,
 		restartType:  enum.RestartNever,
 		timeoutMs:    30000,
 		intervalMs:   0,
@@ -73,7 +69,6 @@ func NewSpec(id, name, slot string) (*Spec, error) {
 			MaxMs:   5000,
 			Factor:  2.0,
 		},
-		kindConfig:   make(map[string]any),
 		runnerLabels: make(map[string]string),
 	}, nil
 }
@@ -102,9 +97,6 @@ func (ts *Spec) CreatedAt() time.Time { return ts.createdAt }
 // UpdatedAt returns the last modification timestamp.
 func (ts *Spec) UpdatedAt() time.Time { return ts.updatedAt }
 
-// KindType returns the task backend kind.
-func (ts *Spec) KindType() enum.TaskKindType { return ts.kindType }
-
 // TimeoutMs returns the task execution timeout in milliseconds.
 func (ts *Spec) TimeoutMs() int64 { return ts.timeoutMs }
 
@@ -131,15 +123,6 @@ func (ts *Spec) SetGeneration(g int) { ts.generation = g }
 
 // SetDeletionRequested restores the soft-delete flag (persistence hook).
 func (ts *Spec) SetDeletionRequested(b bool) { ts.deletionRequested = b }
-
-// KindConfig returns a defensive copy of the kind configuration.
-func (ts *Spec) KindConfig() map[string]any {
-	out := make(map[string]any, len(ts.kindConfig))
-	for k, v := range ts.kindConfig {
-		out[k] = cloneConfigValue(v)
-	}
-	return out
-}
 
 // Workload returns a deep copy of the spec's workload.
 func (ts *Spec) Workload() Workload { return ts.workload.Clone() }
@@ -184,28 +167,6 @@ func (ts *Spec) SetName(name string) {
 		return
 	}
 	ts.name = name
-	ts.updatedAt = time.Now()
-}
-
-// SetKindType updates the task backend kind (runtime field).
-func (ts *Spec) SetKindType(kt enum.TaskKindType) {
-	if ts.kindType == kt {
-		return
-	}
-	ts.kindType = kt
-	ts.updatedAt = time.Now()
-}
-
-// SetKindConfig replaces the backend config with a defensive copy (runtime field).
-func (ts *Spec) SetKindConfig(cfg map[string]any) {
-	if anyMapEqual(ts.kindConfig, cfg) {
-		return
-	}
-	cp := make(map[string]any, len(cfg))
-	for k, v := range cfg {
-		cp[k] = cloneConfigValue(v)
-	}
-	ts.kindConfig = cp
 	ts.updatedAt = time.Now()
 }
 
@@ -305,10 +266,6 @@ func (ts *Spec) MarkForDeletion() {
 
 // Clone creates a deep copy of the Spec.
 func (ts *Spec) Clone() *Spec {
-	kindConfig := make(map[string]any, len(ts.kindConfig))
-	for k, v := range ts.kindConfig {
-		kindConfig[k] = cloneConfigValue(v)
-	}
 	targets := make([]string, len(ts.targets))
 	copy(targets, ts.targets)
 	targetLabels := make(map[string]string, len(ts.targetLabels))
@@ -332,8 +289,6 @@ func (ts *Spec) Clone() *Spec {
 		updatedAt:         ts.updatedAt,
 
 		slot:         ts.slot,
-		kindType:     ts.kindType,
-		kindConfig:   kindConfig,
 		timeoutMs:    ts.timeoutMs,
 		restartType:  ts.restartType,
 		intervalMs:   ts.intervalMs,
@@ -349,7 +304,6 @@ func (ts *Spec) RuntimeEquals(other *Spec) bool {
 		return ts == other
 	}
 	if ts.slot != other.slot ||
-		ts.kindType != other.kindType ||
 		ts.timeoutMs != other.timeoutMs ||
 		ts.restartType != other.restartType ||
 		ts.intervalMs != other.intervalMs ||
@@ -359,10 +313,7 @@ func (ts *Spec) RuntimeEquals(other *Spec) bool {
 	if !stringMapEqual(ts.runnerLabels, other.runnerLabels) {
 		return false
 	}
-	if !ts.workload.Equal(other.workload) {
-		return false
-	}
-	return anyMapEqual(ts.kindConfig, other.kindConfig)
+	return ts.workload.Equal(other.workload)
 }
 
 // ContentEquals reports whether two specs carry the same editable content: the
@@ -381,19 +332,6 @@ func stringMapEqual(a, b map[string]string) bool {
 	}
 	for k, v := range a {
 		if bv, ok := b[k]; !ok || bv != v {
-			return false
-		}
-	}
-	return true
-}
-
-func anyMapEqual(a, b map[string]any) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		bv, ok := b[k]
-		if !ok || !reflect.DeepEqual(v, bv) {
 			return false
 		}
 	}

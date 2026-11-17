@@ -322,7 +322,7 @@ every response:
 }
 ```
 
-`kind_type` and `kind_config` are gone. An invalid body is a 400 whose message
+The former built-in task kind fields are gone. An invalid body is a 400 whose message
 lists `path: message; …`, the first 20 problems. A fingerprint podium does not
 hold is a 400, and so is a body too costly to validate: "the workload schema is
 too expensive to validate this body". A save that changes nothing writes nothing

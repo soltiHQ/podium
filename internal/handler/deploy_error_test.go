@@ -42,7 +42,6 @@ func TestBlockedDeployReportsSafePlacementReasonWithoutSuccess(t *testing.T) {
 				t.Fatal(err)
 			}
 			saved.SetTargets([]string{"private-agent"})
-			saved.SetKindType(enum.TaskKindSubprocess)
 			if err := store.UpsertSpec(ctx, saved); err != nil {
 				t.Fatal(err)
 			}

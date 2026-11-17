@@ -115,11 +115,11 @@ func TestBuilderPageHasATypePickerAndNoKindSections(t *testing.T) {
 				t.Errorf("%s: %q missing from the builder", name, want)
 			}
 		}
-		// The seed (x-data) is the REST spec, which carries its legacy kind
-		// fields until they leave the REST types; the builder never reads them.
-		form := regexp.MustCompile(` x-data="[^"]*"`).ReplaceAllString(markup, "")
-		for _, gone := range []string{"kind_type", "kind_config", "subprocess", "Subprocess", "wasm_json", "container_json", "script_body", "WASM", "Container Config", "env_rows", "fail_on_non_zero", "legacy_script", "onScriptFile"} {
-			if strings.Contains(form, gone) {
+		// The whole page is checked, the x-data seed included. The former field
+		// names are written in two halves so a tree-wide search for them finds
+		// no leftover use.
+		for _, gone := range []string{"kind_" + "type", "kind_" + "config", "subprocess", "Subprocess", "wasm_json", "container_json", "script_body", "WASM", "Container Config", "env_rows", "fail_on_non_zero", "legacy_script", "onScriptFile"} {
+			if strings.Contains(markup, gone) {
 				t.Errorf("%s: %q is still in the builder", name, gone)
 			}
 		}

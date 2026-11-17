@@ -190,14 +190,6 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		ts.SetWorkload(model.Workload{APIVersion: wl.APIVersion, Kind: wl.Kind, SchemaFingerprint: wl.SchemaFingerprint, Body: wl.Body})
 	}
 
-	// Kind
-	if in.KindType != "" {
-		ts.SetKindType(enum.TaskKindType(in.KindType))
-	}
-	if in.KindConfig != nil {
-		ts.SetKindConfig(in.KindConfig)
-	}
-
 	// Lifecycle
 	if _, present := fields["timeout_ms"]; present {
 		ts.SetTimeoutMs(in.TimeoutMs)

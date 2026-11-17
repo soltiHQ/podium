@@ -390,7 +390,7 @@ func sessionTimeFromUnixNano(ns int64, present bool) time.Time {
 
 // === Specs ===
 
-// SpecToProto serialises a model.Spec for Raft replication. KindConfig is
+// SpecToProto serialises a model.Spec for Raft replication. The workload body is
 // converted to google.protobuf.Struct; non-JSON-friendly values inside the
 // map (channels, functions) will fail here loudly.
 func SpecToProto(ts *model.Spec) (*raftv1.SpecMsg, error) {
@@ -406,13 +406,10 @@ func SpecToProto(ts *model.Spec) (*raftv1.SpecMsg, error) {
 		rl[k] = v
 	}
 	b := ts.Backoff()
-	kc, err := configStruct(ts.KindConfig(), "spec config")
-	if err != nil {
-		return nil, err
-	}
 	w := ts.Workload()
 	var body *structpb.Struct
 	if w.Body != nil {
+		var err error
 		if body, err = configStruct(w.Body, "workload body"); err != nil {
 			return nil, err
 		}
@@ -424,8 +421,6 @@ func SpecToProto(ts *model.Spec) (*raftv1.SpecMsg, error) {
 		Version:                   int32(ts.Version()),
 		Generation:                int32(ts.Generation()),
 		DeletionRequested:         ts.DeletionRequested(),
-		KindType:                  string(ts.KindType()),
-		KindConfig:                kc,
 		WorkloadApiVersion:        w.APIVersion,
 		WorkloadKind:              w.Kind,
 		WorkloadBody:              body,
@@ -480,8 +475,6 @@ func SpecFromProto(p *raftv1.SpecMsg) (*model.Spec, error) {
 	if err != nil {
 		return nil, err
 	}
-	ts.SetKindType(enum.TaskKindType(p.GetKindType()))
-	ts.SetKindConfig(p.GetKindConfig().AsMap())
 	if p.GetWorkloadApiVersion() != "" || p.GetWorkloadKind() != "" || p.GetWorkloadSchemaFingerprint() != "" || p.GetWorkloadBody() != nil {
 		ts.SetWorkload(model.Workload{
 			APIVersion:        p.GetWorkloadApiVersion(),

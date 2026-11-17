@@ -542,8 +542,8 @@ without what was written since.
   no write. An upgrade from an earlier version also has prerequisites:
   [Upgrading a raft node](internal/config/README.md#upgrading-a-raft-node).
 - **Workload types.** The version that brought them has no spec in the earlier
-  shape to migrate: a spec carries `workload` where it carried `kind_type` and
-  `kind_config`, and deployments were empty. Raft adds log operation 29 (the
+  shape to migrate: a spec carries `workload` in place of the former
+  built-in task kind, and deployments were empty. Raft adds log operation 29 (the
   workload schema upsert) and snapshot field 12: a replica of an earlier version
   fails operation 29 and drops field 12, so upgrade every replica before agents
   on the reworked SDK send schemas. The database mode adds migration `0002`

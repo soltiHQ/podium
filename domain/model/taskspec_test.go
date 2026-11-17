@@ -97,12 +97,12 @@ func TestRuntimeEqualsIgnoresMetadata(t *testing.T) {
 }
 
 // Every field backing SpecToProto must flip RuntimeEquals to false.
-// Covers slot, kindType, kindConfig, timeoutMs, restartType, intervalMs,
+// Covers slot, workload, timeoutMs, restartType, intervalMs,
 // backoff, runnerLabels.
 func TestRuntimeEqualsDetectsEveryRuntimeField(t *testing.T) {
 	base := func() *Spec {
 		s, _ := NewSpec("sp-1", "demo", "slot-1")
-		s.SetKindConfig(map[string]any{"command": "sleep", "args": []any{"1"}})
+		s.SetWorkload(Workload{APIVersion: "solti.io/v1", Kind: "Job", SchemaFingerprint: "f1", Body: map[string]any{"command": "sleep", "args": []any{"1"}}})
 		s.SetRunnerLabels(map[string]string{"zone": "eu"})
 		return s
 	}
@@ -111,8 +111,16 @@ func TestRuntimeEqualsDetectsEveryRuntimeField(t *testing.T) {
 		name   string
 		mutate func(*Spec)
 	}{
-		{"kindType", func(s *Spec) { s.SetKindType(enum.TaskKindWasm) }},
-		{"kindConfig value", func(s *Spec) { s.SetKindConfig(map[string]any{"command": "echo"}) }},
+		{"workload kind", func(s *Spec) {
+			w := s.Workload()
+			w.Kind = "Other"
+			s.SetWorkload(w)
+		}},
+		{"workload body value", func(s *Spec) {
+			w := s.Workload()
+			w.Body = map[string]any{"command": "echo"}
+			s.SetWorkload(w)
+		}},
 		{"timeoutMs", func(s *Spec) { s.SetTimeoutMs(60_000) }},
 		{"restartType", func(s *Spec) { s.SetRestartType(enum.RestartAlways) }},
 		{"intervalMs", func(s *Spec) { s.SetIntervalMs(500) }},

@@ -165,7 +165,6 @@ func TestSpecUpsertRefusesBadEnvelopeBodyAndBounds(t *testing.T) {
 // error: 400 at create. The body here is valid for its schema, so only the bound
 // can refuse it.
 func TestSpecCreateRefusesABodyOverTheBounds(t *testing.T) {
-	t.Skip("workloadschema.Schema.Validate does not enforce the body bounds yet; enable this test with the validator that does")
 	admin := &identity.Identity{UserID: "admin", Permissions: enum.All}
 	f := newAPIFixture(t)
 	seedHandlerSchema(t, f.store)

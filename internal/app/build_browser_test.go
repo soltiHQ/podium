@@ -294,8 +294,6 @@ func TestSameOriginMutationsAllowed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ts.SetKindType(enum.TaskKindSubprocess)
-		ts.SetKindConfig(map[string]any{"mode": map[string]any{"command": map[string]any{"command": "echo"}}})
 		ts.SetWorkload(model.Workload{APIVersion: "solti.io/v1", Kind: "Container", SchemaFingerprint: fp, Body: map[string]any{"image": "busybox"}})
 		if err := f.store.UpsertSpec(ctx, ts); err != nil {
 			t.Fatal(err)

@@ -16,7 +16,6 @@ type Workload struct {
 // Spec is the REST representation of a task specification.
 type Spec struct {
 	Workload     *Workload         `json:"workload,omitempty"`
-	KindConfig   map[string]any    `json:"kind_config,omitempty"`
 	TargetLabels map[string]string `json:"target_labels,omitempty"`
 	RunnerLabels map[string]string `json:"runner_labels,omitempty"`
 
@@ -40,7 +39,6 @@ type Spec struct {
 	Name        string `json:"name"`
 	Slot        string `json:"slot"`
 	Jitter      string `json:"jitter"`
-	KindType    string `json:"kind_type"`
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
 	RestartType string `json:"restart_type"`
@@ -57,7 +55,6 @@ type SpecCreateRequest struct {
 	Workload     *Workload         `json:"workload,omitempty"`
 	TargetLabels map[string]string `json:"target_labels,omitempty"`
 	RunnerLabels map[string]string `json:"runner_labels,omitempty"`
-	KindConfig   map[string]any    `json:"kind_config,omitempty"`
 	Targets      []string          `json:"targets,omitempty"`
 
 	BackoffFactor float64 `json:"backoff_factor"`
@@ -70,7 +67,6 @@ type SpecCreateRequest struct {
 	Version int `json:"version,omitempty"`
 
 	RestartType string `json:"restart_type"`
-	KindType    string `json:"kind_type"`
 	Jitter      string `json:"jitter"`
 	Name        string `json:"name"`
 	Slot        string `json:"slot"`

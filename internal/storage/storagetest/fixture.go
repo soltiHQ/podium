@@ -153,7 +153,12 @@ func newSpec(j int) (*model.Spec, error) {
 	if err != nil {
 		return nil, err
 	}
-	ts.SetKindConfig(map[string]any{"command": map[string]any{"command": "/usr/local/bin/job", "args": []any{"--shard", fmt.Sprint(j)}}})
+	ts.SetWorkload(model.Workload{
+		APIVersion:        "solti.io/v1",
+		Kind:              "Subprocess",
+		SchemaFingerprint: fmt.Sprintf("%064x", j),
+		Body:              map[string]any{"command": "/usr/local/bin/job", "args": []any{"--shard", fmt.Sprint(j)}},
+	})
 	if j < labelSpecs {
 		selector := map[string]string{"env": "prod"}
 		if j > 0 {
