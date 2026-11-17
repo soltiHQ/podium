@@ -16,7 +16,8 @@ import (
 // sum, which only a migration in no release yet may make; a new migration adds
 // its line, and none is removed.
 var checksums = map[string]string{
-	"0001_init.sql": "bb345de73acd39e80b58a3cd78fc54d925a43b5296ba8e517d52b1fd4d0d4de4",
+	"0001_init.sql":              "bb345de73acd39e80b58a3cd78fc54d925a43b5296ba8e517d52b1fd4d0d4de4",
+	"0002_workload_schemas.sql": "792cc7774bb9f8a767985c9c6f2a659b920a944b825b0056251be6b4cafc8a56",
 }
 
 // migrationNames returns the names of the Postgres migrations, in order.

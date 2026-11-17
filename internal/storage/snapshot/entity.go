@@ -317,3 +317,22 @@ func restored[T domain.Entity[T]](what string, e T, err error) (T, error) {
 	}
 	return e, nil
 }
+
+// MarshalWorkloadSchemaJSON encodes w as the JSON of raftv1.WorkloadSchemaMsg.
+func MarshalWorkloadSchemaJSON(w *model.WorkloadSchema) ([]byte, error) {
+	if w == nil {
+		return nil, refused("workload schema", "it is nil")
+	}
+	return encode("workload schema", wire.WorkloadSchemaToProto(w))
+}
+
+// UnmarshalWorkloadSchemaJSON decodes the workload schema
+// MarshalWorkloadSchemaJSON encoded; the model's constructor checks it again.
+func UnmarshalWorkloadSchemaJSON(b []byte) (*model.WorkloadSchema, error) {
+	var m raftv1.WorkloadSchemaMsg
+	if err := decode("workload schema", b, &m); err != nil {
+		return nil, err
+	}
+	w, err := wire.WorkloadSchemaFromProto(&m)
+	return restored("workload schema", w, err)
+}

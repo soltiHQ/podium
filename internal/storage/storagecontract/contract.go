@@ -46,6 +46,7 @@ func Run(t *testing.T, newStore func(t *testing.T) storage.Storage) {
 		{"Specs", specs},
 		{"Rollouts", rollouts},
 		{"Executions", executions},
+		{"WorkloadSchemas", workloadSchemas},
 		{"Users", users},
 		{"Credentials", credentials},
 		{"Verifiers", verifiers},

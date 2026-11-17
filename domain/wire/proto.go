@@ -532,3 +532,24 @@ func RolloutFromProto(p *raftv1.RolloutMsg) (*model.Rollout, error) {
 // ErrUnknownOp is returned by raft FSM Apply when the oneof variant carried
 // in raftv1.Op is not recognised.
 var ErrUnknownOp = fmt.Errorf("wire: unknown op variant")
+
+// WorkloadSchemaToProto encodes a catalog entry as raft's message.
+func WorkloadSchemaToProto(w *model.WorkloadSchema) *raftv1.WorkloadSchemaMsg {
+	return &raftv1.WorkloadSchemaMsg{
+		Fingerprint:   w.ID(),
+		ApiVersion:    w.APIVersion(),
+		Kind:          w.Kind(),
+		Schema:        w.Schema(),
+		FirstSeenAtNs: w.FirstSeenAt().UnixNano(),
+		FirstAgentId:  w.FirstAgentID(),
+	}
+}
+
+// WorkloadSchemaFromProto decodes raft's message; the model's constructor
+// checks it.
+func WorkloadSchemaFromProto(m *raftv1.WorkloadSchemaMsg) (*model.WorkloadSchema, error) {
+	if m == nil {
+		return nil, fmt.Errorf("workload schema: missing message")
+	}
+	return model.NewWorkloadSchema(m.GetFingerprint(), m.GetApiVersion(), m.GetKind(), m.GetSchema(), m.GetFirstAgentId(), timeFromUnixNano(m.GetFirstSeenAtNs()))
+}

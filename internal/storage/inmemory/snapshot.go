@@ -20,6 +20,8 @@ type SnapshotContent struct {
 	Specs       []*model.Spec
 	Rollouts    []*model.Rollout
 	Executions  []*model.ExecutionRecord
+
+	WorkloadSchemas []*model.WorkloadSchema
 }
 
 // SnapshotForRaft returns a consistent point-in-time snapshot of every entity.
@@ -43,6 +45,8 @@ func (s *Store) SnapshotForRaft() SnapshotContent {
 		Specs:       valuesOf(snap.specs),
 		Rollouts:    valuesOf(snap.rollouts),
 		Executions:  valuesOf(snap.executions),
+
+		WorkloadSchemas: valuesOf(snap.workloadSchemas),
 	}
 }
 
@@ -65,6 +69,8 @@ func (s *Store) RestoreFromSnapshot(c SnapshotContent) {
 		specs:       indexByID(c.Specs),
 		rollouts:    indexByID(c.Rollouts),
 		executions:  indexByID(c.Executions),
+
+		workloadSchemas: indexByID(c.WorkloadSchemas),
 	})
 }
 

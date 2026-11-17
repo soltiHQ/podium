@@ -30,6 +30,7 @@ var schemaTables = []string{
 	"podium_specs",
 	"podium_users",
 	"podium_verifiers",
+	"podium_workload_schemas",
 }
 
 // migrationsTable is the table of the migrations applied, which DropSchema

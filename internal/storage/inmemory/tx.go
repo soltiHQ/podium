@@ -22,6 +22,8 @@ type snapshot struct {
 	specs       map[string]*model.Spec
 	rollouts    map[string]*model.Rollout
 	executions  map[string]*model.ExecutionRecord
+
+	workloadSchemas map[string]*model.WorkloadSchema
 }
 
 func (s *state) takeSnapshot() snapshot {
@@ -36,6 +38,8 @@ func (s *state) takeSnapshot() snapshot {
 		specs:       copyMap(s.specs),
 		rollouts:    copyMap(s.rollouts),
 		executions:  copyMap(s.executions),
+
+		workloadSchemas: copyMap(s.workloadSchemas),
 	}
 }
 
@@ -50,6 +54,7 @@ func (s *state) restoreSnapshot(snap snapshot) {
 	restoreMap(s.specs, snap.specs)
 	restoreMap(s.rollouts, snap.rollouts)
 	restoreMap(s.executions, snap.executions)
+	restoreMap(s.workloadSchemas, snap.workloadSchemas)
 }
 
 func copyMap[T domain.Entity[T]](g *GenericStore[T]) map[string]T {

@@ -38,6 +38,7 @@ func Marshal(content inmemory.SnapshotContent) ([]byte, error) {
 	content.Specs = sortedEntities(content.Specs)
 	content.Rollouts = sortedEntities(content.Rollouts)
 	content.Executions = sortedEntities(content.Executions)
+	content.WorkloadSchemas = sortedEntities(content.WorkloadSchemas)
 	msg := &raftv1.Snapshot{
 		Header: &raftv1.SnapshotHeader{
 			Magic:   Magic,
@@ -53,6 +54,7 @@ func Marshal(content inmemory.SnapshotContent) ([]byte, error) {
 		Specs:            make([]*raftv1.SpecMsg, 0, len(content.Specs)),
 		Rollouts:         make([]*raftv1.RolloutMsg, 0, len(content.Rollouts)),
 		Executions:       make([]*raftv1.ExecutionRecordMsg, 0, len(content.Executions)),
+		WorkloadSchemas:  make([]*raftv1.WorkloadSchemaMsg, 0, len(content.WorkloadSchemas)),
 	}
 	for _, a := range content.Agents {
 		msg.Agents = append(msg.Agents, wire.AgentToProto(a))
@@ -88,6 +90,9 @@ func Marshal(content inmemory.SnapshotContent) ([]byte, error) {
 
 	for _, e := range content.Executions {
 		msg.Executions = append(msg.Executions, wire.ExecutionToProto(e))
+	}
+	for _, w := range content.WorkloadSchemas {
+		msg.WorkloadSchemas = append(msg.WorkloadSchemas, wire.WorkloadSchemaToProto(w))
 	}
 
 	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(msg)
@@ -196,6 +201,14 @@ func Unmarshal(data []byte) (inmemory.SnapshotContent, error) {
 		content.Executions = append(content.Executions, e)
 	}
 
+	for _, m := range snap.GetWorkloadSchemas() {
+		w, err := wire.WorkloadSchemaFromProto(m)
+		if err != nil {
+			return content, fmt.Errorf("storage snapshot: workload schema: %w", err)
+		}
+		content.WorkloadSchemas = append(content.WorkloadSchemas, w)
+	}
+
 	if err := validate(content); err != nil {
 		return content, err
 	}
@@ -239,6 +252,9 @@ func validate(c inmemory.SnapshotContent) error {
 		if err != nil || next.ID() != e.ID() {
 			return fmt.Errorf("storage snapshot: invalid execution record")
 		}
+	}
+	if err := validateEntities(c.WorkloadSchemas); err != nil {
+		return fmt.Errorf("storage snapshot: workload schemas: %w", err)
 	}
 	return nil
 }

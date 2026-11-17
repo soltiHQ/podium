@@ -300,7 +300,7 @@ func TestDropSchemaRechecksTheVersionUnderTheLock(t *testing.T) {
 	if got := tables(t, db); !slices.Equal(got, schemaTables) {
 		t.Errorf("tables %q after the refusal, want %q", got, schemaTables)
 	}
-	if got := versions(t, db); !slices.Equal(got, []int{1, 99}) {
-		t.Errorf("recorded versions %v after the refusal, want [1 99]", got)
+	if got := versions(t, db); !slices.Equal(got, []int{1, 2, 99}) {
+		t.Errorf("recorded versions %v after the refusal, want [1 2 99]", got)
 	}
 }
