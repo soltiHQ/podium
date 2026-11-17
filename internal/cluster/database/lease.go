@@ -8,10 +8,15 @@ import (
 	"time"
 )
 
-// The lease's statements. Each runs on the lease's pool, on one connection,
-// under the statement_timeout onLease sets first, in a transaction of its own,
-// which the server runs and commits within that timeout whatever becomes of the
-// client: no lock a statement takes is held past it. now() is the database's
+// The lease's statements. Each runs on the lease's pool, on one connection, at
+// READ COMMITTED and under the statement_timeout that onLease sets first, in a
+// transaction of its own, which the server runs within that timeout and commits
+// with no further round trip to the client: no lock a statement takes waits on
+// the client. A statement that waited for the row's lock reads the row's newest
+// version once the lock is free, as READ COMMITTED does, where at REPEATABLE
+// READ or SERIALIZABLE a row changed since the statement began would fail it
+// (SQLSTATE 40001): a renewal finds a takeover's moved lease at once, and a
+// takeover finds a renewed lease and takes nothing. now() is the database's
 // clock: the time the statement starts; clock_timestamp() is the time it is
 // read, after any lock's wait before it. A lease of $3 is in microseconds.
 //
@@ -75,10 +80,11 @@ RETURNING epoch`
 	readHolder = `SELECT holder, address, floor(extract(epoch FROM expires_at - now()) * 1000000)::bigint
   FROM podium_leader WHERE id = 1`
 
-	// setStatementTimeout sets the session's statement_timeout, in
-	// milliseconds, which the server enforces even on a statement that waits for
-	// a lock.
-	setStatementTimeout = `SELECT set_config('statement_timeout', $1, false)`
+	// setSession sets the session's statement_timeout, in milliseconds, which
+	// the server enforces even on a statement that waits for a lock, and its
+	// default isolation, READ COMMITTED, whatever the database's or the role's
+	// default.
+	setSession = `SELECT set_config('statement_timeout', $1, false), set_config('default_transaction_isolation', 'read committed', false)`
 )
 
 // minStatementTimeout is the shortest statement timeout of a lease statement.
@@ -286,11 +292,12 @@ func (l *Leadership) release(epoch int64) {
 	}
 }
 
-// onLease runs fn on a connection of the lease's pool, its statements under
-// timeout: the session's statement_timeout, set first, which the server enforces
-// even on a statement that waits for a lock, and the context's deadline, a
-// statement timeout later, for a server that does not answer. It returns fn's
-// error as failed classifies it.
+// onLease runs fn on a connection of the lease's pool, its statements at READ
+// COMMITTED and under timeout: the session's default isolation and its
+// statement_timeout, both set first, in one statement; the server enforces the
+// timeout even on a statement that waits for a lock, and the context's
+// deadline, a statement timeout later, covers a server that does not answer.
+// It returns fn's error as failed classifies it.
 func (l *Leadership) onLease(ctx context.Context, timeout time.Duration, fn func(context.Context, *sql.Conn) error) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout+l.statementTimeout)
 	defer cancel()
@@ -300,7 +307,7 @@ func (l *Leadership) onLease(ctx context.Context, timeout time.Duration, fn func
 	}
 	defer func() { _ = conn.Close() }()
 	ms := strconv.FormatInt(max(timeout, minStatementTimeout).Milliseconds(), 10)
-	if _, err := conn.ExecContext(ctx, setStatementTimeout, ms); err != nil {
+	if _, err := conn.ExecContext(ctx, setSession, ms); err != nil {
 		return failed(ctx, err)
 	}
 	if err := fn(ctx, conn); err != nil {

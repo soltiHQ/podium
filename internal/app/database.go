@@ -44,10 +44,11 @@ const connectTimeout = 5 * time.Second
 // The application_name of each pool of the database mode, which names its
 // connections in pg_stat_activity; the events listener's is podium-events.
 const (
-	primaryName = "podium"
-	replicaName = "podium-replica"
-	leaseName   = "podium-lease"
-	migrateName = "podium-migrate"
+	primaryName    = "podium"
+	replicaName    = "podium-replica"
+	leaseName      = "podium-lease"
+	migrateName    = "podium-migrate"
+	dropSchemaName = "podium-drop-schema"
 )
 
 // What the database mode logs, besides the leadership and the events transport.
@@ -413,6 +414,85 @@ func (p *storePing) ping(ctx context.Context) {
 	}
 	if p.last.Swap(&err) == nil {
 		p.logger.Warn().Err(err).Msg(pingFailed)
+	}
+}
+
+// What podium drop-schema logs while it waits: for the replicas that run on the
+// database, and for a lock another session holds on a table of the schema.
+const (
+	dropWaiting     = "database: replicas still run on the database: waiting for them to stop"
+	dropLockWaiting = "database: another session holds a lock on a table of podium's schema: waiting for it"
+)
+
+// DropSchema drops the schema of the database of cfg, as podium drop-schema
+// does: on a pool of one connection to the primary, application_name
+// podium-drop-schema, it drops every table of podium's, and the data in them,
+// in one transaction under the lock on the migrations (sqlstore.DropSchema),
+// once no replica runs on the database (database.CheckStopped). While replicas
+// run, or another session holds a lock on a table of the schema past the drop's
+// lock timeout, it waits up to wait, logging one WARN for each, and then fails
+// with database.ErrRunning or sqlstore.ErrLocked, as it fails at once with no
+// wait. Each attempt reaches the primary within the startup retry. It logs the
+// host, the port, the database, the version it dropped, read under the lock, and
+// the tables, or that there was no schema to drop. A schema newer than this
+// podium's, or tables with podium's names but not its schema, fail it at once,
+// and nothing is dropped. It runs nothing else: no listener, no leadership, no
+// advertise_addr. cfg is what config.LoadForMigration loaded.
+func DropSchema(ctx context.Context, cfg config.Config, logger zerolog.Logger, wait time.Duration, opts ...Option) error {
+	o := defaultOptions()
+	for _, opt := range opts {
+		opt(&o)
+	}
+	db, where, err := openPool("cluster.database.url", cfg.Cluster.Database.URL, dropSchemaName, 1)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	logger = where.logger(logger)
+	logger.Info().Dur("wait", wait).Msg("database: dropping the schema")
+	stopWaiting := time.Now().Add(wait)
+	var waitedRunning, waitedLock bool
+	for {
+		var dropped sqlstore.Dropped
+		// Each attempt gets a startup retry of its own, 30 s, which outlasts the
+		// drop's lock timeout, 5 s: a lock that another session holds ends an
+		// attempt in sqlstore.ErrLocked, not in the attempt's deadline.
+		err := reach(ctx, logger, where, newStartWindow(o.database), func(ctx context.Context) error {
+			var err error
+			dropped, err = sqlstore.DropSchema(ctx, db, sqlstore.Postgres{}, database.CheckStopped)
+			return err
+		})
+		locked := errors.Is(err, sqlstore.ErrLocked)
+		switch {
+		case err == nil && len(dropped.Tables) == 0:
+			logger.Info().Msg("database: no schema to drop")
+			return nil
+		case err == nil:
+			logger.Info().Int("from_version", dropped.Version).Strs("tables", dropped.Tables).Msg("database: dropped the schema")
+			return nil
+		case !locked && !errors.Is(err, database.ErrRunning):
+			return err
+		case !time.Now().Before(stopWaiting):
+			if waitedRunning || waitedLock {
+				return fmt.Errorf("%w, after waiting %s", err, wait)
+			}
+			return err
+		}
+		switch {
+		case locked && !waitedLock:
+			logger.Warn().Err(err).Dur("wait", wait).Msg(dropLockWaiting)
+			waitedLock = true
+		case !locked && !waitedRunning:
+			logger.Warn().Err(err).Dur("wait", wait).Msg(dropWaiting)
+			waitedRunning = true
+		}
+		pause := time.NewTimer(min(o.database.pause, time.Until(stopWaiting)))
+		select {
+		case <-ctx.Done():
+			pause.Stop()
+			return ctx.Err()
+		case <-pause.C:
+		}
 	}
 }
 

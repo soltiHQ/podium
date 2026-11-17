@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"io"
 	"log"
@@ -323,5 +324,137 @@ func TestLeaderForwardingTrustsClusterCA(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// With tls.forward a follower checks the leader's certificate against
+// tls.forward.ca_file, in place of tls.client.ca_file, which verifies the
+// agents, and for tls.forward.server_name, in place of the leader's host. So one
+// certificate that names the Service, which every replica serves with, reaches
+// a leader at a pod IP, while the follower answers 502 to a write for a leader
+// whose certificate names another host, for a leader checked for its IP, which
+// such a certificate does not name, and for a leader whose CA only tls.forward
+// holds when tls.forward has no CA. The main and the discovery listener forward
+// alike.
+func TestLeaderForwardingChecksTLSForward(t *testing.T) {
+	clusterCA, agentsCA := newTestCA(t), newTestCA(t)
+	followerCert, followerKey := clusterCA.issue(t, "podium.test")
+	for _, listener := range []struct {
+		name, path string
+		addr       func(*config.Config) *string // the listen address whose port the follower forwards to
+		build      func(t *testing.T, cfg config.Config, forwardTLS *tls.Config) http.Handler
+	}{
+		{"main", "/api/v1/users", func(c *config.Config) *string { return &c.HTTP.Addr }, func(t *testing.T, cfg config.Config, forwardTLS *tls.Config) http.Handler {
+			return mainHandlerOf(t, cfg, inmemory.New(), zerolog.Nop(), follower{leader: "127.0.0.1:7000"}, forwardTLS)
+		}},
+		{"discovery", "/api/v1/discovery/sync", func(c *config.Config) *string { return &c.HTTPDiscovery.Addr }, func(t *testing.T, cfg config.Config, forwardTLS *tls.Config) http.Handler {
+			hub := event.NewHub(zerolog.Nop())
+			t.Cleanup(hub.Close)
+			h, srv := buildDiscoveryListeners(zerolog.Nop(), agent.New(inmemory.New(), zerolog.Nop()), hub, follower{leader: "127.0.0.1:7000"}, cfg, nil, nil, forwardTLS, nil, nil)
+			t.Cleanup(srv.Stop)
+			return h
+		}},
+	} {
+		for _, tc := range []struct {
+			name      string
+			hosts     []string // the subject alternative names of the leader's certificate, of the cluster CA
+			forward   tlsconf.ForwardConfig
+			forwarded bool
+		}{
+			{"a leader certificate for the server name", []string{"podium.test"}, tlsconf.ForwardConfig{CAFile: clusterCA.file, ServerName: "podium.test"}, true},
+			{"a leader certificate for another name", []string{"other.test"}, tlsconf.ForwardConfig{CAFile: clusterCA.file, ServerName: "podium.test"}, false},
+			{"no server name, a leader certificate without its IP", []string{"podium.test"}, tlsconf.ForwardConfig{CAFile: clusterCA.file}, false},
+			{"a server name without the cluster CA", []string{"podium.test"}, tlsconf.ForwardConfig{ServerName: "podium.test"}, false},
+		} {
+			t.Run(listener.name+"/"+tc.name, func(t *testing.T) {
+				leaderCert, leaderKey := clusterCA.issue(t, tc.hosts...)
+				cert, err := tls.LoadX509KeyPair(leaderCert, leaderKey)
+				if err != nil {
+					t.Fatal(err)
+				}
+				reached := make(chan string, 1)
+				leader := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					reached <- r.URL.Path
+					w.WriteHeader(http.StatusAccepted)
+				}))
+				// The refused handshakes are what the cases expect, not news.
+				leader.Config.ErrorLog = log.New(io.Discard, "", 0)
+				leader.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+				leader.StartTLS()
+				t.Cleanup(leader.Close)
+				_, port, err := net.SplitHostPort(leader.Listener.Addr().String())
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				cfg := config.Default()
+				*listener.addr(&cfg) = ":" + port
+				cfg.TLS.Server = tlsconf.ServerConfig{CertFile: followerCert, KeyFile: followerKey}
+				cfg.TLS.Client = tlsconf.ClientConfig{CAFile: agentsCA.file}
+				cfg.TLS.Forward = tc.forward
+				_, forwardTLS, err := outboundTLS(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				w := httptest.NewRecorder()
+				listener.build(t, cfg, forwardTLS).ServeHTTP(w, httptest.NewRequest(http.MethodPost, listener.path, strings.NewReader("{}")))
+				switch want := map[bool]int{true: http.StatusAccepted, false: http.StatusBadGateway}[tc.forwarded]; {
+				case w.Code != want:
+					t.Fatalf("follower answered %d %q, want %d", w.Code, w.Body.String(), want)
+				case !tc.forwarded && len(reached) > 0:
+					t.Fatalf("the leader got %s", <-reached)
+				case tc.forwarded && <-reached != listener.path:
+					t.Fatal("the leader got another path")
+				}
+			})
+		}
+	}
+}
+
+// The main listener has no access log around its forwards, so a write that a
+// follower cannot send to the leader goes to the node's log through the Leader
+// middleware, at ERROR, with what the forward met: here a leader certificate
+// that does not verify, as when it lacks the name the follower checks.
+func TestMainListenerLogsAWriteItCannotForward(t *testing.T) {
+	clusterCA, otherCA := newTestCA(t), newTestCA(t)
+	followerCert, followerKey := clusterCA.issue(t, "127.0.0.1")
+	leaderCert, leaderKey := otherCA.issue(t, "127.0.0.1")
+	cert, err := tls.LoadX509KeyPair(leaderCert, leaderKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leader := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }))
+	leader.Config.ErrorLog = log.New(io.Discard, "", 0)
+	leader.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
+	leader.StartTLS()
+	t.Cleanup(leader.Close)
+	_, port, err := net.SplitHostPort(leader.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.HTTP.Addr = ":" + port
+	cfg.TLS.Server = tlsconf.ServerConfig{CertFile: followerCert, KeyFile: followerKey}
+	cfg.TLS.Forward = tlsconf.ForwardConfig{CAFile: clusterCA.file}
+	_, forwardTLS, err := outboundTLS(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs syncBuffer
+	w := httptest.NewRecorder()
+	mainHandlerOf(t, cfg, inmemory.New(), zerolog.New(&logs), follower{leader: "127.0.0.1:7000"}, forwardTLS).
+		ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader("{}")))
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("follower answered %d %q, want 502", w.Code, w.Body.String())
+	}
+	var line map[string]any
+	for _, raw := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var l map[string]any
+		if json.Unmarshal([]byte(raw), &l) == nil && l["message"] == "write not forwarded to the leader" {
+			line = l
+		}
+	}
+	if reason, _ := line["error"].(string); line == nil || line["level"] != "error" || !strings.Contains(reason, "certificate") || line["leader"] != "127.0.0.1:"+port {
+		t.Fatalf("logged %q, want an ERROR line of the refused write that names the leader and the certificate", logs.String())
 	}
 }

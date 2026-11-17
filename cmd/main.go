@@ -36,11 +36,14 @@ func main() {
 const usage = `usage: podium [--config PATH]
        podium agent-token [--generation N] [--] <agent-id>
        podium migrate [--config PATH]
+       podium drop-schema --yes [--config PATH] [--wait DURATION]
        podium version
 
 podium [--config PATH] runs the server; the config file is PATH, or CONFIG_PATH.
 podium agent-token prints the token of an agent ID, derived from the enrollment secret.
 podium migrate migrates the schema of the database mode's database, and exits.
+podium drop-schema drops that schema, every table of podium's and all its data, once no
+  replica runs on the database, waiting up to --wait for them, and exits.
 podium version, or podium --version, prints the version.
 `
 
@@ -67,6 +70,12 @@ func run(args []string, stdout, stderr io.Writer, serve func(configPath string) 
 				return 2
 			}
 			return migrate(path, stdout)
+		case "drop-schema":
+			c, ok := dropSchemaArgs(args[1:], stderr)
+			if !ok {
+				return 2
+			}
+			return dropSchema(c, stdout)
 		}
 	}
 	var (
@@ -143,6 +152,75 @@ func migrate(configPath string, stdout io.Writer) int {
 		return 1
 	}
 	logger.Info().Msg("podium migrate done")
+	return 0
+}
+
+// dropSchemaCommand is the command line of "podium drop-schema".
+type dropSchemaCommand struct {
+	// configPath is the config file, "" for CONFIG_PATH or none.
+	configPath string
+	// wait is how long it waits for the replicas that run on the database.
+	wait time.Duration
+}
+
+// dropSchemaArgs reads the command line of "podium drop-schema": --yes, which
+// it requires, --config PATH and --wait DURATION, 0 or more, in any spelling of
+// the flags. Anything else, and the lack of --yes, prints the error and the
+// usage to stderr and reports false.
+func dropSchemaArgs(args []string, stderr io.Writer) (dropSchemaCommand, bool) {
+	var (
+		c   dropSchemaCommand
+		yes bool
+		fs  = flag.NewFlagSet("podium drop-schema", flag.ContinueOnError)
+	)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&c.configPath, "config", "", "")
+	fs.DurationVar(&c.wait, "wait", 0, "")
+	fs.BoolVar(&yes, "yes", false, "")
+	if err := fs.Parse(args); err != nil {
+		usageError(stderr, fmt.Errorf("drop-schema: %w", err))
+		return c, false
+	}
+	switch {
+	case fs.NArg() > 0:
+		usageError(stderr, fmt.Errorf("drop-schema: unexpected argument %q", fs.Arg(0)))
+		return c, false
+	case c.wait < 0:
+		usageError(stderr, fmt.Errorf("drop-schema: --wait %s is negative", c.wait))
+		return c, false
+	case !yes:
+		usageError(stderr, errors.New("drop-schema drops every table of podium's and all the data in them: pass --yes to confirm"))
+		return c, false
+	}
+	return c, true
+}
+
+// dropSchema runs "podium drop-schema" with the command line c, logging to
+// stdout, and returns the exit code: it reads the configuration as podium
+// migrate does (config.LoadForMigration), connects to the primary within the
+// startup retry, and drops the schema in one transaction once no replica runs on
+// the database, waiting up to c.wait for them, logging the host, the port, the
+// database and the tables it dropped (app.DropSchema). It exits 0 once the
+// schema is gone, or when there was none, and 1 on any failure: a schema newer
+// than this podium's, replicas that still run after the wait, a primary it
+// cannot reach. It starts no listener.
+func dropSchema(c dropSchemaCommand, stdout io.Writer) int {
+	bootstrap := zerolog.New(stdout).Level(zerolog.InfoLevel).With().Timestamp().Logger()
+	logStart(bootstrap, buildinfo.Read())
+
+	cfg, err := config.LoadForMigration(c.configPath, bootstrap)
+	if err != nil {
+		bootstrap.Error().Err(err).Msg("failed to load config")
+		return 1
+	}
+	logger := newLogger(cfg.Log, stdout)
+	ctx, stop := notifyShutdown(logger, os.Exit)
+	defer stop()
+	if err := app.DropSchema(ctx, cfg, logger, c.wait); err != nil {
+		logger.Error().Err(err).Msg("podium drop-schema failed")
+		return 1
+	}
+	logger.Info().Msg("podium drop-schema done")
 	return 0
 }
 

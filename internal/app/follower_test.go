@@ -193,7 +193,7 @@ func newNodeDiscovery(t *testing.T, cfg config.Config, n *raftNode) nodeDiscover
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientTLS, err := cfg.TLS.Client.Build()
+	_, forwardTLS, err := outboundTLS(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,10 +204,10 @@ func newNodeDiscovery(t *testing.T, cfg config.Config, n *raftNode) nodeDiscover
 	if closeHosts != nil {
 		t.Cleanup(closeHosts)
 	}
-	forwarder := syncForwarder(cfg, n.leadership, clientTLS)
+	forwarder := syncForwarder(cfg, n.leadership, forwardTLS)
 	t.Cleanup(func() { _ = forwarder.Close() })
 	agents := agent.New(n.store, logger)
-	h, srv := buildDiscoveryListeners(logger, agents, n.hub, n.leadership, cfg, resolver, serverTLS, clientTLS, forwarder, nil)
+	h, srv := buildDiscoveryListeners(logger, agents, n.hub, n.leadership, cfg, resolver, serverTLS, forwardTLS, forwarder, nil)
 	// Before the forwarder closes: cleanups run last in, first out.
 	t.Cleanup(srv.Stop)
 	return nodeDiscovery{http: h, grpc: srv, agents: agents}
@@ -257,11 +257,18 @@ func (c peerConn) RemoteAddr() net.Addr { return c.peer }
 // the CA that verifies the server, with clientCert presented when set too.
 func discoveryClient(t *testing.T, addr string, roots *testCA, clientCert *tls.Certificate) discoverv1.DiscoverServiceClient {
 	t.Helper()
+	return discoveryClientOf(t, addr, roots, clientCert, "")
+}
+
+// discoveryClientOf is discoveryClient, which verifies the server's
+// certificate for serverName when it is set, for the host of addr otherwise.
+func discoveryClientOf(t *testing.T, addr string, roots *testCA, clientCert *tls.Certificate, serverName string) discoverv1.DiscoverServiceClient {
+	t.Helper()
 	creds := insecure.NewCredentials()
 	if roots != nil {
 		pool := x509.NewCertPool()
 		pool.AddCert(roots.cert)
-		cfg := &tls.Config{RootCAs: pool}
+		cfg := &tls.Config{RootCAs: pool, ServerName: serverName}
 		if clientCert != nil {
 			cfg.Certificates = []tls.Certificate{*clientCert}
 		}
@@ -288,32 +295,45 @@ func withToken(ctx context.Context, token string) context.Context {
 // A follower's gRPC discovery forwards a Sync to the leader's gRPC listener, at
 // the host of the leader's raft address and the follower's own gRPC port, over
 // TLS with tls.client when tls.server is set, presenting tls.client's
-// certificate when the leader wants one, as HTTP forwarding does. The agent's
-// sync lands in the leader's store, which replicates it to every node, and the
-// follower answers with the leader's answer. The token goes along unchanged:
-// the leader enrolls the very token the agent sent, and refuses another one.
+// certificate when the leader wants one, as HTTP forwarding does. With
+// tls.forward it checks the leader's certificate against tls.forward's CA, for
+// tls.forward's server name, which every node's certificate carries in place of
+// the raft host. The agent's sync lands in the leader's store, which replicates
+// it to every node, and the follower answers with the leader's answer. The
+// token goes along unchanged: the leader enrolls the very token the agent sent,
+// and refuses another one.
 func TestFollowerForwardsGRPCSync(t *testing.T) {
 	leader, followers := raftCluster(t, "n1", "n2", "n3")
 	follower := followers[0]
 	ca := newTestCA(t)
-	// One certificate for every listener and for tls.client: it names the raft
-	// host 127.0.0.1, which the follower dials the leader at.
-	certFile, keyFile := ca.issue(t, "127.0.0.1")
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, tc := range []struct {
-		name     string
-		clientCA bool // the listeners want a client certificate of ca
+		name       string
+		clientCA   bool   // the listeners want a client certificate of ca
+		serverName string // tls.forward's server name and CA, the CA's file, when set
 	}{
-		{"tls", false},
-		{"mutual tls", true},
+		{"tls", false, ""},
+		{"mutual tls", true, ""},
+		{"a forward server name", false, "podium.test"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// One certificate for every listener and for tls.client: it names the
+			// raft host 127.0.0.1, which the follower dials the leader at, or the
+			// forward server name alone.
+			certFile, keyFile := ca.issue(t, "127.0.0.1")
+			if tc.serverName != "" {
+				certFile, keyFile = ca.issue(t, tc.serverName)
+			}
+			cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+			if err != nil {
+				t.Fatal(err)
+			}
 			cfg := config.Default()
 			cfg.TLS.Server = tlsconf.ServerConfig{CertFile: certFile, KeyFile: keyFile}
 			cfg.TLS.Client = tlsconf.ClientConfig{CAFile: ca.file}
+			if tc.serverName != "" {
+				cfg.TLS.Client = tlsconf.ClientConfig{}
+				cfg.TLS.Forward = tlsconf.ForwardConfig{CAFile: ca.file, ServerName: tc.serverName}
+			}
 			var agentCert *tls.Certificate
 			if tc.clientCA {
 				cfg.TLS.Server.ClientCAFile = ca.file
@@ -326,7 +346,7 @@ func TestFollowerForwardsGRPCSync(t *testing.T) {
 			leaderDiscovery := newNodeDiscovery(t, cfg, leader)
 			serveGRPC(leaderDiscovery.grpc, leaderLis)
 			// The follower serves on a port of its own, which it does not forward to.
-			client := discoveryClient(t, serveGRPC(newNodeDiscovery(t, cfg, follower).grpc, listenLoopback(t)), ca, agentCert)
+			client := discoveryClientOf(t, serveGRPC(newNodeDiscovery(t, cfg, follower).grpc, listenLoopback(t)), ca, agentCert, tc.serverName)
 
 			ctx := context.Background()
 			id, token := "agent-"+strings.ReplaceAll(tc.name, " ", "-"), "token-of-the-agent"

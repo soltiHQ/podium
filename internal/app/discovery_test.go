@@ -38,7 +38,7 @@ const (
 	agentAuthDisabledWarning = "agent authentication disabled: any host that reaches the discovery listeners can register agents"
 	openDiscoveryWarning     = "agent authentication covers enrolled agents only: the first sync of an unknown agent ID enrolls it and sets the endpoint podium calls, so set SOLTI_AGENT_AUTH_ENROLL_SECRET or tls.server.client_ca_file, or keep the discovery listeners reachable only from agent networks"
 	// The startup warnings of a raft node about its forwards to the leader.
-	plaintextForwardingWarning = "raft forwarding runs plaintext: without tls.server a follower forwards the writes it gets, logins, cookies and tokens included, and the agents' syncs to the leader over plain HTTP and gRPC; set tls.server on every node, and tls.client.ca_file to the CA of the nodes' server certificates"
+	plaintextForwardingWarning = "raft forwarding runs plaintext: without tls.server a follower forwards the writes it gets, logins, cookies and tokens included, and the agents' syncs to the leader over plain HTTP and gRPC; set tls.server on every node, tls.forward.ca_file to the CA of the nodes' server certificates, and tls.forward.server_name to a name every one of them carries when the nodes' addresses change"
 	uncertifiedForwardWarning  = "agent mTLS is on (tls.server.client_ca_file) and tls.client.cert_file is unset: a follower presents no client certificate when it forwards an agent's sync to the leader, whose discovery listeners require one, so every sync that reaches a follower fails; set tls.client.cert_file and key_file to a certificate the agents' CA signed"
 )
 

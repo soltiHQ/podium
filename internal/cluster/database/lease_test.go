@@ -10,7 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/soltiHQ/control-plane/internal/storage/sqlstore/pgtest"
 )
 
 // leaseRow is the lease row as a test reads it.
@@ -487,4 +490,112 @@ func TestNoReleaseWhileLeaderWorkRuns(t *testing.T) {
 	if got := readLease(t, admin); got.epoch != taken.epoch+1 {
 		t.Errorf("replica-b took the lease at epoch %d, want %d", got.epoch, taken.epoch+1)
 	}
+}
+
+// repeatableReadDatabase is migratedDatabase on a database whose new sessions
+// start at REPEATABLE READ, as an operator may set it for a database or a role.
+// The sessions admin opened before keep their own default, so a transaction of
+// admin's names its level.
+func repeatableReadDatabase(t *testing.T) (string, *sql.DB) {
+	t.Helper()
+	databaseURL, admin := migratedDatabase(t)
+	var name string
+	if err := admin.QueryRowContext(t.Context(), `SELECT current_database()`).Scan(&name); err != nil {
+		t.Fatalf("read the database's name: %v", err)
+	}
+	if _, err := admin.ExecContext(t.Context(), `ALTER DATABASE `+pgx.Identifier{name}.Sanitize()+
+		` SET default_transaction_isolation = 'repeatable read'`); err != nil {
+		t.Fatalf("set the database's default isolation: %v", err)
+	}
+	var level string
+	if err := pgtest.Open(t, databaseURL).QueryRowContext(t.Context(), `SHOW default_transaction_isolation`).Scan(&level); err != nil {
+		t.Fatalf("read a new session's default isolation: %v", err)
+	}
+	if level != "repeatable read" {
+		t.Fatalf("a new session starts at %q, want %q", level, "repeatable read")
+	}
+	return databaseURL, admin
+}
+
+// TestLeaseStatementsRunAtReadCommitted checks that a statement onLease runs is
+// a transaction at READ COMMITTED on a database whose sessions start at
+// REPEATABLE READ: the level at which a statement that waited for the row's
+// lock re-reads the row it left.
+func TestLeaseStatementsRunAtReadCommitted(t *testing.T) {
+	databaseURL, _ := repeatableReadDatabase(t)
+	a := newReplica(t, databaseURL, "replica-a", replicaConfig{})
+	var level string
+	err := a.onLease(t.Context(), a.statementTimeout, func(ctx context.Context, conn *sql.Conn) error {
+		return conn.QueryRowContext(ctx, `SELECT current_setting('transaction_isolation')`).Scan(&level)
+	})
+	if err != nil {
+		t.Fatalf("a statement through onLease: %v", err)
+	}
+	if level != "read committed" {
+		t.Errorf("a lease statement ran at %q, want %q", level, "read committed")
+	}
+}
+
+// TestRenewalWaitingForATakeoverStepsDownAtOnce checks that a renewal that
+// waited for a takeover in flight re-reads the row the takeover left, finds the
+// lease moved and steps the leader down at once, with no statement failed, on a
+// database whose sessions start at REPEATABLE READ, where the renewal would
+// fail instead (SQLSTATE 40001) and the step-down wait for its retry. The
+// takeover expires the lease and runs takeLease for replica-ghost in one
+// transaction, left open between two of replica-a's renewals, so that no
+// renewal lands between the expiry and the takeover; replica-a's next renewal
+// is the one session that can wait for a lock.
+func TestRenewalWaitingForATakeoverStepsDownAtOnce(t *testing.T) {
+	// A lease of 6 s leaves the commit a second, the waiting renewal's
+	// statement timeout.
+	const lease = 6 * time.Second
+	databaseURL, admin := repeatableReadDatabase(t)
+	var lost atomic.Int32
+	a := newReplica(t, databaseURL, "replica-a", replicaConfig{
+		lease:    lease,
+		observer: Observer{Lost: func() { lost.Add(1) }},
+	})
+	a.start(t)
+	waitFor(t, 5*time.Second, "replica-a leading", a.AmLeader)
+	old := readLease(t, admin)
+
+	waitBetweenRenewals(t, admin, lease)
+	ctx := context.Background()
+	takeover, err := admin.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		t.Fatalf("begin the takeover: %v", err)
+	}
+	t.Cleanup(func() { _ = takeover.Rollback() })
+	if _, err := takeover.ExecContext(ctx, `UPDATE podium_leader SET expires_at = now() WHERE id = 1`); err != nil {
+		t.Fatalf("expire the lease: %v", err)
+	}
+	var epoch int64
+	if err := takeover.QueryRowContext(ctx, takeLease,
+		"replica-ghost", "replica-ghost.podium.test:7000", lease.Microseconds()).Scan(&epoch); err != nil {
+		t.Fatalf("take the lease for replica-ghost: %v", err)
+	}
+	if epoch != old.epoch+1 {
+		t.Fatalf("replica-ghost took the lease at epoch %d, want %d", epoch, old.epoch+1)
+	}
+
+	waitFor(t, lease/2, "replica-a's renewal waiting for the takeover", func() bool { return lockWaiters(t, admin) > 0 })
+	if err := takeover.Commit(); err != nil {
+		t.Fatalf("commit the takeover: %v", err)
+	}
+	// The step-down turns AmLeader false, then writes its line, then calls Lost.
+	waitFor(t, 5*time.Second, "replica-a's term lost", func() bool { return lost.Load() > 0 })
+	if a.AmLeader() {
+		t.Error("replica-a still leads once its term was lost")
+	}
+	if n := lost.Load(); n != 1 {
+		t.Errorf("Lost was called %d times, want 1", n)
+	}
+	logs := a.logs.String()
+	if strings.Contains(logs, "renewing the lease failed") {
+		t.Errorf("a renewal failed before the step-down, want none:\n%s", logs)
+	}
+	if !strings.Contains(logs, "a renewal found the lease moved to another replica") {
+		t.Errorf("replica-a stepped down, but not as a renewal that found the lease moved:\n%s", logs)
+	}
+	checkLogs(t, a)
 }

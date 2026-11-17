@@ -54,6 +54,12 @@ configuration loads (`TestCLIRefusesUnknownFlagBeforeStarting`):
   database and the schema versions before and after, and exits 0. Any failure, a
   schema newer than this podium's included, exits 1. It starts no listener
   (`TestMigrateCommand`).
+- `podium drop-schema --yes [--config PATH] [--wait DURATION]` drops that
+  schema, every table of podium's and all the state in them, and exits (see
+  "Database backend"). It reads the configuration as `podium migrate` does, and
+  needs `--yes`: without it, it is a usage error. `--wait` is how long it waits
+  for the replicas that run on the database, 0 by default
+  (`TestDropSchemaCommand`).
 - `podium version` and `podium --version` print one line,
   `podium <version> (commit <12 hex>[, modified], built <RFC 3339>, <go version> <os>/<arch>)`
   (`TestVersionCommandPrintsOneLine`), and start nothing. The version, the
@@ -61,7 +67,8 @@ configuration loads (`TestCLIRefusesUnknownFlagBeforeStarting`):
   the binary, and nothing is injected at link time: `dev` stands for a build
   that has no module version, and `unknown` for a commit or a time a build
   without VCS information lacks. The time is the commit's.
-- `-h` and `--help` print the usage to stdout and exit 0 (`TestHelpExitsZero`).
+- `-h` and `--help` print the usage to stdout and exit 0 (`TestHelpExitsZero`);
+  after a subcommand, `podium migrate -h` say, they are a usage error, exit 2.
 - An unknown flag, an unknown subcommand, a flag without its value or an
   argument that belongs to no command prints the error and the usage to stderr
   and exits 2. A subcommand is the first argument:
@@ -418,6 +425,8 @@ default or have no value, as the section on it says.
 | `tls.client.ca_file` | `SOLTI_TLS_CLIENT_CA_FILE` | string | empty |
 | `tls.client.cert_file` | `SOLTI_TLS_CLIENT_CERT_FILE` | string | empty |
 | `tls.client.key_file` | `SOLTI_TLS_CLIENT_KEY_FILE` | string | empty |
+| `tls.forward.ca_file` | `SOLTI_TLS_FORWARD_CA_FILE` | string | empty |
+| `tls.forward.server_name` | `SOLTI_TLS_FORWARD_SERVER_NAME` | string | empty |
 | `agent_auth.require` | `SOLTI_AGENT_AUTH_REQUIRE` | bool | true |
 | not in a file | `SOLTI_AGENT_AUTH_ENROLL_SECRET` | string | no default |
 | `log.level` | `SOLTI_LOG_LEVEL` | string | info |
@@ -443,6 +452,12 @@ against the system roots.
 - `tls.client` (`ca_file`, `cert_file`, `key_file`) — the CP as a client when
   dialing agents (proxy). `ca_file` verifies agent certs; `cert_file`/`key_file`
   present a client cert for mTLS.
+- `tls.forward` (`ca_file`, `server_name`) — how a follower checks the leader it
+  forwards a write to, with `tls.server` set: `ca_file` verifies the leader's
+  certificate in place of `tls.client.ca_file`, and `server_name` is the name
+  the leader's certificate must carry in place of the leader's advertise host.
+  The client certificate a follower presents stays `tls.client`'s. It requires
+  `tls.server`, and `server_name` is a DNS name or an IP address.
 
 ```yaml
 tls:
@@ -451,17 +466,20 @@ tls:
     key_file:  /etc/solti/tls/server.key
     client_ca_file: /etc/solti/tls/agents-ca.crt   # optional: agents need a client certificate
   client:
-    ca_file:   /etc/solti/tls/client-ca.crt        # verifies agents' endpoints; raft: also the nodes' server certificates
+    ca_file:   /etc/solti/tls/client-ca.crt        # verifies agents' endpoints; raft: also the nodes' server certificates, without tls.forward.ca_file
     cert_file: /etc/solti/tls/cp-client.crt        # presented when asked; raft with client_ca_file: required, of the agents' CA
     key_file:  /etc/solti/tls/cp-client.key
+  forward:                                         # optional: a follower's check of the leader
+    ca_file:     /etc/solti/tls/nodes-ca.crt       # the CA of the nodes' server certificates
+    server_name: podium.podium.svc                 # a name every node's server certificate carries
 ```
 
 On the memory backend, `tls.client.ca_file` only verifies the agents' endpoints.
-In a raft cluster it also holds the CA of the nodes' server certificates, and
-with `client_ca_file` set each node needs a `tls.client.cert_file` and
-`key_file` that chain to the agents' CA, or every sync that reaches a follower
-fails: a follower forwards to the leader as a client of `tls.client`, as the
-paragraphs below say.
+In a raft cluster, or the database mode, it also holds the CA of the nodes'
+server certificates unless `tls.forward.ca_file` does, and with `client_ca_file`
+set each node needs a `tls.client.cert_file` and `key_file` that chain to the
+agents' CA, or every sync that reaches a follower fails: a follower forwards to
+the leader as a client of `tls.client`, as the paragraphs below say.
 
 Env equivalents: `SOLTI_TLS_SERVER_CERT_FILE`, `SOLTI_TLS_CLIENT_CA_FILE`, etc.
 
@@ -470,15 +488,29 @@ HTTP-discovery listeners, and the syncs it gets on the gRPC listener, to the
 leader, at the host of the leader's raft advertise address, as written, and this
 node's port of that listener (see "Cluster"); on the database backend, at the
 host of the leader's `cluster.database.advertise_addr`, likewise. With
-`tls.server` set it forwards over TLS with `tls.client`: `ca_file` must also
-hold the CA of the replicas' server certificates, which must name each replica's
-raft advertise host as written, an IP SAN for `10.0.0.1:7000` and a DNS SAN for
-`podium-0.podium:7000`, and `cert_file`/`key_file` are presented when the leader
-asks for a client certificate, as the discovery listener does with
-`client_ca_file`. Without a `tls.client.ca_file`, the leader is verified against
-the system roots. A leader whose certificate does not verify gets no write: the
-follower answers 502. The raft transport has TLS settings of its own, with a CA
-of its own, see "Raft transport security".
+`tls.server` set it forwards over TLS as a client of `tls.client`, whose
+`cert_file`/`key_file` are presented when the leader asks for a client
+certificate, as the discovery listener does with `client_ca_file`. It checks the
+leader's certificate against `tls.forward.ca_file`, or `tls.client.ca_file`
+without one, or the system roots without either, and for
+`tls.forward.server_name`, or without one for the leader's advertise host as
+written: an IP SAN for `10.0.0.1:7000`, a DNS SAN for `podium-0.podium:7000`.
+Replicas whose addresses change, the pod IPs of a Deployment, share one
+certificate that names one host, such as their Service's, and set that host as
+`tls.forward.server_name`. A leader whose certificate does not verify gets no
+write: the follower answers 502 over HTTP, `leader unreachable` over gRPC, and
+logs why, at ERROR. A forward that fails to connect sent nothing, as at a
+handover, where the leader that left refuses the connection or its pod is gone
+(a connect gives up after 2 s): the follower waits up to 3 s for its view of the
+leader to move, and serves the write itself once it leads, or sends it to the
+next leader once. A write that reaches a follower while it knows no leader waits
+for one the same way. The two waits are separate: a write that met both can take
+up to about 12 s before its answer. Over HTTP a forward that was ever handed a
+connection is never sent again, and a TLS handshake that has not completed
+within 2 s answers 502 at once; over gRPC a `Sync` that the leader never
+answered, a stalled handshake included, goes to the next leader too, as it is
+safe to repeat. The raft transport has TLS settings of its own, with a CA of its
+own, see "Raft transport security".
 
 The forwards carry logins, cookies, bearer tokens and agents' tokens, so a raft
 cluster needs `tls.server` on every node: without it a follower forwards them in
@@ -1081,8 +1113,9 @@ may paste a URL into the wrong key.
   the API; everything else reads the primary.
 - Each pool names itself to the server by `application_name`, which replaces a
   URL's own: `podium` for the primary's, `podium-replica`, `podium-lease` for
-  the lease's one connection, `podium-events` for the events listener, and
-  `podium-migrate` for `podium migrate`.
+  the lease's one connection, `podium-events` for the events listener,
+  `podium-migrate` for `podium migrate`, and `podium-drop-schema` for
+  `podium drop-schema`.
 - `max_open_conns` caps the primary's pool and the replica's, which keep as many
   connections idle; the lease has a pool of one connection of its own, so that
   writers never starve it.
@@ -1147,21 +1180,22 @@ replica must share work as in raft, over the replicas the registry lists
 - **Connections.** A replica holds at most `max_open_conns` connections to the
   primary, plus the lease's one and the events listener's one, and at most
   `max_open_conns` to the replica endpoint: 12 and 10 with the default, per
-  replica. `podium migrate` takes one. Add them up over the replicas, and over
-  the extra pod of a rolling update, against the server's `max_connections` and
-  its other clients', and size `max_open_conns` down instead of past it: a
-  replica that finds none free makes its request wait for one
-  (`podium_database_pool_wait_count_total`), and a server at its limit refuses
-  new connections. A pooler between podium and Postgres must hand out a direct
-  or session-mode connection: the events' `LISTEN` does not work through a
-  transaction-mode pool, such as PgBouncer's, which hands the connection to
+  replica. `podium migrate` and `podium drop-schema` take one each. Add them up
+  over the replicas, and over the extra pod of a rolling update, against the
+  server's `max_connections` and its other clients', and size `max_open_conns`
+  down instead of past it: a replica that finds none free makes its request wait
+  for one (`podium_database_pool_wait_count_total`), and a server at its limit
+  refuses new connections. A pooler between podium and Postgres must hand out a
+  direct or session-mode connection: the events' `LISTEN` does not work through
+  a transaction-mode pool, such as PgBouncer's, which hands the connection to
   another client between statements: no notification arrives, and every replica
   then sees the others' events only at its read every 5 s (see "Events" in
   `internal/cluster/database/README.md`). Two more things break through such a
   pooler: pgx's statement cache, which uses prepared statements that PgBouncer
   before 1.21 rejects, and the lease connection's session-level
-  `statement_timeout`, which then leaks to the other clients of the pooled
-  server connection.
+  `statement_timeout` and default isolation, which then leak to the other
+  clients of the pooled server connection, while the lease's own statements can
+  land on a server connection that has neither.
 - **A takeover waits for the old leader's writes.** A write transaction of any
   length keeps the leadership: the leader's renewals do not wait for the fence's
   lock. A takeover does: it waits for the old leader's write transactions in
@@ -1201,6 +1235,32 @@ replica must share work as in raft, over the replicas the registry lists
   exits 0, or 1 on any failure, a configuration that fails loading and an
   unreachable database after the startup retry included (2 on a bad command
   line).
+- **`podium drop-schema --yes`** drops every table of podium's, and all the
+  state in them, which only a backup brings back. It loads the configuration as
+  `podium migrate` does, and drops in one transaction, under the lock on the
+  migrations, once no replica runs on the database: none heartbeated its
+  registry row within three seconds, and the lease is not held, by the
+  database's clock. It checks that twice, the second time with every table
+  locked, so that nothing lands between the check and the drop. A replica that
+  stops cleanly deletes its row and releases the lease, so it no longer runs at
+  once; a killed follower runs until its row is three seconds old, a killed
+  leader until its lease expires. Only replicas that run protect a database: a
+  replica of another deployment on the same database keeps it from dropping that
+  deployment's state, a deployment that runs none at that moment does not, and
+  neither does a replica that is starting and has not heartbeated yet. Each lock
+  it waits for is bounded by 5 s: a session that holds one longer, a `pg_dump`
+  or a transaction left open, makes it wait as a replica that runs does. While
+  either lasts it waits up to `--wait`, logging one WARN for each, and then
+  exits 1 with nothing dropped. It drops no other table, no view, no schema of
+  the database's and not the database, needs the role that owns the tables,
+  refuses a schema newer than its own (that podium's tables it does not know)
+  and tables with podium's names in a database without
+  `podium_schema_migrations`, logs the host, the port, the database, the version
+  and the tables it dropped, and exits 0, also when there was no schema to drop.
+  A database migrated again afterwards starts empty. A signal that ends it while
+  the drop commits can leave the schema dropped with exit 1: run it again, which
+  finds no schema and exits 0. The chart runs it as a `post-delete` hook at
+  `helm uninstall`, under a flag.
 - **Rate limits are per replica.** The login and sync limiters live in the
   memory of one process: logins and agent syncs are forwarded to the leader, so
   the leader's count decides them, the stream limiter counts on the replica that

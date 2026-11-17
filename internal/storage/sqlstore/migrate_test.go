@@ -15,24 +15,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage/sqlstore/pgtest"
 )
 
-// schemaTables are the tables of this podium's schema, sorted.
-var schemaTables = []string{
-	"podium_agent_credentials",
-	"podium_agents",
-	"podium_credentials",
-	"podium_events",
-	"podium_executions",
-	"podium_leader",
-	"podium_replicas",
-	"podium_roles",
-	"podium_rollouts",
-	"podium_schema_migrations",
-	"podium_sessions",
-	"podium_specs",
-	"podium_users",
-	"podium_verifiers",
-}
-
 // entityTables are the tables that hold the entities, one per entity group.
 var entityTables = []string{
 	"podium_agent_credentials",

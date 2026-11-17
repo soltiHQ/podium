@@ -35,7 +35,8 @@ real nodes over loopback with mutual TLS.
    HTTP and gRPC listeners have TLS settings of their own: with `tls.server`
    set, a follower forwards writes over TLS and checks the leader's certificate
    for the leader's raft host, so those certificates name each node's advertise
-   host too, and `tls.client.ca_file` holds their CA (see "TLS" in
+   host too, or one name that `tls.forward.server_name` sets, and
+   `tls.forward.ca_file`, or `tls.client.ca_file`, holds their CA (see "TLS" in
    `internal/config/README.md`).
 1. Set `tls.server` on every node. A follower forwards the writes it gets,
    logins, cookies and bearer tokens included, and the agents' syncs, to the
@@ -171,9 +172,11 @@ and list every node.
   follower answers for every forward that got no answer: a leader that committed
   the write and then died gives one, as does one that did not answer within the
   30 s that the forward waits. The write may land or not, so a client should
-  repeat only writes that are safe to repeat. Followers forward to the new
-  leader, which the hints name: writes sent to a follower's HTTP and gRPC
-  listeners after the leader stopped land on the new leader
+  repeat only writes that are safe to repeat. A forward that failed to connect
+  sent nothing, and goes to the new leader once the follower knows it, if it
+  does within 3 s (see "TLS" in `internal/config/README.md`). Followers forward
+  to the new leader, which the hints name: writes sent to a follower's HTTP and
+  gRPC listeners after the leader stopped land on the new leader
   (`TestFollowerWritesLandOnTheNewLeaderAfterFailover`, in `internal/app`).
 - Every node serves reads from its own state, which a lagging or cut-off node
   serves stale: see "Reads on a follower" for what that means for sessions and
@@ -1308,14 +1311,17 @@ the `UnaryLeader` interceptor's `Forwarder`, through the generated client:
 The leader's answer, an error included, is the follower's
 (`TestFollowerForwardsGRPCSync`, `TestUnaryLeaderForwardsAWriteWithItsMetadata`,
 `TestForwardedCallKeepsTheCallersDeadline`). A forward the leader never answers,
-as it cannot be reached, is `Unavailable` `leader unreachable` with the
-`x-leader` hint, the leader's gRPC address. A follower never forwards a call
-that carries `x-podium-forwarded`: it answers it `Unavailable` with the hint, so
-a call crosses one node at most, even when a stale view of the leader or nodes
-that serve gRPC on different ports would send it round
-(`TestUnaryLeaderAnswersWithTheLeadersGRPCAddress`). The follower that forwarded
-the call passes that answer on with its hint, the refusing node's view of the
-leader. An HTTP forward carries `X-Podium-Forwarded`, which the `Leader`
+as it cannot be reached, waits up to 3 s for the follower's view of the leader
+to move, and goes to the next leader, or is served by the follower once it
+leads, a `Sync` being safe to repeat; a view that does not move leaves
+`Unavailable` `leader unreachable` with the `x-leader` hint, the gRPC address of
+the leader it tried (`TestUnaryLeaderSendsASyncAgainAfterAHandover`). A follower
+never forwards a call that carries `x-podium-forwarded`: it answers it
+`Unavailable` with the hint, so a call crosses one node at most, even when a
+stale view of the leader or nodes that serve gRPC on different ports would send
+it round (`TestUnaryLeaderAnswersWithTheLeadersGRPCAddress`). The follower that
+forwarded the call passes that answer on with its hint, the refusing node's view
+of the leader. An HTTP forward carries `X-Podium-Forwarded`, which the `Leader`
 middleware of a follower answers the same way, 503 with `X-Leader`
 (`TestLeaderForwardsAWriteOnce`). The forward's transport sets the mark on what
 it sends, after the reverse proxy dropped the hop-by-hop headers, so a client

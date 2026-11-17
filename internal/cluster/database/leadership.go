@@ -17,11 +17,13 @@
 // within two thirds of the lease, counted from the send of the last renewal
 // that did: it stops before the row can expire, whatever the renewal's answer
 // took. The lease's statements run on a pool of their own (Options.LeaseDB),
-// each under a statement timeout that the server enforces, so that writers
-// never starve them and none runs past the step-down. When Run's context ends,
-// the holder releases the row once its WhenLeader work has returned: expires_at
-// becomes the database's now, epoch and holder kept. Work that has not returned
-// within a sixth of the lease leaves the row to expire.
+// so that writers never starve them, each under a statement timeout that the
+// server enforces, a renewal's cut to the time left before the step-down, and
+// at READ COMMITTED, whatever the database's or the role's default, so that one
+// that waited for the row's lock reads the row's newest version. When Run's
+// context ends, the holder releases the row once its WhenLeader work has
+// returned: expires_at becomes the database's now, epoch and holder kept. Work
+// that has not returned within a sixth of the lease leaves the row to expire.
 //
 // # The fence
 //
