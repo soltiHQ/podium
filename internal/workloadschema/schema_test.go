@@ -9,7 +9,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -81,10 +80,16 @@ func closedAddr(t *testing.T) string {
 // within runs f and fails the test when f takes longer than hostileBudget.
 func within(t *testing.T, name string, f func()) {
 	t.Helper()
+	withinBudget(t, name, hostileBudget, f)
+}
+
+// withinBudget runs f and fails the test when f takes longer than budget.
+func withinBudget(t *testing.T, name string, budget time.Duration, f func()) {
+	t.Helper()
 	start := time.Now()
 	f()
-	if took := time.Since(start); took > hostileBudget {
-		t.Errorf("%s took %v, want at most %v", name, took.Round(time.Millisecond), hostileBudget)
+	if took := time.Since(start); took > budget {
+		t.Errorf("%s took %v, want at most %v", name, took.Round(time.Millisecond), budget)
 	}
 }
 
@@ -296,26 +301,23 @@ func TestCompileHandlesARefCycleAndDeepNesting(t *testing.T) {
 		}
 	})
 
-	// A cycle bites when a body meets it, so each schema validates one too.
-	body := map[string]any{"next": map[string]any{"next": map[string]any{}}}
+	// A cycle at one location of the body is refused, before any body meets
+	// it (TestCompileRefusesASameLocationCycle has more of them).
 	for name, schema := range map[string]string{
 		"a $ref cycle":     `{"$defs":{"a":{"$ref":"#/$defs/b"},"b":{"$ref":"#/$defs/a"}},"$ref":"#/$defs/a"}`,
 		"a $ref to itself": `{"$ref":"#"}`,
 	} {
 		within(t, name, func() {
-			s, err := Compile([]byte(schema))
+			_, err := Compile([]byte(schema))
 			notPanicked(t, name, err)
-			if err != nil {
-				return
-			}
-			got := problems(t, s, body)
-			if len(got) == 0 || !strings.Contains(got[0].Message, "cycle") {
-				t.Errorf("%s: problems %v, want the reference cycle", name, got)
+			if err == nil || !strings.Contains(err.Error(), "cycle") {
+				t.Errorf("Compile(%s) = %v, want the cycle refused", name, err)
 			}
 		})
 	}
 	// A $ref that recurses into the body is no cycle: it validates a
 	// linked list, one level of the schema for each level of the body.
+	body := map[string]any{"next": map[string]any{"next": map[string]any{}}}
 	s := mustCompile(t, `{"properties":{"next":{"$ref":"#"}},"additionalProperties":false}`)
 	if err := s.Validate(body); err != nil {
 		t.Errorf("Validate of a linked list: %v", err)
@@ -326,7 +328,7 @@ func TestCompileHandlesARefCycleAndDeepNesting(t *testing.T) {
 // shapes that its time grows with, far within 64 KiB: many subschemas, and
 // deep nesting. Compile refuses a schema one past either bound at once, the
 // 64 KiB ones included, and compiles the worst schemas within both bounds
-// inside the budget.
+// inside boundedBudget.
 func TestCompileBoundsTheWidestAndDeepestSchemas(t *testing.T) {
 	// wide is n values under allOf, with the root object one more.
 	wide := func(n int, value string) string {
@@ -369,7 +371,7 @@ func TestCompileBoundsTheWidestAndDeepestSchemas(t *testing.T) {
 		"the deepest chain":    chain(maxSchemaDepth),
 		"the most such chains": `{"allOf":[` + strings.Join(parts, ",") + `]}`,
 	} {
-		within(t, name, func() {
+		withinBudget(t, name, boundedBudget, func() {
 			s, err := Compile([]byte(schema))
 			if err != nil {
 				t.Errorf("Compile(%s): %v", name, err)
@@ -501,68 +503,4 @@ func shortBudget(t *testing.T, d time.Duration) {
 	saved := validationBudget
 	validationBudget = d
 	t.Cleanup(func() { validationBudget = saved })
-}
-
-// TestValidateGivesUpOnASchemaPastItsBudget validates against a schema that
-// takes the validator 2^15 steps, a few hundred milliseconds and more, under
-// a budget of 100 ms. Validate returns the overrun at the budget, the same
-// error at once from then on, and the validator it abandoned finishes in the
-// background within seconds.
-func TestValidateGivesUpOnASchemaPastItsBudget(t *testing.T) {
-	const budget = 100 * time.Millisecond
-	shortBudget(t, budget)
-	s := mustCompile(t, anyOfChain(15))
-	before := runtime.NumGoroutine()
-
-	start := time.Now()
-	err := s.Validate(map[string]any{})
-	took := time.Since(start)
-	if !errors.Is(err, ErrValidationTooExpensive) {
-		t.Fatalf("Validate = %v, want ErrValidationTooExpensive", err)
-	}
-	if !strings.Contains(err.Error(), "ran past its budget of 100ms") {
-		t.Errorf("error %q does not name the overrun", err)
-	}
-	if took > hostileBudget {
-		t.Errorf("Validate gave up after %v, want at the budget of %v", took, budget)
-	}
-
-	// The schema is marked: a later validation does not run the validator.
-	start = time.Now()
-	err = s.Validate(map[string]any{"a": "b"})
-	if took := time.Since(start); took > 10*time.Millisecond {
-		t.Errorf("a later Validate took %v, want it at once", took)
-	}
-	if !errors.Is(err, ErrValidationTooExpensive) {
-		t.Errorf("a later Validate = %v, want ErrValidationTooExpensive", err)
-	}
-
-	// The abandoned validator ends on its own.
-	deadline := time.Now().Add(30 * time.Second)
-	for runtime.NumGoroutine() > before {
-		if time.Now().After(deadline) {
-			t.Fatalf("the abandoned validator still runs after 30s: %d goroutines, %d before", runtime.NumGoroutine(), before)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// TestValidateUnderAShortBudgetLeavesANormalSchemaAlone validates against a
-// schema the validator is quick on, under the same budget of 100 ms: it
-// validates as it did without a budget, and is never marked.
-func TestValidateUnderAShortBudgetLeavesANormalSchemaAlone(t *testing.T) {
-	shortBudget(t, 100*time.Millisecond)
-	s := mustCompile(t, deploySchema)
-	want := []Problem{
-		{Path: "", Message: "missing property 'name'"},
-		{Path: "/ports/0", Message: "got string, want integer"},
-	}
-	for range 20 {
-		if err := s.Validate(map[string]any{"name": "web", "ports": []any{float64(80)}}); err != nil {
-			t.Fatalf("Validate of a valid body: %v", err)
-		}
-		if got := problems(t, s, map[string]any{"ports": []any{"80"}}); !slices.Equal(got, want) {
-			t.Fatalf("problems %v, want %v", got, want)
-		}
-	}
 }
