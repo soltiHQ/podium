@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/internal/storage/sqlstore/pgtest"
+	"github.com/soltiHQ/control-plane/migrations"
 )
 
 // entityTables are the tables that hold the entities, one per entity group.
@@ -322,14 +323,20 @@ type fsDialect struct {
 
 func (d fsDialect) Migrations() fs.FS { return d.files }
 
+// stamped is migration file version: statements, then the statement that
+// records the version, as every migration file ends.
+func stamped(version int, statements string) *fstest.MapFile {
+	return &fstest.MapFile{Data: []byte(statements + "\n" + fmt.Sprintf(stampMigration, version) + "\n")}
+}
+
 // TestMigrationsRunOneToATransaction migrates with a first file that applies and
 // a second that fails halfway: the second rolls back whole, the first stays
 // applied and recorded, and Open still refuses the schema as older.
 func TestMigrationsRunOneToATransaction(t *testing.T) {
 	d := fsDialect{files: fstest.MapFS{
-		"0001_first.sql": {Data: []byte(`CREATE TABLE first_table (id int);`)},
+		"0001_first.sql": stamped(1, `CREATE TABLE first_table (id int);`),
 		// Its first statement succeeds, its second fails.
-		"0002_second.sql": {Data: []byte(`CREATE TABLE second_table (id int); INSERT INTO no_such_table VALUES (1);`)},
+		"0002_second.sql": stamped(2, `CREATE TABLE second_table (id int); INSERT INTO no_such_table VALUES (1);`),
 	}}
 	db := pgtest.Fresh(t)
 	ctx := t.Context()
@@ -349,6 +356,76 @@ func TestMigrationsRunOneToATransaction(t *testing.T) {
 	}
 	if s, err := Open(ctx, Options{Primary: db, Dialect: d}); s != nil || !errors.Is(err, ErrSchemaOlder) {
 		t.Errorf("Open: %v, %v; want no store and ErrSchemaOlder", s, err)
+	}
+}
+
+// TestMigrationMustLeaveItsVersion migrates with a second file that ends with
+// the statement that records its version, but moves the version recorded
+// before it past its own: the migrator finds the schema at another version
+// than the file's once it ran, and rolls the file back.
+func TestMigrationMustLeaveItsVersion(t *testing.T) {
+	d := fsDialect{files: fstest.MapFS{
+		"0001_first.sql":  stamped(1, `CREATE TABLE first_table (id int);`),
+		"0002_second.sql": stamped(2, `CREATE TABLE second_table (id int); UPDATE podium_schema_migrations SET version = 9;`),
+	}}
+	db := pgtest.Fresh(t)
+
+	err := Migrate(t.Context(), db, d)
+	if want := "migration 0002_second.sql left the schema at version 9, want 2"; err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Migrate: %v, want an error naming %q", err, want)
+	}
+	if want := []string{"first_table", "podium_schema_migrations"}; !slices.Equal(tables(t, db), want) {
+		t.Errorf("tables %q, want %q: the second migration rolled back", tables(t, db), want)
+	}
+	if got := versions(t, db); !slices.Equal(got, []int{1}) {
+		t.Errorf("recorded versions %v, want [1]", got)
+	}
+}
+
+// TestSchemaAppliedByAnotherTool applies the Postgres migrations as a tool of
+// the deployment's own does, as Bytebase: each file as it is, in a transaction
+// of its own, in version order, without podium's migrator. The files record
+// their versions themselves, so the schema is at podium's version: Open takes
+// it, and Migrate finds nothing to apply.
+func TestSchemaAppliedByAnotherTool(t *testing.T) {
+	db := pgtest.Fresh(t)
+	ctx := t.Context()
+	names, err := fs.Glob(migrations.Postgres(), "*.sql")
+	if err != nil || len(names) == 0 {
+		t.Fatalf("the migration files: %q, %v", names, err)
+	}
+	want := []int{}
+	for i, name := range names {
+		body, err := fs.ReadFile(migrations.Postgres(), name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.ExecContext(ctx, string(body)); err != nil {
+			t.Fatalf("apply %s: %v", name, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit %s: %v", name, err)
+		}
+		want = append(want, i+1)
+	}
+	if got := versions(t, db); !slices.Equal(got, want) {
+		t.Fatalf("recorded versions %v, want %v: each file records its own", got, want)
+	}
+	if _, err := Open(ctx, Options{Primary: db, Dialect: Postgres{}}); err != nil {
+		t.Errorf("Open: %v, want the schema taken", err)
+	}
+	if err := Migrate(ctx, db, Postgres{}); err != nil {
+		t.Errorf("Migrate: %v, want nothing to apply", err)
+	}
+	if got := versions(t, db); !slices.Equal(got, want) {
+		t.Errorf("recorded versions %v after Migrate, want %v", got, want)
+	}
+	if got := tables(t, db); !slices.Equal(got, schemaTables) {
+		t.Errorf("tables %q, want %q", got, schemaTables)
 	}
 }
 
@@ -416,8 +493,26 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 	}
 }
 
+// TestLatestVersion checks LatestVersion: the version of a dialect's newest
+// migration, its files checked as the migrator checks them.
+func TestLatestVersion(t *testing.T) {
+	if v, err := LatestVersion(Postgres{}); err != nil || v != latest(t) {
+		t.Errorf("LatestVersion(Postgres) = %d, %v; want %d", v, err, latest(t))
+	}
+	two := fsDialect{files: fstest.MapFS{"0001_first.sql": stamped(1, "SELECT 1;"), "0002_second.sql": stamped(2, "SELECT 1;")}}
+	if v, err := LatestVersion(two); err != nil || v != 2 {
+		t.Errorf("LatestVersion of two files = %d, %v; want 2", v, err)
+	}
+	unstamped := fsDialect{files: fstest.MapFS{"0001_first.sql": {Data: []byte("SELECT 1;")}}}
+	if v, err := LatestVersion(unstamped); err == nil {
+		t.Errorf("LatestVersion of a file without its stamp = %d, want an error", v)
+	}
+}
+
 // TestMigrationFiles checks how the migrator reads a dialect's files: named
-// NNNN_name.sql, versions 1, 2, 3… without a gap or a repeat.
+// NNNN_name.sql, versions 1, 2, 3… without a gap or a repeat, each ending with
+// the statement that records its version, the only one that inserts into
+// podium_schema_migrations.
 func TestMigrationFiles(t *testing.T) {
 	files, err := migrationFiles(Postgres{}.Migrations())
 	if err != nil || len(files) != 1 || files[0].version != 1 || files[0].name != "0001_init.sql" {
@@ -430,19 +525,30 @@ func TestMigrationFiles(t *testing.T) {
 		t.Errorf("0001_init.sql does not repeat the migrator's statement:\n%s", createMigrationsTable)
 	}
 
-	file := &fstest.MapFile{Data: []byte("SELECT 1;")}
+	// The statement that records the version may be followed by blank lines
+	// and comments, and nothing else.
+	trailing := &fstest.MapFile{Data: []byte("SELECT 1;\n" + fmt.Sprintf(stampMigration, 1) + "\n\n-- the end\n")}
+	if files, err := migrationFiles(fstest.MapFS{"0001_init.sql": trailing}); err != nil || len(files) != 1 {
+		t.Errorf("a file whose stamp blank lines and a comment follow: %+v, %v; want it read", files, err)
+	}
+
+	first := stamped(1, "SELECT 1;")
 	for _, tc := range []struct {
-		name string
-		fsys fstest.MapFS
+		name, want string
+		fsys       fstest.MapFS
 	}{
-		{"no file", fstest.MapFS{}},
-		{"a gap", fstest.MapFS{"0001_init.sql": file, "0003_more.sql": file}},
-		{"a repeated version", fstest.MapFS{"0001_init.sql": file, "0001_again.sql": file}},
-		{"no version 1", fstest.MapFS{"0002_more.sql": file}},
-		{"a name without a version", fstest.MapFS{"0001_init.sql": file, "init.sql": file}},
+		{"no file", "has no migrations", fstest.MapFS{}},
+		{"a gap", `"0003_more.sql" has version 3, want 2`, fstest.MapFS{"0001_init.sql": first, "0003_more.sql": stamped(3, "SELECT 1;")}},
+		{"a repeated version", `"0001_init.sql" has version 1, want 2`, fstest.MapFS{"0001_again.sql": first, "0001_init.sql": first}},
+		{"no version 1", `"0002_more.sql" has version 2, want 1`, fstest.MapFS{"0002_more.sql": stamped(2, "SELECT 1;")}},
+		{"a name without a version", `"init.sql" is not a file named NNNN_name.sql`, fstest.MapFS{"0001_init.sql": first, "init.sql": first}},
+		{"no stamp", `"0001_init.sql" does not end with the statement that records its version`, fstest.MapFS{"0001_init.sql": {Data: []byte("SELECT 1;\n")}}},
+		{"the stamp of another version", `"0001_init.sql" does not end with the statement that records its version`, fstest.MapFS{"0001_init.sql": stamped(2, "SELECT 1;")}},
+		{"a statement after the stamp", `"0001_init.sql" does not end with the statement that records its version`, fstest.MapFS{"0001_init.sql": {Data: []byte(fmt.Sprintf(stampMigration, 1) + "\nSELECT 1;\n")}}},
+		{"a second insert into the table", `"0001_init.sql" inserts into podium_schema_migrations 2 times`, fstest.MapFS{"0001_init.sql": stamped(1, "insert  into podium_schema_migrations (version) VALUES (7);")}},
 	} {
-		if files, err := migrationFiles(tc.fsys); err == nil {
-			t.Errorf("migration files with %s: %+v, want an error", tc.name, files)
+		if files, err := migrationFiles(tc.fsys); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("migration files with %s: %+v, %v; want an error naming %q", tc.name, files, err, tc.want)
 		}
 	}
 }

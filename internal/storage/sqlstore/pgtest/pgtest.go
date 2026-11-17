@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +60,63 @@ func NewDatabase(t testing.TB) string {
 	})
 
 	u.Path, u.RawPath = "/"+name, ""
+	return u.String()
+}
+
+// DMLRole creates a role that may log in to the database at databaseURL and
+// read and write the rows of its tables, and nothing else, as a deployment
+// whose migrations a tool of its own applies runs podium: CONNECT on the
+// database, USAGE on schema public, and SELECT, INSERT, UPDATE and DELETE on
+// the tables of schema public, those there now and, as default privileges of
+// databaseURL's user, those that user makes later. It grants nothing on a
+// sequence. It returns databaseURL with the role's name and a password of its
+// own, and drops the role when t ends, before NewDatabase drops the database.
+func DMLRole(t testing.TB, databaseURL string) string {
+	t.Helper()
+	u, err := url.Parse(databaseURL)
+	if err != nil {
+		t.Fatal("pgtest: the database URL does not parse")
+	}
+	random := make([]byte, 24)
+	_, _ = rand.Read(random)
+	name := "podium_dml_" + hex.EncodeToString(random[:8])
+	password := hex.EncodeToString(random[8:])
+	database := strings.TrimPrefix(u.Path, "/")
+
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatalf("pgtest: open the database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	// The statements name the role and the database, never the password, which
+	// the first one carries.
+	for i, statement := range []string{
+		"CREATE ROLE " + name + " LOGIN PASSWORD '" + password + "'",
+		"GRANT CONNECT ON DATABASE " + database + " TO " + name,
+		"GRANT USAGE ON SCHEMA public TO " + name,
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO " + name,
+		"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO " + name,
+	} {
+		if _, err := db.ExecContext(t.Context(), statement); err != nil {
+			if i == 0 {
+				statement = "CREATE ROLE " + name
+			}
+			t.Fatalf("pgtest: %s: %v", statement, err)
+		}
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		defer cancel()
+		// DROP OWNED revokes what the role holds in the database, its default
+		// privileges and its CONNECT included, without which DROP ROLE refuses.
+		for _, statement := range []string{"DROP OWNED BY " + name, "DROP ROLE " + name} {
+			if err := onServer(ctx, databaseURL, statement); err != nil {
+				t.Errorf("pgtest: %s: %v", statement, err)
+				return
+			}
+		}
+	})
+	u.User = url.UserPassword(name, password)
 	return u.String()
 }
 

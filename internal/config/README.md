@@ -60,6 +60,15 @@ configuration loads (`TestCLIRefusesUnknownFlagBeforeStarting`):
   needs `--yes`: without it, it is a usage error. `--wait` is how long it waits
   for the replicas that run on the database, 0 by default
   (`TestDropSchemaCommand`).
+- `podium schema version` prints the version of that schema this podium runs on,
+  its newest migration's, and `podium schema export --dir DIR` writes podium's
+  SQL migrations into `DIR`, which it makes when it is missing, for a tool of
+  the deployment's own that applies them, as Bytebase (see
+  [Migrations](../../migrations/README.md)). Neither loads a configuration or
+  reaches a database. The export keeps a file of `DIR` with the same content and
+  one of no migration's name, overwrites nothing, and stops with exit 1 before
+  it writes anything at a file of a migration's name with other content
+  (`TestSchemaExportCommand`).
 - `podium version` and `podium --version` print one line,
   `podium <version> (commit <12 hex>[, modified], built <RFC 3339>, <go version> <os>/<arch>)`
   (`TestVersionCommandPrintsOneLine`), and start nothing. The version, the
@@ -1128,8 +1137,10 @@ may paste a URL into the wrong key.
 - `migrate: true` migrates the schema at start, under a database lock, so that
   replicas that start together migrate once. `migrate: false` makes a replica
   refuse a schema older than its own, saying to run `podium migrate`, for
-  deployments that run `podium migrate` as a step of their own. A schema newer
-  than the replica's stops it, both versions named, and it writes nothing.
+  deployments that run `podium migrate` as a step of their own, or apply
+  podium's migrations with a tool of their own, as Bytebase (see
+  [Migrations](../../migrations/README.md)). A schema newer than the replica's
+  stops it, both versions named, and it writes nothing.
 
 At start a replica retries a database it cannot reach for 30 s, a second apart,
 with one WARN for each database read that fails, which names the SQLSTATE of a
@@ -1227,7 +1238,8 @@ replica must share work as in raft, over the replicas the registry lists
   migration meets; there is no downgrade: back the database up before an
   upgrade, with the database's own tools. With `migrate: true`, the default, the
   first replica of the new version migrates at start; with `migrate: false`, run
-  `podium migrate` first, such as a Kubernetes Job that runs before the rollout.
+  `podium migrate` first, such as a Kubernetes Job that runs before the rollout,
+  or apply the new migrations with your own tool first.
 - **`podium migrate`** loads and validates the whole configuration as the server
   does, `advertise_addr` aside, from the same file and variables (so it needs
   `SOLTI_AUTH_JWT_SECRET` and the rest, and `cluster.backend: database`), logs

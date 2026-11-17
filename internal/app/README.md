@@ -5,10 +5,11 @@ services, transports, and background runners into a single \[`App`\] aggregate
 with a clean **Build / Run / Shutdown** contract.
 
 `cmd/main.go` is a thin entry point: it parses the command line, answers
-`podium agent-token` and `podium version` itself, runs `podium migrate` through
-`app.Migrate` and `podium drop-schema` through `app.DropSchema`, and to serve
-builds the loggers and the signal handling around: load config → `app.New` →
-`app.Run` → `app.Shutdown`. Everything else lives here.
+`podium agent-token`, `podium schema` and `podium version` itself, runs
+`podium migrate` through `app.Migrate` and `podium drop-schema` through
+`app.DropSchema`, and to serve builds the loggers and the signal handling
+around: load config → `app.New` → `app.Run` → `app.Shutdown`. Everything else
+lives here.
 
 ## Package map
 

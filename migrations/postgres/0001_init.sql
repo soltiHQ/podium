@@ -154,3 +154,7 @@ CREATE TABLE podium_events (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX podium_events_created_at ON podium_events (created_at);
+
+-- The version this file brings the schema to: the last statement of every
+-- migration file, see migrations/README.md.
+INSERT INTO podium_schema_migrations (version) VALUES (1) ON CONFLICT (version) DO NOTHING;
