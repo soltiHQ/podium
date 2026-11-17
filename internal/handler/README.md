@@ -306,7 +306,13 @@ names, Deploy writes nothing and answers 412
 matches, and a blank `If-Match`, or one of empty list elements only, names no
 plan and gets the same answer. Only without `If-Match`, or with `*` anywhere in
 it, Deploy deploys the current placement unchecked, as before, so API clients
-that never preview keep working.
+that never preview keep working. A deploy whose spec workload changed between
+the placement check and the write answers the same 412, even without a token.
+
+Each runner of the placement may carry `detail`, a string of at most 1 KiB that
+says why the runner is `schema_incompatible`: the schema problems, "the body is
+too costly to check against this schema", or "the schema could not be loaded:
+…". The UI shows it as text.
 
 A spec carries its workload beside the envelope, on create and update and in
 every response:
@@ -322,11 +328,11 @@ every response:
 }
 ```
 
-The former built-in task kind fields are gone. An invalid body is a 400 whose message
-lists `path: message; …`, the first 20 problems. A fingerprint podium does not
-hold is a 400, and so is a body too costly to validate: "the workload schema is
-too expensive to validate this body". A save that changes nothing writes nothing
-and no longer bumps the version.
+The former built-in task kind fields are gone. An invalid body is a 400 whose
+message lists `path: message; …`, the first 20 problems. A fingerprint podium
+does not hold is a 400, and so is a body too costly to validate: "the workload
+schema is too expensive to validate this body". A save that changes nothing
+writes nothing and no longer bumps the version.
 
 ### Workload type catalog `/api/v1/workload-types`
 
@@ -506,24 +512,27 @@ below the root. `format` and `content*` are annotations, never asserted.
 Validation runs under a fixed work budget.
 
 **Placement reasons.** Each target gets one of `compatible`,
-`workload_unsupported`, `runner_labels_mismatch` and three that the schemas
-bring:
+`workload_unsupported`, `runner_labels_mismatch`, `inventory_unknown` and three
+that the schemas bring:
 
 | Reason | Meaning |
 | -- | -- |
+| `inventory_unknown` | The agent has reported no runners. It is not eligible. |
 | `schema_incompatible` | The body is invalid against that target's schema, or too costly to check. |
 | `schema_pending` | The target's schema has not arrived yet, normally for one sync. |
 | `schema_unpublished` | The runner declares the type without a fingerprint. |
 
 A target whose fingerprint differs from the spec's is compatible when the body
 is valid against the target's schema; the spec keeps its own fingerprint. Deploy
-refuses incompatible targets with 409. A task already running on a target that
-turns incompatible is left alone and gets no new generation.
+refuses incompatible targets, and `inventory_unknown` ones, with 409
+`Deployment blocked: a target cannot take this workload (<codes>). Review the placement preview.`
+A task already running on a target that turns incompatible is left alone and
+gets no new generation.
 
 ## Discovery endpoint
 
 A sync also carries the agents' workload type fingerprints and, when podium
-asked, their schemas: see "Workload types" above.
+asked, their schemas: see "Workload types and schemas" above.
 
 | Transport | Method | Path / RPC |
 | -- | -- | -- |
