@@ -99,7 +99,7 @@ func TestPlacementPreservesRunnerRegistrationOrderAndObservedLiveness(t *testing
 	if !plan.DeployAllowed || !target.Eligible || target.SelectedRunner != "z-first" {
 		t.Fatalf("routing changed admission/order: %+v", target)
 	}
-	if !reflect.DeepEqual(target.RunnerNames, []string{"z-first", "a-second"}) || !reflect.DeepEqual(target.MatchedBy, []string{"explicit", "labels"}) {
+	if !reflect.DeepEqual(target.RunnerNames, []string{"z-first"}) || !reflect.DeepEqual(target.MatchedBy, []string{"explicit", "labels"}) {
 		t.Fatalf("ordered runner/union metadata lost: %+v", target)
 	}
 	if target.Status != "inactive" || target.HeartbeatFreshness != "overdue" || !target.LastSeenAt.Equal(a.LastSeenAt()) {
@@ -107,6 +107,11 @@ func TestPlacementPreservesRunnerRegistrationOrderAndObservedLiveness(t *testing
 	}
 	if target.Runners[0].Reason != "workload_unsupported" || target.Runners[1].Reason != "runner_labels_mismatch" || target.Runners[2].Reason != "compatible" {
 		t.Fatalf("routing explanations wrong: %+v", target.Runners)
+	}
+	// The agent routes the workload to z-first: a-second, which matches too, is
+	// not evaluated.
+	if r := target.Runners[3]; r.Reason != "" || r.Eligible || !r.WorkloadMatch || !r.LabelsMatch {
+		t.Fatalf("a runner after the routed one was evaluated: %+v", r)
 	}
 }
 
@@ -284,6 +289,10 @@ func containerRunner(name, fingerprint string) model.RunnerCapability {
 	return model.RunnerCapability{Name: name, Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Container", SchemaFingerprint: fingerprint}}}
 }
 
+// Each runner fingerprint, the one the agent routes the workload to, gives the
+// outcome its schema has for the body: the spec's own and another schema the
+// body fits are compatible, one that refuses it is schema_incompatible with the
+// problems, one podium lacks is pending and none is unpublished.
 func TestPlacementComparesFingerprints(t *testing.T) {
 	svc, store := mkService(t)
 	ctx := context.Background()
@@ -291,50 +300,37 @@ func TestPlacementComparesFingerprints(t *testing.T) {
 	// The body {"image": "busybox"} is valid for permissiveSchema and not for portSchema.
 	valid := seedSchema(t, store, permissiveSchema)
 	invalid := seedSchema(t, store, portSchema)
-	a, err := store.GetAgent(ctx, "agent")
-	if err != nil {
-		t.Fatal(err)
-	}
-	a.SetCapabilities([]model.RunnerCapability{
-		containerRunner("equal", testFingerprint(t)),
-		containerRunner("valid", valid),
-		containerRunner("invalid", invalid),
-		containerRunner("unknown", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
-		containerRunner("unpublished", ""),
-	})
-	if err = store.UpsertAgent(ctx, a); err != nil {
-		t.Fatal(err)
-	}
-	plan, err := svc.PreviewPlacement(ctx, ts.ID())
-	if err != nil {
-		t.Fatal(err)
-	}
-	target := plan.Targets[0]
-	got := make(map[string]string)
-	eligible := make(map[string]bool)
-	for _, r := range target.Runners {
-		got[r.Name], eligible[r.Name] = r.Reason, r.Eligible
-		if !r.WorkloadMatch {
-			t.Fatalf("runner %s does not match the workload type", r.Name)
+	for _, tc := range []struct {
+		name, fingerprint, reason string
+	}{
+		{"equal", testFingerprint(t), "compatible"},
+		{"valid", valid, "compatible"},
+		{"invalid", invalid, "schema_incompatible"},
+		{"unknown", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "schema_pending"},
+		{"unpublished", "", "schema_unpublished"},
+	} {
+		a, err := store.GetAgent(ctx, "agent")
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	want := map[string]string{
-		"equal": "compatible", "valid": "compatible", "invalid": "schema_incompatible",
-		"unknown": "schema_pending", "unpublished": "schema_unpublished",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("reasons = %v, want %v", got, want)
-	}
-	for name, reason := range want {
-		if eligible[name] != (reason == "compatible") {
-			t.Fatalf("runner %s: eligible = %v with reason %s", name, eligible[name], reason)
+		a.SetCapabilities([]model.RunnerCapability{containerRunner(tc.name, tc.fingerprint)})
+		if err = store.UpsertAgent(ctx, a); err != nil {
+			t.Fatal(err)
 		}
-	}
-	if !reflect.DeepEqual(target.RunnerNames, []string{"equal", "valid"}) || target.SelectedRunner != "equal" || !target.Eligible || target.EligibilityReason != "compatible_runner" {
-		t.Fatalf("only compatible runners are eligible: %+v", target)
-	}
-	for _, r := range target.Runners {
-		if r.Name == "invalid" && !strings.Contains(r.Detail, "port") {
+		plan, err := svc.PreviewPlacement(ctx, ts.ID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		target := plan.Targets[0]
+		r := target.Runners[0]
+		compatible := tc.reason == "compatible"
+		if !r.WorkloadMatch || r.Reason != tc.reason || r.Eligible != compatible || target.Eligible != compatible {
+			t.Fatalf("%s: runner %s eligible %v, target eligible %v; want %s", tc.name, r.Reason, r.Eligible, target.Eligible, tc.reason)
+		}
+		if compatible && (target.SelectedRunner != tc.name || target.EligibilityReason != "compatible_runner") {
+			t.Fatalf("%s: selected %q (%s)", tc.name, target.SelectedRunner, target.EligibilityReason)
+		}
+		if tc.name == "invalid" && !strings.Contains(r.Detail, "port") {
 			t.Fatalf("the incompatible runner names no problem: %q", r.Detail)
 		}
 	}
@@ -365,6 +361,111 @@ func TestPlacementWithoutACompatibleRunnerExplainsWhy(t *testing.T) {
 		if target := plan.Targets[0]; target.Eligible || target.EligibilityReason != tc.reason || plan.DeployAllowed || plan.BlockingReason != "incompatible_targets" {
 			t.Fatalf("%s: %+v / %q", name, target, plan.BlockingReason)
 		}
+	}
+}
+
+// The agent routes a task to the first runner, in its declared order, whose
+// workload type and labels match, whatever that runner's schema: placement
+// evaluates that runner alone. An incompatible first runner makes the target
+// ineligible, with its reason, even when a later runner would take the body;
+// the later runners are not evaluated. Runners whose type or labels do not
+// match are passed over, as the agent passes them over.
+func TestPlacementEvaluatesTheRunnerTheAgentRoutesTo(t *testing.T) {
+	svc, store := mkService(t)
+	ctx := context.Background()
+	ts := mkSpec(t, svc, store, "first-runner", []string{"agent"})
+	ts.SetRunnerLabels(map[string]string{"zone": "a"})
+	if _, err := svc.Upsert(ctx, ts, ts.Version()); err != nil {
+		t.Fatal(err)
+	}
+	refuses := seedSchema(t, store, portSchema)
+	zoned := func(name, zone, fingerprint string) model.RunnerCapability {
+		r := containerRunner(name, fingerprint)
+		r.Labels = map[string]string{"zone": zone}
+		return r
+	}
+	for _, tc := range []struct {
+		name     string
+		runners  []model.RunnerCapability
+		eligible bool
+		reason   string // the target's
+		selected string
+		reasons  []string // each runner's, in order
+	}{
+		{
+			name:    "incompatible first",
+			runners: []model.RunnerCapability{zoned("refuses", "a", refuses), zoned("fits", "a", testFingerprint(t))},
+			reason:  "schema_incompatible", reasons: []string{"schema_incompatible", ""},
+		},
+		{
+			name:     "compatible first",
+			runners:  []model.RunnerCapability{zoned("fits", "a", testFingerprint(t)), zoned("refuses", "a", refuses)},
+			eligible: true, reason: "compatible_runner", selected: "fits", reasons: []string{"compatible", ""},
+		},
+		{
+			name: "other types and labels passed over",
+			runners: []model.RunnerCapability{
+				{Name: "wasm", Labels: map[string]string{"zone": "a"}, Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Wasm"}}},
+				zoned("other-zone", "b", testFingerprint(t)),
+				zoned("refuses", "a", refuses),
+				zoned("fits", "a", testFingerprint(t)),
+			},
+			reason: "schema_incompatible", reasons: []string{"workload_unsupported", "runner_labels_mismatch", "schema_incompatible", ""},
+		},
+		{
+			name:    "pending first",
+			runners: []model.RunnerCapability{zoned("pending", "a", strings.Repeat("f", 64)), zoned("fits", "a", testFingerprint(t))},
+			reason:  "schema_pending", reasons: []string{"schema_pending", ""},
+		},
+		{
+			name:    "unpublished first",
+			runners: []model.RunnerCapability{zoned("unpublished", "a", ""), zoned("fits", "a", testFingerprint(t))},
+			reason:  "schema_unpublished", reasons: []string{"schema_unpublished", ""},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := store.GetAgent(ctx, "agent")
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.SetCapabilities(tc.runners)
+			if err = store.UpsertAgent(ctx, a); err != nil {
+				t.Fatal(err)
+			}
+			plan, err := svc.PreviewPlacement(ctx, ts.ID())
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := plan.Targets[0]
+			if target.Eligible != tc.eligible || target.EligibilityReason != tc.reason || target.SelectedRunner != tc.selected || plan.DeployAllowed != tc.eligible {
+				t.Fatalf("target eligible %v (%s), selected %q, deploy allowed %v; want %v (%s), selected %q",
+					target.Eligible, target.EligibilityReason, target.SelectedRunner, plan.DeployAllowed, tc.eligible, tc.reason, tc.selected)
+			}
+			var reasons []string
+			for _, r := range target.Runners {
+				reasons = append(reasons, r.Reason)
+				if r.Eligible && r.Name != tc.selected {
+					t.Fatalf("runner %s is eligible, but the agent routes to %q", r.Name, tc.selected)
+				}
+			}
+			if !reflect.DeepEqual(reasons, tc.reasons) {
+				t.Fatalf("runner reasons %q, want %q", reasons, tc.reasons)
+			}
+			wantNames := []string{}
+			if tc.selected != "" {
+				wantNames = []string{tc.selected}
+			}
+			if !reflect.DeepEqual(target.RunnerNames, wantNames) {
+				t.Fatalf("runner names %q, want %q", target.RunnerNames, wantNames)
+			}
+			var incompatible *IncompatibleTargetsError
+			switch err := svc.Deploy(ctx, ts.ID(), nil); {
+			case tc.eligible && err != nil:
+				t.Fatalf("Deploy = %v", err)
+			case !tc.eligible && (!errors.As(err, &incompatible) || incompatible.Reasons["agent"] != tc.reason):
+				t.Fatalf("Deploy = %v, want it refused with %s", err, tc.reason)
+			}
+		})
 	}
 }
 
@@ -429,35 +530,36 @@ func TestDeployRefusesOnlyIncompatibleTargets(t *testing.T) {
 	}
 }
 
-// flakySource wraps the catalog and fails to load the fingerprints in broken.
+// flakySource wraps the catalog, fails to load the fingerprints in broken, and
+// counts the fingerprints it is asked to load.
 type flakySource struct {
 	SchemaSource
 	broken map[string]bool
+	loaded map[string]int
 }
 
 func (f flakySource) Compiled(ctx context.Context, fingerprint string) (*workloadschema.Schema, bool, error) {
+	f.loaded[fingerprint]++
 	if f.broken[fingerprint] {
 		return nil, false, errors.New("stored schema no longer compiles")
 	}
 	return f.SchemaSource.Compiled(ctx, fingerprint)
 }
 
-// A schema that cannot be loaded marks its runner schema_incompatible with a
-// generic detail; it does not fail the plan, and a schema of an unrelated type
-// on the same agent is not even looked at.
+// A schema that cannot be loaded marks the runner the agent routes the workload
+// to schema_incompatible; it does not fail the plan. The schemas of the other
+// runners, of the type or not, are not even looked at.
 func TestPlacementSurvivesASchemaThatCannotBeLoaded(t *testing.T) {
 	svc, store := mkService(t)
 	ctx := context.Background()
 	ts := mkSpec(t, svc, store, "broken", []string{"agent"})
 	brokenOwn := seedSchema(t, store, portSchema)
 	brokenOther := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
-	svc.schemas = flakySource{SchemaSource: svc.schemas, broken: map[string]bool{brokenOwn: true, brokenOther: true}}
+	source := flakySource{SchemaSource: svc.schemas, broken: map[string]bool{brokenOwn: true, brokenOther: true}, loaded: map[string]int{}}
+	svc.schemas = source
+	otherType := model.RunnerCapability{Name: "other-type", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Unrelated", SchemaFingerprint: brokenOther}}}
 	a, _ := store.GetAgent(ctx, "agent")
-	a.SetCapabilities([]model.RunnerCapability{
-		containerRunner("fine", testFingerprint(t)),
-		containerRunner("own-broken", brokenOwn),
-		{Name: "other-type", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Unrelated", SchemaFingerprint: brokenOther}}},
-	})
+	a.SetCapabilities([]model.RunnerCapability{otherType, containerRunner("fine", testFingerprint(t)), containerRunner("own-broken", brokenOwn)})
 	if err := store.UpsertAgent(ctx, a); err != nil {
 		t.Fatal(err)
 	}
@@ -466,14 +568,30 @@ func TestPlacementSurvivesASchemaThatCannotBeLoaded(t *testing.T) {
 		t.Fatalf("the plan failed on a broken schema: %v", err)
 	}
 	runners := plan.Targets[0].Runners
-	if runners[1].Reason != "schema_incompatible" || runners[1].Detail != "the schema could not be loaded" {
-		t.Fatalf("own-broken: %+v", runners[1])
-	}
-	if runners[2].Reason != "workload_unsupported" || runners[2].Detail != "" {
-		t.Fatalf("other-type: %+v", runners[2])
+	if runners[0].Reason != "workload_unsupported" || runners[0].Detail != "" || runners[1].Reason != "compatible" || runners[2].Reason != "" {
+		t.Fatalf("runners: %+v", runners)
 	}
 	if err = svc.Deploy(ctx, ts.ID(), nil); err != nil {
 		t.Fatalf("a broken schema of another runner blocked the deploy: %v", err)
+	}
+	if len(source.loaded) != 0 {
+		t.Fatalf("schemas of runners the agent does not route to were loaded: %v", source.loaded)
+	}
+
+	// The agent now routes the workload to the runner whose schema cannot be loaded.
+	a.SetCapabilities([]model.RunnerCapability{containerRunner("own-broken", brokenOwn), containerRunner("fine", testFingerprint(t))})
+	if err = store.UpsertAgent(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if plan, err = svc.PreviewPlacement(ctx, ts.ID()); err != nil {
+		t.Fatalf("the plan failed on a broken schema: %v", err)
+	}
+	if r := plan.Targets[0].Runners[0]; r.Reason != "schema_incompatible" || r.Detail != "the schema could not be loaded" || plan.Targets[0].Eligible {
+		t.Fatalf("own-broken: %+v", r)
+	}
+	var incompatible *IncompatibleTargetsError
+	if err = svc.Deploy(ctx, ts.ID(), nil); !errors.As(err, &incompatible) {
+		t.Fatalf("Deploy = %v, want the broken schema to block it", err)
 	}
 }
 
@@ -514,6 +632,13 @@ func TestDeployRefusesAWorkloadChangedAfterThePrefetch(t *testing.T) {
 	changed.SetWorkload(w)
 	if _, _, err = loadPlacement(ctx, store, nil, zerolog.Nop(), changed, time.Now(), pre); !errors.Is(err, ErrPlacementChanged) {
 		t.Fatalf("a workload changed after the prefetch: %v", err)
+	}
+	// The runner labels pick the runner each agent routes the workload to: the
+	// outcomes were computed for the labels read before the transaction.
+	relabelled := ts.Clone()
+	relabelled.SetRunnerLabels(map[string]string{"zone": "b"})
+	if _, _, err = loadPlacement(ctx, store, nil, zerolog.Nop(), relabelled, time.Now(), pre); !errors.Is(err, ErrPlacementChanged) {
+		t.Fatalf("runner labels changed after the prefetch: %v", err)
 	}
 }
 

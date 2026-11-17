@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"maps"
 	"sort"
 	"strings"
 	"time"
@@ -43,9 +44,10 @@ func (s *Service) PreviewPlacement(ctx context.Context, specID string) (*model.P
 //
 // The body is validated against the runners' schemas outside any transaction:
 // with pre set (Deploy's prefetch) loadPlacement validates nothing and compiles
-// nothing, and answers [ErrPlacementChanged] when the spec's workload is no longer
-// the one the outcomes were computed for; with pre nil it computes them from
-// schemas, and logger takes a schema that cannot be loaded.
+// nothing, and answers [ErrPlacementChanged] when the spec's workload or runner
+// labels are no longer the ones the outcomes were computed for (the labels pick
+// the runner each agent routes the workload to); with pre nil it computes them
+// from schemas, and logger takes a schema that cannot be loaded.
 func loadPlacement(ctx context.Context, store storage.Storage, schemas SchemaSource, logger zerolog.Logger, ts *model.Spec, now time.Time, pre *prefetched) (*model.PlacementPlan, []deployStep, error) {
 	agents, err := placementAgents(ctx, store, ts)
 	if err != nil {
@@ -53,12 +55,12 @@ func loadPlacement(ctx context.Context, store storage.Storage, schemas SchemaSou
 	}
 	var outcomes compatOutcomes
 	if pre != nil {
-		if !ts.Workload().Equal(pre.workload) {
+		if !ts.Workload().Equal(pre.workload) || !maps.Equal(ts.RunnerLabels(), pre.runnerLabels) {
 			return nil, nil, ErrPlacementChanged
 		}
 		outcomes = pre.outcomes
 	} else {
-		outcomes = outcomesFor(ctx, schemas, logger, ts.Workload(), agents)
+		outcomes = outcomesFor(ctx, schemas, logger, ts, agents)
 	}
 	rollouts, err := storage.AllRollouts(ctx, store, store.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: ts.ID()}))
 	if err != nil {
@@ -107,11 +109,13 @@ func placementAgents(ctx context.Context, store storage.Storage, ts *model.Spec)
 }
 
 // prefetched is what Deploy computes before its transaction opens: the workload
-// it read, and for it the outcome of each runner schema. Reading the catalog and
-// validating a body inside the transaction would hold the store while they run.
+// and runner labels it read, and for them the outcome of the schema of each
+// runner the agents route the workload to. Reading the catalog and validating a
+// body inside the transaction would hold the store while they run.
 type prefetched struct {
-	workload model.Workload
-	outcomes compatOutcomes
+	workload     model.Workload
+	runnerLabels map[string]string
+	outcomes     compatOutcomes
 }
 
 // prefetch reads the spec and its placement's agents and validates the spec's
@@ -125,8 +129,7 @@ func (s *Service) prefetch(ctx context.Context, specID string) (*prefetched, err
 	if err != nil {
 		return nil, err
 	}
-	w := ts.Workload()
-	return &prefetched{workload: w, outcomes: outcomesFor(ctx, s.schemas, s.logger, w, agents)}, nil
+	return &prefetched{workload: ts.Workload(), runnerLabels: ts.RunnerLabels(), outcomes: outcomesFor(ctx, s.schemas, s.logger, ts, agents)}, nil
 }
 
 // deployAction is what Deploy does with one agent's rollout of the spec.
@@ -229,7 +232,8 @@ func appendTokenString(b []byte, s string) []byte {
 // outcomes says, per runner fingerprint, whether the body fits the schema it
 // names; a fingerprint without an outcome is pending.
 // Explicit IDs are unioned with ALL-label matches. Empty labels match no extra
-// agents. Matching runners retain registration order, not alphabetical order.
+// agents. Runners retain registration order, not alphabetical order, and each
+// target is evaluated on the runner its agent routes the workload to.
 func buildPlacement(ts *model.Spec, agents []*model.Agent, now time.Time, outcomes compatOutcomes) (*model.PlacementPlan, error) {
 	plan := &model.PlacementPlan{
 		SpecID: ts.ID(), SpecVersion: ts.Version(), Generation: ts.Generation(), CheckedAt: now,
@@ -300,8 +304,8 @@ func agentMatchesLabels(a *model.Agent, labels map[string]string) bool {
 // compat is how a runner's schema relates to the spec's workload body.
 type compat struct{ reason, detail string }
 
-// compatOutcomes holds the outcome for each runner fingerprint that names a
-// schema other than the spec's own.
+// compatOutcomes holds the outcome for each fingerprint, other than the spec's
+// own, of a runner that an agent routes the workload to.
 type compatOutcomes map[string]compat
 
 // schemaCompat gives the outcome for a runner fingerprint. It reads the
@@ -329,34 +333,67 @@ func (c *schemaCompat) check(fingerprint string) compat {
 	return compat{reason: "schema_pending"}
 }
 
-// outcomesFor validates the workload's body against the schema of each runner
-// fingerprint of the agents, once per fingerprint. Only runners that declare the
-// workload's exact type count. A schema podium refuses, or that cannot be
-// loaded, makes that fingerprint schema_incompatible; it never fails the plan.
-// A nil source knows no schema, so every fingerprint is pending.
-func outcomesFor(ctx context.Context, schemas SchemaSource, logger zerolog.Logger, w model.Workload, agents []*model.Agent) compatOutcomes {
+// outcomesFor validates the spec's body against the schema of the runner each
+// agent routes the workload to (see routedRunner), once per fingerprint: the
+// schemas of the other runners are not even loaded. A schema podium refuses, or
+// that cannot be loaded, makes that fingerprint schema_incompatible; it never
+// fails the plan. A nil source knows no schema, so every fingerprint is pending.
+func outcomesFor(ctx context.Context, schemas SchemaSource, logger zerolog.Logger, ts *model.Spec, agents []*model.Agent) compatOutcomes {
 	out := compatOutcomes{}
+	w := ts.Workload()
 	want, err := w.GVK()
 	if err != nil || schemas == nil {
 		return out
 	}
+	selector := ts.RunnerLabels()
 	for _, a := range agents {
 		if a == nil {
 			continue
 		}
-		for _, c := range a.Capabilities() {
-			for _, gvk := range c.Workloads {
-				fp := gvk.SchemaFingerprint
-				if gvk.Group != want.Group || gvk.Version != want.Version || gvk.Kind != want.Kind || fp == "" || fp == w.SchemaFingerprint {
-					continue
-				}
-				if _, done := out[fp]; !done {
-					out[fp] = outcomeFor(ctx, schemas, logger, fp, w.Body)
-				}
-			}
+		routed, fp := routedRunner(a.Capabilities(), want, selector)
+		if routed < 0 || fp == "" || fp == w.SchemaFingerprint {
+			continue
+		}
+		if _, done := out[fp]; !done {
+			out[fp] = outcomeFor(ctx, schemas, logger, fp, w.Body)
 		}
 	}
 	return out
+}
+
+// routedRunner returns the index in runners of the runner an agent routes a
+// task of type want to, as the SDK router does: the first, in declared order,
+// that declares want's exact group, version and kind and whose labels match
+// every one of selector, whatever its schema. It returns the fingerprint that
+// runner declares for the type too, and -1 when no runner matches both.
+func routedRunner(runners []model.RunnerCapability, want model.GroupVersionKind, selector map[string]string) (int, string) {
+	for i, r := range runners {
+		if fp, ok := declaredFingerprint(r, want); ok && labelsMatch(r.Labels, selector) {
+			return i, fp
+		}
+	}
+	return -1, ""
+}
+
+// declaredFingerprint reports whether runner declares want's exact group,
+// version and kind, and the fingerprint it declares for the type.
+func declaredFingerprint(runner model.RunnerCapability, want model.GroupVersionKind) (string, bool) {
+	for _, gvk := range runner.Workloads {
+		if gvk.Group == want.Group && gvk.Version == want.Version && gvk.Kind == want.Kind {
+			return gvk.SchemaFingerprint, true
+		}
+	}
+	return "", false
+}
+
+// labelsMatch reports whether labels hold every key of selector with its value.
+func labelsMatch(labels, selector map[string]string) bool {
+	for k, v := range selector {
+		if actual, ok := labels[k]; !ok || actual != v {
+			return false
+		}
+	}
+	return true
 }
 
 // outcomeFor checks the body against the schema of one fingerprint. A schema
@@ -411,6 +448,9 @@ func problemsText(verr *workloadschema.ValidationError) string {
 	return strings.Join(parts, "; ")
 }
 
+// planTarget evaluates agent a as a target of ts. Of its runners only the one
+// the agent routes the workload to is evaluated (see [model.PlacementTarget]):
+// the target's eligibility and reason are that runner's.
 func planTarget(a *model.Agent, ts *model.Spec, now time.Time, cmp *schemaCompat) model.PlacementTarget {
 	t := model.PlacementTarget{Status: "unknown", HeartbeatFreshness: "unknown", RunnerNames: []string{}, Runners: []model.PlacementRunner{}}
 	if a == nil {
@@ -439,54 +479,40 @@ func planTarget(a *model.Agent, ts *model.Spec, now time.Time, cmp *schemaCompat
 	// The workload type is matched exactly. A spec without a workload has no
 	// type, and matches no runner.
 	want, wantErr := cmp.workload.GVK()
-	anyWorkload, anyLabels := false, false
-	firstSchemaReason := ""
 	selector := ts.RunnerLabels()
-	for _, cap := range capabilities {
-		r := model.PlacementRunner{Name: cap.Name, Labels: cap.Labels, LabelsMatch: true}
+	routed := -1
+	if wantErr == nil {
+		routed, _ = routedRunner(capabilities, want, selector)
+	}
+	anyWorkload := false
+	for i, capability := range capabilities {
+		r := model.PlacementRunner{Name: capability.Name, Labels: capability.Labels, LabelsMatch: labelsMatch(capability.Labels, selector)}
 		var fingerprint string
 		if wantErr == nil {
-			for _, gvk := range cap.Workloads {
-				if gvk.Group == want.Group && gvk.Version == want.Version && gvk.Kind == want.Kind {
-					r.WorkloadMatch = true
-					fingerprint = gvk.SchemaFingerprint
-					anyWorkload = true
-					break
-				}
-			}
+			fingerprint, r.WorkloadMatch = declaredFingerprint(capability, want)
 		}
-		for k, v := range selector {
-			if actual, ok := cap.Labels[k]; !ok || actual != v {
-				r.LabelsMatch = false
-				break
-			}
-		}
+		anyWorkload = anyWorkload || r.WorkloadMatch
 		switch {
 		case !r.WorkloadMatch:
 			r.Reason = "workload_unsupported"
 		case !r.LabelsMatch:
 			r.Reason = "runner_labels_mismatch"
-		default:
-			anyLabels = true
-			c := cmp.check(fingerprint)
-			r.Reason, r.Detail = c.reason, c.detail
-			if firstSchemaReason == "" {
-				firstSchemaReason = c.reason
-			}
+		case i == routed:
+			out := cmp.check(fingerprint)
+			r.Reason, r.Detail, r.Eligible = out.reason, out.detail, out.reason == "compatible"
 		}
-		r.Eligible = r.Reason == "compatible"
+		// A runner after the routed one whose type and labels match is not
+		// evaluated: the agent never routes the workload to it.
 		t.Runners = append(t.Runners, r)
-		if r.Eligible {
-			t.RunnerNames = append(t.RunnerNames, r.Name)
-		}
 	}
 	switch {
-	case len(t.RunnerNames) > 0:
+	case routed >= 0 && t.Runners[routed].Eligible:
 		t.Eligible = true
-		t.SelectedRunner = t.RunnerNames[0]
+		t.SelectedRunner = t.Runners[routed].Name
+		t.RunnerNames = append(t.RunnerNames, t.SelectedRunner)
 		t.EligibilityReason = "compatible_runner"
-	case anyLabels:
-		t.EligibilityReason = firstSchemaReason
+	case routed >= 0:
+		t.EligibilityReason = t.Runners[routed].Reason
 	case anyWorkload:
 		t.EligibilityReason = "runner_labels_mismatch"
 	default:

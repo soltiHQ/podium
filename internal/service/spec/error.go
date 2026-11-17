@@ -67,7 +67,9 @@ func (e *IncompatibleTargetsError) Unwrap() error { return storage.ErrInvalidArg
 // longer matches the plan recomputed inside the transaction: since the preview
 // the spec was saved, the set of targets changed, a target was registered or
 // changed eligibility or selected runner, or another deploy created rollouts.
-// Deploy writes nothing; the caller previews again.
+// Deploy returns it without a token too, when the spec's workload or runner
+// labels changed between the schema check it runs before its transaction and the
+// transaction. Deploy writes nothing; the caller previews again.
 var ErrPlacementChanged = errors.New("placement changed since preview")
 
 // WorkloadError is a workload the service refuses: it is missing, unknown to the

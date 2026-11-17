@@ -291,8 +291,10 @@ func (s *Service) RolloutsBySpec(ctx context.Context, specID string) ([]*model.R
 //
 // `planTokens` are the plan tokens of the placements the caller reviewed (see [Service.PreviewPlacement]). Unless it
 // is nil, the token of the plan recomputed inside the transaction must be one of them, else Deploy writes nothing and
-// returns [ErrPlacementChanged]; an empty list names no plan. Pass nil to deploy the current placement unchecked (API
-// clients that never preview).
+// returns [ErrPlacementChanged]; an empty list names no plan. Pass nil to skip the token check (API clients that never
+// preview). Deploy validates the workload against the targets' schemas before its transaction opens: with or without
+// tokens, it returns [ErrPlacementChanged] and writes nothing when the spec's workload or runner labels changed in
+// between, and it refuses targets that are not compatible.
 func (s *Service) Deploy(ctx context.Context, specID string, planTokens []string) error {
 	if specID == "" {
 		return storage.ErrInvalidArgument

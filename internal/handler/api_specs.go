@@ -333,7 +333,9 @@ func (a *API) specForceDelete(w http.ResponseWriter, r *http.Request, mode httpc
 // of placement previews, a placement whose plan has none of them is refused
 // with 412 and nothing is written; the HX-Trigger refreshes the page's
 // placement panel so the operator reviews the new plan. Without If-Match (or
-// with "*") the current placement is deployed unchecked, as before.
+// with "*") no token is checked, but the deploy can still answer 412: when the
+// spec's workload or runner labels changed between the schema check and the
+// write (spec.ErrPlacementChanged).
 func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	if err := a.specSVC.Deploy(r.Context(), id, planTokensFromIfMatch(r)); err != nil {
 		if errors.Is(err, spec.ErrPlacementChanged) {
