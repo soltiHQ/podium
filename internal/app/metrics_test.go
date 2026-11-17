@@ -319,7 +319,7 @@ func TestFollowerCountsRefusedSyncsAsUnavailable(t *testing.T) {
 	hub := event.NewHub(zerolog.Nop())
 	t.Cleanup(hub.Close)
 	agents := agent.New(inmemory.New(), zerolog.Nop())
-	h, srv := buildDiscoveryListeners(zerolog.Nop(), agents, hub, follower{leader: "127.0.0.1:7000"}, cfg, nil, nil, nil, nil, m)
+	h, srv := buildDiscoveryListeners(zerolog.Nop(), agents, nil, hub, follower{leader: "127.0.0.1:7000"}, cfg, nil, nil, nil, nil, m)
 	client := serveDiscovery(t, srv)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/sync", strings.NewReader(`{"id":"agent-1"}`))

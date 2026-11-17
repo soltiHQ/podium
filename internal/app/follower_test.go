@@ -207,7 +207,7 @@ func newNodeDiscovery(t *testing.T, cfg config.Config, n *raftNode) nodeDiscover
 	forwarder := syncForwarder(cfg, n.leadership, forwardTLS)
 	t.Cleanup(func() { _ = forwarder.Close() })
 	agents := agent.New(n.store, logger)
-	h, srv := buildDiscoveryListeners(logger, agents, n.hub, n.leadership, cfg, resolver, serverTLS, forwardTLS, forwarder, nil)
+	h, srv := buildDiscoveryListeners(logger, agents, nil, n.hub, n.leadership, cfg, resolver, serverTLS, forwardTLS, forwarder, nil)
 	// Before the forwarder closes: cleanups run last in, first out.
 	t.Cleanup(srv.Stop)
 	return nodeDiscovery{http: h, grpc: srv, agents: agents}

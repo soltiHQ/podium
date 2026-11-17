@@ -45,6 +45,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/session"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
 	"github.com/soltiHQ/control-plane/internal/service/user"
+	"github.com/soltiHQ/control-plane/internal/service/workload"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/clientip"
@@ -62,6 +63,7 @@ type services struct {
 	session    *session.Service
 	access     *access.Service
 	agent      *agent.Service
+	workload   *workload.Service
 	spec       *spec.Service
 	user       *user.Service
 	role       *role.Service
@@ -88,6 +90,7 @@ func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history
 		credential: credential.New(store, logger, passwordCost),
 		session:    session.New(store, logger),
 		agent:      agent.New(store, logger, agentOpts...),
+		workload:   workload.New(store, logger),
 		spec:       spec.New(store, logger),
 		role:       role.New(store, logger),
 		user:       user.New(store, logger),
@@ -563,15 +566,15 @@ func warnForwarding(logger zerolog.Logger, cfg config.Config, backend cluster.Ba
 // cluster.Membership and where a follower forwards its syncs to the leader with
 // forwarder, while memory keeps the peer address, as before. m counts and times
 // the calls of both listeners and the outcome of each sync; nil records nothing.
-func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, cfg config.Config, resolver *clientip.Resolver, serverTLS, forwardTLS *tls.Config, forwarder *interceptor.Forwarder, m *metrics.Metrics) (http.Handler, *grpc.Server) {
+func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, catalog *workload.Service, eventHub *event.Hub, leadership cluster.Leadership, cfg config.Config, resolver *clientip.Resolver, serverTLS, forwardTLS *tls.Config, forwarder *interceptor.Forwarder, m *metrics.Metrics) (http.Handler, *grpc.Server) {
 	limiter := kit.NewLimiter(cfg.Auth)
 	syncs := handler.NewSyncBuckets()
 	var grpcClients *clientip.Resolver
 	if _, raft := leadership.(cluster.Membership); raft {
 		grpcClients = resolver
 	}
-	return buildDiscoveryHandler(logger, agentSVC, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), limiter, syncs, resolver, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled(), forwardTLS, m),
-		buildGRPCServer(logger, agentSVC, eventHub, leadership, limiter, syncs, grpcClients, serverTLS, cfg.AgentAuth.Require, addrPort(cfg.GRPC.Addr), forwarder, m)
+	return buildDiscoveryHandler(logger, agentSVC, catalog, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), limiter, syncs, resolver, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled(), forwardTLS, m),
+		buildGRPCServer(logger, agentSVC, catalog, eventHub, leadership, limiter, syncs, grpcClients, serverTLS, cfg.AgentAuth.Require, addrPort(cfg.GRPC.Addr), forwarder, m)
 }
 
 // buildDiscoveryHandler wires the HTTP discovery listener. It has no per-IP
@@ -582,11 +585,12 @@ func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, eve
 // request, outside the other middleware, the outcome of every sync, among them
 // the writes that a follower cannot send to a leader and refuses itself, and
 // the syncs a follower forwards.
-func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, requireAuth bool, targetTLS bool, forwardTLS *tls.Config, m *metrics.Metrics) http.Handler {
+func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, catalog *workload.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, requireAuth bool, targetTLS bool, forwardTLS *tls.Config, m *metrics.Metrics) http.Handler {
 	var (
 		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC, eventHub, limiter, syncs, resolver, requireAuth)
 		mux           = http.NewServeMux()
 	)
+	httpDiscovery.UseCatalog(catalog)
 	httpDiscovery.Observe(func(outcome string) { m.Sync(metrics.TransportHTTP, outcome) })
 	mux.HandleFunc("/api/v1/discovery/sync", httpDiscovery.Sync)
 
@@ -684,7 +688,7 @@ func addrPort(addr string) int {
 // Unavailable with that address in the x-leader hint. m counts and times the
 // calls, first in the chain, and counts the outcome of each sync, and each sync
 // a follower forwards.
-func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *event.Hub, leadership cluster.Leadership, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, serverTLS *tls.Config, requireAuth bool, port int, forwarder *interceptor.Forwarder, m *metrics.Metrics) *grpc.Server {
+func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, catalog *workload.Service, eventHub *event.Hub, leadership cluster.Leadership, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, serverTLS *tls.Config, requireAuth bool, port int, forwarder *interceptor.Forwarder, m *metrics.Metrics) *grpc.Server {
 	// Write methods (must run on leader). Sync is the only agent-facing
 	// mutation; everything else is pure read.
 	writeMethods := map[string]struct{}{
@@ -727,6 +731,7 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, eventHub *e
 		srv           = grpc.NewServer(opts...)
 		grpcDiscovery = handler.NewGRPCDiscovery(logger, agentSVC, eventHub, limiter, syncs, resolver, requireAuth)
 	)
+	grpcDiscovery.UseCatalog(catalog)
 	grpcDiscovery.Observe(func(outcome string) { m.Sync(metrics.TransportGRPC, outcome) })
 	discoverv1.RegisterDiscoverServiceServer(srv, grpcDiscovery)
 	return srv

@@ -348,7 +348,7 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 	if forwarder != nil {
 		raftShutdown = before(func() { _ = forwarder.Close() }, raftShutdown)
 	}
-	discoveryHandler, grpcSrv := buildDiscoveryListeners(logger, svc.agent, eventHub, leadership, cfg, resolver, serverTLS, forwardTLS, forwarder, m)
+	discoveryHandler, grpcSrv := buildDiscoveryListeners(logger, svc.agent, svc.workload, eventHub, leadership, cfg, resolver, serverTLS, forwardTLS, forwarder, m)
 	discoveryCfg := cfg.HTTPDiscovery
 	discoveryCfg.TLSConfig = serverTLS
 	httpDiscoveryRunner, err := httpserver.New(discoveryCfg, logger, discoveryHandler)
