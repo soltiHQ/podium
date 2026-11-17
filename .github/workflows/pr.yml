@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: mr-chelyshkin/actions/task-run@577ea5b38e0b2ad2bffe7977574fda5e59657a60 # v2
+      - uses: mr-chelyshkin/actions/task-run@772ed02edbc40cbc539a507e0f55972da7cc7c8e # v3
         with:
           task: ci/markdown/fmt
 
@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: mr-chelyshkin/actions/task-run@577ea5b38e0b2ad2bffe7977574fda5e59657a60 # v2
+      - uses: mr-chelyshkin/actions/task-run@772ed02edbc40cbc539a507e0f55972da7cc7c8e # v3
         with:
           task: ci/ui/test
 
@@ -55,6 +55,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: mr-chelyshkin/actions/job-results-check@577ea5b38e0b2ad2bffe7977574fda5e59657a60 # v2
+      - uses: mr-chelyshkin/actions/job-results-check@772ed02edbc40cbc539a507e0f55972da7cc7c8e # v3
         with:
           results: ${{ toJSON(needs) }}
