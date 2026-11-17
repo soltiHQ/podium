@@ -21,7 +21,7 @@ func TestPlacementMatchesDeployBeyond500AndUsesAllLabelUnion(t *testing.T) {
 	ctx := context.Background()
 	ts := mkSpec(t, svc, store, "placement-many", []string{"explicit", "explicit"})
 	ts.SetTargetLabels(map[string]string{"env": "prod", "team": "ops"})
-	if err := svc.Upsert(ctx, ts, ts.Version()); err != nil {
+	if _, err := svc.Upsert(ctx, ts, ts.Version()); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 503; i++ {
@@ -144,7 +144,7 @@ func TestPlacementUnknownInventoryBlocksLikeTheSchemaReasons(t *testing.T) {
 		t.Fatal(err)
 	}
 	ts.SetTargets([]string{"blocked"})
-	if err := svc.Upsert(ctx, ts, ts.Version()); err != nil {
+	if _, err := svc.Upsert(ctx, ts, ts.Version()); err != nil {
 		t.Fatal(err)
 	}
 	plan, err = svc.PreviewPlacement(ctx, ts.ID())
@@ -160,7 +160,7 @@ func TestPlacementUnknownInventoryBlocksLikeTheSchemaReasons(t *testing.T) {
 		t.Fatal("blocked whole deployment changed an existing rollout")
 	}
 	ts.SetTargets([]string{"missing"})
-	if err := svc.Upsert(ctx, ts, ts.Version()); err != nil {
+	if _, err := svc.Upsert(ctx, ts, ts.Version()); err != nil {
 		t.Fatal(err)
 	}
 	plan, err = svc.PreviewPlacement(ctx, ts.ID())
@@ -178,7 +178,7 @@ func TestPlacementReevaluatesMetadataAndEmptyTargetsDrain(t *testing.T) {
 	ctx := context.Background()
 	ts := mkSpec(t, svc, store, "placement-drift", nil)
 	ts.SetTargetLabels(map[string]string{"env": "prod"})
-	if err := svc.Upsert(ctx, ts, ts.Version()); err != nil {
+	if _, err := svc.Upsert(ctx, ts, ts.Version()); err != nil {
 		t.Fatal(err)
 	}
 	a, _ := model.NewAgent("changing", "changing", "http://changing")

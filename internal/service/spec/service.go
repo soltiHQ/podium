@@ -107,21 +107,23 @@ func (s *Service) Create(ctx context.Context, ts *model.Spec) error {
 
 // Upsert persists changes to an existing task spec. `Version` bumps on every save that changes something (edits counter).
 // `Generation` bumps only if the **runtime** fields - those that end up in `SpecToProto`: actually changed;
-// metadata-only edits (rename, target-list) never rotate live tasks. A save that changes nothing bumps neither.
+// metadata-only edits (rename, target-list) never rotate live tasks. A save that changes nothing bumps neither and
+// writes nothing. changed reports whether the save changed something, so that a caller records and announces only a
+// save that did.
 //
 // `expectedVersion` is the optimistic-concurrency CAS token:
 // the client sends the version it last read, and Upsert rejects with a [ConflictError] if the stored version has advanced in the meantime.
 // Pass `0` to opt out of the check (background jobs with no rival writer); interactive UI flows should always pass the observed version.
-func (s *Service) Upsert(ctx context.Context, ts *model.Spec, expectedVersion int) error {
-	if err := s.validateSpec(ctx, ts); err != nil {
-		return err
+func (s *Service) Upsert(ctx context.Context, ts *model.Spec, expectedVersion int) (changed bool, err error) {
+	if err = s.validateSpec(ctx, ts); err != nil {
+		return false, err
 	}
 
 	var (
 		runtimeChanged bool
 		unchanged      bool
 	)
-	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+	err = s.store.WithTx(ctx, func(tx storage.Storage) error {
 		old, err := tx.GetSpec(ctx, ts.ID())
 		if err != nil {
 			return err
@@ -152,11 +154,11 @@ func (s *Service) Upsert(ctx context.Context, ts *model.Spec, expectedVersion in
 		return tx.UpsertSpec(ctx, ts)
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	if unchanged {
-		return nil
+		return false, nil
 	}
 
 	s.logger.Debug().
@@ -165,7 +167,7 @@ func (s *Service) Upsert(ctx context.Context, ts *model.Spec, expectedVersion in
 		Int("generation", ts.Generation()).
 		Bool("runtime_changed", runtimeChanged).
 		Msg("spec updated")
-	return nil
+	return true, nil
 }
 
 // Delete soft-deletes a spec:

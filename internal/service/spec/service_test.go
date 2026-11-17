@@ -62,7 +62,7 @@ func TestUpsertBumpsVersionAlwaysGenerationOnRuntimeChange(t *testing.T) {
 
 	renamed := ts.Clone()
 	renamed.SetName("new-name")
-	if err := svc.Upsert(context.Background(), renamed, 0); err != nil {
+	if _, err := svc.Upsert(context.Background(), renamed, 0); err != nil {
 		t.Fatalf("Upsert rename: %v", err)
 	}
 	afterRename, _ := store.GetSpec(context.Background(), ts.ID())
@@ -75,7 +75,7 @@ func TestUpsertBumpsVersionAlwaysGenerationOnRuntimeChange(t *testing.T) {
 
 	changed := afterRename.Clone()
 	changed.SetTimeoutMs(60_000)
-	if err := svc.Upsert(context.Background(), changed, 0); err != nil {
+	if _, err := svc.Upsert(context.Background(), changed, 0); err != nil {
 		t.Fatalf("Upsert runtime: %v", err)
 	}
 	afterRuntime, _ := store.GetSpec(context.Background(), ts.ID())
@@ -148,7 +148,7 @@ func TestDeployQueuesUpdateForStaleRollout(t *testing.T) {
 	_ = store.UpsertRollout(context.Background(), rA)
 
 	ts.SetTimeoutMs(60_000)
-	if err := svc.Upsert(context.Background(), ts, 0); err != nil {
+	if _, err := svc.Upsert(context.Background(), ts, 0); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
@@ -176,7 +176,7 @@ func TestDeployQueuesUninstallForRemovedTarget(t *testing.T) {
 	}
 
 	ts.SetTargets([]string{"agent-a"})
-	_ = svc.Upsert(context.Background(), ts, 0)
+	_, _ = svc.Upsert(context.Background(), ts, 0)
 	_ = svc.Deploy(context.Background(), "sp-1", nil)
 
 	rB, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-b"))
@@ -346,7 +346,7 @@ func TestUpsertRejectsStaleVersion(t *testing.T) {
 
 	first := ts.Clone()
 	first.SetName("first-save")
-	if err := svc.Upsert(context.Background(), first, 1); err != nil {
+	if _, err := svc.Upsert(context.Background(), first, 1); err != nil {
 		t.Fatalf("first Upsert: %v", err)
 	}
 	afterFirst, _ := store.GetSpec(context.Background(), "sp-1")
@@ -356,7 +356,7 @@ func TestUpsertRejectsStaleVersion(t *testing.T) {
 
 	stale := ts.Clone()
 	stale.SetName("stale-save")
-	err := svc.Upsert(context.Background(), stale, 1)
+	_, err := svc.Upsert(context.Background(), stale, 1)
 	if err == nil {
 		t.Fatal("stale Upsert must fail")
 	}
@@ -389,7 +389,7 @@ func TestUpsertRejectsTombstonedSpec(t *testing.T) {
 
 	mutated := ts.Clone()
 	mutated.SetName("trying to resurrect")
-	if err := svc.Upsert(context.Background(), mutated, 0); err == nil {
+	if _, err := svc.Upsert(context.Background(), mutated, 0); err == nil {
 		t.Fatal("Upsert on tombstoned spec must return an error")
 	}
 
@@ -406,7 +406,7 @@ func mkTokenFixture(t *testing.T) (*Service, *inmemory.Store, *model.Spec) {
 	svc, store := mkService(t)
 	ts := mkSpec(t, svc, store, "sp-token", nil)
 	ts.SetTargetLabels(map[string]string{"env": "prod"})
-	if err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
+	if _, err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
 		t.Fatal(err)
 	}
 	addMatchingAgent(t, store, "agent-a")
@@ -561,7 +561,7 @@ func TestPlanTokenChangesWithTargets(t *testing.T) {
 
 	// A rename bumps the version only: generation stays, so it alone cannot tell.
 	ts.SetName("renamed")
-	if err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
+	if _, err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
 		t.Fatal(err)
 	}
 	if ts.Generation() != 1 {
@@ -579,7 +579,7 @@ var wasmOnly = []model.RunnerCapability{{Name: "wasm", Workloads: []model.GroupV
 func addMissingTarget(t *testing.T, svc *Service, _ *inmemory.Store, ts *model.Spec) {
 	t.Helper()
 	ts.SetTargets([]string{"agent-x"})
-	if err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
+	if _, err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -642,7 +642,7 @@ func TestPlanTokenCoversEveryInput(t *testing.T) {
 		svc, store, ts := mkTokenFixture(t)
 		twin := mkSpec(t, svc, store, "sp-twin", nil)
 		twin.SetTargetLabels(ts.TargetLabels())
-		if err := svc.Upsert(context.Background(), twin, twin.Version()); err != nil {
+		if _, err := svc.Upsert(context.Background(), twin, twin.Version()); err != nil {
 			t.Fatal(err)
 		}
 		if previewToken(t, svc, twin.ID()) == previewToken(t, svc, ts.ID()) {
@@ -661,7 +661,7 @@ func TestDeployRefusesChangedPlacement(t *testing.T) {
 		}},
 		{name: "the spec is edited", change: func(t *testing.T, svc *Service, _ *inmemory.Store, ts *model.Spec) {
 			ts.SetTimeoutMs(60_000)
-			if err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
+			if _, err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -728,7 +728,7 @@ func TestDeployAcceptsUnchangedPlacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	ts.SetTimeoutMs(60_000)
-	if err := svc.Upsert(ctx, ts, ts.Version()); err != nil {
+	if _, err := svc.Upsert(ctx, ts, ts.Version()); err != nil {
 		t.Fatal(err)
 	}
 	changeAgent(t, store, "agent-c", func(a *model.Agent) { a.LabelAdd("env", "dev") })
@@ -879,7 +879,7 @@ func TestCreateRefusesAnInvalidEnvelope(t *testing.T) {
 	} {
 		bad := good.Clone()
 		edit(bad)
-		if err = svc.Upsert(ctx, bad, 0); !errors.Is(err, storage.ErrInvalidArgument) {
+		if _, err = svc.Upsert(ctx, bad, 0); !errors.Is(err, storage.ErrInvalidArgument) {
 			t.Errorf("Upsert with a bad %s = %v", name, err)
 		}
 	}
@@ -924,7 +924,7 @@ func TestUpsertValidatesTheWorkload(t *testing.T) {
 	w.Body = map[string]any{"image": 1}
 	bad.SetWorkload(w)
 	var werr *WorkloadError
-	if err := svc.Upsert(context.Background(), bad, 0); !errors.As(err, &werr) {
+	if _, err := svc.Upsert(context.Background(), bad, 0); !errors.As(err, &werr) {
 		t.Fatalf("Upsert = %v", err)
 	}
 	if got, _ := store.GetSpec(context.Background(), "sp-1"); got.Version() != 1 || !got.Workload().Equal(testWorkload(t)) {
@@ -941,8 +941,8 @@ func TestRuntimeEqualsSeesABodyChangeThroughTheService(t *testing.T) {
 	ts := mkSpec(t, svc, store, "sp-1", nil)
 
 	same := ts.Clone()
-	if err := svc.Upsert(ctx, same, 0); err != nil {
-		t.Fatalf("Upsert unchanged: %v", err)
+	if changed, err := svc.Upsert(ctx, same, 0); err != nil || changed {
+		t.Fatalf("Upsert unchanged: changed %v, %v; want nothing changed", changed, err)
 	}
 	got, _ := store.GetSpec(ctx, "sp-1")
 	if got.Version() != 1 || got.Generation() != 1 {
@@ -956,8 +956,8 @@ func TestRuntimeEqualsSeesABodyChangeThroughTheService(t *testing.T) {
 	w := changed.Workload()
 	w.Body["replicas"] = json.Number("5")
 	changed.SetWorkload(w)
-	if err := svc.Upsert(ctx, changed, 1); err != nil {
-		t.Fatalf("Upsert body change: %v", err)
+	if saved, err := svc.Upsert(ctx, changed, 1); err != nil || !saved {
+		t.Fatalf("Upsert body change: changed %v, %v; want it changed", saved, err)
 	}
 	got, _ = store.GetSpec(ctx, "sp-1")
 	if got.Version() != 2 || got.Generation() != 2 {
@@ -969,7 +969,7 @@ func TestRuntimeEqualsSeesABodyChangeThroughTheService(t *testing.T) {
 
 	renamed := got.Clone()
 	renamed.SetName("other")
-	if err := svc.Upsert(ctx, renamed, 2); err != nil {
+	if _, err := svc.Upsert(ctx, renamed, 2); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = store.GetSpec(ctx, "sp-1")

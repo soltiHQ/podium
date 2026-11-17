@@ -257,7 +257,8 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 
-	if err = a.specSVC.Upsert(r.Context(), ts, in.Version); err != nil {
+	changed, err := a.specSVC.Upsert(r.Context(), ts, in.Version)
+	if err != nil {
 		var conflict *spec.ConflictError
 		if errors.As(err, &conflict) {
 			a.logger.Warn().Str("spec", id).
@@ -280,9 +281,15 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		response.StoreFailed(w, r, mode, err)
 		return
 	}
-	a.logger.Info().Str("spec", id).Msg("spec updated")
-	a.hub.Record(event.SpecUpdated, event.Payload{ID: id, Name: ts.Name()})
-	a.hub.Notify(event.RefreshSpecs)
+	// A save that changed nothing wrote nothing: there is nothing to record or
+	// to refresh, and it answers as any save does.
+	if changed {
+		a.logger.Info().Str("spec", id).Msg("spec updated")
+		a.hub.Record(event.SpecUpdated, event.Payload{ID: id, Name: ts.Name()})
+		a.hub.Notify(event.RefreshSpecs)
+	} else {
+		a.logger.Debug().Str("spec", id).Msg("spec save changed nothing")
+	}
 	// Mirror the create path: after Save Changes send the user back to
 	// the specs list. The edit form's Alpine submit handler honors the
 	// HX-Redirect header. The old htmx.Trigger(SpecUpdate) no longer
