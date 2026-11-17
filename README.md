@@ -546,9 +546,13 @@ without what was written since.
   task kind, and deployments were empty. Raft adds log operation 29 (the
   workload schema upsert) and snapshot field 12: a replica of an earlier version
   fails operation 29 and drops field 12, so upgrade every replica before agents
-  on the reworked SDK send schemas. The database mode adds migration `0002`
-  (table `podium_workload_schemas`), which only adds a table. Agents on the
-  current SDK do not accept the tasks podium now sends: see
+  on the reworked SDK send schemas. A replica of an earlier version also drops
+  the spec's fields 18 to 21, its workload: a spec written or edited on one, in
+  raft or database mode, or replayed there from the raft log, loses its
+  workload, so write no specs until every replica runs this version. The
+  database mode adds migration `0002` (table `podium_workload_schemas`), which
+  only adds a table. Agents on the current SDK do not accept the tasks podium
+  now sends: see
   [Agent communication](internal/proxy/README.md#transports-and-resource-identity).
 - **New permissions.** A version that adds permissions gives them to the
   built-in Admin role, which bootstrap reconciles at each memory start and at

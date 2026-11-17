@@ -19,11 +19,10 @@ color, radius and elevation tokens live in `static/css/app.css` and
   keys) cannot be quoted and must be compile-time constants.
   `TestNoValuePastedBetweenQuotes` fails on a quoted format verb or a value
   joined at a quote in the templates and their Go builders.
-- `static/js/spec-builder.js`: spec editing state, exact argument/environment
-  round trips, validation, cursor-based agent selection, and submit recovery. It
-  builds the spec's `workload` object (`api_version`, `kind`,
-  `schema_fingerprint`, `body`). It also exports its builder for Node's built-in
-  test runner.
+- `static/js/spec-builder.js`: spec editing state, validation, cursor-based
+  agent selection, and submit recovery. It builds the spec's `workload` object
+  (`api_version`, `kind`, `schema_fingerprint`, `body`). It also exports its
+  builder for Node's built-in test runner.
 - `static/js/control-plane.js`: shared HTTP failure recovery, live-update
   connection status, and task-log lifecycle. Log viewers are preserved by task
   UID across row refreshes, disconnected when removed, and retain at most 256

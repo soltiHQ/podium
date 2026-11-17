@@ -305,14 +305,16 @@ names, Deploy writes nothing and answers 412
 `Placement changed since it was previewed. Review it again.`. A weak tag never
 matches, and a blank `If-Match`, or one of empty list elements only, names no
 plan and gets the same answer. Only without `If-Match`, or with `*` anywhere in
-it, Deploy deploys the current placement unchecked, as before, so API clients
-that never preview keep working. A deploy whose spec workload changed between
-the placement check and the write answers the same 412, even without a token.
+it, Deploy checks no token, as before, so API clients that never preview keep
+working. A deploy whose spec workload or runner labels changed between the
+schema check, which runs before the deploy's transaction, and the write answers
+the same 412, even without a token.
 
 Each runner of the placement may carry `detail`, a string of at most 1 KiB that
 says why the runner is `schema_incompatible`: the schema problems, "the body is
-too costly to check against this schema", or "the schema could not be loaded:
-…". The UI shows it as text.
+too costly to check against this schema", "podium refused this schema: <reason>"
+(see "Refused schemas" below), or "the schema could not be loaded", whose error
+podium logs with the fingerprint instead. The UI shows it as text.
 
 A spec carries its workload beside the envelope, on create and update and in
 every response:
@@ -330,9 +332,19 @@ every response:
 
 The former built-in task kind fields are gone. An invalid body is a 400 whose
 message lists `path: message; …`, the first 20 problems. A fingerprint podium
-does not hold is a 400, and so is a body too costly to validate: "the workload
-schema is too expensive to validate this body". A save that changes nothing
-writes nothing and no longer bumps the version.
+does not hold is a 400, and so is one whose schema podium refuses, with a
+message that names the fingerprint and the reason, and a body too costly to
+validate: "the workload schema is too expensive to validate this body".
+
+Numbers in a body are IEEE 754 doubles where a spec is encoded (the raft log and
+snapshots, the database rows), so an integer must fit in ±2^53 to be kept
+exactly. One beyond that which a double cannot hold exactly is a 400 whose
+message names its path, in every storage mode, the memory mode included; one a
+double can hold is kept as that double. Send 64-bit IDs as strings.
+
+A save that changes nothing writes nothing, no longer bumps the version, and
+records no `spec_updated` event and sends no refresh; it answers 204 as any save
+does.
 
 ### Workload type catalog `/api/v1/workload-types`
 
@@ -346,7 +358,10 @@ The list answers a JSON array of
 `agents` are the IDs of the agents that declare the fingerprint and `received`
 says whether podium holds its schema. The type answers
 `{api_version, kind, fingerprints: [{fingerprint, agents, received, schema}]}`;
-`schema` is the raw JSON an agent sent, untrusted text.
+`schema` is the raw JSON an agent sent, untrusted text. In both, a fingerprint
+whose schema podium refuses also carries `refused`, the reason, at most 512
+bytes that may quote the schema: untrusted text too (see "Refused schemas"
+below).
 
 ### Dashboard `/api/v1/dashboard`
 
@@ -477,14 +492,35 @@ podium has no built-in kinds: whatever an agent runs is an ordinary
 agent-declared type, which the SDK rework brings.
 
 **Discovery.** Each declared type carries `schema_fingerprint` (agent proto
-`WorkloadType`, field 3). podium answers the fingerprints it lacks with
-`SyncResponse.want_schemas` (field 4). The agent's next sync sends them in
-`SyncRequest.schemas` (field 14, `WorkloadSchema{fingerprint, schema}`), only
-for fingerprints declared in that same request. podium recomputes each
-fingerprint and rejects a mismatch. Heartbeats carry fingerprints only. A schema
-is stored once per fingerprint and kept after no agent declares it. A whole
-SyncRequest stays within 256 KiB, so an agent sends as many requested schemas as
-fit and the rest in later syncs.
+`WorkloadType`, field 3): empty, or exactly 64 lowercase hex characters, with at
+most 256 distinct fingerprints across all the runners of a sync. Anything else
+is refused as any invalid capability is, see "Discovery endpoint" below. podium
+answers the fingerprints it lacks with `SyncResponse.want_schemas` (field 4).
+The agent's next sync sends them in `SyncRequest.schemas` (field 14,
+`WorkloadSchema{fingerprint, schema}`), only for fingerprints declared in that
+same request. podium recomputes each fingerprint and rejects a mismatch.
+Heartbeats carry fingerprints only. A schema is stored once per fingerprint and
+kept after no agent declares it. A whole SyncRequest stays within 256 KiB, so an
+agent sends as many requested schemas as fit and the rest in later syncs. Over
+HTTP the JSON carries the schema bytes as base64, a third larger, so only about
+two 64 KiB schemas fit in one sync, three over gRPC; a request over 256 KiB is
+refused whole, its heartbeat included (HTTP 413, gRPC `ResourceExhausted`).
+
+**Refused schemas.** A schema whose fingerprint matches its bytes and that
+podium does not compile (see "Schemas podium accepts" below) is refused for
+good: the refusal is the same on every try of this binary. podium remembers it
+in memory, with the reason cut to 512 bytes, logs it once at WARN with the
+reason in a field, and no longer lists the fingerprint in `want_schemas`, so the
+agent stops sending it. The catalog shows the reason as `refused`; a runner that
+declares the fingerprint is `schema_incompatible` with the detail "podium
+refused this schema: <reason>"; a save naming it is a 400 that names the
+fingerprint and the reason. A schema in the catalog that this binary does not
+compile, as one another version stored, is refused the same way once podium
+tries to compile it. Each replica keeps its own refusals, lost with the process:
+after a restart podium asks for the schema once more. It keeps at most 4096;
+past that, a new refusal is not remembered, and its fingerprint stays wanted and
+is refused each time it is sent. What an agent sends reaches the logs only in
+fields, cut: an offered fingerprint to 128 bytes, a reason to 512.
 
 A group-less `api_version` (such as `v1`) is a valid type, and two types may
 share one fingerprint when their canonical schemas are identical.
@@ -511,23 +547,49 @@ below the root. `format` and `content*` are annotations, never asserted.
 
 Validation runs under a fixed work budget.
 
-**Placement reasons.** Each target gets one of `compatible`,
-`workload_unsupported`, `runner_labels_mismatch`, `inventory_unknown` and three
-that the schemas bring:
+**Placement.** The agent routes a task to the first runner, in declared order,
+whose type and labels match: the SDK router takes the first runner that declares
+the spec's exact type and matches its runner labels, whatever its schema.
+Placement evaluates that runner, and only that one. A target whose first
+matching runner is not compatible is not eligible, even when a later runner
+would take the body, since the agent never routes the task there; a later runner
+whose type and labels match is not evaluated and has no reason.
 
-| Reason | Meaning |
+Each runner gets one of these reasons, or none when it is not evaluated:
+
+| Runner reason | Meaning |
 | -- | -- |
-| `inventory_unknown` | The agent has reported no runners. It is not eligible. |
-| `schema_incompatible` | The body is invalid against that target's schema, or too costly to check. |
-| `schema_pending` | The target's schema has not arrived yet, normally for one sync. |
+| `compatible` | The runner takes the body. |
+| `workload_unsupported` | The runner does not declare the spec's exact type. |
+| `runner_labels_mismatch` | The runner's labels do not match the spec's runner labels. |
+| `schema_incompatible` | The body is invalid against the runner's schema or too costly to check, or podium refused the schema or could not load it: `detail` says which. |
+| `schema_pending` | The runner's schema has not arrived yet, normally for one sync. |
 | `schema_unpublished` | The runner declares the type without a fingerprint. |
+
+Each target gets one of these:
+
+| Target reason | Meaning |
+| -- | -- |
+| `compatible_runner` | The evaluated runner is compatible; `selected_runner` names it. |
+| `missing_agent` | The explicit target is not in discovery. |
+| `inventory_unknown` | The agent has reported no runners. |
+| `workload_unsupported` | No runner declares the spec's exact type. |
+| `runner_labels_mismatch` | A runner declares the type, but none matches the runner labels. |
+| `schema_incompatible`, `schema_pending`, `schema_unpublished` | The reason of the evaluated runner. |
 
 A target whose fingerprint differs from the spec's is compatible when the body
 is valid against the target's schema; the spec keeps its own fingerprint. Deploy
 refuses incompatible targets, and `inventory_unknown` ones, with 409
 `Deployment blocked: a target cannot take this workload (<codes>). Review the placement preview.`
-A task already running on a target that turns incompatible is left alone and
-gets no new generation.
+
+The sync runner checks each target the same way before every push, whether it
+pushes a new generation, retries one or reinstalls a task the agent lost. A
+target that is no longer compatible since the deploy (its schema, its runners or
+their labels changed) gets no call: its rollout is marked failed with
+`target not compatible: <reason>` and the runner's detail, and is retried as any
+failed push is. A task the agent still runs is not touched and keeps its
+generation; one the agent lost, as when it restarts on a version whose schema
+refuses the body, is not reinstalled.
 
 ## Discovery endpoint
 
@@ -547,17 +609,20 @@ the bucket (`chargeSync`), and call `agentSVC.Upsert`. The capability fields
 have limits of their own: at most 64 runners, each name at most 128 bytes; per
 runner at most 256 labels (key at most 317 bytes, value at most 1024 bytes) and
 at most 256 workloads (`api_version` at most 317 bytes, `kind` at most 128
-bytes). Data that breaks one is answered 400 / `InvalidArgument` naming the
-field (such as `agent capabilities.runners[1].name exceeds 128 bytes`), with
-nothing enrolled or stored (`TestCapabilityCapsRefuseOversizedFields`). The SDK
-treats a 400 as permanent. No byte limit that refuses is below the SDK's own:
-there a label key is a qualified name, an optional DNS prefix of at most 253
-bytes, a slash and a name of at most 63, and an `api_version` is a CRD group of
-at most 253 bytes, a slash and a version of at most 63, so both are 317 bytes at
-most. The three counts are below what the SDK lets an agent send, since it sets
-none: an agent with more than 64 runners, or more than 256 labels or 256
-workloads in one, gets that 400. A sync with the longest key and `api_version`
-the SDK allows and the counts at the caps is stored whole
+bytes, `schema_fingerprint` empty or 64 lowercase hex characters); across all
+runners at most 256 distinct schema fingerprints. Data that breaks one is
+answered 400 / `InvalidArgument` naming the field (such as
+`agent capabilities.runners[1].name exceeds 128 bytes`), with nothing enrolled
+or stored (`TestCapabilityCapsRefuseOversizedFields`). The SDK treats a 400 as
+permanent. No byte limit that refuses is below the SDK's own: there a label key
+is a qualified name, an optional DNS prefix of at most 253 bytes, a slash and a
+name of at most 63, and an `api_version` is a CRD group of at most 253 bytes, a
+slash and a version of at most 63, so both are 317 bytes at most; the contract
+fixes a fingerprint as 64 lowercase hex characters. The four counts are below
+what the SDK lets an agent send, since it sets none: an agent with more than 64
+runners, more than 256 labels or 256 workloads in one, or more than 256 distinct
+schema fingerprints, gets that 400. A sync with the longest key and
+`api_version` the SDK allows and the counts at the caps is stored whole
 (`TestCapabilityCapsAcceptWhatTheSDKSends`). `os`, `arch` and `platform` are not
 refused for their length: each is cut to 256 bytes on a rune boundary
 (`TestLongPlatformFieldsAreCut`). The limits are not applied to rows already
