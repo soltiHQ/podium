@@ -25,7 +25,8 @@ vars:
   name: podium
 
   proto_repo: https://github.com/soltiHQ/proto.git
-  proto_ref: v0.1.3
+  # Pre-release contract branch; becomes the v0.2.0 tag before merge.
+  proto_ref: other/workload-types
   proto_packages: agent discover task raft
   proto_plugins_dir: .cache/proto-plugins
 
