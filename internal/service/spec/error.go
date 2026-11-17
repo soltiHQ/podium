@@ -50,6 +50,19 @@ func (e *UnsupportedTargetsError) Error() string {
 }
 func (e *UnsupportedTargetsError) Unwrap() error { return storage.ErrInvalidArgument }
 
+// IncompatibleTargetsError identifies targets whose runners publish a schema the
+// workload body does not satisfy, or none that can be compared. Reasons gives the
+// placement reason of each agent in Agents.
+type IncompatibleTargetsError struct {
+	Agents  []string
+	Reasons map[string]string
+}
+
+func (e *IncompatibleTargetsError) Error() string {
+	return fmt.Sprintf("deploy rejected: workload schema incompatible on agents: %s", strings.Join(e.Agents, ", "))
+}
+func (e *IncompatibleTargetsError) Unwrap() error { return storage.ErrInvalidArgument }
+
 // ErrPlacementChanged is returned by Deploy when the caller's plan token no
 // longer matches the plan recomputed inside the transaction: since the preview
 // the spec was saved, the set of targets changed, a target was registered or

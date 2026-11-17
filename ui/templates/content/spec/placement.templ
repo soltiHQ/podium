@@ -140,6 +140,8 @@ func placementBlockingReason(reason string) string {
 		return "At least one explicit target agent is missing. The deployment is blocked for every target."
 	case "unsupported_targets":
 		return "At least one target has no compatible runner. The deployment is blocked for every target."
+	case "incompatible_targets":
+		return "At least one target runs no schema this workload fits. The deployment is blocked for every target."
 	default:
 		return reason
 	}
@@ -154,6 +156,12 @@ func placementTargetReason(reason string) string {
 		return "The advertised runners do not support this workload group, version and kind."
 	case "runner_labels_mismatch":
 		return "The workload is supported, but no runner matches every required runner label."
+	case "schema_incompatible":
+		return "The workload body does not satisfy the schema the runners publish."
+	case "schema_pending":
+		return "The schema the runners publish has not reached the control plane yet."
+	case "schema_unpublished":
+		return "The runners publish no schema for this workload, so the body cannot be checked."
 	case "compatible_runner":
 		return "A compatible runner is advertised for this saved desired state."
 	default:
@@ -166,8 +174,14 @@ func placementRunnerReason(reason string) string {
 		return "This registration does not support the required workload."
 	case "runner_labels_mismatch":
 		return "This registration does not match all required runner labels."
+	case "schema_incompatible":
+		return "The workload body does not satisfy the schema this registration publishes."
+	case "schema_pending":
+		return "The schema this registration publishes has not reached the control plane yet."
+	case "schema_unpublished":
+		return "This registration publishes no schema for the workload."
 	case "compatible":
-		return "This registration matches both workload and runner labels."
+		return "This registration matches the workload, its schema and runner labels."
 	default:
 		return reason
 	}

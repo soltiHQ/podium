@@ -113,7 +113,7 @@ func TestDeployRejectsIncompatibleAdvertisedRunner(t *testing.T) {
 	if !errors.As(err, &unsupported) {
 		t.Fatalf("incompatible advertised runner accepted: %v", err)
 	}
-	ag.SetCapabilities([]model.RunnerCapability{{Name: "sub", Labels: map[string]string{"zone": "a"}, Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Subprocess"}}}})
+	ag.SetCapabilities([]model.RunnerCapability{{Name: "sub", Labels: map[string]string{"zone": "a"}, Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Container", SchemaFingerprint: testFingerprint(t)}}}})
 	_ = s.UpsertAgent(ctx, ag)
 	ts.SetRunnerLabels(map[string]string{"zone": "b"})
 	_ = svc.Upsert(ctx, ts, 0)

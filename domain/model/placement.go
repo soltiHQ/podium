@@ -47,4 +47,7 @@ type PlacementRunner struct {
 	LabelsMatch   bool
 	Eligible      bool
 	Reason        string
+	// Detail says more about a refusal: the first schema problems, or that the
+	// body was too expensive to validate. It is empty for other reasons.
+	Detail string
 }

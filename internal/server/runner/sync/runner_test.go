@@ -187,7 +187,7 @@ func seedSpecAndAgent(t *testing.T, store storage.Storage, specID, agentID strin
 		t.Fatalf("NewSpec: %v", err)
 	}
 	ts.SetTargets([]string{agentID})
-	ts.SetKindConfig(map[string]any{"command": map[string]any{"command": "echo", "args": []any{"hi"}}})
+	ts.SetWorkload(model.Workload{APIVersion: "solti.io/v1", Kind: "Container", SchemaFingerprint: "abc", Body: map[string]any{"image": "busybox", "args": []any{"hi"}}})
 	if err := store.UpsertSpec(context.Background(), ts); err != nil {
 		t.Fatalf("UpsertSpec: %v", err)
 	}

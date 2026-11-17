@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/workloadschema"
 )
 
 func TestPlacementMatchesDeployBeyond500AndUsesAllLabelUnion(t *testing.T) {
@@ -69,6 +71,7 @@ func TestPlacementMatchesDeployBeyond500AndUsesAllLabelUnion(t *testing.T) {
 func TestPlacementPreservesRunnerRegistrationOrderAndObservedLiveness(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	ts, _ := model.NewSpec("plan", "plan", "slot")
+	ts.SetWorkload(testWorkload(t))
 	ts.SetTargets([]string{"agent", "agent"})
 	ts.SetTargetLabels(map[string]string{"env": "prod"})
 	ts.SetRunnerLabels(map[string]string{"zone": "a"})
@@ -77,14 +80,14 @@ func TestPlacementPreservesRunnerRegistrationOrderAndObservedLiveness(t *testing
 	a.SetStatus(enum.AgentStatusInactive)
 	a.SetLastSeenAt(now.Add(-time.Minute))
 	a.SetStaleAt(now.Add(-30 * time.Second))
-	sub := []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Subprocess"}}
+	sub := []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Container", SchemaFingerprint: testFingerprint(t)}}
 	a.SetCapabilities([]model.RunnerCapability{
-		{Name: "other-workload", Labels: map[string]string{"zone": "a"}, Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Container"}}},
+		{Name: "other-workload", Labels: map[string]string{"zone": "a"}, Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Subprocess"}}},
 		{Name: "wrong-zone", Labels: map[string]string{"zone": "b"}, Workloads: sub},
 		{Name: "z-first", Labels: map[string]string{"zone": "a"}, Workloads: sub},
 		{Name: "a-second", Labels: map[string]string{"zone": "a"}, Workloads: sub},
 	})
-	plan, err := buildPlacement(ts, []*model.Agent{a}, now)
+	plan, err := buildPlacement(context.Background(), ts, []*model.Agent{a}, now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,17 +219,189 @@ func TestPlacementPreviewUsesOnlyReadsAndDeletionIsBlocked(t *testing.T) {
 	}
 }
 
-func TestPlacementNeverMatchesUnknownKindToMalformedInventory(t *testing.T) {
+func TestPlacementNeverMatchesAWorkloadlessSpecToMalformedInventory(t *testing.T) {
 	ts, _ := model.NewSpec("invalid-kind", "invalid", "slot")
-	ts.SetKindType(enum.TaskKindType("unknown"))
 	ts.SetTargets([]string{"agent"})
 	a, _ := model.NewAgent("agent", "agent", "http://agent")
 	a.SetCapabilities([]model.RunnerCapability{{Name: "malformed", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: ""}}}})
-	plan, err := buildPlacement(ts, []*model.Agent{a}, time.Now())
+	plan, err := buildPlacement(context.Background(), ts, []*model.Agent{a}, time.Now(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if plan.DeployAllowed || plan.Targets[0].EligibilityReason != "workload_unsupported" {
-		t.Fatalf("unknown kind matched malformed capability: %+v", plan)
+		t.Fatalf("a spec without a workload matched a malformed capability: %+v", plan)
+	}
+}
+
+// A second schema of the Container type, one that accepts a body the first
+// refuses and refuses a body the first accepts.
+const (
+	permissiveSchema = `{"type":"object"}`
+	portSchema       = `{"type":"object","required":["image","port"],"properties":{"image":{"type":"string"},"port":{"type":"integer"}}}`
+)
+
+// seedSchema puts a schema of the test type into the catalog and returns its fingerprint.
+func seedSchema(t testing.TB, store storage.Storage, schema string) string {
+	t.Helper()
+	fp, err := workloadschema.Fingerprint([]byte(schema))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := model.NewWorkloadSchema(fp, testAPIVersion, testKind, []byte(schema), "agent-1", time.Unix(1700000000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.UpsertWorkloadSchema(context.Background(), entry); err != nil {
+		t.Fatal(err)
+	}
+	return fp
+}
+
+func containerRunner(name, fingerprint string) model.RunnerCapability {
+	return model.RunnerCapability{Name: name, Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Container", SchemaFingerprint: fingerprint}}}
+}
+
+func TestPlacementComparesFingerprints(t *testing.T) {
+	svc, store := mkService(t)
+	ctx := context.Background()
+	ts := mkSpec(t, svc, store, "fingerprints", []string{"agent"})
+	// The body {"image": "busybox"} is valid for permissiveSchema and not for portSchema.
+	valid := seedSchema(t, store, permissiveSchema)
+	invalid := seedSchema(t, store, portSchema)
+	a, err := store.GetAgent(ctx, "agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetCapabilities([]model.RunnerCapability{
+		containerRunner("equal", testFingerprint(t)),
+		containerRunner("valid", valid),
+		containerRunner("invalid", invalid),
+		containerRunner("unknown", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+		containerRunner("unpublished", ""),
+	})
+	if err = store.UpsertAgent(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := svc.PreviewPlacement(ctx, ts.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := plan.Targets[0]
+	got := make(map[string]string)
+	eligible := make(map[string]bool)
+	for _, r := range target.Runners {
+		got[r.Name], eligible[r.Name] = r.Reason, r.Eligible
+		if !r.WorkloadMatch {
+			t.Fatalf("runner %s does not match the workload type", r.Name)
+		}
+	}
+	want := map[string]string{
+		"equal": "compatible", "valid": "compatible", "invalid": "schema_incompatible",
+		"unknown": "schema_pending", "unpublished": "schema_unpublished",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reasons = %v, want %v", got, want)
+	}
+	for name, reason := range want {
+		if eligible[name] != (reason == "compatible") {
+			t.Fatalf("runner %s: eligible = %v with reason %s", name, eligible[name], reason)
+		}
+	}
+	if !reflect.DeepEqual(target.RunnerNames, []string{"equal", "valid"}) || target.SelectedRunner != "equal" || !target.Eligible || target.EligibilityReason != "compatible_runner" {
+		t.Fatalf("only compatible runners are eligible: %+v", target)
+	}
+	for _, r := range target.Runners {
+		if r.Name == "invalid" && !strings.Contains(r.Detail, "port") {
+			t.Fatalf("the incompatible runner names no problem: %q", r.Detail)
+		}
+	}
+}
+
+func TestPlacementWithoutACompatibleRunnerExplainsWhy(t *testing.T) {
+	svc, store := mkService(t)
+	ctx := context.Background()
+	ts := mkSpec(t, svc, store, "reasons", []string{"agent"})
+	invalid := seedSchema(t, store, portSchema)
+	a, _ := store.GetAgent(ctx, "agent")
+	for name, tc := range map[string]struct {
+		runner model.RunnerCapability
+		reason string
+	}{
+		"incompatible": {containerRunner("r", invalid), "schema_incompatible"},
+		"pending":      {containerRunner("r", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"), "schema_pending"},
+		"unpublished":  {containerRunner("r", ""), "schema_unpublished"},
+	} {
+		a.SetCapabilities([]model.RunnerCapability{tc.runner})
+		if err := store.UpsertAgent(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+		plan, err := svc.PreviewPlacement(ctx, ts.ID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if target := plan.Targets[0]; target.Eligible || target.EligibilityReason != tc.reason || plan.DeployAllowed || plan.BlockingReason != "incompatible_targets" {
+			t.Fatalf("%s: %+v / %q", name, target, plan.BlockingReason)
+		}
+	}
+}
+
+// Review Focus 3: one spec, two targets whose runners publish two schemas, and
+// a body valid for one of them. The plan has one compatible and one
+// schema_incompatible target, and Deploy refuses only the second.
+func TestDeployRefusesOnlyIncompatibleTargets(t *testing.T) {
+	svc, store := mkService(t)
+	ctx := context.Background()
+	ts := mkSpec(t, svc, store, "focus-3", []string{"fits", "misfits"})
+	for id, schema := range map[string]string{"fits": permissiveSchema, "misfits": portSchema} {
+		fp := seedSchema(t, store, schema)
+		a, err := store.GetAgent(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.SetCapabilities([]model.RunnerCapability{containerRunner("runner", fp)})
+		if err = store.UpsertAgent(ctx, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan, err := svc.PreviewPlacement(ctx, ts.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Targets) != 2 || plan.Targets[0].AgentID != "fits" || plan.Targets[1].AgentID != "misfits" {
+		t.Fatalf("targets: %+v", plan.Targets)
+	}
+	if r := plan.Targets[0].Runners[0]; !plan.Targets[0].Eligible || r.Reason != "compatible" {
+		t.Fatalf("fits: %+v", plan.Targets[0])
+	}
+	if r := plan.Targets[1].Runners[0]; plan.Targets[1].Eligible || r.Reason != "schema_incompatible" || plan.Targets[1].EligibilityReason != "schema_incompatible" {
+		t.Fatalf("misfits: %+v", plan.Targets[1])
+	}
+	if plan.DeployAllowed || plan.BlockingReason != "incompatible_targets" {
+		t.Fatalf("plan: allowed %v, blocking %q", plan.DeployAllowed, plan.BlockingReason)
+	}
+	var incompatible *IncompatibleTargetsError
+	err = svc.Deploy(ctx, ts.ID(), nil)
+	if !errors.As(err, &incompatible) {
+		t.Fatalf("Deploy = %v, want an IncompatibleTargetsError", err)
+	}
+	if !reflect.DeepEqual(incompatible.Agents, []string{"misfits"}) || !reflect.DeepEqual(incompatible.Reasons, map[string]string{"misfits": "schema_incompatible"}) {
+		t.Fatalf("refused %v with %v, want only misfits", incompatible.Agents, incompatible.Reasons)
+	}
+	var unsupported *UnsupportedTargetsError
+	if errors.As(err, &unsupported) {
+		t.Fatal("an incompatible target is reported as unsupported")
+	}
+	if rollouts, _ := svc.RolloutsBySpec(ctx, ts.ID()); len(rollouts) != 0 {
+		t.Fatalf("a refused deploy wrote %d rollouts", len(rollouts))
+	}
+
+	// Once the second agent runs a schema the body fits, Deploy goes ahead.
+	a, _ := store.GetAgent(ctx, "misfits")
+	a.SetCapabilities([]model.RunnerCapability{containerRunner("runner", seedSchema(t, store, permissiveSchema))})
+	if err = store.UpsertAgent(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err = svc.Deploy(ctx, ts.ID(), nil); err != nil {
+		t.Fatalf("Deploy after the fix: %v", err)
 	}
 }

@@ -7,11 +7,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"sort"
+	"strings"
 	"time"
 
-	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/workloadschema"
 )
 
 // PreviewPlacement evaluates a saved specification without mutating storage or
@@ -29,20 +30,43 @@ func (s *Service) PreviewPlacement(ctx context.Context, specID string) (*model.P
 	if err != nil {
 		return nil, err
 	}
-	plan, _, err := loadPlacement(ctx, s.store, ts, time.Now())
+	plan, _, err := loadPlacement(ctx, s.store, s.schemas, ts, time.Now())
 	return plan, err
 }
 
 // loadPlacement reads the inventory and the spec's rollouts, and returns the
 // plan with its token and the steps Deploy executes for it. Preview and Deploy
 // both call it, so the same stored state gives them the same token.
-func loadPlacement(ctx context.Context, store storage.Storage, ts *model.Spec, now time.Time) (*model.PlacementPlan, []deployStep, error) {
+func loadPlacement(ctx context.Context, store storage.Storage, schemas SchemaSource, ts *model.Spec, now time.Time) (*model.PlacementPlan, []deployStep, error) {
+	agents, err := placementAgents(ctx, store, ts)
+	if err != nil {
+		return nil, nil, err
+	}
+	rollouts, err := storage.AllRollouts(ctx, store, store.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: ts.ID()}))
+	if err != nil {
+		return nil, nil, err
+	}
+	if err = ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	plan, err := buildPlacement(ctx, ts, agents, now, schemas)
+	if err != nil {
+		return nil, nil, err
+	}
+	steps := deploySteps(plan, rollouts)
+	plan.Token = planToken(plan, steps)
+	return plan, steps, nil
+}
+
+// placementAgents reads the agents a spec's placement considers: all of them
+// when it selects by label, else the explicit targets that exist.
+func placementAgents(ctx context.Context, store storage.Storage, ts *model.Spec) ([]*model.Agent, error) {
 	var agents []*model.Agent
 	if len(ts.TargetLabels()) > 0 {
 		var err error
 		agents, err = storage.AllAgents(ctx, store, nil)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	} else {
 		seen := make(map[string]bool)
@@ -56,25 +80,56 @@ func loadPlacement(ctx context.Context, store storage.Storage, ts *model.Spec, n
 				continue
 			}
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 			agents = append(agents, a)
 		}
 	}
-	rollouts, err := storage.AllRollouts(ctx, store, store.BuildRolloutFilter(storage.RolloutQueryCriteria{SpecID: ts.ID()}))
+	return agents, nil
+}
+
+// prefetchedSchemas answers Compiled from schemas read before a transaction
+// opened. The catalog's own source reads the store, which Deploy's transaction
+// holds, so inside the transaction a fingerprint missing here is unknown, not read.
+type prefetchedSchemas map[string]*workloadschema.Schema
+
+func (p prefetchedSchemas) Compiled(_ context.Context, fingerprint string) (*workloadschema.Schema, bool, error) {
+	schema, ok := p[fingerprint]
+	return schema, ok, nil
+}
+
+// prefetchSchemas compiles, outside any transaction, every schema the runners of
+// the spec's placement publish.
+func (s *Service) prefetchSchemas(ctx context.Context, specID string) (prefetchedSchemas, error) {
+	out := prefetchedSchemas{}
+	if s.schemas == nil {
+		return out, nil
+	}
+	ts, err := s.store.GetSpec(ctx, specID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	if err = ctx.Err(); err != nil {
-		return nil, nil, err
-	}
-	plan, err := buildPlacement(ts, agents, now)
+	agents, err := placementAgents(ctx, s.store, ts)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	steps := deploySteps(plan, rollouts)
-	plan.Token = planToken(plan, steps)
-	return plan, steps, nil
+	for _, a := range agents {
+		for _, c := range a.Capabilities() {
+			for _, gvk := range c.Workloads {
+				if gvk.SchemaFingerprint == "" || out[gvk.SchemaFingerprint] != nil {
+					continue
+				}
+				schema, known, err := s.schemas.Compiled(ctx, gvk.SchemaFingerprint)
+				if err != nil {
+					return nil, err
+				}
+				if known {
+					out[gvk.SchemaFingerprint] = schema
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
 // deployAction is what Deploy does with one agent's rollout of the spec.
@@ -173,10 +228,12 @@ func appendTokenString(b []byte, s string) []byte {
 	return append(b, s...)
 }
 
-// buildPlacement is the single pure policy for preview and actual deployment.
+// buildPlacement is the single policy for preview and actual deployment. It
+// reads only the catalog behind schemas, to check the body against the schemas
+// the runners publish; a nil source knows no schema.
 // Explicit IDs are unioned with ALL-label matches. Empty labels match no extra
 // agents. Matching runners retain registration order, not alphabetical order.
-func buildPlacement(ts *model.Spec, agents []*model.Agent, now time.Time) (*model.PlacementPlan, error) {
+func buildPlacement(ctx context.Context, ts *model.Spec, agents []*model.Agent, now time.Time, schemas SchemaSource) (*model.PlacementPlan, error) {
 	plan := &model.PlacementPlan{
 		SpecID: ts.ID(), SpecVersion: ts.Version(), Generation: ts.Generation(), CheckedAt: now,
 		DeployAllowed: !ts.DeletionRequested(), DeletionRequested: ts.DeletionRequested(), Targets: []model.PlacementTarget{},
@@ -211,8 +268,12 @@ func buildPlacement(ts *model.Spec, agents []*model.Agent, now time.Time) (*mode
 	}
 	sort.Strings(ids)
 	plan.NoTargets = len(ids) == 0
+	cmp := &schemaCompat{ctx: ctx, schemas: schemas, workload: ts.Workload(), memo: make(map[string]compat)}
 	for _, id := range ids {
-		target := planTarget(inventory[id], ts, now)
+		target, err := planTarget(inventory[id], ts, now, cmp)
+		if err != nil {
+			return nil, err
+		}
 		target.AgentID = id
 		target.MatchedBy = wanted[id]
 		plan.Targets = append(plan.Targets, target)
@@ -221,10 +282,12 @@ func buildPlacement(ts *model.Spec, agents []*model.Agent, now time.Time) (*mode
 		}
 	}
 	if !ts.DeletionRequested() {
-		if missing, _ := blockedTargets(plan); len(missing) > 0 {
+		if missing, _, _ := blockedTargets(plan); len(missing) > 0 {
 			plan.BlockingReason = "unknown_targets"
-		} else if _, unsupported := blockedTargets(plan); len(unsupported) > 0 {
+		} else if _, unsupported, _ := blockedTargets(plan); len(unsupported) > 0 {
 			plan.BlockingReason = "unsupported_targets"
+		} else if _, _, incompatible := blockedTargets(plan); len(incompatible) > 0 {
+			plan.BlockingReason = "incompatible_targets"
 		}
 	}
 	return plan, nil
@@ -239,11 +302,83 @@ func agentMatchesLabels(a *model.Agent, labels map[string]string) bool {
 	return true
 }
 
-func planTarget(a *model.Agent, ts *model.Spec, now time.Time) model.PlacementTarget {
+// compat is how a runner's schema relates to the spec's workload body.
+type compat struct{ reason, detail string }
+
+// schemaCompat decides, for a runner fingerprint, whether the spec's body fits.
+// Each fingerprint is checked once per plan.
+type schemaCompat struct {
+	ctx      context.Context
+	schemas  SchemaSource
+	workload model.Workload
+	memo     map[string]compat
+}
+
+// check gives the placement reason for a runner that publishes fingerprint:
+//   - empty                          schema_unpublished
+//   - the spec's own fingerprint     compatible
+//   - not in the catalog (yet)       schema_pending
+//   - known and the body is valid    compatible
+//   - known and the body is invalid  schema_incompatible, or too expensive to validate
+func (c *schemaCompat) check(fingerprint string) (compat, error) {
+	if fingerprint == "" {
+		return compat{reason: "schema_unpublished"}, nil
+	}
+	if fingerprint == c.workload.SchemaFingerprint {
+		return compat{reason: "compatible"}, nil
+	}
+	if got, ok := c.memo[fingerprint]; ok {
+		return got, nil
+	}
+	got := compat{reason: "schema_pending"}
+	if c.schemas != nil {
+		schema, known, err := c.schemas.Compiled(c.ctx, fingerprint)
+		if err != nil {
+			return compat{}, err
+		}
+		if known {
+			body := c.workload.Body
+			if body == nil {
+				body = map[string]any{}
+			}
+			var verr *workloadschema.ValidationError
+			switch err = schema.Validate(body); {
+			case err == nil:
+				got = compat{reason: "compatible"}
+			case errors.Is(err, workloadschema.ErrValidationTooExpensive):
+				got = compat{reason: "schema_incompatible", detail: "the body was too expensive to validate against this schema"}
+			case errors.As(err, &verr):
+				got = compat{reason: "schema_incompatible", detail: problemsText(verr)}
+			default:
+				got = compat{reason: "schema_incompatible", detail: err.Error()}
+			}
+		}
+	}
+	c.memo[fingerprint] = got
+	return got, nil
+}
+
+// problemsText lists the first problems of a refusal, as the service does when it refuses a body.
+func problemsText(verr *workloadschema.ValidationError) string {
+	problems := verr.Problems
+	if len(problems) > maxProblems {
+		problems = problems[:maxProblems]
+	}
+	parts := make([]string, len(problems))
+	for i, p := range problems {
+		parts[i] = p.Path + ": " + p.Message
+		if p.Path == "" {
+			parts[i] = p.Message
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+func planTarget(a *model.Agent, ts *model.Spec, now time.Time, cmp *schemaCompat) (model.PlacementTarget, error) {
 	t := model.PlacementTarget{Status: "unknown", HeartbeatFreshness: "unknown", RunnerNames: []string{}, Runners: []model.PlacementRunner{}}
 	if a == nil {
 		t.EligibilityReason = "missing_agent"
-		return t
+		return t, nil
 	}
 	t.Exists = true
 	t.AgentName = a.Name()
@@ -261,18 +396,25 @@ func planTarget(a *model.Agent, ts *model.Spec, now time.Time) model.PlacementTa
 	if !t.InventoryKnown {
 		t.Eligible = true
 		t.EligibilityReason = "inventory_unknown"
-		return t
+		return t, nil
 	}
-	kind := workloadKind(ts.KindType())
-	anyWorkload := false
+	// The workload type is matched exactly. A spec without a workload has no
+	// type, and matches no runner.
+	want, wantErr := cmp.workload.GVK()
+	anyWorkload, anyLabels := false, false
+	firstSchemaReason := ""
 	selector := ts.RunnerLabels()
 	for _, cap := range capabilities {
 		r := model.PlacementRunner{Name: cap.Name, Labels: cap.Labels, LabelsMatch: true}
-		for _, gvk := range cap.Workloads {
-			if kind != "" && gvk.Group == "solti.io" && gvk.Version == "v1" && gvk.Kind == kind {
-				r.WorkloadMatch = true
-				anyWorkload = true
-				break
+		var fingerprint string
+		if wantErr == nil {
+			for _, gvk := range cap.Workloads {
+				if gvk.Group == want.Group && gvk.Version == want.Version && gvk.Kind == want.Kind {
+					r.WorkloadMatch = true
+					fingerprint = gvk.SchemaFingerprint
+					anyWorkload = true
+					break
+				}
 			}
 		}
 		for k, v := range selector {
@@ -281,52 +423,65 @@ func planTarget(a *model.Agent, ts *model.Spec, now time.Time) model.PlacementTa
 				break
 			}
 		}
-		r.Eligible = r.WorkloadMatch && r.LabelsMatch
 		switch {
 		case !r.WorkloadMatch:
 			r.Reason = "workload_unsupported"
 		case !r.LabelsMatch:
 			r.Reason = "runner_labels_mismatch"
 		default:
-			r.Reason = "compatible"
+			anyLabels = true
+			c, err := cmp.check(fingerprint)
+			if err != nil {
+				return t, err
+			}
+			r.Reason, r.Detail = c.reason, c.detail
+			if firstSchemaReason == "" {
+				firstSchemaReason = c.reason
+			}
 		}
+		r.Eligible = r.Reason == "compatible"
 		t.Runners = append(t.Runners, r)
 		if r.Eligible {
 			t.RunnerNames = append(t.RunnerNames, r.Name)
 		}
 	}
-	if len(t.RunnerNames) > 0 {
+	switch {
+	case len(t.RunnerNames) > 0:
 		t.Eligible = true
 		t.SelectedRunner = t.RunnerNames[0]
 		t.EligibilityReason = "compatible_runner"
-	} else if anyWorkload {
+	case anyLabels:
+		t.EligibilityReason = firstSchemaReason
+	case anyWorkload:
 		t.EligibilityReason = "runner_labels_mismatch"
-	} else {
+	default:
 		t.EligibilityReason = "workload_unsupported"
 	}
-	return t
+	return t, nil
 }
 
-func workloadKind(kind enum.TaskKindType) string {
-	switch kind {
-	case enum.TaskKindSubprocess:
-		return "Subprocess"
-	case enum.TaskKindWasm:
-		return "Wasm"
-	case enum.TaskKindContainer:
-		return "Container"
-	default:
-		return ""
-	}
-}
-
-func blockedTargets(plan *model.PlacementPlan) (missing, unsupported []string) {
+// blockedTargets sorts the targets that stop a deploy: agents missing from
+// discovery, agents with no runner for the workload or its labels, and agents
+// whose runners publish no schema the body fits.
+func blockedTargets(plan *model.PlacementPlan) (missing, unsupported, incompatible []string) {
 	for _, target := range plan.Targets {
-		if !target.Exists {
+		switch {
+		case !target.Exists:
 			missing = append(missing, target.AgentID)
-		} else if !target.Eligible {
+		case target.Eligible:
+		case isSchemaReason(target.EligibilityReason):
+			incompatible = append(incompatible, target.AgentID)
+		default:
 			unsupported = append(unsupported, target.AgentID)
 		}
 	}
-	return missing, unsupported
+	return missing, unsupported, incompatible
+}
+
+func isSchemaReason(reason string) bool {
+	switch reason {
+	case "schema_incompatible", "schema_pending", "schema_unpublished":
+		return true
+	}
+	return false
 }

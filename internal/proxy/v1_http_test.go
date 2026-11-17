@@ -124,7 +124,7 @@ func TestApplyTaskPreconditionsInvalidEndpointReturnsError(t *testing.T) {
 func httpTestManifest(t *testing.T, name string) *taskv1.TaskManifest {
 	t.Helper()
 	s, _ := model.NewSpec("test", "test", "my-slot")
-	s.SetKindConfig(map[string]any{"command": map[string]any{"command": "echo"}})
+	s.SetWorkload(model.Workload{APIVersion: "solti.io/v1", Kind: "Container", SchemaFingerprint: "abc", Body: map[string]any{"image": "busybox"}})
 	m, err := SpecToProto(s)
 	if err != nil {
 		t.Fatal(err)

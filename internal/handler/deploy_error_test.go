@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -15,11 +16,13 @@ import (
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
+	"github.com/soltiHQ/control-plane/internal/service/workload"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transportctx"
+	"github.com/soltiHQ/control-plane/internal/workloadschema"
 )
 
 func TestBlockedDeployReportsSafePlacementReasonWithoutSuccess(t *testing.T) {
@@ -327,5 +330,77 @@ func TestPlanTokensFromIfMatch(t *testing.T) {
 		if (got == nil) != (tc.want == nil) || !slices.Equal(got, tc.want) {
 			t.Errorf("If-Match %q: %#v, want %#v", tc.values, got, tc.want)
 		}
+	}
+}
+
+// A target whose runner schema refuses the body answers 409 with the placement
+// reason. The text names the reason and no agent, runner or endpoint.
+func TestDeployToAnIncompatibleSchemaIs409WithTheReasons(t *testing.T) {
+	ctx := context.Background()
+	store := inmemory.New()
+	seed := func(schema string) string {
+		fp, err := workloadschema.Fingerprint([]byte(schema))
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry, err := model.NewWorkloadSchema(fp, "solti.io/v1", "Container", []byte(schema), "agent-1", time.Unix(1700000000, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = store.UpsertWorkloadSchema(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+		return fp
+	}
+	accepts := seed(`{"type":"object","properties":{"image":{"type":"string"}}}`)
+	refuses := seed(`{"type":"object","required":["port"]}`)
+	saved, err := model.NewSpec("saved", "Saved spec", "lane")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved.SetTargets([]string{"private-agent"})
+	saved.SetWorkload(model.Workload{APIVersion: "solti.io/v1", Kind: "Container", SchemaFingerprint: accepts, Body: map[string]any{"image": "busybox"}})
+	if err = store.UpsertSpec(ctx, saved); err != nil {
+		t.Fatal(err)
+	}
+	agent, err := model.NewAgentFrom(model.AgentParams{ID: "private-agent", Name: "Private agent", Endpoint: "http://private-endpoint", EndpointType: 2, APIVersion: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent.SetCapabilities([]model.RunnerCapability{{Name: "private-runner", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Container", SchemaFingerprint: refuses}}}})
+	if err = store.UpsertAgent(ctx, agent); err != nil {
+		t.Fatal(err)
+	}
+	hub := event.NewHub(zerolog.Nop())
+	api := &API{specSVC: spec.New(store, zerolog.Nop(), spec.WithSchemaSource(workload.New(store, zerolog.Nop()))), hub: hub, logger: zerolog.Nop()}
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/specs/saved/deploy", nil)
+	r.Header.Set("HX-Request", "true")
+	r.Header.Set("Accept", "application/json")
+	r = r.WithContext(transportctx.WithIdentity(r.Context(), &identity.Identity{UserID: "operator", Permissions: []enum.Permission{enum.SpecsDeploy}}))
+	w := httptest.NewRecorder()
+	middleware.Negotiate(responder.NewJSON(), responder.NewHTML())(http.HandlerFunc(api.SpecsRouter)).ServeHTTP(w, r)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("deploy returned %d: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err = json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != http.StatusConflict || !strings.Contains(body.Message, "schema_incompatible") {
+		t.Fatalf("the refusal names no reason: %+v", body)
+	}
+	for _, private := range []string{"private-agent", "private-runner", "private-endpoint", "deploy rejected:"} {
+		if strings.Contains(w.Body.String(), private) {
+			t.Fatalf("raw details exposed: %s", w.Body.String())
+		}
+	}
+	if w.Header().Get("HX-Trigger") != "" || len(hub.RecentEvents(10)) != 0 {
+		t.Fatal("refused deploy emitted a success signal")
+	}
+	if rollouts, err := storage.AllRollouts(ctx, store, nil); err != nil || len(rollouts) != 0 {
+		t.Fatalf("refused deploy created rollouts: %v %v", rollouts, err)
 	}
 }

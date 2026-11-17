@@ -298,7 +298,11 @@ func (s *Service) Deploy(ctx context.Context, specID string, planTokens []string
 		generation                       int
 		install, update, uninstall, noop int
 	)
-	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+	schemas, err := s.prefetchSchemas(ctx, specID)
+	if err != nil {
+		return err
+	}
+	err = s.store.WithTx(ctx, func(tx storage.Storage) error {
 		ts, err := tx.GetSpec(ctx, specID)
 		if err != nil {
 			return err
@@ -307,19 +311,28 @@ func (s *Service) Deploy(ctx context.Context, specID string, planTokens []string
 			return storage.ErrInvalidArgument
 		}
 		generation = ts.Generation()
-		plan, steps, err := loadPlacement(ctx, tx, ts, time.Now())
+		plan, steps, err := loadPlacement(ctx, tx, schemas, ts, time.Now())
 		if err != nil {
 			return err
 		}
 		if planTokens != nil && !slices.Contains(planTokens, plan.Token) {
 			return ErrPlacementChanged
 		}
-		missing, unsupported := blockedTargets(plan)
+		missing, unsupported, incompatible := blockedTargets(plan)
 		if len(missing) > 0 {
 			return &UnknownTargetsError{Agents: missing}
 		}
 		if len(unsupported) > 0 {
 			return &UnsupportedTargetsError{Agents: unsupported}
+		}
+		if len(incompatible) > 0 {
+			reasons := make(map[string]string, len(incompatible))
+			for _, target := range plan.Targets {
+				if slices.Contains(incompatible, target.AgentID) {
+					reasons[target.AgentID] = target.EligibilityReason
+				}
+			}
+			return &IncompatibleTargetsError{Agents: incompatible, Reasons: reasons}
 		}
 
 		for _, step := range steps {
@@ -380,19 +393,20 @@ func (s *Service) validateSpec(ctx context.Context, ts *model.Spec) error {
 	if ts == nil || strings.TrimSpace(ts.Name()) == "" {
 		return fmt.Errorf("%w: spec name is required", storage.ErrInvalidArgument)
 	}
-	// Expand step: a spec that still carries a kind config keeps its kind
-	// checks; a spec without one is checked through its workload alone.
-	if len(ts.KindConfig()) > 0 {
-		if _, err := proxy.SpecToProto(ts); err != nil {
-			return fmt.Errorf("%w: %v", storage.ErrInvalidArgument, err)
-		}
-	}
 	for k, v := range ts.TargetLabels() {
 		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
 			return fmt.Errorf("%w: target selector key/value required", storage.ErrInvalidArgument)
 		}
 	}
-	return s.validateWorkload(ctx, ts.Workload())
+	if err := s.validateWorkload(ctx, ts.Workload()); err != nil {
+		return err
+	}
+	// The envelope (slot, restart, timeout, backoff, runner labels) is what the
+	// proxy sends with the body; a spec it cannot convert is refused here.
+	if _, err := proxy.SpecToProto(ts); err != nil {
+		return fmt.Errorf("%w: %v", storage.ErrInvalidArgument, err)
+	}
+	return nil
 }
 
 // validateWorkload requires a workload and checks it against the catalog: the

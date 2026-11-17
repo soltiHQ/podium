@@ -8,12 +8,32 @@ import (
 
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
-	"google.golang.org/protobuf/proto"
 )
 
-func TestManifestMapsPoliciesRunnerSelectorAndBinaryScript(t *testing.T) {
-	spec, _ := model.NewSpec("A1CaseSensitive", "Demo", "demo-slot")
-	spec.SetKindConfig(map[string]any{"mode": map[string]any{"script": map[string]any{"interpreter": "/bin/sh", "body": "ZWNobyBoaQo=", "args": []string{"--literal spaces"}}}, "env": []any{map[string]any{"key": "EMPTY", "value": ""}, map[string]any{"key": "VALUE", "value": "literal $HOME"}}, "cwd": "/tmp", "failOnNonZero": true})
+// workloadBody is a body with every JSON shape: nested objects, arrays, strings
+// that look like numbers, booleans, null and an integer larger than 2^53.
+func workloadBody() map[string]any {
+	return map[string]any{
+		"image":    "busybox:1",
+		"command":  []any{"echo", "one argument", "$HOME"},
+		"env":      []any{map[string]any{"key": "EMPTY", "value": ""}, map[string]any{"key": "X", "value": "1"}},
+		"replicas": json.Number("9007199254740993"),
+		"nested":   map[string]any{"on": true, "off": false, "none": nil, "ratio": 0.5},
+	}
+}
+
+func workloadSpec(t *testing.T) *model.Spec {
+	t.Helper()
+	spec, err := model.NewSpec("A1CaseSensitive", "Demo", "demo-slot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec.SetWorkload(model.Workload{APIVersion: "example.io/v2", Kind: "Widget", SchemaFingerprint: "abc123", Body: workloadBody()})
+	return spec
+}
+
+func TestSpecToProtoSendsTheBodyAsAnExtension(t *testing.T) {
+	spec := workloadSpec(t)
 	spec.SetRunnerLabels(map[string]string{"zone": "eu"})
 	spec.SetRestartType(enum.RestartAlways)
 	spec.SetIntervalMs(2500)
@@ -27,6 +47,43 @@ func TestManifestMapsPoliciesRunnerSelectorAndBinaryScript(t *testing.T) {
 	if TaskNameForSpec("a1CaseSensitive") == manifest.GetMetadata().GetName() {
 		t.Fatal("case-sensitive IDs collided")
 	}
+	w := manifest.GetSpec().GetWorkload()
+	if w.GetApiVersion() != "example.io/v2" || w.GetKind() != "Widget" {
+		t.Fatalf("workload type = %s %s", w.GetApiVersion(), w.GetKind())
+	}
+	ext := w.GetExtension()
+	if ext == nil || w.GetSubprocess() != nil || w.GetContainer() != nil || w.GetWasm() != nil {
+		t.Fatalf("workload is not an extension: %v", w)
+	}
+	var got map[string]any
+	if err = json.Unmarshal(ext.GetSpec().GetRaw(), &got); err != nil {
+		t.Fatalf("Raw is not JSON: %v", err)
+	}
+	var want map[string]any
+	exact, _ := json.Marshal(workloadBody())
+	if err = json.Unmarshal(exact, &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Raw = %s, want the stored body", ext.GetSpec().GetRaw())
+	}
+	if !strings.Contains(string(ext.GetSpec().GetRaw()), "9007199254740993") {
+		t.Fatalf("Raw lost the integer's digits: %s", ext.GetSpec().GetRaw())
+	}
+	if manifest.GetSpec().GetRunnerSelector().GetMatchLabels()["zone"] != "eu" || manifest.GetSpec().GetRestartIntervalMs() != 2500 {
+		t.Fatalf("policies lost: %v", manifest.GetSpec())
+	}
+}
+
+func TestTaskManifestJSONSendsTheBodyAsSpec(t *testing.T) {
+	spec := workloadSpec(t)
+	spec.SetRunnerLabels(map[string]string{"zone": "eu"})
+	spec.SetRestartType(enum.RestartAlways)
+	spec.SetIntervalMs(2500)
+	manifest, err := SpecToProto(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
 	data, err := TaskManifestJSON(manifest)
 	if err != nil {
 		t.Fatal(err)
@@ -38,21 +95,8 @@ func TestManifestMapsPoliciesRunnerSelectorAndBinaryScript(t *testing.T) {
 				Type     string `json:"type"`
 				Interval int    `json:"intervalMs"`
 			} `json:"restart"`
-			Workload struct {
-				Spec struct {
-					Env []struct {
-						Key   string `json:"key"`
-						Value string `json:"value"`
-					} `json:"env"`
-					Mode struct {
-						Script struct {
-							Body string   `json:"body"`
-							Args []string `json:"args"`
-						} `json:"script"`
-					} `json:"mode"`
-				} `json:"spec"`
-			} `json:"workload"`
-			RunnerSelector struct {
+			Workload map[string]json.RawMessage `json:"workload"`
+			Selector struct {
 				MatchLabels map[string]string `json:"matchLabels"`
 			} `json:"runnerSelector"`
 		} `json:"spec"`
@@ -60,119 +104,53 @@ func TestManifestMapsPoliciesRunnerSelectorAndBinaryScript(t *testing.T) {
 	if err = json.Unmarshal(data, &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.Spec.Timeout != 30000 || out.Spec.Restart.Type != "always" || out.Spec.Restart.Interval != 2500 || out.Spec.Workload.Spec.Mode.Script.Body != "ZWNobyBoaQo=" || !reflect.DeepEqual(out.Spec.Workload.Spec.Mode.Script.Args, []string{"--literal spaces"}) || len(out.Spec.Workload.Spec.Env) != 2 || out.Spec.Workload.Spec.Env[0].Key != "EMPTY" || out.Spec.Workload.Spec.Env[0].Value != "" || out.Spec.Workload.Spec.Env[1].Value != "literal $HOME" || out.Spec.RunnerSelector.MatchLabels["zone"] != "eu" {
-		t.Fatalf("HTTP encoding lost fields: %s", data)
+	if len(out.Spec.Workload) != 3 {
+		t.Fatalf("workload has keys beyond apiVersion, kind and spec: %s", data)
+	}
+	var apiVersion, kind string
+	if json.Unmarshal(out.Spec.Workload["apiVersion"], &apiVersion) != nil || json.Unmarshal(out.Spec.Workload["kind"], &kind) != nil || apiVersion != "example.io/v2" || kind != "Widget" {
+		t.Fatalf("workload type lost: %s", data)
+	}
+	var got, want map[string]any
+	if err = json.Unmarshal(out.Spec.Workload["spec"], &got); err != nil {
+		t.Fatal(err)
+	}
+	exact, _ := json.Marshal(workloadBody())
+	if err = json.Unmarshal(exact, &want); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("workload spec = %s, want the stored body", out.Spec.Workload["spec"])
+	}
+	if out.Spec.Timeout != 30000 || out.Spec.Restart.Type != "always" || out.Spec.Restart.Interval != 2500 || out.Spec.Selector.MatchLabels["zone"] != "eu" {
+		t.Fatalf("HTTP encoding lost policies: %s", data)
 	}
 }
 
-func TestLegacySubprocessOneofNormalizesLosslessly(t *testing.T) {
-	for _, variant := range []string{"command", "script"} {
-		config := map[string]any{"command": "echo", "args": []string{"one argument", "$HOME"}}
-		if variant == "script" {
-			config = map[string]any{"interpreter": "sh", "body": "ZWNobyBoaQo=", "args": []string{"-e"}}
-		}
-		common := map[string]any{"cwd": "/tmp", "failOnNonZero": true, "env": []any{map[string]any{"key": "X", "value": "value"}}}
-		legacy, current := map[string]any{}, map[string]any{}
-		for k, v := range common {
-			legacy[k] = v
-			current[k] = v
-		}
-		legacy[variant] = config
-		current["mode"] = map[string]any{variant: config}
-		a, err := buildTaskWorkload(enum.TaskKindSubprocess, legacy)
-		if err != nil {
-			t.Fatal(err)
-		}
-		b, err := buildTaskWorkload(enum.TaskKindSubprocess, current)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !proto.Equal(a, b) {
-			t.Fatalf("legacy %s normalization lost data", variant)
-		}
+func TestSpecToProtoRefusesASpecWithoutAWorkload(t *testing.T) {
+	spec, _ := model.NewSpec("spec", "Demo", "slot")
+	if _, err := SpecToProto(spec); err == nil || !strings.Contains(err.Error(), "spec has no workload") {
+		t.Fatalf("a spec without a workload: %v", err)
 	}
-}
-
-func TestInvalidWorkloadFieldsAreRejected(t *testing.T) {
-	cases := []map[string]any{
-		{"mode": map[string]any{"command": map[string]any{"command": "echo", "argz": []string{"lost"}}}},
-		{"mode": map[string]any{"command": map[string]any{"command": ""}}},
-		{"mode": map[string]any{"script": map[string]any{"interpreter": "sh", "body": "//4="}}},
-		{"command": map[string]any{"command": "echo"}, "script": map[string]any{"interpreter": "sh", "body": "ZWNobw=="}},
+	spec.SetWorkload(model.Workload{APIVersion: "example.io/v2", Kind: "Widget", SchemaFingerprint: "abc123"})
+	manifest, err := SpecToProto(spec)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, cfg := range cases {
-		if _, err := buildTaskWorkload(enum.TaskKindSubprocess, cfg); err == nil {
-			t.Fatalf("accepted invalid config: %+v", cfg)
-		}
-	}
-}
-
-func TestContainerEntrypointPresenceSurvivesHTTPEncoding(t *testing.T) {
-	spec, _ := model.NewSpec("container", "Demo", "container-slot")
-	spec.SetKindType(enum.TaskKindContainer)
-	for _, entrypoint := range []bool{false, true} {
-		config := map[string]any{"image": "example:v1"}
-		if entrypoint {
-			config["command"] = map[string]any{"items": []string{}}
-		}
-		spec.SetKindConfig(config)
-		manifest, err := SpecToProto(spec)
-		if err != nil {
-			t.Fatal(err)
-		}
-		data, err := TaskManifestJSON(manifest)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var out map[string]any
-		if err = json.Unmarshal(data, &out); err != nil {
-			t.Fatal(err)
-		}
-		workload := out["spec"].(map[string]any)["workload"].(map[string]any)["spec"].(map[string]any)
-		_, exists := workload["command"]
-		if exists != entrypoint {
-			t.Fatalf("entrypoint presence lost: %s", data)
-		}
-	}
-}
-
-func TestHTTPPreservesNonzeroPolicyAndOrderedDuplicateEnvironment(t *testing.T) {
-	for _, fail := range []bool{false, true} {
-		spec, _ := model.NewSpec("env-policy", "Demo", "env-policy")
-		spec.SetKindConfig(map[string]any{"mode": map[string]any{"command": map[string]any{"command": "echo"}}, "failOnNonZero": fail, "env": []any{map[string]any{"key": "X", "value": "one"}, map[string]any{"key": "X", "value": "two"}}})
-		manifest, err := SpecToProto(spec)
-		if err != nil {
-			t.Fatal(err)
-		}
-		data, err := TaskManifestJSON(manifest)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var out map[string]any
-		if err = json.Unmarshal(data, &out); err != nil {
-			t.Fatal(err)
-		}
-		config := out["spec"].(map[string]any)["workload"].(map[string]any)["spec"].(map[string]any)
-		value, present := config["failOnNonZero"]
-		if !present || value != fail {
-			t.Fatalf("nonzero policy changed: %s", data)
-		}
-		env, ok := config["env"].([]any)
-		if !ok || len(env) != 2 || env[0].(map[string]any)["value"] != "one" || env[1].(map[string]any)["value"] != "two" {
-			t.Fatalf("ordered duplicate environment changed: %s", data)
-		}
+	if raw := manifest.GetSpec().GetWorkload().GetExtension().GetSpec().GetRaw(); string(raw) != "{}" {
+		t.Fatalf("an empty body is sent as %q, want {}", raw)
 	}
 }
 
 func TestManifestRejectsInvalidSlotsIntervalsAndRunnerLabels(t *testing.T) {
 	valid := func() *model.Spec {
 		s, _ := model.NewSpec("spec", "Demo", "slot")
-		s.SetKindConfig(map[string]any{"mode": map[string]any{"command": map[string]any{"command": "echo"}}})
+		s.SetWorkload(model.Workload{APIVersion: "example.io/v2", Kind: "Widget", SchemaFingerprint: "abc123", Body: map[string]any{"a": "b"}})
 		return s
 	}
 	for _, slot := range []string{".", "..", "slash/path", "unicode-é", string(make([]byte, 65))} {
 		spec, _ := model.NewSpec("spec", "Demo", slot)
-		spec.SetKindConfig(valid().KindConfig())
+		spec.SetWorkload(valid().Workload())
 		if _, err := SpecToProto(spec); err == nil {
 			t.Fatalf("invalid slot %q accepted", slot)
 		}
@@ -192,37 +170,13 @@ func TestManifestRejectsInvalidSlotsIntervalsAndRunnerLabels(t *testing.T) {
 		}
 	}
 	spec := valid()
+	spec.SetTimeoutMs(0)
+	if _, err := SpecToProto(spec); err == nil {
+		t.Fatal("a zero timeout was accepted")
+	}
+	spec = valid()
 	spec.SetRunnerLabels(map[string]string{"example.io/Valid_Key": ""})
 	if _, err := SpecToProto(spec); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestLegacyContainerCommandPreservesDefaultAndArguments(t *testing.T) {
-	for _, items := range [][]string{{}, {"echo", "one argument", "$HOME"}} {
-		legacy, err := buildTaskWorkload(enum.TaskKindContainer, map[string]any{"image": "example:v1", "command": items, "args": []string{"literal"}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		current := map[string]any{"image": "example:v1", "args": []string{"literal"}}
-		if len(items) > 0 {
-			current["command"] = map[string]any{"items": items}
-		}
-		expected, err := buildTaskWorkload(enum.TaskKindContainer, current)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !proto.Equal(legacy, expected) {
-			t.Fatalf("legacy command changed: %v", items)
-		}
-	}
-}
-
-func TestLegacyInlineScriptRuntimeRequiresExplicitMigration(t *testing.T) {
-	for _, runtime := range []map[string]any{{"wellKnown": "SCRIPT_RUNTIME_BASH"}, {"well_known": "SCRIPT_RUNTIME_PYTHON"}, {"custom": map[string]any{"command": "ruby", "flag": "-e"}}} {
-		runtime["body"] = "ZWNobw=="
-		if _, err := buildTaskWorkload(enum.TaskKindSubprocess, map[string]any{"script": runtime}); err == nil || !strings.Contains(err.Error(), "explicit migration") {
-			t.Fatalf("legacy execution semantics silently changed: %v", err)
-		}
 	}
 }

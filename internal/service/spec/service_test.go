@@ -412,7 +412,7 @@ func mkTokenFixture(t *testing.T) (*Service, *inmemory.Store, *model.Spec) {
 }
 
 // addMatchingAgent stores an agent labelled env=prod whose runner "sub" runs
-// the fixture's Subprocess workload.
+// the fixture's Container workload.
 func addMatchingAgent(t *testing.T, store *inmemory.Store, id string) {
 	t.Helper()
 	a, err := model.NewAgent(id, "name-"+id, "http://"+id)
@@ -420,7 +420,7 @@ func addMatchingAgent(t *testing.T, store *inmemory.Store, id string) {
 		t.Fatal(err)
 	}
 	a.LabelAdd("env", "prod")
-	a.SetCapabilities([]model.RunnerCapability{{Name: "sub", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Subprocess"}}}})
+	a.SetCapabilities([]model.RunnerCapability{{Name: "sub", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Container", SchemaFingerprint: testFingerprint(t)}}}})
 	if err = store.UpsertAgent(context.Background(), a); err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +457,7 @@ func TestPlanTokenIgnoresObservationTimes(t *testing.T) {
 		a.SetLastSeenAt(now)
 		a.SetStaleAt(now.Add(30 * time.Second))
 	})
-	before, _, err := loadPlacement(ctx, store, ts, now)
+	before, _, err := loadPlacement(ctx, store, nil, ts, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +469,7 @@ func TestPlanTokenIgnoresObservationTimes(t *testing.T) {
 		a.SetStaleAt(now.Add(90 * time.Second))
 		a.SetUptimeSeconds(3600)
 	})
-	after, _, err := loadPlacement(ctx, store, ts, now.Add(time.Hour))
+	after, _, err := loadPlacement(ctx, store, nil, ts, now.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -570,7 +570,7 @@ func TestPlanTokenChangesWithTargets(t *testing.T) {
 	}
 }
 
-// wasmOnly is runner inventory that cannot run the fixture's Subprocess workload.
+// wasmOnly is runner inventory that cannot run the fixture's Container workload.
 var wasmOnly = []model.RunnerCapability{{Name: "wasm", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Wasm"}}}}
 
 // addMissingTarget adds an explicit target that discovery does not know.

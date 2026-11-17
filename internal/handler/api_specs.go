@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/segmentio/ksuid"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -346,6 +348,12 @@ func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 			response.BadRequestMsg(w, r, mode, "Deployment blocked: a target has no compatible runner. Review the placement preview.")
 			return
 		}
+		var incompatible *spec.IncompatibleTargetsError
+		if errors.As(err, &incompatible) {
+			a.logger.Warn().Str("spec", id).Strs("incompatible_agents", incompatible.Agents).Interface("reasons", incompatible.Reasons).Msg("spec deploy rejected")
+			response.Conflict(w, r, mode, incompatibleTargetsMessage(incompatible.Reasons))
+			return
+		}
 		var unknown *spec.UnknownTargetsError
 		if errors.As(err, &unknown) {
 			a.logger.Warn().Str("spec", id).Strs("missing_agents", unknown.Agents).Msg("spec deploy rejected")
@@ -391,4 +399,19 @@ func (a *API) specRollouts(w http.ResponseWriter, r *http.Request, mode httpctx.
 		Data:      items,
 		Component: contentSpec.Rollouts(items),
 	})
+}
+
+// incompatibleTargetsMessage names the placement reasons of a refused deploy,
+// without the agents or runners they belong to.
+func incompatibleTargetsMessage(reasons map[string]string) string {
+	seen := make(map[string]bool, len(reasons))
+	var distinct []string
+	for _, reason := range reasons {
+		if !seen[reason] {
+			seen[reason] = true
+			distinct = append(distinct, reason)
+		}
+	}
+	slices.Sort(distinct)
+	return "Deployment blocked: the workload does not fit the schema of a target's runner (" + strings.Join(distinct, ", ") + "). Review the placement preview."
 }
