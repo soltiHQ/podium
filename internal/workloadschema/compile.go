@@ -37,7 +37,9 @@ import (
 //
 // Any other keyword is ignored, as draft 2020-12 ignores keywords it does not
 // know, and its value is not compiled unless a $ref points into it. A keyword
-// of the subset whose value is not what the keyword takes is an error.
+// of the subset whose value is not what the keyword takes is an error. A
+// pattern, and a patternProperties key, is Go's regular expression syntax
+// without inline flag groups, within the bounds that regex.go sets.
 
 // draft2020 is the one $schema a workload schema may have.
 const draft2020 = "https://json-schema.org/draft/2020-12/schema"
@@ -179,8 +181,12 @@ func (l *location) child(tokens ...string) *location {
 	return l
 }
 
+// maxLocationBytes bounds a location in an error, so that the keyword before
+// it and the reason after it fit in maxMessageBytes.
+const maxLocationBytes = 256
+
 // String writes the location as a URI fragment, "#/properties/name", cut to
-// maxMessageBytes at a rune boundary. The nil location is the root, "#".
+// maxLocationBytes at a rune boundary. The nil location is the root, "#".
 func (l *location) String() string {
 	var tokens []string
 	for at := l; at != nil; at = at.parent {
@@ -188,15 +194,21 @@ func (l *location) String() string {
 	}
 	var b strings.Builder
 	b.WriteByte('#')
-	for i := len(tokens) - 1; i >= 0 && b.Len() <= maxMessageBytes; i-- {
+	for i := len(tokens) - 1; i >= 0 && b.Len() <= maxLocationBytes; i-- {
 		t := tokens[i]
-		if len(t) > maxMessageBytes {
-			t = t[:maxMessageBytes+1] // past the cut, which truncate makes at a rune boundary
+		if len(t) > maxLocationBytes {
+			t = t[:maxLocationBytes+1] // past the cut, which cut makes at a rune boundary
 		}
 		b.WriteByte('/')
 		b.WriteString(escapeToken(t))
 	}
-	return truncate(b.String())
+	return cut(b.String(), maxLocationBytes, "…")
+}
+
+// quoted is the location quoted for an error, cut to maxLocationBytes once
+// quoted.
+func (l *location) quoted() string {
+	return cut(strconv.Quote(l.String()), maxLocationBytes, `…"`)
 }
 
 // position is the place of a value in the decoded document, by which a
@@ -283,14 +295,14 @@ func (c *compiler) compile(v any, at *location, pos position, tree bool) (*schem
 		}
 		return s, nil
 	}
-	return nil, fmt.Errorf("workloadschema: compile schema: the value at %q is %s, not a schema: want an object or a boolean", at, describe(v))
+	return nil, fmt.Errorf("workloadschema: compile schema: the value at %s is %s, not a schema: want an object or a boolean", at.quoted(), describe(v))
 }
 
 // keyword compiles the keyword k of the subschema s, whose object is obj.
 func (c *compiler) keyword(s *schema, obj map[string]any, k string, tree bool) error {
 	v := obj[k]
 	fail := func(format string, args ...any) error {
-		return fmt.Errorf("workloadschema: compile schema: %q at %q %s", k, s.at, fmt.Sprintf(format, args...))
+		return fmt.Errorf("workloadschema: compile schema: %q at %s "+format, append([]any{k, s.at.quoted()}, args...)...)
 	}
 	// sub compiles the subschema under the keyword itself, or under one of
 	// its members or items, key, in container.
@@ -321,7 +333,7 @@ func (c *compiler) keyword(s *schema, obj map[string]any, k string, tree bool) e
 		}
 		if tree {
 			if other, ok := c.anchors[name]; ok {
-				return fail("declares %s, which %q declares too", quote(name), other.at)
+				return fail("declares %s, which %s declares too", quote(name), other.at.quoted())
 			}
 			c.anchors[name] = s
 		}
@@ -370,7 +382,7 @@ func (c *compiler) keyword(s *schema, obj map[string]any, k string, tree bool) e
 		return nil
 	case "type":
 		if err := s.compileTypes(v); err != nil {
-			return fail("%v", err)
+			return fail("%w", err)
 		}
 	case "enum":
 		list, ok := v.([]any)
@@ -449,7 +461,7 @@ func (c *compiler) keyword(s *schema, obj map[string]any, k string, tree bool) e
 		}
 		p, err := c.patterns.compile(text)
 		if err != nil {
-			return fail("%v", err)
+			return fail("%w", err)
 		}
 		s.pattern = p
 	case "uniqueItems":
@@ -461,7 +473,7 @@ func (c *compiler) keyword(s *schema, obj map[string]any, k string, tree bool) e
 	case "required":
 		names, err := uniqueNames(v)
 		if err != nil {
-			return fail("%v", err)
+			return fail("%w", err)
 		}
 		s.required = names
 	case "dependentRequired":
@@ -472,7 +484,7 @@ func (c *compiler) keyword(s *schema, obj map[string]any, k string, tree bool) e
 		for _, name := range slices.Sorted(maps.Keys(deps)) {
 			names, err := uniqueNames(deps[name])
 			if err != nil {
-				return fail("at %s %v", quote(name), err)
+				return fail("at %s %w", quote(name), err)
 			}
 			s.dependentRequired = append(s.dependentRequired, dependentNames{name: name, names: names})
 		}
@@ -557,7 +569,7 @@ func (c *compiler) keyword(s *schema, obj map[string]any, k string, tree bool) e
 		for _, text := range slices.Sorted(maps.Keys(m)) {
 			p, err := c.patterns.compile(text)
 			if err != nil {
-				return fail("%s %v", quote(text), err)
+				return fail("%s %w", quote(text), err)
 			}
 			one, err := subAt(m[text], m, text)
 			if err != nil {
@@ -611,7 +623,7 @@ func (s *schema) compileTypes(v any) error {
 // resolve finds the subschema that a $ref inside the document points at.
 func (c *compiler) resolve(from *schema, ref string) (*schema, error) {
 	fail := func(format string, args ...any) error {
-		return fmt.Errorf(`workloadschema: compile schema: "$ref" at %q is %s, %s`, from.at, quote(ref), fmt.Sprintf(format, args...))
+		return fmt.Errorf(`workloadschema: compile schema: "$ref" at %s is %s, `+format, append([]any{from.at.quoted(), quote(ref)}, args...)...)
 	}
 	frag := ref[1:]
 	if frag == "" {
@@ -685,7 +697,7 @@ func (c *compiler) checkCycles() error {
 	visit = func(s *schema) error {
 		switch state[s] {
 		case visiting:
-			return fmt.Errorf("workloadschema: compile schema: the subschema at %q refers back to itself at the same location of a body (a reference cycle)", s.at)
+			return fmt.Errorf("workloadschema: compile schema: the subschema at %s refers back to itself at the same location of a body (a reference cycle)", s.at.quoted())
 		case done:
 			return nil
 		}

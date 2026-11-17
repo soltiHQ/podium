@@ -54,75 +54,105 @@ func TestRegexSizeBoundsTheProgram(t *testing.T) {
 	}
 }
 
-// TestPatternWorkCountsWhatParsingBuilds estimates, from the source, what Go's
-// parser builds beyond reading a pattern: the ranges of each Unicode class,
-// and, where case folding may be on, the runes of each bracket range that it
-// folds one at a time.
-func TestPatternWorkCountsWhatParsingBuilds(t *testing.T) {
+// TestScanPatternReadsAsGoDoes reads patterns as Go's parser does: it
+// counts each Unicode class escape, with a braced name or a one-letter one,
+// inside a class and outside, and no escape that an escaped backslash or
+// \Q...\E makes literal; it refuses every inline flag group, but no text that
+// only looks like one; and it refuses what it cannot read.
+func TestScanPatternReadsAsGoDoes(t *testing.T) {
+	x := string(rune(0x1E942))
 	for _, tc := range []struct {
-		src  string
-		work int
-		ok   bool
+		src     string
+		classes int
+		refusal string // what the error says, "" for none
 	}{
-		{`^[a-z0-9]+$`, 0, true},
-		{`\pL`, unicodeClassWork, true},
-		{`[\p{L}\p{N}_-]`, 2 * unicodeClassWork, true},
-		{`\\pL`, unicodeClassWork, true}, // counted, though a backslash escapes the backslash: the estimate errs high
-		{`\P{^Greek}`, unicodeClassWork, true},
-		{`[\x{42}-\x{1E942}]`, 0, true},                            // no case folding: one range, appended at once
-		{`(?i)[\x{42}-\x{1E942}]`, (0x1E942 - 0x42 + 1) / 4, true}, // folded rune by rune
-		{`(?i)[a-f0-9]`, 6 / 4, true},                              // 0-9 lies below the folded runes
-		{`(?i)[\x00-\x{10FFFF}]`, 0, true},                         // the whole range, appended at once
-		{`(?i)[A-\x{1E943}]`, 0, true},
-		{`(?i)[B-\x{1E943}]`, (0x1E943 - 0x42 + 1) / 4, true},
-		{`(?-i)[\x{42}-\x{1E942}]`, (0x1E942 - 0x42 + 1) / 4, true}, // the estimate assumes folding wherever the flag appears
-		{`[(?i)]` + `[\x{42}-\x{1E942}]`, (0x1E942 - 0x42 + 1) / 4, true},
-		{`(?i)\Q[\x{42}-\x{1E942}]\E`, 0, true}, // literal text
-		{`(?i)[\101-\132]`, 26 / 4, true},       // octal: A to Z
-		{`(?i)[\q-z]`, 0, false},                // a range whose start it cannot read, under folding
-		{`(?i)\pL`, unicodeClassWork, true},     // the escape's count covers its folding
+		{`^[a-z0-9]+$`, 0, ""},
+		{`\pL`, 1, ""},
+		{`\p{L}`, 1, ""},
+		{`\PN`, 1, ""},
+		{`\p{^Greek}`, 1, ""},
+		{`[\pL\pN_-]`, 2, ""},
+		{`[\p{L}\P{Greek}]+\pN`, 3, ""},
+		{`[\pN-B-` + x + `-B-` + x + `]`, 1, ""}, // the round-5 repro's items: \pN, then - B - U+1E942 ...
+		{`[[:alpha:]\pL]`, 1, ""},
+		{`[]\pL]`, 1, ""},    // a first ] is a literal
+		{`[^]\pL]`, 1, ""},   // and after ^ too
+		{`\x{5B}\pL`, 1, ""}, // \x{5B} is "[", one escape
+		{`\x5B\pL`, 1, ""},
+		{`\0\pL\101\pN`, 2, ""}, // octal escapes
+		{`\\pL`, 0, ""},         // an escaped backslash, then "pL"
+		{`\Q\pL\E\pN`, 1, ""},   // \Q...\E is literal text
+		{`\Q\pL`, 0, ""},        // to the end, without \E
+		{`(?:a)(?P<n>b)(?<m>c)`, 0, ""},
+		{`^\(?i\)?$`, 0, ""}, // an escaped parenthesis, then "?i"
+		{`[(?i)]`, 0, ""},
+		{`\Q(?i)\E`, 0, ""},
+		{`(?i)a`, 0, "inline flag"},
+		{`a(?-m)b`, 0, "inline flag"},
+		{`(?s:.)`, 0, "inline flag"},
+		{`(?U)a+`, 0, "inline flag"},
+		{`[a-z](?im)`, 0, "inline flag"},
+		{`\p{L`, 0, "cannot read"},
+		{`a\`, 0, "cannot read"},
+		{`[a`, 0, "cannot read"},
+		{`\p`, 0, "cannot read"},
 	} {
-		work, ok := patternWork(tc.src)
-		if work != tc.work || ok != tc.ok {
-			t.Errorf("patternWork(%q) = %d, %v, want %d, %v", tc.src, work, ok, tc.work, tc.ok)
+		classes, err := scanPattern(tc.src)
+		switch {
+		case tc.refusal == "" && (err != nil || classes != tc.classes):
+			t.Errorf("scanPattern(%q) = %d, %v, want %d Unicode classes", tc.src, classes, err, tc.classes)
+		case tc.refusal != "" && (err == nil || !strings.Contains(err.Error(), tc.refusal)):
+			t.Errorf("scanPattern(%q) = %d, %v, want an error that says %q", tc.src, classes, err, tc.refusal)
 		}
 	}
-	// What the parser builds for any Unicode table stays within what an
-	// escape counts: the table's ranges, and under case folding also its
-	// fold table's, and their merge.
-	built := func(tables ...*unicode.RangeTable) int {
+}
+
+// TestUnicodeClassWorkIsTheLargestClass holds what a Unicode class escape
+// counts to the most that Go's parser builds for one: the ranges it appends
+// for each table that a name it accepts resolves to, unicode.Categories (the
+// one-letter ones among them) and unicode.Scripts, which aliases resolve to
+// as well, Any and ASCII, and Assigned, which is the negation of Cn; each
+// negated, as \P{X} or \p{^X}, too. Without inline flags, Go folds no case.
+func TestUnicodeClassWorkIsTheLargestClass(t *testing.T) {
+	appended := func(tab *unicode.RangeTable, negated bool) int {
 		n := 0
-		for _, t := range tables {
-			if t == nil {
-				continue
-			}
-			for _, r := range t.R16 {
-				n += rangesOf(rune(r.Lo), rune(r.Hi), rune(r.Stride))
-			}
-			for _, r := range t.R32 {
-				n += rangesOf(rune(r.Lo), rune(r.Hi), rune(r.Stride))
-			}
+		for _, r := range tab.R16 {
+			n += rangesOf(rune(r.Lo), rune(r.Hi), rune(r.Stride))
+		}
+		for _, r := range tab.R32 {
+			n += rangesOf(rune(r.Lo), rune(r.Hi), rune(r.Stride))
+		}
+		if negated {
+			n++ // the gaps between the ranges, and the one after the last
 		}
 		return n
 	}
-	check := func(name string, tab, fold *unicode.RangeTable) {
-		work := built(tab)
-		if fold != nil { // (?i): the table and its fold table, then their merge
-			re, err := syntax.Parse(`(?i)\p{`+name+`}`, syntax.Perl)
-			if err != nil {
-				t.Fatalf(`Parse((?i)\p{%s}): %v`, name, err)
+	largest, name := 0, ""
+	check := func(n string, tab *unicode.RangeTable) {
+		for _, negated := range []bool{false, true} {
+			if got := appended(tab, negated); got > largest {
+				largest, name = got, n
+				if negated {
+					name = `\P{` + n + `}`
+				}
 			}
-			work = max(work, built(tab)+built(fold)+len(re.Rune)/2)
 		}
-		if work > unicodeClassWork {
-			t.Errorf(`\p{%s} makes the parser build %d ranges, over the %d an escape counts`, name, work, unicodeClassWork)
+		// Go's parser takes the name: the table is one a pattern can reach.
+		if _, err := syntax.Parse(`\p{`+n+`}`, syntax.Perl); err != nil {
+			t.Errorf(`Parse(\p{%s}): %v`, n, err)
 		}
 	}
-	for name, tab := range unicode.Categories {
-		check(name, tab, unicode.FoldCategory[name])
+	for n, tab := range unicode.Categories {
+		check(n, tab)
 	}
-	for name, tab := range unicode.Scripts {
-		check(name, tab, unicode.FoldScript[name])
+	for n, tab := range unicode.Scripts {
+		check(n, tab)
+	}
+	check("Assigned", unicode.Cn) // \p{Assigned} is the negation of Cn, and \P{Assigned} Cn itself
+	check("ASCII", &unicode.RangeTable{R16: []unicode.Range16{{Lo: 0, Hi: unicode.MaxASCII, Stride: 1}}})
+	check("Any", &unicode.RangeTable{R32: []unicode.Range32{{Lo: 0, Hi: unicode.MaxRune, Stride: 1}}})
+	if unicodeClassWork != largest {
+		t.Errorf("unicodeClassWork = %d, want %d, the ranges Go's parser appends for %s", unicodeClassWork, largest, name)
 	}
 }
 

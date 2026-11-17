@@ -188,10 +188,21 @@ func Fingerprint(raw []byte) (string, error) {
 func Compile(raw []byte) (*Schema, error) {
 	s, err := compileSchema(raw)
 	if err != nil && len(err.Error()) > maxMessageBytes {
-		return nil, errors.New(truncate(err.Error()))
+		return nil, &cutError{msg: truncate(err.Error()), err: err}
 	}
 	return s, err
 }
+
+// cutError is an error cut to maxMessageBytes, which still wraps the error it
+// cuts, for errors.Is and errors.As.
+type cutError struct {
+	msg string
+	err error
+}
+
+func (e *cutError) Error() string { return e.msg }
+
+func (e *cutError) Unwrap() error { return e.err }
 
 func compileSchema(raw []byte) (_ *Schema, err error) {
 	c, err := canonical(raw)
@@ -256,15 +267,20 @@ func invalid(message string) *ValidationError {
 // truncate cuts a message to at most maxMessageBytes, at a rune boundary,
 // with an ellipsis for what it cuts.
 func truncate(message string) string {
-	if len(message) <= maxMessageBytes {
-		return message
+	return cut(message, maxMessageBytes, "…")
+}
+
+// cut cuts s to at most n bytes, at a rune boundary, ending in tail when it
+// cuts anything.
+func cut(s string, n int, tail string) string {
+	if len(s) <= n {
+		return s
 	}
-	const ellipsis = "…"
-	cut := maxMessageBytes - len(ellipsis)
-	for cut > 0 && !utf8.RuneStart(message[cut]) {
-		cut--
+	end := n - len(tail)
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
 	}
-	return message[:cut] + ellipsis
+	return s[:end] + tail
 }
 
 // quote writes a string for a message: in single quotes, escaped as Go
