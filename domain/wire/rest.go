@@ -19,7 +19,7 @@ func AgentToREST(a *model.Agent) restv1.Agent {
 	for _, c := range a.Capabilities() {
 		workloads := make([]restv1.WorkloadGVK, 0, len(c.Workloads))
 		for _, gvk := range c.Workloads {
-			workloads = append(workloads, restv1.WorkloadGVK{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind})
+			workloads = append(workloads, restv1.WorkloadGVK{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind, SchemaFingerprint: gvk.SchemaFingerprint})
 		}
 		caps = append(caps, restv1.RunnerCapability{Name: c.Name, Labels: c.Labels, Workloads: workloads})
 	}

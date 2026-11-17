@@ -242,3 +242,46 @@ func TestUpsertFailureInsideTheTransactionReportsNothing(t *testing.T) {
 		})
 	}
 }
+
+// Two syncs that differ only in the schema fingerprint of one workload are
+// different capabilities: the upsert judges the sync visible and stores the new
+// fingerprint.
+func TestAChangedFingerprintChangesTheCapabilities(t *testing.T) {
+	ctx := context.Background()
+	store := inmemory.New()
+	svc := New(store, zerolog.New(io.Discard))
+
+	with := func(fp string) *model.Agent {
+		p := syncParams(100)
+		p.Capabilities[0].Workloads[0].SchemaFingerprint = fp
+		a, err := model.NewAgentFrom(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	if _, err := svc.Upsert(ctx, with("aaaa")); err != nil {
+		t.Fatal(err)
+	}
+	same, err := svc.Upsert(ctx, with("aaaa"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if same.Visible {
+		t.Fatal("the same fingerprint is a visible change")
+	}
+	changed, err := svc.Upsert(ctx, with("bbbb"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed.Visible {
+		t.Fatal("a changed fingerprint is not a visible change")
+	}
+	stored, err := store.GetAgent(ctx, "agent-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stored.Capabilities()[0].Workloads[0].SchemaFingerprint; got != "bbbb" {
+		t.Fatalf("stored fingerprint = %q, want bbbb", got)
+	}
+}

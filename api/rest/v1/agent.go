@@ -52,4 +52,6 @@ type WorkloadGVK struct {
 	Group   string `json:"group"`
 	Version string `json:"version"`
 	Kind    string `json:"kind"`
+
+	SchemaFingerprint string `json:"schema_fingerprint,omitempty"`
 }
