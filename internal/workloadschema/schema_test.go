@@ -4,10 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -479,4 +481,88 @@ func TestValidateIsSafeForConcurrentUse(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+// anyOfChain is levels definitions, each an anyOf of two $refs to the next,
+// down to false: the validator takes 2^levels steps on any body.
+func anyOfChain(levels int) string {
+	var b strings.Builder
+	b.WriteString(`{"$defs":{`)
+	for i := range levels {
+		fmt.Fprintf(&b, `"d%d":{"anyOf":[{"$ref":"#/$defs/d%d"},{"$ref":"#/$defs/d%d"}]},`, i, i+1, i+1)
+	}
+	fmt.Fprintf(&b, `"d%d":false},"$ref":"#/$defs/d0"}`, levels)
+	return b.String()
+}
+
+// shortBudget sets the validation budget to d for the rest of the test.
+func shortBudget(t *testing.T, d time.Duration) {
+	t.Helper()
+	saved := validationBudget
+	validationBudget = d
+	t.Cleanup(func() { validationBudget = saved })
+}
+
+// TestValidateGivesUpOnASchemaPastItsBudget validates against a schema that
+// takes the validator 2^15 steps, a few hundred milliseconds and more, under
+// a budget of 100 ms. Validate returns the overrun at the budget, the same
+// error at once from then on, and the validator it abandoned finishes in the
+// background within seconds.
+func TestValidateGivesUpOnASchemaPastItsBudget(t *testing.T) {
+	const budget = 100 * time.Millisecond
+	shortBudget(t, budget)
+	s := mustCompile(t, anyOfChain(15))
+	before := runtime.NumGoroutine()
+
+	start := time.Now()
+	err := s.Validate(map[string]any{})
+	took := time.Since(start)
+	if !errors.Is(err, ErrValidationTooExpensive) {
+		t.Fatalf("Validate = %v, want ErrValidationTooExpensive", err)
+	}
+	if !strings.Contains(err.Error(), "ran past its budget of 100ms") {
+		t.Errorf("error %q does not name the overrun", err)
+	}
+	if took > hostileBudget {
+		t.Errorf("Validate gave up after %v, want at the budget of %v", took, budget)
+	}
+
+	// The schema is marked: a later validation does not run the validator.
+	start = time.Now()
+	err = s.Validate(map[string]any{"a": "b"})
+	if took := time.Since(start); took > 10*time.Millisecond {
+		t.Errorf("a later Validate took %v, want it at once", took)
+	}
+	if !errors.Is(err, ErrValidationTooExpensive) {
+		t.Errorf("a later Validate = %v, want ErrValidationTooExpensive", err)
+	}
+
+	// The abandoned validator ends on its own.
+	deadline := time.Now().Add(30 * time.Second)
+	for runtime.NumGoroutine() > before {
+		if time.Now().After(deadline) {
+			t.Fatalf("the abandoned validator still runs after 30s: %d goroutines, %d before", runtime.NumGoroutine(), before)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestValidateUnderAShortBudgetLeavesANormalSchemaAlone validates against a
+// schema the validator is quick on, under the same budget of 100 ms: it
+// validates as it did without a budget, and is never marked.
+func TestValidateUnderAShortBudgetLeavesANormalSchemaAlone(t *testing.T) {
+	shortBudget(t, 100*time.Millisecond)
+	s := mustCompile(t, deploySchema)
+	want := []Problem{
+		{Path: "", Message: "missing property 'name'"},
+		{Path: "/ports/0", Message: "got string, want integer"},
+	}
+	for range 20 {
+		if err := s.Validate(map[string]any{"name": "web", "ports": []any{float64(80)}}); err != nil {
+			t.Fatalf("Validate of a valid body: %v", err)
+		}
+		if got := problems(t, s, map[string]any{"ports": []any{"80"}}); !slices.Equal(got, want) {
+			t.Fatalf("problems %v, want %v", got, want)
+		}
+	}
 }

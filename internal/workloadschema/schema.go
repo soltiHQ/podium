@@ -9,7 +9,9 @@
 // resolves a $ref only inside the schema: a URL anywhere else, remote,
 // relative or file, is refused, so compiling fetches nothing and reads no
 // file. The JSON Schema metaschemas are the exception: the compiler serves
-// them from copies embedded in it.
+// them from copies embedded in it. Validate waits for the validator for at
+// most 2 s: a schema that takes longer, as a small one can, is too expensive
+// to validate against, and stays so.
 package workloadschema
 
 import (
@@ -22,6 +24,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/gowebpki/jcs"
 	"github.com/santhosh-tekuri/jsonschema/v6"
@@ -51,6 +55,31 @@ const (
 // maxProblems bounds the problems that one validation reports.
 const maxProblems = 20
 
+// validationBudget bounds how long Validate waits for the validator. Within
+// the bounds above a schema still compiles that takes the validator time
+// exponential in its size: an anyOf of two $refs to the next of 18 such
+// definitions, 1.2 KB, takes it 1.7 s on an empty body. A variable, so that
+// tests can shorten it.
+var validationBudget = 2 * time.Second
+
+// ErrValidationTooExpensive matches, through errors.Is, the error of a
+// validation that ran past its budget, and of every later validation against
+// the same schema.
+var ErrValidationTooExpensive = errors.New("workloadschema: validation too expensive")
+
+// overrunError is the validation that ran past its budget.
+type overrunError struct {
+	budget time.Duration
+}
+
+func (e *overrunError) Error() string {
+	return fmt.Sprintf("%v: it ran past its budget of %v, and this schema validates no more bodies", ErrValidationTooExpensive, e.budget)
+}
+
+func (e *overrunError) Unwrap() error {
+	return ErrValidationTooExpensive
+}
+
 // documentURL is where the compiler holds the schema. A $ref resolves against
 // it, or against an $id inside the schema. One that resolves to any other URL
 // reaches refuseLoader.
@@ -76,6 +105,9 @@ var printer = message.NewPrinter(language.English)
 // Schema is a compiled workload schema. It is safe for concurrent use.
 type Schema struct {
 	compiled *jsonschema.Schema
+	// overrun is the first validation that ran past its budget: once it is
+	// set, Validate returns it without running the validator.
+	overrun atomic.Pointer[overrunError]
 }
 
 // Problem is one way in which a body fails its schema.
@@ -222,14 +254,28 @@ func Compile(raw []byte) (_ *Schema, err error) {
 	return &Schema{compiled: compiled}, nil
 }
 
-// Validate checks a body against the schema. It returns nil for a valid body
-// and a *ValidationError otherwise, a body that is not JSON included.
+// Validate checks a body against the schema. It returns nil for a valid body,
+// a *ValidationError for a body the schema rejects or that is not JSON, and an
+// error that matches ErrValidationTooExpensive for a schema too expensive to
+// validate against.
 //
 // The body goes through JSON first and is decoded as the schema was, numbers
 // as json.Number, so that the validator sees JSON values whatever Go types the
 // caller built the body from (an int, a []string), and each number with the
 // precision its encoding has. A nil body is the empty object.
-func (s *Schema) Validate(body map[string]any) (err error) {
+//
+// The validator runs in a goroutine of its own, and Validate waits for it for
+// at most validationBudget, 2 s. Past that, Validate returns the overrun and
+// marks the schema too expensive: every later Validate on it returns the same
+// error at once, without running the validator. The abandoned validator runs
+// on in the background until it finishes, which nothing can cut short. It
+// races with nothing: it reads the compiled schema, which nothing writes once
+// Compile returns, and its own decoding of the body, which nothing else holds,
+// and it leaves its result in a buffered channel that no one reads any more.
+func (s *Schema) Validate(body map[string]any) error {
+	if overrun := s.overrun.Load(); overrun != nil {
+		return overrun
+	}
 	if body == nil {
 		body = map[string]any{}
 	}
@@ -241,6 +287,28 @@ func (s *Schema) Validate(body map[string]any) (err error) {
 	if err != nil {
 		return invalid("body cannot be decoded: " + err.Error())
 	}
+	budget := validationBudget
+	done := make(chan error, 1)
+	go func() { done <- s.validate(doc) }()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		select {
+		case err := <-done: // the validator finished as the budget ran out
+			return err
+		default:
+		}
+		s.overrun.CompareAndSwap(nil, &overrunError{budget: budget})
+		return s.overrun.Load()
+	}
+}
+
+// validate runs the validator over a decoded body and turns what it finds into
+// a *ValidationError.
+func (s *Schema) validate(doc any) (err error) {
 	// The schema is untrusted: a panic of the validator on it rejects the body,
 	// and does not take the process down.
 	defer func() {
