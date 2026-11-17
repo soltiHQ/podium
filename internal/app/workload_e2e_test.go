@@ -181,7 +181,11 @@ func e2eSpec(slot, fingerprint, body string, targets ...string) string {
 // whose schema rejects the body is shown as incompatible, and a third that
 // declares no fingerprint as unpublished.
 func TestWorkloadTypesEndToEnd(t *testing.T) {
-	r := startApp(t, func(c *config.Config) { c.AgentAuth.Require = false }, nil)
+	r := startApp(t, func(c *config.Config) {
+		c.AgentAuth.Require = false
+		// The rollout runs on the sync runner's tick: a short one keeps the test fast.
+		c.Sync.TickInterval = 200 * time.Millisecond
+	}, nil)
 	cfg := r.cfg
 	waitFor(t, 10*time.Second, "the listeners bind", func() bool { return r.app.ui.Addr() != "" && r.app.grpc.Addr() != "" })
 	conn, err := grpc.NewClient("passthrough:///"+r.app.grpc.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -229,7 +233,7 @@ func TestWorkloadTypesEndToEnd(t *testing.T) {
 		t.Fatalf("invalid body: HTTP %d %s, want 400 naming /message", code, out)
 	}
 	code, out = rest.do(http.MethodPost, "/api/v1/specs", e2eSpec("only-a", f1, e2eBody, "agent-a"), nil)
-	if code != http.StatusOK && code != http.StatusCreated && code != http.StatusNoContent {
+	if code != http.StatusNoContent {
 		t.Fatalf("valid body: HTTP %d %s", code, out)
 	}
 	onlyA := rest.specID("only-a")
@@ -238,7 +242,7 @@ func TestWorkloadTypesEndToEnd(t *testing.T) {
 	}
 
 	// 3. Deploy: A's Task API gets the workload, with the body as extension.raw.
-	if code, out = rest.do(http.MethodPost, "/api/v1/specs/"+onlyA+"/deploy", "", nil); code != http.StatusNoContent && code != http.StatusOK {
+	if code, out = rest.do(http.MethodPost, "/api/v1/specs/"+onlyA+"/deploy", "", nil); code != http.StatusNoContent {
 		t.Fatalf("deploy to A: HTTP %d %s", code, out)
 	}
 	// The rollout applies it asynchronously.
@@ -267,7 +271,7 @@ func TestWorkloadTypesEndToEnd(t *testing.T) {
 		t.Fatalf("sync of B that sends the schema wants %v", want)
 	}
 	code, out = rest.do(http.MethodPost, "/api/v1/specs", e2eSpec("a-and-b", f1, e2eBody, "agent-a", "agent-b"), nil)
-	if code != http.StatusOK && code != http.StatusCreated && code != http.StatusNoContent {
+	if code != http.StatusNoContent {
 		t.Fatalf("spec for A and B: HTTP %d %s", code, out)
 	}
 	both := rest.specID("a-and-b")
@@ -294,7 +298,7 @@ func TestWorkloadTypesEndToEnd(t *testing.T) {
 		t.Fatalf("sync of C wants %v", want)
 	}
 	code, out = rest.do(http.MethodPost, "/api/v1/specs", e2eSpec("with-c", f1, e2eBody, "agent-c"), nil)
-	if code != http.StatusOK && code != http.StatusCreated && code != http.StatusNoContent {
+	if code != http.StatusNoContent {
 		t.Fatalf("spec for C: HTTP %d %s", code, out)
 	}
 	if tg := rest.placement(rest.specID("with-c"))["agent-c"]; tg.Eligible || runnerReason(tg) != "schema_unpublished" {
