@@ -15,8 +15,7 @@ workload type: gRPC sends `TaskWorkload{api_version, kind, extension.raw}` with
 the body as the raw bytes, HTTP sends `{"apiVersion", "kind", "spec": body}`.
 Podium has no kind of its own to map. `TaskManifestJSON` performs the explicit
 mapping of the envelope. Agents on the current SDK do not accept this until the
-SDK rework. Ordered environment entries and duplicate keys retain their order;
-`failOnNonZero: false` stays explicit because the SDK HTTP default is true.
+SDK rework.
 
 `SpecToProto` validates the envelope's policies before persistence or
 submission. A Podium spec receives a stable DNS-compatible resource name from

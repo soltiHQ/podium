@@ -41,7 +41,7 @@ probes, Prometheus     --->  :8081   ops                   /       |           (
   a JSON Schema per type, which podium asks for by fingerprint and validates a
   spec's body against. podium has no built-in task kinds: what an agent runs is
   whatever it declares. See
-  [Workload types](internal/handler/README.md#workload-types).
+  [Workload types](internal/handler/README.md#workload-types-and-schemas).
 - **Specs and rollouts.** A task spec targets agents by ID and by label.
   Deploying it turns its placement into rollouts: an install or an update for
   each agent it targets, an uninstall for each agent it no longer targets. The
@@ -548,7 +548,8 @@ without what was written since.
   fails operation 29 and drops field 12, so upgrade every replica before agents
   on the reworked SDK send schemas. The database mode adds migration `0002`
   (table `podium_workload_schemas`), which only adds a table. Agents on the
-  current SDK do not accept the tasks podium now sends until the SDK rework.
+  current SDK do not accept the tasks podium now sends: see
+  [Agent communication](internal/proxy/README.md#transports-and-resource-identity).
 - **New permissions.** A version that adds permissions gives them to the
   built-in Admin role, which bootstrap reconciles at each memory start and at
   each raft leadership term. A user who holds every permission directly, not
