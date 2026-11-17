@@ -451,7 +451,7 @@ func logCredentialSweep(logger zerolog.Logger, res agent.CredentialSweep, secret
 // every request the listener answers, outside the other middleware, and counts
 // the logins and the writes a follower forwards; nil records nothing.
 func buildMainHandler(cfg config.Config, logger zerolog.Logger, svc services, authModel *kit.Auth, proxyPool *proxy.Pool, eventHub *event.Hub, leadership cluster.Leadership, resolver *clientip.Resolver, forwardTLS *tls.Config, m *metrics.Metrics) (http.Handler, *loghub.Hub) {
-	var apiOpts []handler.APIOption
+	apiOpts := []handler.APIOption{handler.WithCatalog(svc.workload)}
 	if svc.cluster != nil {
 		apiOpts = append(apiOpts, handler.WithCluster(svc.cluster))
 	}

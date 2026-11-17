@@ -25,6 +25,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/session"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
 	"github.com/soltiHQ/control-plane/internal/service/user"
+	"github.com/soltiHQ/control-plane/internal/service/workload"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
 	"github.com/soltiHQ/control-plane/internal/transport/http/responder"
 	"github.com/soltiHQ/control-plane/internal/transport/http/response"
@@ -61,6 +62,8 @@ type API struct {
 	logAccess     func(*http.Request) error
 	// clusterSVC serves the cluster routes; nil, as in memory, registers none.
 	clusterSVC *clustersvc.Service
+	// catalogSVC serves the workload type routes; nil registers none.
+	catalogSVC *workload.Service
 
 	logger zerolog.Logger
 }
@@ -74,6 +77,12 @@ type APIOption func(*API)
 // registered, and their paths answer as any other unknown path.
 func WithCluster(svc *clustersvc.Service) APIOption {
 	return func(a *API) { a.clusterSVC = svc }
+}
+
+// WithCatalog serves the workload type routes with svc: GET
+// /api/v1/workload-types and GET /api/v1/workload-types/{group}/{version}/{kind}.
+func WithCatalog(svc *workload.Service) APIOption {
+	return func(a *API) { a.catalogSVC = svc }
 }
 
 // NewAPI creates a new API handler. logAccess re-checks, for a task log stream
@@ -166,6 +175,10 @@ func (a *API) Routes(mux *http.ServeMux, auth route.BaseMW, _ route.PermMW, comm
 	route.HandleFunc(mux, routepath.ApiHistory, a.History, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiSpecs, a.Specs, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiSpec, a.SpecsRouter, append(common, auth)...)
+	if a.catalogSVC != nil {
+		route.HandleFunc(mux, routepath.ApiWorkloadTypes, a.WorkloadTypes, append(common, auth)...)
+		route.HandleFunc(mux, routepath.ApiWorkloadType, a.WorkloadTypeRouter, append(common, auth)...)
+	}
 	route.HandleFunc(mux, routepath.ApiDashboard, a.Dashboard, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiDashboardIssues, a.IssuesDelete, append(common, auth)...)
 	route.HandleFunc(mux, routepath.ApiPermissions, a.Permissions, append(common, auth)...)
