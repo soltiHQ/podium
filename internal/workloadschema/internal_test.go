@@ -6,12 +6,15 @@ import (
 	"regexp/syntax"
 	"strings"
 	"testing"
+	"unicode"
 )
 
-// TestRegexSizeBoundsTheProgram holds the size that Compile measures a
-// regular expression by to the program Go compiles from it: never less, so
-// that no expression past the bounds reaches regexp.Compile, and not much
-// more, so that the bounds refuse no more than they say.
+// TestRegexSizeBoundsTheProgram holds the two measures of a regular
+// expression to the program Go compiles from it. The weight that matching is
+// charged by is never less than the program's instructions, so that matching
+// runs no more than it charges, and not much more for an expression of small
+// classes. The size that Compile bounds is the weight with each character
+// class counted by its ranges, which Go builds and compiles one by one.
 func TestRegexSizeBoundsTheProgram(t *testing.T) {
 	for _, expr := range []string{
 		"", "a", "abc", "a*", "a+", "a?", "(a)", "a|b|c", "[a-z]+", ".*", "(?s).*", "^x$", `\bfoo\b`,
@@ -23,14 +26,125 @@ func TestRegexSizeBoundsTheProgram(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Parse(%q): %v", expr, err)
 		}
-		measured := regexSize(re)
+		weight, size := regexWeight(re), regexSize(re)
 		prog, err := syntax.Compile(re.Simplify())
 		if err != nil {
 			t.Fatalf("Compile(%q): %v", expr, err)
 		}
-		if actual := len(prog.Inst); measured < actual || measured > 2*actual+4 {
-			t.Errorf("regexSize(%q) = %d, want at least the %d instructions Go compiles, and not much more", expr, measured, actual)
+		actual := len(prog.Inst)
+		if weight < actual || weight > 2*actual+4 && !strings.Contains(expr, `\p`) {
+			t.Errorf("regexWeight(%q) = %d, want at least the %d instructions Go compiles, and not much more", expr, weight, actual)
 		}
+		if size < weight {
+			t.Errorf("regexSize(%q) = %d, under its weight %d", expr, size, weight)
+		}
+	}
+	// A class counts its ranges in the size, and a binary search over them in
+	// the weight.
+	letters, err := syntax.Parse(`\pL`, syntax.Perl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ranges := len(letters.Rune) / 2
+	if got := regexSize(letters); got != ranges+2 {
+		t.Errorf(`regexSize(\pL) = %d, want its %d ranges and the program's 2 instructions`, got, ranges)
+	}
+	if got := regexWeight(letters); got < 3 || got > 6 {
+		t.Errorf(`regexWeight(\pL) = %d, want a few steps for a search of %d ranges`, got, ranges)
+	}
+}
+
+// TestPatternWorkCountsWhatParsingBuilds estimates, from the source, what Go's
+// parser builds beyond reading a pattern: the ranges of each Unicode class,
+// and, where case folding may be on, the runes of each bracket range that it
+// folds one at a time.
+func TestPatternWorkCountsWhatParsingBuilds(t *testing.T) {
+	for _, tc := range []struct {
+		src  string
+		work int
+		ok   bool
+	}{
+		{`^[a-z0-9]+$`, 0, true},
+		{`\pL`, unicodeClassWork, true},
+		{`[\p{L}\p{N}_-]`, 2 * unicodeClassWork, true},
+		{`\\pL`, unicodeClassWork, true}, // counted, though a backslash escapes the backslash: the estimate errs high
+		{`\P{^Greek}`, unicodeClassWork, true},
+		{`[\x{42}-\x{1E942}]`, 0, true},                            // no case folding: one range, appended at once
+		{`(?i)[\x{42}-\x{1E942}]`, (0x1E942 - 0x42 + 1) / 4, true}, // folded rune by rune
+		{`(?i)[a-f0-9]`, 6 / 4, true},                              // 0-9 lies below the folded runes
+		{`(?i)[\x00-\x{10FFFF}]`, 0, true},                         // the whole range, appended at once
+		{`(?i)[A-\x{1E943}]`, 0, true},
+		{`(?i)[B-\x{1E943}]`, (0x1E943 - 0x42 + 1) / 4, true},
+		{`(?-i)[\x{42}-\x{1E942}]`, (0x1E942 - 0x42 + 1) / 4, true}, // the estimate assumes folding wherever the flag appears
+		{`[(?i)]` + `[\x{42}-\x{1E942}]`, (0x1E942 - 0x42 + 1) / 4, true},
+		{`(?i)\Q[\x{42}-\x{1E942}]\E`, 0, true}, // literal text
+		{`(?i)[\101-\132]`, 26 / 4, true},       // octal: A to Z
+		{`(?i)[\q-z]`, 0, false},                // a range whose start it cannot read, under folding
+		{`(?i)\pL`, unicodeClassWork, true},     // the escape's count covers its folding
+	} {
+		work, ok := patternWork(tc.src)
+		if work != tc.work || ok != tc.ok {
+			t.Errorf("patternWork(%q) = %d, %v, want %d, %v", tc.src, work, ok, tc.work, tc.ok)
+		}
+	}
+	// What the parser builds for any Unicode table stays within what an
+	// escape counts: the table's ranges, and under case folding also its
+	// fold table's, and their merge.
+	built := func(tables ...*unicode.RangeTable) int {
+		n := 0
+		for _, t := range tables {
+			if t == nil {
+				continue
+			}
+			for _, r := range t.R16 {
+				n += rangesOf(rune(r.Lo), rune(r.Hi), rune(r.Stride))
+			}
+			for _, r := range t.R32 {
+				n += rangesOf(rune(r.Lo), rune(r.Hi), rune(r.Stride))
+			}
+		}
+		return n
+	}
+	check := func(name string, tab, fold *unicode.RangeTable) {
+		work := built(tab)
+		if fold != nil { // (?i): the table and its fold table, then their merge
+			re, err := syntax.Parse(`(?i)\p{`+name+`}`, syntax.Perl)
+			if err != nil {
+				t.Fatalf(`Parse((?i)\p{%s}): %v`, name, err)
+			}
+			work = max(work, built(tab)+built(fold)+len(re.Rune)/2)
+		}
+		if work > unicodeClassWork {
+			t.Errorf(`\p{%s} makes the parser build %d ranges, over the %d an escape counts`, name, work, unicodeClassWork)
+		}
+	}
+	for name, tab := range unicode.Categories {
+		check(name, tab, unicode.FoldCategory[name])
+	}
+	for name, tab := range unicode.Scripts {
+		check(name, tab, unicode.FoldScript[name])
+	}
+}
+
+// rangesOf is the ranges that Go's parser appends for a range of a Unicode
+// table: one, or one for each rune when the stride skips runes.
+func rangesOf(lo, hi, stride rune) int {
+	if stride == 1 {
+		return 1
+	}
+	return int((hi-lo)/stride) + 1
+}
+
+// TestStepsAreInt64 holds the arithmetic of steps to int64, which a 32-bit int
+// would wrap: one match of a string of 256 KiB against a program of 2 000
+// instructions charges over 3e9 steps.
+func TestStepsAreInt64(t *testing.T) {
+	sameType((*pattern).steps, (func(*pattern, int) int64)(nil))
+	sameType((*multiple).steps, (func(*multiple, num) int64)(nil))
+	sameType(lookupSteps, (func(int, int) int64)(nil))
+	sameType((*evaluator).charge, (func(*evaluator, int64) bool)(nil))
+	if got := (&pattern{weight: maxRegexSize}).steps(maxBodyBytes); got < 3e9 {
+		t.Errorf("one match of %d bytes against a weight of %d charges %d steps, want over 3e9", maxBodyBytes, maxRegexSize, got)
 	}
 }
 
@@ -134,3 +248,6 @@ func TestEvaluationChargesAsItGoes(t *testing.T) {
 		t.Errorf("validate with %d steps, one short = %v, want ErrValidationTooExpensive", used-1, err)
 	}
 }
+
+// sameType compiles only for two values of one type.
+func sameType[T any](T, T) {}

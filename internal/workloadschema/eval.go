@@ -26,11 +26,12 @@ import (
 // failure. Problems are reported in collect mode, on the main path, where a
 // failure fails the body; the evaluator stops at maxProblems of them.
 
-// maxSteps is the budget of one validation. A step is at most about a
-// nanosecond of the work that charges it (see below), so the budget ends the
-// worst validation within the bounds of a schema and a body after a few tens
-// of milliseconds. A body of 10 000 values that a usual schema evaluates
-// once or twice each takes under a fiftieth of it.
+// maxSteps is the budget of one validation. A step is about a nanosecond of
+// the work that charges it, and at most about one and a half as measured (see
+// below), so the budget ends the worst validation within the bounds of a
+// schema and a body after a few tens of milliseconds. A body of 10 000 values
+// that a usual schema evaluates once or twice each takes under a fiftieth of
+// it.
 const maxSteps = 25_000_000
 
 // maxEvalDepth bounds the evaluations nested in one another. A body nests
@@ -39,9 +40,9 @@ const maxEvalDepth = 1_000
 
 // What each kind of work costs, in steps. Each was measured on the worst
 // input of its kind that the bounds allow, without the race detector, under
-// the load of other builds on the same machine: no kind takes much more than
-// a nanosecond a step there (the report of Task 4's fix round 3 has the
-// table).
+// the load of other builds on the same machine: no kind took more than about
+// one and a half nanoseconds a step there (the report of Task 4's fix rounds 3
+// and 4 has the measurements).
 const (
 	stepsPerEval          = 32   // an evaluation of a subschema at a value,
 	stepsPerKeyword       = 2    // and each keyword the subschema holds
@@ -61,8 +62,8 @@ const (
 
 // lookupSteps is what finding a name of n bytes among the m members of an
 // object costs: a binary search, each step comparing the name.
-func lookupSteps(m, n int) int {
-	return (bits.Len(uint(m)) + 1) * (stepsPerHalving + n/8)
+func lookupSteps(m, n int) int64 {
+	return int64(bits.Len(uint(m))+1) * (stepsPerHalving + int64(n)/8)
 }
 
 // pathStep is a step of a location in a body: a member's name, or an item's
@@ -80,7 +81,7 @@ type found struct {
 
 // evaluator evaluates one body against one schema.
 type evaluator struct {
-	left      int        // the steps left of the budget
+	left      int64      // the steps left of the budget
 	depth     int        // the evaluations in progress
 	stopped   bool       // past the budget or the depth, or at maxProblems problems: every evaluation ends
 	exhausted bool       // past the budget
@@ -90,7 +91,7 @@ type evaluator struct {
 }
 
 // validate evaluates a body against the schema, within a budget of steps.
-func (s *schema) validate(body *value, budget int) error {
+func (s *schema) validate(body *value, budget int64) error {
 	e := &evaluator{left: budget}
 	ok := e.eval(s, body, true)
 	switch {
@@ -109,7 +110,7 @@ func (s *schema) validate(body *value, budget int) error {
 
 // charge takes steps from the budget. Past it, or once the evaluator stopped,
 // it returns false, and the caller returns at once.
-func (e *evaluator) charge(steps int) bool {
+func (e *evaluator) charge(steps int64) bool {
 	if e.stopped {
 		return false
 	}
@@ -250,7 +251,7 @@ func (e *evaluator) equal(a, b *value) bool {
 	if a.hash != b.hash || a.kind != b.kind {
 		return false
 	}
-	if !e.charge(stepsPerCompare + min(a.weight, b.weight)*stepsPerWeight) {
+	if !e.charge(stepsPerCompare + int64(min(a.weight, b.weight))*stepsPerWeight) {
 		return false
 	}
 	return same(a, b)
@@ -260,7 +261,7 @@ func (e *evaluator) equal(a, b *value) bool {
 func (e *evaluator) number(s *schema, v *value, collect bool) bool {
 	ok := true
 	n := v.n
-	steps := stepsPerCompare + len(n.d)/16
+	steps := stepsPerCompare + int64(len(n.d))/16
 	if s.maximum != nil {
 		if !e.charge(steps) {
 			return false
@@ -384,7 +385,7 @@ func (e *evaluator) unique(v *value) bool {
 	if v.unique != 0 {
 		return v.unique == 1
 	}
-	if !e.charge(len(v.items) * stepsPerUniqueItem) {
+	if !e.charge(int64(len(v.items)) * stepsPerUniqueItem) {
 		return false
 	}
 	first := make(map[uint64]int, len(v.items)) // the first item of each hash
@@ -717,7 +718,7 @@ func (e *evaluator) membersOf(s *schema, v *value, collect bool) bool {
 		at := pathStep{name: name, index: -1}
 		matched := false
 		if s.properties != nil {
-			if !e.charge(stepsPerLookup + len(name)/4) {
+			if !e.charge(stepsPerLookup + int64(len(name))/4) {
 				return false
 			}
 			if sub, found := s.properties[name]; found {
@@ -788,7 +789,7 @@ func (e *evaluator) propertiesOnly(s *schema, v *value, collect bool) bool {
 		return ok
 	}
 	for i, name := range v.keys {
-		if !e.charge(stepsPerItem + stepsPerLookup + len(name)/4) {
+		if !e.charge(stepsPerItem + stepsPerLookup + int64(len(name))/4) {
 			return false
 		}
 		if sub, found := s.properties[name]; found && !e.child(sub, v.vals[i], pathStep{name: name, index: -1}, collect) {
@@ -809,7 +810,7 @@ func (e *evaluator) nameValues(v *value) []value {
 	}
 	names := make([]value, len(v.keys))
 	for i, name := range v.keys {
-		if !e.charge(stepsPerName + len(name)/2) {
+		if !e.charge(stepsPerName + int64(len(name))/2) {
 			return nil
 		}
 		names[i] = stringValue(name)
@@ -834,7 +835,7 @@ func (e *evaluator) child(s *schema, v *value, at pathStep, collect bool) bool {
 // maxProblems problems.
 func (e *evaluator) report(message string) bool {
 	message = truncate(message)
-	if !e.charge(stepsPerProblem + (len(e.problems)+1)*(len(e.path)+len(message)/16)) {
+	if !e.charge(stepsPerProblem + int64(len(e.problems)+1)*int64(len(e.path)+len(message)/16)) {
 		return true
 	}
 	for _, p := range e.problems {

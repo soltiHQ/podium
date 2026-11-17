@@ -240,6 +240,12 @@ func TestValidateRefusesABodyPastItsBounds(t *testing.T) {
 		"an exponent over 400":            {map[string]any{"n": jsonNumber("1e401")}, "/n", "exponent"},
 		"an exponent under -400":          {map[string]any{"n": jsonNumber("-1E-401")}, "/n", "exponent"},
 		"an exponent of many digits":      {map[string]any{"n": jsonNumber("1e999999999999999999999")}, "/n", "exponent"},
+		// Go escapes U+2028 as \u2028, but the bound counts its 3 bytes of
+		// UTF-8; a backslash and "u2028" as text are 7 bytes, escaped.
+		"270 000 bytes of U+2028":    {map[string]any{"s": strings.Repeat("\u2028", 90_000)}, "", "270008 bytes"},
+		"40 000 \\u2028 as text":     {map[string]any{"s": strings.Repeat("\\u2028", 40_000)}, "", "280008 bytes"},
+		"80 000 U+2029, 30 000 x":    {map[string]any{"s": strings.Repeat("\u2029", 80_000) + strings.Repeat("x", 30_000)}, "", "270008 bytes"},
+		"\\\\u2028 as text, escaped": {map[string]any{"s": strings.Repeat("\\\\u2028", 40_000)}, "", "360008 bytes"},
 	} {
 		within(t, name, func() {
 			err := s.Validate(tc.body)
@@ -260,6 +266,8 @@ func TestValidateRefusesABodyPastItsBounds(t *testing.T) {
 		"an exponent of 400":        {"n": jsonNumber("1e400")},
 		"an exponent of -400":       {"n": jsonNumber("-1.5e-400")},
 		"256 KiB in HTML's letters": {"s": strings.Repeat("<>&", (maxBodyBytes-16)/3)},
+		"135 000 bytes of U+2028":   {"s": strings.Repeat("\u2028", 45_000)},
+		"256 KiB of U+2029":         {"s": strings.Repeat("\u2029", (maxBodyBytes-16)/3)},
 	} {
 		if err := accept.Validate(body); err != nil {
 			t.Errorf("Validate(%s) = %v, want nil", name, err)

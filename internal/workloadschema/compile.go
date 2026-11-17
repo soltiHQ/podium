@@ -7,8 +7,8 @@ import (
 	"maps"
 	"math"
 	"net/url"
+	"reflect"
 	"regexp"
-	"regexp/syntax"
 	"slices"
 	"strconv"
 	"strings"
@@ -41,16 +41,6 @@ import (
 
 // draft2020 is the one $schema a workload schema may have.
 const draft2020 = "https://json-schema.org/draft/2020-12/schema"
-
-// Each regular expression is measured before it is compiled, by the program
-// Go compiles from it, all of which matching may run for each byte of a
-// string.
-const (
-	// maxRegexInsts bounds the program of one regular expression.
-	maxRegexInsts = 2_000
-	// maxSchemaRegexInsts bounds the programs of all those of a schema.
-	maxSchemaRegexInsts = 20_000
-)
 
 // maxCount is the most a counting keyword, such as maxLength, takes: a count
 // over it is clamped to it, which no body within its bounds comes near.
@@ -96,13 +86,15 @@ var kindBits = [...]uint8{
 
 // schema is a compiled subschema.
 type schema struct {
-	loc string // where it is in the document, as a URI fragment: "#", "#/properties/name"
+	// at is where it is in the document, for the errors of Compile, which
+	// clears it once it is done.
+	at *location
 
 	boolean bool // a schema of true or false, which accepts every value or none
 	valid   bool // the value of a boolean schema
 
-	keywords int // the keywords it evaluates
-	cost     int // the steps of one evaluation of it, besides its loops and leaves
+	keywords int   // the keywords it evaluates
+	cost     int64 // the steps of one evaluation of it, besides its loops and leaves
 
 	// Assertions.
 	types     uint8  // the types it accepts, 0 for any
@@ -170,26 +162,66 @@ type dependentNames struct {
 	names []string
 }
 
-// pattern is a compiled regular expression.
-type pattern struct {
-	re    *regexp.Regexp
-	insts int // the instructions of its program, as regexSize measures them
-	text  string
+// location is where a value is in the document: the location of the value
+// that holds it, and its RFC 6901 token there. Compile writes it out only for
+// an error, cut to maxMessageBytes, so that no subschema keeps the names of
+// its ancestors.
+type location struct {
+	parent *location
+	token  string
 }
 
-// steps is what matching a string of n bytes costs at worst.
-func (p *pattern) steps(n int) int {
-	return stepsPerMatch + n*p.insts*stepsPerMatchedByte
+// child is the location tokens below l.
+func (l *location) child(tokens ...string) *location {
+	for _, t := range tokens {
+		l = &location{parent: l, token: t}
+	}
+	return l
+}
+
+// String writes the location as a URI fragment, "#/properties/name", cut to
+// maxMessageBytes at a rune boundary. The nil location is the root, "#".
+func (l *location) String() string {
+	var tokens []string
+	for at := l; at != nil; at = at.parent {
+		tokens = append(tokens, at.token)
+	}
+	var b strings.Builder
+	b.WriteByte('#')
+	for i := len(tokens) - 1; i >= 0 && b.Len() <= maxMessageBytes; i-- {
+		t := tokens[i]
+		if len(t) > maxMessageBytes {
+			t = t[:maxMessageBytes+1] // past the cut, which truncate makes at a rune boundary
+		}
+		b.WriteByte('/')
+		b.WriteString(escapeToken(t))
+	}
+	return truncate(b.String())
+}
+
+// position is the place of a value in the decoded document, by which a
+// subschema compiled there is found again: the object or the array that
+// holds it, by address, and its member name or index there. The root's is
+// the zero position.
+type position struct {
+	in  uintptr
+	key string
+}
+
+// positionIn is the position of the value under key in the object or the
+// array container.
+func positionIn(container any, key string) position {
+	return position{in: reflect.ValueOf(container).Pointer(), key: key}
 }
 
 // compiler compiles the subschemas of one schema document.
 type compiler struct {
-	doc     any
-	nodes   map[string]*schema // the subschemas compiled, by location
-	order   []*schema          // the same, in the order compiled
-	anchors map[string]*schema
-	refs    []pendingRef // the $refs to resolve once the tree is compiled
-	insts   int          // the instructions of the regular expressions so far
+	doc      any
+	nodes    map[position]*schema // the subschemas compiled, by position
+	order    []*schema            // the same, in the order compiled
+	anchors  map[string]*schema
+	refs     []pendingRef // the $refs to resolve once the tree is compiled
+	patterns regexBounds  // what the regular expressions have taken of their bounds
 }
 
 type pendingRef struct {
@@ -205,8 +237,8 @@ type pendingRef struct {
 // keyword the subset does not know. Last, it refuses a cycle of subschemas at
 // one location of a body.
 func compileDocument(doc any) (*schema, error) {
-	c := &compiler{doc: doc, nodes: map[string]*schema{}, anchors: map[string]*schema{}}
-	root, err := c.compile(doc, nil, true)
+	c := &compiler{doc: doc, nodes: map[position]*schema{}, anchors: map[string]*schema{}}
+	root, err := c.compile(doc, nil, position{}, true)
 	if err != nil {
 		return nil, err
 	}
@@ -227,18 +259,17 @@ func compileDocument(doc any) (*schema, error) {
 	return root, nil
 }
 
-// compile compiles the subschema v at a location, given as RFC 6901 tokens.
-// A subschema of the tree registers its $anchor.
-func (c *compiler) compile(v any, at []string, tree bool) (*schema, error) {
-	loc := fragment(at)
-	if s, ok := c.nodes[loc]; ok {
+// compile compiles the subschema v, at a location and a position. A
+// subschema of the tree registers its $anchor.
+func (c *compiler) compile(v any, at *location, pos position, tree bool) (*schema, error) {
+	if s, ok := c.nodes[pos]; ok {
 		return s, nil
 	}
 	s := &schema{
-		loc: loc, minLength: -1, maxLength: -1, minItems: -1, maxItems: -1,
+		at: at, minLength: -1, maxLength: -1, minItems: -1, maxItems: -1,
 		minContains: 1, maxContains: -1, minProperties: -1, maxProperties: -1,
 	}
-	c.nodes[loc] = s
+	c.nodes[pos] = s
 	c.order = append(c.order, s)
 	switch v := v.(type) {
 	case bool:
@@ -246,22 +277,28 @@ func (c *compiler) compile(v any, at []string, tree bool) (*schema, error) {
 		return s, nil
 	case map[string]any:
 		for _, k := range slices.Sorted(maps.Keys(v)) {
-			if err := c.keyword(s, k, v[k], at, tree); err != nil {
+			if err := c.keyword(s, v, k, tree); err != nil {
 				return nil, err
 			}
 		}
 		return s, nil
 	}
-	return nil, fmt.Errorf("workloadschema: compile schema: the value at %q is %s, not a schema: want an object or a boolean", loc, describe(v))
+	return nil, fmt.Errorf("workloadschema: compile schema: the value at %q is %s, not a schema: want an object or a boolean", at, describe(v))
 }
 
-// keyword compiles one keyword of the subschema s, at at.
-func (c *compiler) keyword(s *schema, k string, v any, at []string, tree bool) error {
+// keyword compiles the keyword k of the subschema s, whose object is obj.
+func (c *compiler) keyword(s *schema, obj map[string]any, k string, tree bool) error {
+	v := obj[k]
 	fail := func(format string, args ...any) error {
-		return fmt.Errorf("workloadschema: compile schema: %q at %q %s", k, s.loc, fmt.Sprintf(format, args...))
+		return fmt.Errorf("workloadschema: compile schema: %q at %q %s", k, s.at, fmt.Sprintf(format, args...))
 	}
-	sub := func(v any, path ...string) (*schema, error) {
-		return c.compile(v, append(slices.Clip(at), path...), tree)
+	// sub compiles the subschema under the keyword itself, or under one of
+	// its members or items, key, in container.
+	sub := func(v any) (*schema, error) {
+		return c.compile(v, s.at.child(k), positionIn(obj, k), tree)
+	}
+	subAt := func(v, container any, key string) (*schema, error) {
+		return c.compile(v, s.at.child(k, key), positionIn(container, key), tree)
 	}
 	switch k {
 	case "$schema":
@@ -270,7 +307,7 @@ func (c *compiler) keyword(s *schema, k string, v any, at []string, tree bool) e
 		}
 		return nil
 	case "$id":
-		if len(at) > 0 {
+		if s.at != nil {
 			return fail("is not supported: only the root of a workload schema may have an $id")
 		}
 		if _, ok := v.(string); !ok {
@@ -284,7 +321,7 @@ func (c *compiler) keyword(s *schema, k string, v any, at []string, tree bool) e
 		}
 		if tree {
 			if other, ok := c.anchors[name]; ok {
-				return fail("declares %s, which %q declares too", quote(name), other.loc)
+				return fail("declares %s, which %q declares too", quote(name), other.at)
 			}
 			c.anchors[name] = s
 		}
@@ -304,7 +341,7 @@ func (c *compiler) keyword(s *schema, k string, v any, at []string, tree bool) e
 			return fail("must be an object of schemas")
 		}
 		for _, name := range slices.Sorted(maps.Keys(defs)) {
-			if _, err := sub(defs[name], k, name); err != nil {
+			if _, err := subAt(defs[name], defs, name); err != nil {
 				return err
 			}
 		}
@@ -410,7 +447,7 @@ func (c *compiler) keyword(s *schema, k string, v any, at []string, tree bool) e
 		if !ok {
 			return fail("must be a string")
 		}
-		p, err := c.regex(text)
+		p, err := c.patterns.compile(text)
 		if err != nil {
 			return fail("%v", err)
 		}
@@ -447,7 +484,7 @@ func (c *compiler) keyword(s *schema, k string, v any, at []string, tree bool) e
 		schemas := make([]*schema, len(list))
 		for i, x := range list {
 			var err error
-			if schemas[i], err = sub(x, k, strconv.Itoa(i)); err != nil {
+			if schemas[i], err = subAt(x, list, strconv.Itoa(i)); err != nil {
 				return err
 			}
 		}
@@ -468,7 +505,7 @@ func (c *compiler) keyword(s *schema, k string, v any, at []string, tree bool) e
 			}
 			return fail("must be a schema: an object or a boolean")
 		}
-		one, err := sub(v, k)
+		one, err := sub(v)
 		if err != nil {
 			return err
 		}
@@ -497,7 +534,7 @@ func (c *compiler) keyword(s *schema, k string, v any, at []string, tree bool) e
 		}
 		list := make([]namedSchema, 0, len(m))
 		for _, name := range slices.Sorted(maps.Keys(m)) {
-			one, err := sub(m[name], k, name)
+			one, err := subAt(m[name], m, name)
 			if err != nil {
 				return err
 			}
@@ -518,11 +555,11 @@ func (c *compiler) keyword(s *schema, k string, v any, at []string, tree bool) e
 			return fail("must be an object of schemas")
 		}
 		for _, text := range slices.Sorted(maps.Keys(m)) {
-			p, err := c.regex(text)
+			p, err := c.patterns.compile(text)
 			if err != nil {
 				return fail("%s %v", quote(text), err)
 			}
-			one, err := sub(m[text], k, text)
+			one, err := subAt(m[text], m, text)
 			if err != nil {
 				return err
 			}
@@ -571,98 +608,14 @@ func (s *schema) compileTypes(v any) error {
 	return nil
 }
 
-// regex measures a regular expression, and compiles it unless it is past its
-// bound, or takes the schema's regular expressions past theirs.
-func (c *compiler) regex(text string) (*pattern, error) {
-	parsed, err := syntax.Parse(text, syntax.Perl)
-	if err != nil {
-		return nil, fmt.Errorf("is not a valid regular expression: %w", err)
-	}
-	insts := regexSize(parsed)
-	if insts > maxRegexInsts {
-		return nil, fmt.Errorf("is a regular expression of %s instructions, over the limit of %d", sizeText(insts), maxRegexInsts)
-	}
-	if c.insts += insts; c.insts > maxSchemaRegexInsts {
-		return nil, fmt.Errorf("takes the schema's regular expressions to %d instructions, over the limit of %d in all", c.insts, maxSchemaRegexInsts)
-	}
-	re, err := regexp.Compile(text)
-	if err != nil {
-		return nil, fmt.Errorf("is not a valid regular expression: %w", err)
-	}
-	return &pattern{re: re, insts: insts, text: text}, nil
-}
-
-// regexSize is the size of the program that Go compiles from a parsed regular
-// expression, measured without compiling it, and on the expression as Go
-// simplifies it before compiling: a repeat x{n,m} as n copies of x and m-n
-// optional ones. It is never less than the program's size. Past
-// maxSchemaRegexInsts, it stops counting.
-func regexSize(re *syntax.Regexp) int {
-	return addSize(size(re), 2) // the program's fail and match instructions
-}
-
-func size(re *syntax.Regexp) int {
-	switch re.Op {
-	case syntax.OpLiteral:
-		return max(len(re.Rune), 1)
-	case syntax.OpCapture:
-		return addSize(size(re.Sub[0]), 2)
-	case syntax.OpStar:
-		return addSize(size(re.Sub[0]), 2) // a loop, or (x+)? when x matches the empty string
-	case syntax.OpPlus, syntax.OpQuest:
-		return addSize(size(re.Sub[0]), 1)
-	case syntax.OpRepeat:
-		sub := size(re.Sub[0])
-		switch {
-		case re.Max == -1 && re.Min <= 1: // x* or x+
-			return addSize(sub, 2)
-		case re.Max == -1: // n-1 copies of x, then x+
-			return addSize(mulSize(re.Min, sub), 1)
-		case re.Max == 0:
-			return 1
-		}
-		return addSize(mulSize(re.Min, sub), mulSize(re.Max-re.Min, addSize(sub, 1)))
-	case syntax.OpConcat, syntax.OpAlternate:
-		total := len(re.Sub) // the alternation's branches, or the empty concatenation's no-op
-		for _, s := range re.Sub {
-			total = addSize(total, size(s))
-		}
-		return total
-	}
-	return 1 // a character class, an empty-width assertion, or an empty or failing match
-}
-
-// saturated is past every bound on regular expressions: sizes stop there, so
-// that no product overflows.
-const saturated = maxSchemaRegexInsts + 1
-
-func addSize(a, b int) int { return min(a+b, saturated) }
-
-func mulSize(n, s int) int {
-	if n == 0 || s == 0 {
-		return 0
-	}
-	if n > saturated/s {
-		return saturated
-	}
-	return n * s
-}
-
-func sizeText(insts int) string {
-	if insts >= saturated {
-		return fmt.Sprintf("more than %d", maxSchemaRegexInsts)
-	}
-	return strconv.Itoa(insts)
-}
-
 // resolve finds the subschema that a $ref inside the document points at.
 func (c *compiler) resolve(from *schema, ref string) (*schema, error) {
 	fail := func(format string, args ...any) error {
-		return fmt.Errorf(`workloadschema: compile schema: "$ref" at %q is %s, %s`, from.loc, quote(ref), fmt.Sprintf(format, args...))
+		return fmt.Errorf(`workloadschema: compile schema: "$ref" at %q is %s, %s`, from.at, quote(ref), fmt.Sprintf(format, args...))
 	}
 	frag := ref[1:]
 	if frag == "" {
-		return c.nodes["#"], nil
+		return c.nodes[position{}], nil
 	}
 	if frag[0] != '/' {
 		if !anchorName.MatchString(frag) {
@@ -685,7 +638,7 @@ func (c *compiler) resolve(from *schema, ref string) (*schema, error) {
 		}
 		tokens[i] = strings.ReplaceAll(strings.ReplaceAll(t, "~1", "/"), "~0", "~")
 	}
-	v := c.doc
+	v, pos := c.doc, position{}
 	for _, t := range tokens {
 		switch node := v.(type) {
 		case map[string]any:
@@ -693,13 +646,13 @@ func (c *compiler) resolve(from *schema, ref string) (*schema, error) {
 			if !ok {
 				return nil, fail("which points at nothing in the schema")
 			}
-			v = child
+			v, pos = child, positionIn(node, t)
 		case []any:
 			i, ok := arrayIndex(t, len(node))
 			if !ok {
 				return nil, fail("which points at nothing in the schema")
 			}
-			v = node[i]
+			v, pos = node[i], positionIn(node, t)
 		default:
 			return nil, fail("which points at nothing in the schema")
 		}
@@ -707,7 +660,7 @@ func (c *compiler) resolve(from *schema, ref string) (*schema, error) {
 	if !isSchema(v) {
 		return nil, fail("which points at %s, not a schema", describe(v))
 	}
-	return c.compile(v, tokens, false)
+	return c.compile(v, (*location)(nil).child(tokens...), pos, false)
 }
 
 // arrayIndex reads an RFC 6901 array index below n.
@@ -732,7 +685,7 @@ func (c *compiler) checkCycles() error {
 	visit = func(s *schema) error {
 		switch state[s] {
 		case visiting:
-			return fmt.Errorf("workloadschema: compile schema: the subschema at %q refers back to itself at the same location of a body (a reference cycle)", s.loc)
+			return fmt.Errorf("workloadschema: compile schema: the subschema at %q refers back to itself at the same location of a body (a reference cycle)", s.at)
 		case done:
 			return nil
 		}
@@ -781,7 +734,8 @@ func (s *schema) sameLocation() []*schema {
 // finish sets what the evaluator reads of a subschema before its keywords:
 // its cost, and which of its keywords apply to a value of which type.
 func (s *schema) finish() {
-	s.cost = stepsPerEval + s.keywords*stepsPerKeyword
+	s.at = nil // for errors of Compile only
+	s.cost = stepsPerEval + int64(s.keywords)*stepsPerKeyword
 	if s.boolean {
 		return
 	}
@@ -864,17 +818,6 @@ func uniqueNames(v any) ([]string, error) {
 		names = append(names, name)
 	}
 	return names, nil
-}
-
-// fragment is the URI fragment of a location in the document.
-func fragment(at []string) string {
-	var b strings.Builder
-	b.WriteByte('#')
-	for _, t := range at {
-		b.WriteByte('/')
-		b.WriteString(escapeToken(t))
-	}
-	return b.String()
 }
 
 // escapeToken escapes an RFC 6901 token: ~ as ~0, and / as ~1.

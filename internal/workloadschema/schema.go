@@ -9,8 +9,9 @@
 //   - Fingerprint and Compile take at most MaxSchemaBytes, and only JSON that
 //     RFC 8785 accepts whose value is an object. Compile also refuses a schema
 //     that nests deeper than 32 levels or holds more than 512 objects and
-//     booleans, and a regular expression of more than 2 000 instructions, or
-//     regular expressions of more than 20 000 in all (compile.go).
+//     booleans, and bounds each regular expression before Go parses it, and
+//     again before Go compiles it (regex.go). A compiled subschema keeps no
+//     location, and an error of Compile says at most 512 bytes.
 //   - Compile accepts draft 2020-12 in a subset, and refuses the rest by name
 //     and location (compile.go). A $ref resolves only inside the schema, so
 //     compiling fetches nothing and reads no file.
@@ -61,7 +62,9 @@ const quoteBytes = 128
 
 // ErrValidationTooExpensive matches, through errors.Is, the error of a
 // validation that ran past its budget of steps, or nested its evaluations too
-// deep. The schema is at fault, not the body: the validation affects no other.
+// deep: the schema and the body together are too costly to check, whichever
+// of them makes them so, and the body is neither accepted nor rejected. The
+// validation affects no other.
 var ErrValidationTooExpensive = errors.New("workloadschema: validation too expensive")
 
 // Schema is a compiled workload schema. It is safe for concurrent use.
@@ -176,12 +179,21 @@ func Fingerprint(raw []byte) (string, error) {
 // bounds on its shape or on its regular expressions, a keyword outside the
 // subset, a keyword whose value is not what it takes, a $ref to anything
 // outside the schema, with a "remote reference" error, and a cycle of
-// subschemas at one location of a body.
+// subschemas at one location of a body. Its error says at most 512 bytes:
+// the names and values of a schema reach it, and Podium logs it.
 //
 // It compiles the canonical form, the bytes that the fingerprint hashes, so
 // that two schemas with one fingerprint validate alike: each number is the
 // IEEE 754 double that RFC 8785 makes of it.
-func Compile(raw []byte) (_ *Schema, err error) {
+func Compile(raw []byte) (*Schema, error) {
+	s, err := compileSchema(raw)
+	if err != nil && len(err.Error()) > maxMessageBytes {
+		return nil, errors.New(truncate(err.Error()))
+	}
+	return s, err
+}
+
+func compileSchema(raw []byte) (_ *Schema, err error) {
 	c, err := canonical(raw)
 	if err != nil {
 		return nil, err

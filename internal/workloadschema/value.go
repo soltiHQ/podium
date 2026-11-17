@@ -271,8 +271,8 @@ func decodeBody(body map[string]any) (*value, *ValidationError) {
 		return nil, invalid("body is not JSON: " + err.Error())
 	}
 	raw := bytes.TrimSuffix(buf.Bytes(), []byte{'\n'})
-	if len(raw) > maxBodyBytes {
-		return nil, invalid(fmt.Sprintf("body of %d bytes is over the limit of %d", len(raw), maxBodyBytes))
+	if size := jsonSize(raw); size > maxBodyBytes {
+		return nil, invalid(fmt.Sprintf("body of %d bytes is over the limit of %d", size, maxBodyBytes))
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
@@ -290,6 +290,25 @@ func decodeBody(body map[string]any) (*value, *ValidationError) {
 		return nil, b.bad
 	}
 	return v, nil
+}
+
+// jsonSize is the size of JSON that encoding/json wrote, with U+2028 and
+// U+2029 counted as their 3 bytes of UTF-8: encoding/json escapes them as
+// \u2028 and \u2029, 6 bytes each, which JSON does not need. A backslash
+// escapes the byte after it, so a backslash that the data holds, written \\,
+// does not start an escape of its own.
+func jsonSize(raw []byte) int {
+	n := len(raw)
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '\\' {
+			continue
+		}
+		if bytes.HasPrefix(raw[i+1:], []byte("u2028")) || bytes.HasPrefix(raw[i+1:], []byte("u2029")) {
+			n -= 3
+		}
+		i++ // the escaped byte
+	}
+	return n
 }
 
 // countValues is the JSON values of decoded JSON, counted up to limit.
@@ -493,7 +512,7 @@ func newMultiple(n num) *multiple {
 }
 
 // steps is what dividing v by the divisor costs.
-func (m *multiple) steps(v num) int {
+func (m *multiple) steps(v num) int64 {
 	if m.small != 0 && len(v.d) <= 19 {
 		return stepsPerSmallDivision
 	}
