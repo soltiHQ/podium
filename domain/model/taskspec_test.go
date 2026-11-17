@@ -170,8 +170,10 @@ func TestRuntimeEqualsHandlesNil(t *testing.T) {
 // fields, so a change of its body, type or schema is a runtime change, and a
 // copy of it, or the same numbers held another way, is not.
 func TestRuntimeEqualsSeesABodyChange(t *testing.T) {
-	base := Workload{APIVersion: "solti.io/v1", Kind: "Container", SchemaFingerprint: "f1",
-		Body: map[string]any{"image": "busybox", "ports": []any{float64(80), map[string]any{"n": "x"}}}}
+	base := Workload{
+		APIVersion: "solti.io/v1", Kind: "Container", SchemaFingerprint: "f1",
+		Body: map[string]any{"image": "busybox", "ports": []any{float64(80), map[string]any{"n": "x"}}},
+	}
 	a, _ := NewSpec("sp-1", "n", "slot")
 	a.SetWorkload(base)
 	b := a.Clone()
@@ -219,7 +221,7 @@ func TestWorkloadGVK(t *testing.T) {
 	if err != nil || gvk != (GroupVersionKind{Group: "solti.io", Version: "v1", Kind: "Container", SchemaFingerprint: "f"}) {
 		t.Fatalf("GVK = %+v, %v", gvk, err)
 	}
-	for _, w := range []Workload{{Kind: "K"}, {APIVersion: "v1", Kind: "K"}, {APIVersion: "g/", Kind: "K"}, {APIVersion: "/v1", Kind: "K"}, {APIVersion: "a/b/c", Kind: "K"}, {APIVersion: "g/v1"}} {
+	for _, w := range []Workload{{Kind: "K"}, {APIVersion: "g/", Kind: "K"}, {APIVersion: "/v1", Kind: "K"}, {APIVersion: "a/b/c", Kind: "K"}, {APIVersion: "g/v1"}} {
 		if _, err := w.GVK(); err == nil {
 			t.Errorf("GVK accepted %+v", w)
 		}

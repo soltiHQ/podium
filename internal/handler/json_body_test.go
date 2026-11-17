@@ -136,3 +136,41 @@ func TestSpecUpsertAnswersWorkloadProblemsWith400(t *testing.T) {
 		t.Fatalf("the created spec does not carry its workload: %s", list.Body.String())
 	}
 }
+
+// A spec the proxy cannot send is 400, at create and at update: the envelope is
+// checked for every spec. An invalid body on PUT is 400 too.
+func TestSpecUpsertRefusesBadEnvelopeBodyAndBounds(t *testing.T) {
+	admin := &identity.Identity{UserID: "admin", Permissions: enum.All}
+	f := newAPIFixture(t)
+	seedHandlerSchema(t, f.store)
+	f.spec(t, "spec-1")
+	wl := func(body string) string {
+		return `"workload":{"api_version":"solti.io/v1","kind":"Container","schema_fingerprint":"` + handlerFingerprint + `","body":` + body + `}`
+	}
+	for _, tc := range []struct{ name, method, target, body string }{
+		{"slot with a space", http.MethodPost, "/api/v1/specs", `{"name":"S","slot":"a b",` + validKind + `}`},
+		{"invalid body on PUT", http.MethodPut, "/api/v1/specs/spec-1", `{"version":1,"name":"S",` + wl(`{"image":7}`) + `}`},
+	} {
+		w := f.do(tc.method, tc.target, tc.body, admin)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: HTTP %d %.200s, want 400", tc.name, w.Code, w.Body.String())
+		}
+	}
+	if rows, err := f.store.GetSpec(context.Background(), "spec-1"); err != nil || rows.Version() != 1 {
+		t.Fatalf("a refused PUT changed the spec: %v %v", rows, err)
+	}
+}
+
+// A body over the validator's bounds (256 KiB encoded, 10 000 values) is a body
+// error: 400 at create. The body here is valid for its schema, so only the bound
+// can refuse it.
+func TestSpecCreateRefusesABodyOverTheBounds(t *testing.T) {
+	t.Skip("workloadschema.Schema.Validate does not enforce the body bounds yet; enable this test with the validator that does")
+	admin := &identity.Identity{UserID: "admin", Permissions: enum.All}
+	f := newAPIFixture(t)
+	seedHandlerSchema(t, f.store)
+	body := `{"name":"S","slot":"huge","workload":{"api_version":"solti.io/v1","kind":"Container","schema_fingerprint":"` + handlerFingerprint + `","body":{"image":"` + strings.Repeat("x", 300<<10) + `"}}}`
+	if w := f.do(http.MethodPost, "/api/v1/specs", body, admin); w.Code != http.StatusBadRequest {
+		t.Fatalf("HTTP %d %.200s, want 400", w.Code, w.Body.String())
+	}
+}

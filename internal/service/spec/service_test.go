@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"regexp"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/workload"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"github.com/soltiHQ/control-plane/internal/workloadschema"
 )
 
 func mkService(t *testing.T) (*Service, *inmemory.Store) {
@@ -832,21 +834,70 @@ func TestCreateRefusesABodyTheSchemaRejects(t *testing.T) {
 	}
 }
 
-func TestCreateRefusesAGVKThatDiffersFromTheSchemas(t *testing.T) {
+// Two types may share one canonical schema, hence one fingerprint, and the
+// catalog keeps the first type it saw: a spec of another type is not refused for it.
+func TestCreateAcceptsATypeThatSharesTheSchemaOfAnother(t *testing.T) {
 	for name, mutate := range map[string]func(*model.Workload){
 		"kind":        func(w *model.Workload) { w.Kind = "Other" },
 		"api version": func(w *model.Workload) { w.APIVersion = "solti.io/v2" },
+		"no group":    func(w *model.Workload) { w.APIVersion = "v1" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			svc, _ := mkService(t)
 			w := testWorkload(t)
 			mutate(&w)
-			err := svc.Create(context.Background(), workloadSpec(t, "sp-1", w))
-			var bad *WorkloadError
-			if !errors.As(err, &bad) || !strings.Contains(bad.Message, "differs from the type of its schema") {
+			if err := svc.Create(context.Background(), workloadSpec(t, "sp-1", w)); err != nil {
 				t.Fatalf("Create = %v", err)
 			}
 		})
+	}
+}
+
+// The envelope is checked for every spec, whatever its workload: a slot the
+// proxy refuses is a validation error at create and at update.
+func TestCreateRefusesAnInvalidEnvelope(t *testing.T) {
+	ctx := context.Background()
+	svc, store := mkService(t)
+	ts, err := model.NewSpec("sp-slot", "name", "a b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts.SetWorkload(testWorkload(t))
+	if err = svc.Create(ctx, ts); !errors.Is(err, storage.ErrInvalidArgument) {
+		t.Fatalf("Create with slot %q = %v", "a b", err)
+	}
+	if _, err = store.GetSpec(ctx, "sp-slot"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("a refused spec was stored: %v", err)
+	}
+	good := mkSpec(t, svc, store, "sp-env", nil)
+	for name, edit := range map[string]func(*model.Spec){
+		"timeout":      func(s *model.Spec) { s.SetTimeoutMs(0) },
+		"runner label": func(s *model.Spec) { s.SetRunnerLabels(map[string]string{"-bad": "v"}) },
+		"interval":     func(s *model.Spec) { s.SetIntervalMs(100) },
+	} {
+		bad := good.Clone()
+		edit(bad)
+		if err = svc.Upsert(ctx, bad, 0); !errors.Is(err, storage.ErrInvalidArgument) {
+			t.Errorf("Upsert with a bad %s = %v", name, err)
+		}
+	}
+}
+
+// An overrun of the validator, however it is wrapped, is refused with a message
+// that says so; the mapping does not depend on what makes a schema expensive.
+func TestWorkloadRefusalMapsTooExpensive(t *testing.T) {
+	for name, err := range map[string]error{
+		"bare":    workloadschema.ErrValidationTooExpensive,
+		"wrapped": fmt.Errorf("validating: %w", workloadschema.ErrValidationTooExpensive),
+	} {
+		var bad *WorkloadError
+		got := workloadRefusal(err)
+		if !errors.As(got, &bad) || bad.Message != "the workload schema is too expensive to validate this body" || !errors.Is(got, storage.ErrInvalidArgument) {
+			t.Errorf("%s: %v", name, got)
+		}
+	}
+	if workloadRefusal(nil) != nil {
+		t.Error("a valid body is refused")
 	}
 }
 
@@ -855,7 +906,7 @@ func TestCreateRequiresAWorkload(t *testing.T) {
 	for name, w := range map[string]model.Workload{
 		"none":           {},
 		"no fingerprint": {APIVersion: testAPIVersion, Kind: testKind},
-		"bad api":        {APIVersion: "v1", Kind: testKind, SchemaFingerprint: testFingerprint(t)},
+		"bad api":        {APIVersion: "a/b/c", Kind: testKind, SchemaFingerprint: testFingerprint(t)},
 	} {
 		if err := svc.Create(context.Background(), workloadSpec(t, "sp-1", w)); !errors.Is(err, storage.ErrInvalidArgument) {
 			t.Errorf("%s: Create = %v", name, err)

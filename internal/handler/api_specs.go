@@ -125,6 +125,15 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	if err == nil {
 		err = json.Unmarshal(raw, &fields)
 	}
+	// The workload body keeps its numbers exact: it is decoded with json.Number.
+	var sent struct {
+		Workload *restv1.Workload `json:"workload"`
+	}
+	if err == nil {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		err = dec.Decode(&sent)
+	}
 	if err != nil {
 		badBody(w, r, mode, err)
 		return
@@ -177,15 +186,7 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	}
 
 	// Workload
-	if raw, present := fields["workload"]; present && string(raw) != "null" {
-		// Numbers stay exact: the body is decoded with json.Number.
-		var wl restv1.Workload
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.UseNumber()
-		if err := dec.Decode(&wl); err != nil {
-			response.BadRequestMsg(w, r, mode, "The workload is not a valid object.")
-			return
-		}
+	if wl := sent.Workload; wl != nil {
 		ts.SetWorkload(model.Workload{APIVersion: wl.APIVersion, Kind: wl.Kind, SchemaFingerprint: wl.SchemaFingerprint, Body: wl.Body})
 	}
 

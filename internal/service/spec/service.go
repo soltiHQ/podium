@@ -105,7 +105,7 @@ func (s *Service) Create(ctx context.Context, ts *model.Spec) error {
 	return nil
 }
 
-// Upsert persists changes to an existing task spec. `Version` bumps on every save (edits counter).
+// Upsert persists changes to an existing task spec. `Version` bumps on every save that changes something (edits counter).
 // `Generation` bumps only if the **runtime** fields - those that end up in `SpecToProto`: actually changed;
 // metadata-only edits (rename, target-list) never rotate live tasks. A save that changes nothing bumps neither.
 //
@@ -410,8 +410,10 @@ func (s *Service) validateSpec(ctx context.Context, ts *model.Spec) error {
 }
 
 // validateWorkload requires a workload and checks it against the catalog: the
-// fingerprint is known, the type is the one the schema was offered for, and the
-// body satisfies the schema. A refusal is a [WorkloadError].
+// fingerprint is known and the body satisfies the schema. The type is not
+// compared with the one the catalog stored with the schema: two types may share
+// one schema, and the catalog keeps the first type it saw. A refusal is a
+// [WorkloadError].
 func (s *Service) validateWorkload(ctx context.Context, w model.Workload) error {
 	if w.APIVersion == "" || w.Kind == "" || w.SchemaFingerprint == "" {
 		return &WorkloadError{Message: "the workload requires api_version, kind and schema_fingerprint"}
@@ -429,40 +431,22 @@ func (s *Service) validateWorkload(ctx context.Context, w model.Workload) error 
 	if !known {
 		return &WorkloadError{Message: fmt.Sprintf("the workload schema %q is not in the catalog", w.SchemaFingerprint)}
 	}
-	entry, err := s.store.GetWorkloadSchema(ctx, w.SchemaFingerprint)
-	if errors.Is(err, storage.ErrNotFound) {
-		return &WorkloadError{Message: fmt.Sprintf("the workload schema %q is not in the catalog", w.SchemaFingerprint)}
-	}
-	if err != nil {
-		return err
-	}
-	if entry.APIVersion() != w.APIVersion || entry.Kind() != w.Kind {
-		return &WorkloadError{Message: fmt.Sprintf("the workload type %s %s differs from the type of its schema, %s %s",
-			w.APIVersion, w.Kind, entry.APIVersion(), entry.Kind())}
-	}
-
 	body := w.Body
 	if body == nil {
 		body = map[string]any{}
 	}
-	err = schema.Validate(body)
+	return workloadRefusal(schema.Validate(body))
+}
+
+// workloadRefusal turns the result of validating a body into the error a save
+// returns: nil for a valid body, else a [WorkloadError] that says why.
+func workloadRefusal(err error) error {
 	var verr *workloadschema.ValidationError
 	switch {
 	case err == nil:
 		return nil
 	case errors.As(err, &verr):
-		problems := verr.Problems
-		if len(problems) > maxProblems {
-			problems = problems[:maxProblems]
-		}
-		parts := make([]string, len(problems))
-		for i, p := range problems {
-			parts[i] = p.Path + ": " + p.Message
-			if p.Path == "" {
-				parts[i] = p.Message
-			}
-		}
-		return &WorkloadError{Message: strings.Join(parts, "; ")}
+		return &WorkloadError{Message: problemsText(verr)}
 	case errors.Is(err, workloadschema.ErrValidationTooExpensive):
 		return &WorkloadError{Message: "the workload schema is too expensive to validate this body"}
 	default:

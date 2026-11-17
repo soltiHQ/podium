@@ -21,9 +21,14 @@ type Workload struct {
 // GVK returns the workload type, with the schema fingerprint. The API version
 // must be "group/version", with both parts set, and the kind must be set.
 func (w Workload) GVK() (GroupVersionKind, error) {
+	// A version without a group ("v1") is a core type: Group is empty, as
+	// discovery parses a runner's capabilities.
 	group, version, ok := strings.Cut(w.APIVersion, "/")
-	if !ok || group == "" || version == "" || strings.Contains(version, "/") {
-		return GroupVersionKind{}, fmt.Errorf("workload: the API version %q is not group/version", w.APIVersion)
+	if !ok {
+		group, version = "", w.APIVersion
+	}
+	if (ok && group == "") || version == "" || strings.Contains(version, "/") {
+		return GroupVersionKind{}, fmt.Errorf("workload: the API version %q is not [group/]version", w.APIVersion)
 	}
 	if w.Kind == "" {
 		return GroupVersionKind{}, fmt.Errorf("workload: the kind is empty")

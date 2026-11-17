@@ -25,8 +25,8 @@ import (
 	"github.com/soltiHQ/control-plane/internal/config"
 	"github.com/soltiHQ/control-plane/internal/service/credential"
 	"github.com/soltiHQ/control-plane/internal/storage"
-	"github.com/soltiHQ/control-plane/internal/workloadschema"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"github.com/soltiHQ/control-plane/internal/workloadschema"
 	"golang.org/x/crypto/bcrypt"
 )
 
