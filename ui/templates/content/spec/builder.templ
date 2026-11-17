@@ -15,11 +15,11 @@ import (
 // `initial = nil` for create mode; pass a populated `*restv1.Spec` for
 // edit mode — Alpine seeds itself from it and the form posts PUT
 // `/specs/{id}` instead of POST `/specs`.
-// Left: form sections (identity, kind, lifecycle, targets).
+// Left: form sections (identity, workload, lifecycle, targets).
 // Right: live JSON preview updated reactively via Alpine.js.
 templ BuilderPage(initial *restv1.Spec) {
 	<form
-		x-data={ builderXData(routepath.ApiAgents, builderSeed(initial)) }
+		x-data={ builderXData(routepath.ApiAgents, routepath.ApiWorkloadTypes, builderSeed(initial)) }
 		x-init={ builderInitExpr() }
 		x-on:submit.prevent={ builderSubmitExpr(formEndpoint(initial), formMethod(initial)) }
 		class="rounded-[var(--r-lg)] border border-border bg-card shadow-3 overflow-clip"
@@ -43,104 +43,35 @@ templ BuilderPage(initial *restv1.Spec) {
  }
 				}
 
-				<!-- Kind -->
-				@builderSection("Kind") {
+				<!-- Workload -->
+				@builderSection("Workload") {
 					<div>
-						<label class={ form.LabelClass }>Type</label>
-						<select x-model="kind_type" class={ form.SelectClass(false, false) }>
-							<option value="subprocess">Subprocess</option>
-							<option value="wasm">WASM</option>
-							<option value="container">Container</option>
+						<label for="workload_type" class={ form.LabelClass }>Workload type</label>
+						<select id="workload_type" x-model="type_key" x-on:change="onTypeChange()" class={ form.SelectClass(false, false) }>
+							<option value="">Select a type...</option>
+							<template x-for="t in typeOptions" :key="t.key">
+								<option x-bind:value="t.key" x-bind:selected="t.key === type_key" x-text="t.label"></option>
+							</template>
 						</select>
+						<p x-show="types_error" x-text="types_error" class="mt-1 text-xs text-danger" role="alert"></p>
+						<button type="button" x-show="types_error" x-on:click="loadTypes()" class="text-xs text-primary">Retry type lookup</button>
+						<p x-show="!types_error && typeOptions.length === 0" class="mt-1 text-xs text-muted">No agent has declared a workload type yet.</p>
 					</div>
-
-					<!-- Subprocess fields (command | script modes share env/cwd/fail flag) -->
-					<template x-if="kind_type === 'subprocess'">
-						<div class="space-y-4">
-							<!-- Mode toggle -->
-							<div>
-								<label class={ form.LabelClass }>Mode</label>
-								<div class="flex flex-wrap gap-2">
-									@subprocessModeChip("command", "Command")
-									@subprocessModeChip("script", "Script")
-								</div>
-							</div>
-
-							<!-- Command mode -->
-							<template x-if="subprocess_mode === 'command'">
-								<div class="space-y-3">
-									@builderField("cmd", "Command", "e.g. sleep", true)
-									@builderField("args", "Arguments (JSON array)", `["30", "hello world"]`, false)
-								</div>
+					<div x-show="type_key">
+						<label for="workload_fingerprint" class={ form.LabelClass }>Schema</label>
+						<select id="workload_fingerprint" x-model="fingerprint" class={ form.SelectClass(false, false) }>
+							<template x-for="f in fingerprintOptions" :key="f.value">
+								<option x-bind:value="f.value" x-bind:title="f.title" x-bind:selected="f.value === fingerprint" x-text="f.label"></option>
 							</template>
-
-							<!-- Script mode -->
-							<template x-if="subprocess_mode === 'script'">
-								<div class="space-y-3">
- @builderField("script_interpreter", "Interpreter", "bash, python3, node, or an absolute executable path", true)
-
-									<!-- Drag-drop + file picker -->
-									<div>
-										<label class={ form.LabelClass }>Script body</label>
-										<div
-											x-on:dragover.prevent="script_drag_over = true"
-											x-on:dragleave.prevent="script_drag_over = false"
-											x-on:drop.prevent="onScriptFileDrop($event)"
-											x-bind:class="script_drag_over ? 'border-primary bg-primary/5' : 'border-dashed border-border bg-surface-dim'"
-											class="rounded-[var(--r-xs)] border px-3 py-2 text-xs text-muted flex items-center justify-between gap-3 transition-colors mb-2">
-											<span>
-												<span x-show="!script_body">Drag &amp; drop a file here, or</span>
-												<span x-show="script_body" x-cloak>Script loaded — drop a new file to replace, or</span>
-											</span>
-											<label class="cursor-pointer text-primary hover:text-primary/80">
-												<input type="file" class="hidden" x-on:change="onScriptFileChange($event)"/>
-												browse
-											</label>
-										</div>
-										<textarea x-model="script_body" rows="12" spellcheck="false"
-											class={ textareaClass }
-											placeholder="#!/usr/bin/env bash&#10;echo hello"></textarea>
-									</div>
-
-									@builderField("args", "Arguments (JSON array)", `["hello world", ""]`, false)
-								</div>
-							</template>
-
-							<!-- Common subprocess fields -->
-							@builderField("cwd", "Working Directory", "/path/to/dir", false)
-
-							<div class="flex items-center gap-2">
-								<input type="checkbox" id="fail_on_non_zero" x-model="fail_on_non_zero"
-									class="w-4 h-4 rounded border border-input accent-primary"/>
-								<label for="fail_on_non_zero" class="text-sm text-fg">Fail on non-zero exit</label>
-							</div>
-
-							<div>
-								<label class={ form.LabelClass }>Environment Variables</label>
-								@kvEditor("env_rows")
-							</div>
-						</div>
-					</template>
-
-					<!-- WASM raw JSON -->
-					<template x-if="kind_type === 'wasm'">
-						<div>
-							<label class={ form.LabelClass }>WASM Config (JSON)</label>
-							<textarea x-model="wasm_json" rows="5"
-								class={ textareaClass }
-								placeholder='{"module": "path.wasm", "args": []}'></textarea>
-						</div>
-					</template>
-
-					<!-- Container raw JSON -->
-					<template x-if="kind_type === 'container'">
-						<div>
-							<label class={ form.LabelClass }>Container Config (JSON)</label>
-							<textarea x-model="container_json" rows="5"
-								class={ textareaClass }
-								placeholder='{"image": "alpine:latest", "command": {"items": ["sh"]}, "args": ["-c", "echo hello"]}'></textarea>
-						</div>
-					</template>
+						</select>
+						<p x-show="fingerprintOptions.length === 0" class="mt-1 text-xs text-muted">No schema of this type has arrived yet.</p>
+					</div>
+					<div>
+						<label for="workload_body" class={ form.LabelClass }>Body (JSON object)</label>
+						<textarea id="workload_body" x-model="body_json" rows="10" spellcheck="false"
+							class={ textareaClass }
+							placeholder="{}"></textarea>
+					</div>
 				}
 
 				<!-- Lifecycle -->
@@ -258,8 +189,9 @@ templ BuilderPage(initial *restv1.Spec) {
 
 		<div class="px-6 py-4 border-t border-border" x-show="error" x-cloak>
  <p x-text="error" role="alert" class="text-sm text-danger"></p>
- <pre x-show="legacy_script_blocked" x-text="legacy_script_json" class="mt-3 p-3 rounded border border-border text-xs font-mono whitespace-pre-wrap break-words"></pre>
- <button type="button" x-show="legacy_script_blocked" x-on:click="legacy_script_blocked=false;error=''" class="mt-2 text-sm text-primary">Use the reviewed interpreter and file-execution contract</button>
+ <ul x-show="problems.length > 0" class="mt-2 list-disc pl-5 text-xs font-mono text-danger space-y-1">
+ <template x-for="(problem, i) in problems" :key="i"><li x-text="problem"></li></template>
+ </ul>
  if initial != nil {
  <a x-show="conflict" href={ templ.SafeURL(formCancelHref(initial)) } target="_blank" rel="noopener" class="text-sm text-primary">Open latest saved spec</a>
  }
@@ -269,7 +201,7 @@ templ BuilderPage(initial *restv1.Spec) {
 			<a href={ templ.SafeURL(formCancelHref(initial)) }
 				class="text-sm text-muted hover:text-fg transition-colors">Cancel</a>
 			@button.Button("", "submit", false, button.VariantPrimary, false,
-				templ.Attributes{"x-bind:disabled": "submitting || !name || !slot"},
+				templ.Attributes{"x-bind:disabled": "submitting || !name || !slot || !type_key || !fingerprint"},
 			) {
 				if initial == nil {
 					<span x-show="!submitting">Create Spec</span>
@@ -338,16 +270,6 @@ templ presetButton(preset string, label string) {
 		x-on:click={ "applyPreset(" + jsexpr.String(preset) + ")" }>{ label }</button>
 }
 
-// subprocessModeChip renders a toggle between Command and Script modes
-// for Subprocess tasks. Active state is signalled with the primary
-// colour band to match the backoff-preset chip family.
-templ subprocessModeChip(mode string, label string) {
-	<button type="button"
-		class="px-3 py-1.5 text-xs rounded-full border transition-colors"
-		x-bind:class={ "subprocess_mode === " + jsexpr.String(mode) + " ? 'bg-primary/10 border-primary text-primary' : 'border-border text-muted hover:text-fg'" }
-		x-on:click={ "subprocess_mode = " + jsexpr.String(mode) }>{ label }</button>
-}
-
 // agentMultiSelect renders the agent multi-select dropdown.
 templ agentMultiSelect() {
 	<label class={ form.LabelClass }>Select Agents</label>
@@ -363,15 +285,15 @@ templ agentMultiSelect() {
 			<span x-show="agents.length === 0" class={ form.MsPlaceholder }>Select agents...</span>
 		</div>
 		<div x-show="agents_open" x-cloak x-transition.opacity class={ form.MsDropdown }>
-			<template x-for="opt in agents_opts" :key="opt">
+			<template x-for="opt in agentOptions" :key="opt">
 				<div class={ form.MsOption }
 					x-on:click="agents.includes(opt) ? agents = agents.filter(x => x !== opt) : agents.push(opt)">
 					<input type="checkbox" class={ form.MsCheckbox } x-bind:checked="agents.includes(opt)"/>
 					<span x-text="opt"></span>
 				</div>
 			</template>
-			<div x-show="agents_opts.length === 0" class="px-3 py-2 text-sm text-muted">
-				No agents available
+			<div x-show="agentOptions.length === 0" class="px-3 py-2 text-sm text-muted">
+				No agents declare this type
 			</div>
 		</div>
 	</div>

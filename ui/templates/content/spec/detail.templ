@@ -90,7 +90,11 @@ templ Detail(ts restv1.RolloutSpec, p policy.SpecDetail) {
 			@card.CardBody() {
 				<dl class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
 					@visual.KV("Slot", ts.Slot)
-					@visual.KV("Kind", ts.KindType)
+					@visual.KV("Type", workloadType(ts.Workload))
+					<div class="min-w-0">
+						<dt class={ visual.SectionLabel + " mb-0.5" }>Schema</dt>
+						<dd class="text-base text-fg leading-snug font-mono truncate" title={ workloadFingerprint(ts.Workload) }>{ shortFingerprint(workloadFingerprint(ts.Workload)) }</dd>
+					</div>
 					@visual.KV("Timeout", fmt.Sprintf("%dms", ts.TimeoutMs))
 					@visual.KV("Restart", ts.RestartType)
 					if ts.IntervalMs > 0 {
@@ -102,6 +106,18 @@ templ Detail(ts restv1.RolloutSpec, p policy.SpecDetail) {
 						@visual.KV("Targets", strings.Join(ts.Targets, ", "))
 					}
 				</dl>
+			}
+		}
+
+		<!-- Workload body -->
+		if ts.Workload != nil {
+			@card.Card("") {
+				@card.CardBody() {
+					<div class="flex items-center justify-between mb-3">
+						<span class={ visual.SectionLabel + " font-semibold" }>Workload Body</span>
+					</div>
+					<pre class="text-[13px] font-mono text-fg/80 whitespace-pre-wrap break-words leading-relaxed p-4 rounded-[var(--r-xs)] bg-surface-dim border border-border overflow-x-auto">{ prettyBody(ts.Workload.Body) }</pre>
+				}
 			}
 		}
 
@@ -261,6 +277,19 @@ func prettyJSON(v any) string {
 		return "{}"
 	}
 	return string(b)
+}
+
+// prettyBody indents a workload body as the user wrote it: markup characters
+// stay as they are, since templ escapes the text when it renders.
+func prettyBody(body map[string]any) string {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(body); err != nil {
+		return "{}"
+	}
+	return strings.TrimRight(buf.String(), "\n")
 }
 
 script copySpec(spec any) {
