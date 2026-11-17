@@ -247,10 +247,11 @@ podium --config podium.yaml
 ### Command line
 
 ```text
-podium [--config PATH]                                runs the server
-podium agent-token [--generation N] [--] <agent-id>   prints an agent's token, derived from SOLTI_AGENT_AUTH_ENROLL_SECRET
-podium migrate [--config PATH]                        migrates the schema of the database backend's database, and exits
-podium version                                        prints the version, as podium --version does
+podium [--config PATH]                                       runs the server
+podium agent-token [--generation N] [--] <agent-id>          prints an agent's token, derived from SOLTI_AGENT_AUTH_ENROLL_SECRET
+podium migrate [--config PATH]                               migrates the schema of the database backend's database, and exits
+podium drop-schema --yes [--config PATH] [--wait DURATION]   drops that schema, and all the state in it, once no replica runs, and exits
+podium version                                               prints the version, as podium --version does
 ```
 
 The command line is parsed before anything starts: an unknown flag or subcommand
@@ -404,23 +405,30 @@ tls:
     key_file:  /etc/solti/tls/server.key
     client_ca_file: /etc/solti/tls/agents-ca.crt   # optional: agents need a client certificate
   client:
-    ca_file:   /etc/solti/tls/client-ca.crt        # verifies agents' endpoints; raft: also the nodes' server certificates
+    ca_file:   /etc/solti/tls/client-ca.crt        # verifies agents' endpoints; raft: also the nodes' server certificates, without tls.forward.ca_file
     cert_file: /etc/solti/tls/cp-client.crt        # presented when asked; raft with client_ca_file: required, of the agents' CA
     key_file:  /etc/solti/tls/cp-client.key
+  forward:                                         # optional: a follower's check of the leader
+    ca_file:     /etc/solti/tls/nodes-ca.crt       # the CA of the nodes' server certificates
+    server_name: podium.podium.svc                 # a name every node's server certificate carries
 ```
 
-In a raft cluster a follower forwards writes and agents' syncs to the leader,
-over TLS as a client of `tls.client` once `tls.server` is set.
-`tls.client.ca_file` must then also hold the CA of the nodes' server
-certificates, which name each node's raft advertise host as written (without a
-`ca_file` the leader is checked against the system roots): a leader whose
-certificate does not verify gets no write, and the follower answers 502 over
-HTTP and `leader unreachable` over gRPC. With `client_ca_file` set too, the
-leader's discovery listeners ask a forwarding follower for a certificate of the
-agents' CA, so each node's `tls.client.cert_file` and `key_file` must chain to
-that CA: without `tls.client.cert_file`, every sync that reaches a follower
-fails, 502 over HTTP and `leader unreachable` over gRPC, and each node logs a
-WARN at start.
+In a raft cluster, or the database mode, a follower forwards writes and agents'
+syncs to the leader, over TLS as a client of `tls.client` once `tls.server` is
+set. It checks the leader's certificate against `tls.forward.ca_file`, or
+`tls.client.ca_file` without one (the system roots without either), for
+`tls.forward.server_name`, or without one for the leader's advertise host as
+written. Replicas whose addresses change, such as a Deployment's pods, share one
+certificate for one name, their Service's say, and set it as
+`tls.forward.server_name`. A leader whose certificate does not verify gets no
+write, and the follower answers 502 over HTTP and `leader unreachable` over
+gRPC, and logs why. A forward that fails to connect, as at a handover, and a
+write that reaches a follower while it knows no leader, wait up to 3 s for the
+next leader and go there. With `client_ca_file` set too, the leader's discovery
+listeners ask a forwarding follower for a certificate of the agents' CA, so each
+node's `tls.client.cert_file` and `key_file` must chain to that CA: without
+`tls.client.cert_file`, every sync that reaches a follower fails, 502 over HTTP
+and `leader unreachable` over gRPC, and each node logs a WARN at start.
 
 podium reads its certificate files at start only, so a renewed certificate takes
 effect at the next start. Behind a reverse proxy that terminates TLS, list the
@@ -462,10 +470,10 @@ a disposable deployment.
 
 The state is the database's: back it up with Postgres's own tools, a base backup
 or a dump, and test the restore. podium neither runs nor backs it up, and
-`podium migrate` is no backup. A restore returns the whole state to its time:
-the sessions, the rollouts and the credentials too. Take a backup before every
-upgrade, as the schema has no downgrade (see
-[Database cluster](#database-cluster)).
+`podium migrate` is no backup, and `podium drop-schema` drops the whole state
+for good. A restore returns the whole state to its time: the sessions, the
+rollouts and the credentials too. Take a backup before every upgrade, as the
+schema has no downgrade (see [Database cluster](#database-cluster)).
 
 ### What a backup holds
 
@@ -666,13 +674,13 @@ adding and removing members, a compromised node, browsers and
   `tls.client`. See
   [Raft transport security](internal/config/README.md#raft-transport-security).
 - Set `tls.server` on every node, with certificates that name each node's raft
-  advertise host as written, and put their CA in every node's
-  `tls.client.ca_file`: a follower forwards the writes it gets, logins, cookies
-  and tokens included, and the agents' syncs to the leader, in plaintext without
-  `tls.server`, and each node logs a WARN at start that says so. With
-  `tls.server.client_ca_file`, give every node a `tls.client.cert_file` and
-  `key_file` that chain to the agents' CA, or every sync that reaches a follower
-  fails: see [TLS](#tls).
+  advertise host as written, or one name set as `tls.forward.server_name`, and
+  put their CA in every node's `tls.forward.ca_file`, or `tls.client.ca_file`: a
+  follower forwards the writes it gets, logins, cookies and tokens included, and
+  the agents' syncs to the leader, in plaintext without `tls.server`, and each
+  node logs a WARN at start that says so. With `tls.server.client_ca_file`, give
+  every node a `tls.client.cert_file` and `key_file` that chain to the agents'
+  CA, or every sync that reaches a follower fails: see [TLS](#tls).
 - Some settings must be the same on every node: `auth.jwt_secret`,
   `auth.cookie_secure`, `auth.issuer`, `auth.audience`, `agent_auth.require`,
   the enrollment secret, `trusted_proxies`, `cors.*` and
@@ -761,6 +769,16 @@ podium --config podium.yaml
   own, run `podium migrate [--config PATH]` first, such as a Kubernetes Job, and
   set `migrate: false`: it validates the same configuration, and exits 0, or 1
   on any failure. The version before keeps working while a rollout runs.
+- **Dropping the schema.**
+  `podium drop-schema --yes [--config PATH] [--wait DURATION]` drops every table
+  of podium's, and all the state in them, in one transaction, once no replica
+  runs on the database: none heartbeated within three seconds and the lease is
+  not held. It waits up to `--wait` for them, and for a lock another session
+  holds on a table, 0 by default, and fails if one still runs: only replicas
+  that run protect a database. It drops no other table, no schema of the
+  database's and not the database, refuses a schema newer than its own, exits 0
+  once the schema is gone or when there was none, and 1 on any failure. See
+  [Database backend](internal/config/README.md#database-backend).
 - **Readiness.** `/readyz` answers 503 `storage failed` while the primary does
   not answer a ping, and recovers with it, without a restart; it never waits for
   a leader, so a failover leaves every replica serving reads. `/leaderz` answers
@@ -769,10 +787,11 @@ podium --config podium.yaml
 - **Forwarding and TLS.** A replica that does not lead forwards the writes it
   gets, logins, cookies and tokens included, and the agents' syncs, to the
   leader at the same ports, in plaintext without `tls.server`, with one WARN at
-  start that says so. Set `tls.server` on every replica, and the CA of the
-  replicas' certificates in every `tls.client.ca_file`, as in
-  [Raft cluster](#raft-cluster). Some settings must be the same on every
-  replica, which each checks against its leader's: see
+  start that says so. Set `tls.server` on every replica, the CA of the replicas'
+  certificates in every `tls.forward.ca_file`, and, as the pod IPs of a
+  Deployment change, one name that every replica's certificate carries as
+  `tls.forward.server_name`: see [TLS](#tls). Some settings must be the same on
+  every replica, which each checks against its leader's: see
   [Settings every replica must share](internal/config/README.md#settings-every-replica-must-share).
 - **Rate limits are per replica**, in memory, not shared through the database: a
   failover starts the new leader's limiters empty. See
@@ -796,9 +815,10 @@ podium --config podium.yaml
 - **Kubernetes.** The [`podium` chart](https://github.com/soltiHQ/charts) runs
   both modes: `mode: memory` (the default, one replica, no volume) and
   `mode: database` (a Deployment of `replicas`, the URLs from a Secret, the pod
-  IP as the advertise address, and an optional pre-install and pre-upgrade Job
-  that runs `podium migrate`). Its image must be built from a release with the
-  database mode.
+  IP as the advertise address, an optional pre-install and pre-upgrade Job that
+  runs `podium migrate`, and an optional post-delete Job that runs
+  `podium drop-schema` at `helm uninstall`). Its image must be built from a
+  release with the database mode.
 
 ## Develop
 

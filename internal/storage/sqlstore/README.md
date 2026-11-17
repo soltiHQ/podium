@@ -23,6 +23,7 @@ sqlstore/
 ├── postgres.go     Postgres: $n placeholders, the SQLSTATE classification, NOTIFY and the
 │                   events' advisory lock, the embedded migrations
 ├── migrate.go      Migrate, SchemaVersion, the migration files
+├── drop.go         DropSchema, and the tables of the schema it drops
 ├── migrations/postgres/0001_init.sql   the Postgres schema
 ├── tx.go           the write transactions: the gate, the fence, nesting, WithTx
 ├── readonly.go     the read routing: the replica for marked listings, the primary otherwise
@@ -319,6 +320,33 @@ stops that replica (`ErrSchemaNewer`). The role that migrates needs to create
 tables in its schema; `internal/config/README.md`, "Operating the database
 backend", has the operator's side: privileges, connections, replicas that lag
 and the password.
+
+`DropSchema` drops the schema: every table the migrations create, listed in
+`drop.go` next to them (a migration that adds a table adds it there, which
+`TestMigrateCreatesSchema` checks), the rows with them, and nothing else, no
+other table, no view, no schema of the database's, not the database. It runs in
+one transaction at READ COMMITTED, each lock it waits for bounded by a lock
+timeout of 5 s, past which it answers `ErrLocked`:
+
+- with none of the names present as tables it ends, dropping nothing
+- tables with the names of podium's but without `podium_schema_migrations` are
+  no schema podium migrated: `ErrNotPodiumSchema`, naming them, and nothing is
+  dropped
+- otherwise it locks `podium_schema_migrations` `IN ACCESS EXCLUSIVE MODE`,
+  which waits for a migrator in flight and holds off the next one and the read
+  of `SchemaVersion` with which a replica opens the store (that read fails once
+  the table is gone); reads the version under the lock and refuses a newer
+  schema with `ErrSchemaNewer`, as it can hold tables this podium does not know
+- it asks its guard, in the transaction, with the other tables unlocked, so that
+  a deployment whose replicas run never queues behind the drop; then locks every
+  table of the schema `IN ACCESS EXCLUSIVE MODE` and asks the guard again, so
+  that no heartbeat, take of the lease or write lands between that answer and
+  the drop (`database.CheckStopped` is the guard of `podium drop-schema`; its
+  refusal comes back as it is)
+- then it drops the tables in one statement and commits
+
+It returns the version, read under the lock, and the tables it dropped. A
+database it dropped is an empty one to `Open` and to `Migrate`.
 
 Until the database mode is released, `0001_init.sql` stays the only migration
 and is edited in place: no installation exists. The lock statement and the

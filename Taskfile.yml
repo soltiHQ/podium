@@ -94,7 +94,7 @@ vars:
   # only their Postgres tests run here, those whose names postgres_app_test_run
   # matches, with the flags postgres_app_test_flags.
   postgres_app_test_packages: ./internal/app/ ./cmd/...
-  postgres_app_test_run: '^(TestDatabase|TestTwoReplicasForwardWrites$|TestBootstrapNeedsPassword$|TestMigrateCommand$)'
+  postgres_app_test_run: '^(TestDatabase|TestTwoReplicasForwardWrites$|TestBootstrapNeedsPassword$|TestMigrateCommand$|TestDropSchemaCommand$)'
   postgres_app_test_flags: -race -count=1 -timeout=10m
   # The Postgres server of ci/golang/test/postgres: the current stable image,
   # postgres:18.7 on 2026-11-13, pinned by the digest of its multi-arch index,

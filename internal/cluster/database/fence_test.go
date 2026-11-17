@@ -403,8 +403,10 @@ VALUES (1, 7, 'replica-gone', 'replica-gone.podium.test:7000', now() - interval 
 
 	// Through the HTTP layer: a GET that writes, as a session rotation does,
 	// passes the Leader middleware of a follower and meets the store's refusal;
-	// a POST, the middleware refuses itself. Both answer 503, naming no leader.
-	writes := middleware.Leader(b, middleware.LeaderOptions{ForwardPort: 8080})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// a POST, the middleware holds for a leader, up to its handover wait, and
+	// then refuses itself, as the takeover still waits for the lock. Both answer
+	// 503, naming no leader.
+	writes := middleware.Leader(b, middleware.LeaderOptions{ForwardPort: 8080, HandoverWait: 200 * time.Millisecond})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := store.UpsertRole(r.Context(), role); err != nil {
 			response.FromError(w, r, httpctx.RenderBlock, err)
 			return

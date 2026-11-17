@@ -20,6 +20,16 @@ var (
 	// than this podium's, an empty one included: Migrate brings it forward.
 	// The error names both versions.
 	ErrSchemaOlder = errors.New("sqlstore: the database schema is older than this podium; run podium migrate")
+
+	// ErrNotPodiumSchema is the error of DropSchema on a database that holds
+	// tables with the names of podium's but no podium_schema_migrations: no
+	// schema podium migrated, of which it drops nothing. The error names the
+	// tables.
+	ErrNotPodiumSchema = errors.New("sqlstore: tables with the names of podium's, but no podium_schema_migrations: not a schema podium migrated")
+
+	// ErrLocked is the error of DropSchema when another session holds a lock
+	// on one of the schema's tables past the drop's lock timeout.
+	ErrLocked = errors.New("sqlstore: another session holds a lock on a table of podium's schema")
 )
 
 // sentinels are the storage errors a classification answers.
