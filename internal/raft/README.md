@@ -437,6 +437,11 @@ until each node has taken two snapshots on it and log compaction has dropped its
 version-2 entries (a node keeps the last `trailing_logs` entries behind a
 snapshot, see "Log compaction"), and then upgrade.
 
+The version with workload types adds log operation 29 (workload schema upsert)
+and snapshot field 12. A node of an earlier version fails operation 29 and drops
+field 12, so upgrade every node before agents on the reworked SDK start sending
+schemas. Specs in the earlier shape do not exist, so nothing is migrated.
+
 Earlier versions ran the transport on plain TCP, and a node on TLS and a node on
 plain TCP cannot reach each other (`TestRaftRefusesPeerWithoutClusterCert`): a
 first node upgraded with `raft.tls` would never follow the leader, and the

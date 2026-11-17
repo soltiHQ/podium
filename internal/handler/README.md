@@ -308,6 +308,96 @@ plan and gets the same answer. Only without `If-Match`, or with `*` anywhere in
 it, Deploy deploys the current placement unchecked, as before, so API clients
 that never preview keep working.
 
+A spec carries its workload beside the envelope, on create and update and in
+every response:
+
+```json
+{
+  "workload": {
+    "api_version": "gitlab.solti.io/v1",
+    "kind": "GroupPolicy",
+    "schema_fingerprint": "<lowercase hex sha256>",
+    "body": {}
+  }
+}
+```
+
+`kind_type` and `kind_config` are gone. An invalid body is a 400 whose message
+lists `path: message; …`, the first 20 problems. A fingerprint podium does not
+hold is a 400, and so is a body too costly to validate: "the workload schema is
+too expensive to validate this body". A save that changes nothing writes nothing
+and no longer bumps the version.
+
+### Workload types `/api/v1/workload-types`
+
+| Method | Path | Permission |
+| -- | -- | -- |
+| GET | `/api/v1/workload-types` | `SpecsGet` |
+| GET | `/api/v1/workload-types/{group}/{version}/{kind}` | `SpecsGet` |
+
+The list answers a JSON array of
+`{api_version, kind, fingerprints: [{fingerprint, agents, received}]}`, where
+`agents` are the IDs of the agents that declare the fingerprint and `received`
+says whether podium holds its schema. The type answers
+`{api_version, kind, fingerprints: [{fingerprint, agents, received, schema}]}`;
+`schema` is the raw JSON an agent sent, untrusted text.
+
+### Workload types
+
+podium owns the envelope of a spec: identity, slot, targets, restart, interval,
+timeout, backoff, rollout, history and logs. The body belongs to the agent. Each
+runner declares the workload types it accepts, a group/version and a kind with a
+JSON Schema per type, and podium validates a spec's body against those schemas.
+podium has no built-in kinds: whatever an agent runs is an ordinary
+agent-declared type, which the SDK rework brings.
+
+**Discovery.** Each declared type carries `schema_fingerprint` (agent proto
+`WorkloadType`, field 3). podium answers the fingerprints it lacks with
+`SyncResponse.want_schemas` (field 4). The agent's next sync sends them in
+`SyncRequest.schemas` (field 14, `WorkloadSchema{fingerprint, schema}`), only
+for fingerprints declared in that same request. podium recomputes each
+fingerprint and rejects a mismatch. Heartbeats carry fingerprints only. A schema
+is stored once per fingerprint and kept after no agent declares it. A whole
+SyncRequest stays within 256 KiB, so an agent sends as many requested schemas as
+fit and the rest in later syncs.
+
+**Fingerprint.** The lowercase hex sha256 of the RFC 8785 (JCS) canonical JSON
+of the schema.
+
+**Schemas podium accepts.** Draft 2020-12, also when `$schema` is absent, as a
+subset. Refused: `$dynamicRef`, `$dynamicAnchor`, `$recursiveRef`,
+`$recursiveAnchor`, `$vocabulary`, `unevaluatedItems`, `unevaluatedProperties`,
+any other `$schema`, any `$ref` that is not same-document (`#…`), and `$id`
+below the root. `format` and `content*` are annotations, never asserted.
+
+| Limit | Value |
+| -- | -- |
+| Schema size | 64 KiB |
+| Nesting | 32 levels |
+| Objects and booleans in a schema | 512 |
+| One regular expression | 2 000 compiled instructions |
+| All regular expressions of a schema | 20 000 compiled instructions |
+| `$ref` cycle at the same location | refused |
+| Body size | 256 KiB |
+| JSON values in a body | 10 000 |
+
+Validation runs under a fixed work budget.
+
+**Placement reasons.** Each target gets one of `compatible`,
+`workload_unsupported`, `runner_labels_mismatch` and three that the schemas
+bring:
+
+| Reason | Meaning |
+| -- | -- |
+| `schema_incompatible` | The body is invalid against that target's schema, or too costly to check. |
+| `schema_pending` | The target's schema has not arrived yet, normally for one sync. |
+| `schema_unpublished` | The runner declares the type without a fingerprint. |
+
+A target whose fingerprint differs from the spec's is compatible when the body
+is valid against the target's schema; the spec keeps its own fingerprint. Deploy
+refuses incompatible targets with 409. A task already running on a target that
+turns incompatible is left alone and gets no new generation.
+
 ### Dashboard `/api/v1/dashboard`
 
 | Method | Path | Permission |
@@ -428,6 +518,9 @@ a token.
 | GET | `/api/v1/events/stream` | (any authed); registered by `app`, sends refresh triggers only |
 
 ## Discovery endpoint
+
+A sync also carries the agents' workload type fingerprints and, when podium
+asked, their schemas: see "Workload types" above.
 
 | Transport | Method | Path / RPC |
 | -- | -- | -- |

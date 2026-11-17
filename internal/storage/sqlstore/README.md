@@ -51,9 +51,9 @@ sqlstore/
 — `podium_agents`, `podium_agent_credentials`, `podium_users`,
 `podium_credentials`, `podium_verifiers`, `podium_sessions`, `podium_roles`,
 `podium_specs`, `podium_rollouts`, `podium_executions`,
-`podium_workload_schemas` (from `0002_workload_schemas.sql`) — and `podium_leader`
-(the database leadership's lease), `podium_replicas` (the replica registry),
-`podium_events` (the events every replica applies) and
+`podium_workload_schemas` (from `0002_workload_schemas.sql`) — and
+`podium_leader` (the database leadership's lease), `podium_replicas` (the
+replica registry), `podium_events` (the events every replica applies) and
 `podium_schema_migrations` (the migrations applied).
 
 An entity's row is its ID, its creation time, the columns its lookups, criteria

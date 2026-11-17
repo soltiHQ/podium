@@ -21,8 +21,9 @@ color, radius and elevation tokens live in `static/css/app.css` and
   joined at a quote in the templates and their Go builders.
 - `static/js/spec-builder.js`: spec editing state, exact argument/environment
   round trips, validation, cursor-based agent selection, and submit recovery. It
-  serializes the current protobuf JSON workload shape. It also exports its
-  builder for Node's built-in test runner.
+  builds the spec's `workload` object (`api_version`, `kind`,
+  `schema_fingerprint`, `body`). It also exports its builder for Node's built-in
+  test runner.
 - `static/js/control-plane.js`: shared HTTP failure recovery, live-update
   connection status, and task-log lifecycle. Log viewers are preserved by task
   UID across row refreshes, disconnected when removed, and retain at most 256
@@ -51,20 +52,20 @@ color, radius and elevation tokens live in `static/css/app.css` and
 
 ## Contract and failure behavior
 
-Subprocess configuration uses `mode.command` or `mode.script` with an explicit
-interpreter. Argument inputs use a JSON string array, preserving spaces, empty
-arguments and Unicode. Environment entries preserve their order and duplicates;
-selector labels reject duplicate keys. Target agents and target label matches
+The spec builder is type-first: pick a workload type from the catalog
+(`GET /api/v1/workload-types`), then one of its received fingerprints, labelled
+with its agent count. The body is a JSON editor, `{}` by default, and a 400
+shows the problems the API lists. Agent targets are limited to agents that
+declare the type. The detail page and the list show `apiVersion/kind` and the
+short fingerprint, the full value on hover; the detail page also shows the body.
+Selector labels reject duplicate keys. Target agents and target label matches
 are combined by the control plane; all label requirements must match.
 
 Spec saves include the loaded version. HTTP 409, validation errors and network
 failures keep the draft intact. A conflict provides a link to the saved version
 in another tab rather than reloading the editor. Slot remains immutable after
-creation. Legacy flat command/script configurations are hydrated without losing
-arguments or body. Obsolete inline-script runtimes require an explicit operator
-review before switching to the current interpreter-and-file execution contract.
-Empty target and label selections are sent explicitly so they clear stored
-selectors.
+creation. Empty target and label selections are sent explicitly so they clear
+stored selectors.
 
 Fetch forms ask for `Accept: application/json` even when using HTMX redirect
 headers. API negotiation honors that header so error messages remain readable. A
@@ -210,7 +211,6 @@ release. `task ci/golang/build` runs `assets` first, and then fails unless the
 Alpine, HTMX and CSS files exist and are not empty, so every binary it builds
 embeds the UI; a plain `go build` embeds whatever `static/` holds.
 
-The builder currently supports the original built-in Subprocess, Wasm and
-Container workload types. Arbitrary extension workload creation and durable log
-archival remain outside this UI. Stored terminal execution observations are
-implemented separately from live logs.
+Forms generated from a type's schema are a later phase: the body is edited as
+JSON. Durable log archival remains outside this UI. Stored terminal execution
+observations are implemented separately from live logs.

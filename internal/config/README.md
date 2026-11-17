@@ -1658,6 +1658,11 @@ Earlier versions also ran the transport on plain TCP and made `data_dir` and
   directory that is still open to the group or others; it makes the snapshots in
   it private by itself at its next start.
 
+The version with workload types adds log operation 29 and snapshot field 12 (the
+workload schema catalog), which a node of an earlier version fails and drops:
+upgrade every node before agents on the reworked SDK send schemas (see "Rolling
+upgrade" in `internal/raft/README.md`). The database mode adds migration `0002`.
+
 This version also adds the permissions `cluster:get` and `cluster:manage`, on
 the memory backend too, which the Admin role gets when bootstrap reconciles it,
 and a user who holds every permission directly, not through the Admin role,
