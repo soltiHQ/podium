@@ -32,6 +32,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/handler"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
+	"github.com/soltiHQ/control-plane/internal/service/workload"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/workloadschema"
@@ -272,7 +273,10 @@ func newDiscoveryClientsLogged(t *testing.T, cfg config.Config, logger zerolog.L
 	}
 	hub := event.NewHub(logger)
 	t.Cleanup(hub.Close)
-	h, srv := buildDiscoveryListeners(logger, svc.agent, svc.workload, hub, memory.NewLeadership(), cfg, nil, nil, nil, nil, nil)
+	h, srv, err := buildDiscoveryListeners(logger, svc.agent, svc.workload, hub, memory.NewLeadership(), cfg, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return discoveryClients{http: h, grpc: serveDiscovery(t, srv), agents: svc.agent}
 }
 
@@ -301,7 +305,7 @@ func TestGRPCDiscoveryRejectsOversizedMessage(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	client := serveDiscovery(t, buildGRPCServer(logger, svc, nil, hub, memory.NewLeadership(), kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, nil, false, 0, nil, nil))
+	client := serveDiscovery(t, newGRPCServer(t, logger, svc, hub))
 	sync := func(id string, osBytes int) error {
 		_, err := client.Sync(ctx, &discoverv1.SyncRequest{
 			Id: id, Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1,
@@ -328,7 +332,7 @@ func TestGRPCDiscoveryCapsHeaders(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	defer hub.Close()
-	client := serveDiscovery(t, buildGRPCServer(logger, svc, nil, hub, memory.NewLeadership(), kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, nil, false, 0, nil, nil))
+	client := serveDiscovery(t, newGRPCServer(t, logger, svc, hub))
 	sync := func(id string, padding int) error {
 		md := metadata.AppendToOutgoingContext(ctx, "x-padding", strings.Repeat("p", padding))
 		_, err := client.Sync(md, &discoverv1.SyncRequest{
@@ -625,7 +629,10 @@ func TestMemoryGRPCDiscoveryIgnoresForwardedFor(t *testing.T) {
 	svc := agent.New(inmemory.New(), logger)
 	hub := event.NewHub(logger)
 	t.Cleanup(hub.Close)
-	h, srv := buildDiscoveryListeners(logger, svc, nil, hub, leadership, cfg, resolver, nil, nil, nil, nil)
+	h, srv, err := buildDiscoveryListeners(logger, svc, testCatalog(), hub, leadership, cfg, resolver, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	client := serveDiscovery(t, srv)
 	forged := func(attempt int) string { return fmt.Sprintf("198.51.100.%d", attempt+1) }
 	for _, tc := range []struct {
@@ -743,5 +750,35 @@ func TestDiscoveryListenersExchangeWorkloadSchemas(t *testing.T) {
 	// The catalog is shared: the HTTP agent no longer wants what the gRPC one gave.
 	if got := httpSync(false); len(got) != 0 {
 		t.Fatalf("HTTP sync wants %v after the schema was offered", got)
+	}
+}
+
+// testCatalog is a workload catalog over a store of its own.
+func testCatalog() *workload.Service { return workload.New(inmemory.New(), zerolog.Nop()) }
+
+func newGRPCServer(t *testing.T, logger zerolog.Logger, svc *agent.Service, hub *event.Hub) *grpc.Server {
+	t.Helper()
+	srv, err := buildGRPCServer(logger, svc, testCatalog(), hub, memory.NewLeadership(), kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, nil, false, 0, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv
+}
+
+// A discovery build without the workload catalog fails, instead of serving
+// listeners that quietly never exchange schemas.
+func TestDiscoveryBuildRefusesANilCatalog(t *testing.T) {
+	logger := zerolog.Nop()
+	agents := agent.New(inmemory.New(), logger)
+	hub := event.NewHub(logger)
+	t.Cleanup(hub.Close)
+	if _, _, err := buildDiscoveryListeners(logger, agents, nil, hub, memory.NewLeadership(), config.Default(), nil, nil, nil, nil, nil); err == nil {
+		t.Fatal("buildDiscoveryListeners accepted a nil catalog")
+	}
+	if _, err := buildDiscoveryHandler(logger, agents, nil, hub, memory.NewLeadership(), 0, kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, false, false, nil, nil); err == nil {
+		t.Fatal("buildDiscoveryHandler accepted a nil catalog")
+	}
+	if _, err := buildGRPCServer(logger, agents, nil, hub, memory.NewLeadership(), kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, nil, false, 0, nil, nil); err == nil {
+		t.Fatal("buildGRPCServer accepted a nil catalog")
 	}
 }

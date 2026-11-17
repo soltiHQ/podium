@@ -348,7 +348,13 @@ func New(ctx context.Context, cfg config.Config, logger zerolog.Logger, opts ...
 	if forwarder != nil {
 		raftShutdown = before(func() { _ = forwarder.Close() }, raftShutdown)
 	}
-	discoveryHandler, grpcSrv := buildDiscoveryListeners(logger, svc.agent, svc.workload, eventHub, leadership, cfg, resolver, serverTLS, forwardTLS, forwarder, m)
+	discoveryHandler, grpcSrv, err := buildDiscoveryListeners(logger, svc.agent, svc.workload, eventHub, leadership, cfg, resolver, serverTLS, forwardTLS, forwarder, m)
+	if err != nil {
+		logHub.Close()
+		_ = proxyPool.Close()
+		closeOnError(raftShutdown, eventHub)
+		return nil, err
+	}
 	discoveryCfg := cfg.HTTPDiscovery
 	discoveryCfg.TLSConfig = serverTLS
 	httpDiscoveryRunner, err := httpserver.New(discoveryCfg, logger, discoveryHandler)

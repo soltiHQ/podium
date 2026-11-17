@@ -32,6 +32,9 @@ type Service struct {
 
 	mu       sync.Mutex
 	compiled map[string]*workloadschema.Schema
+	// known holds the fingerprints seen in the catalog. An entry never changes
+	// or goes, so a fingerprint seen once never hits the store again.
+	known map[string]struct{}
 }
 
 // New returns the catalog service over store.
@@ -41,6 +44,7 @@ func New(store storage.Storage, logger zerolog.Logger) *Service {
 		logger:   logger.With().Str("service", "workload").Logger(),
 		clock:    time.Now,
 		compiled: make(map[string]*workloadschema.Schema),
+		known:    make(map[string]struct{}),
 	}
 }
 
@@ -81,20 +85,21 @@ func (s *Service) Exchange(ctx context.Context, agentID string, declared []model
 		}
 	}
 
-	stored := make(map[string]bool)
+	// absent memoizes the fingerprints this call found missing or failed to
+	// look up, so each is read, and a failure logged, once.
+	absent := make(map[string]bool)
+	seen := make(map[string]bool)
 	for _, o := range offered {
+		if seen[o.Fingerprint] {
+			continue
+		}
+		seen[o.Fingerprint] = true
 		d, ok := decl[o.Fingerprint]
 		if !ok {
 			s.reject(agentID, o.Fingerprint, "the schema is not declared by the agent")
 			continue
 		}
-		if stored[o.Fingerprint] {
-			continue
-		}
-		if _, err := s.store.GetWorkloadSchema(ctx, o.Fingerprint); err == nil {
-			continue
-		} else if !errors.Is(err, storage.ErrNotFound) {
-			s.logger.Error().Err(err).Str("agent_id", agentID).Str("fingerprint", o.Fingerprint).Msg("workload schema lookup failed")
+		if s.has(ctx, agentID, o.Fingerprint, absent) {
 			continue
 		}
 		if len(o.Schema) > workloadschema.MaxSchemaBytes {
@@ -123,23 +128,48 @@ func (s *Service) Exchange(ctx context.Context, agentID string, declared []model
 			s.logger.Error().Err(err).Str("agent_id", agentID).Str("fingerprint", fp).Msg("workload schema store failed")
 			continue
 		}
-		stored[fp] = true
+		s.markKnown(fp)
 	}
 
 	var want []string
 	for _, fp := range order {
-		if stored[fp] {
-			continue
+		if !s.has(ctx, agentID, fp, absent) {
+			want = append(want, fp)
 		}
-		if _, err := s.store.GetWorkloadSchema(ctx, fp); err == nil {
-			continue
-		} else if !errors.Is(err, storage.ErrNotFound) {
-			s.logger.Error().Err(err).Str("agent_id", agentID).Str("fingerprint", fp).Msg("workload schema lookup failed")
-		}
-		want = append(want, fp)
 	}
 	slices.Sort(want)
 	return want
+}
+
+// has reports whether the catalog holds fingerprint. A fingerprint seen once
+// is answered from memory; one missing, or whose lookup failed (logged), is
+// memoized in absent for the rest of the call only, as it can arrive.
+func (s *Service) has(ctx context.Context, agentID, fingerprint string, absent map[string]bool) bool {
+	s.mu.Lock()
+	_, ok := s.known[fingerprint]
+	s.mu.Unlock()
+	if ok {
+		return true
+	}
+	if absent[fingerprint] {
+		return false
+	}
+	_, err := s.store.GetWorkloadSchema(ctx, fingerprint)
+	switch {
+	case err == nil:
+		s.markKnown(fingerprint)
+		return true
+	case !errors.Is(err, storage.ErrNotFound):
+		s.logger.Error().Err(err).Str("agent_id", agentID).Str("fingerprint", fingerprint).Msg("workload schema lookup failed")
+	}
+	absent[fingerprint] = true
+	return false
+}
+
+func (s *Service) markKnown(fingerprint string) {
+	s.mu.Lock()
+	s.known[fingerprint] = struct{}{}
+	s.mu.Unlock()
 }
 
 func (s *Service) reject(agentID, fingerprint, why string) {

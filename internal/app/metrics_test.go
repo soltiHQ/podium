@@ -319,7 +319,10 @@ func TestFollowerCountsRefusedSyncsAsUnavailable(t *testing.T) {
 	hub := event.NewHub(zerolog.Nop())
 	t.Cleanup(hub.Close)
 	agents := agent.New(inmemory.New(), zerolog.Nop())
-	h, srv := buildDiscoveryListeners(zerolog.Nop(), agents, nil, hub, follower{leader: "127.0.0.1:7000"}, cfg, nil, nil, nil, nil, m)
+	h, srv, err := buildDiscoveryListeners(zerolog.Nop(), agents, testCatalog(), hub, follower{leader: "127.0.0.1:7000"}, cfg, nil, nil, nil, nil, m)
+	if err != nil {
+		t.Fatal(err)
+	}
 	client := serveDiscovery(t, srv)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/sync", strings.NewReader(`{"id":"agent-1"}`))
@@ -328,7 +331,7 @@ func TestFollowerCountsRefusedSyncsAsUnavailable(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("HTTP sync on a follower: %d, want 503", w.Code)
 	}
-	_, err := client.Sync(context.Background(), &discoverv1.SyncRequest{Id: "agent-1"})
+	_, err = client.Sync(context.Background(), &discoverv1.SyncRequest{Id: "agent-1"})
 	if status.Code(err) != codes.Unavailable {
 		t.Fatalf("gRPC sync on a follower: %v, want Unavailable", err)
 	}

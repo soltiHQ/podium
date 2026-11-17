@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -566,16 +567,31 @@ func warnForwarding(logger zerolog.Logger, cfg config.Config, backend cluster.Ba
 // cluster.Membership and where a follower forwards its syncs to the leader with
 // forwarder, while memory keeps the peer address, as before. m counts and times
 // the calls of both listeners and the outcome of each sync; nil records nothing.
-func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, catalog *workload.Service, eventHub *event.Hub, leadership cluster.Leadership, cfg config.Config, resolver *clientip.Resolver, serverTLS, forwardTLS *tls.Config, forwarder *interceptor.Forwarder, m *metrics.Metrics) (http.Handler, *grpc.Server) {
+func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, catalog *workload.Service, eventHub *event.Hub, leadership cluster.Leadership, cfg config.Config, resolver *clientip.Resolver, serverTLS, forwardTLS *tls.Config, forwarder *interceptor.Forwarder, m *metrics.Metrics) (http.Handler, *grpc.Server, error) {
+	if catalog == nil {
+		return nil, nil, errNilCatalog
+	}
 	limiter := kit.NewLimiter(cfg.Auth)
 	syncs := handler.NewSyncBuckets()
 	var grpcClients *clientip.Resolver
 	if _, raft := leadership.(cluster.Membership); raft {
 		grpcClients = resolver
 	}
-	return buildDiscoveryHandler(logger, agentSVC, catalog, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), limiter, syncs, resolver, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled(), forwardTLS, m),
-		buildGRPCServer(logger, agentSVC, catalog, eventHub, leadership, limiter, syncs, grpcClients, serverTLS, cfg.AgentAuth.Require, addrPort(cfg.GRPC.Addr), forwarder, m)
+	httpHandler, err := buildDiscoveryHandler(logger, agentSVC, catalog, eventHub, leadership, addrPort(cfg.HTTPDiscovery.Addr), limiter, syncs, resolver, cfg.AgentAuth.Require, cfg.TLS.Server.Enabled(), forwardTLS, m)
+	if err != nil {
+		return nil, nil, err
+	}
+	grpcSrv, err := buildGRPCServer(logger, agentSVC, catalog, eventHub, leadership, limiter, syncs, grpcClients, serverTLS, cfg.AgentAuth.Require, addrPort(cfg.GRPC.Addr), forwarder, m)
+	if err != nil {
+		return nil, nil, err
+	}
+	return httpHandler, grpcSrv, nil
 }
+
+// errNilCatalog is a discovery build without the workload catalog: without it
+// the listeners would neither store nor want any schema, quietly, so the build
+// refuses.
+var errNilCatalog = errors.New("app: discovery needs the workload catalog")
 
 // buildDiscoveryHandler wires the HTTP discovery listener. It has no per-IP
 // limit: the handler counts authentication failures per (client IP, agent ID)
@@ -585,7 +601,10 @@ func buildDiscoveryListeners(logger zerolog.Logger, agentSVC *agent.Service, cat
 // request, outside the other middleware, the outcome of every sync, among them
 // the writes that a follower cannot send to a leader and refuses itself, and
 // the syncs a follower forwards.
-func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, catalog *workload.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, requireAuth bool, targetTLS bool, forwardTLS *tls.Config, m *metrics.Metrics) http.Handler {
+func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, catalog *workload.Service, eventHub *event.Hub, leadership cluster.Leadership, httpPort int, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, requireAuth bool, targetTLS bool, forwardTLS *tls.Config, m *metrics.Metrics) (http.Handler, error) {
+	if catalog == nil {
+		return nil, errNilCatalog
+	}
 	var (
 		httpDiscovery = handler.NewHTTPDiscovery(logger, agentSVC, eventHub, limiter, syncs, resolver, requireAuth)
 		mux           = http.NewServeMux()
@@ -603,7 +622,7 @@ func buildDiscoveryHandler(logger zerolog.Logger, agentSVC *agent.Service, catal
 	h = middleware.Logger(logger)(h)
 	h = middleware.RequestID()(h)
 	h = m.HTTP("discovery")(h)
-	return h
+	return h, nil
 }
 
 // outboundTLS builds the client sides of podium's outbound TLS from cfg: client,
@@ -688,7 +707,10 @@ func addrPort(addr string) int {
 // Unavailable with that address in the x-leader hint. m counts and times the
 // calls, first in the chain, and counts the outcome of each sync, and each sync
 // a follower forwards.
-func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, catalog *workload.Service, eventHub *event.Hub, leadership cluster.Leadership, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, serverTLS *tls.Config, requireAuth bool, port int, forwarder *interceptor.Forwarder, m *metrics.Metrics) *grpc.Server {
+func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, catalog *workload.Service, eventHub *event.Hub, leadership cluster.Leadership, limiter *ratelimit.Limiter, syncs *ratelimit.Buckets, resolver *clientip.Resolver, serverTLS *tls.Config, requireAuth bool, port int, forwarder *interceptor.Forwarder, m *metrics.Metrics) (*grpc.Server, error) {
+	if catalog == nil {
+		return nil, errNilCatalog
+	}
 	// Write methods (must run on leader). Sync is the only agent-facing
 	// mutation; everything else is pure read.
 	writeMethods := map[string]struct{}{
@@ -734,7 +756,7 @@ func buildGRPCServer(logger zerolog.Logger, agentSVC *agent.Service, catalog *wo
 	grpcDiscovery.UseCatalog(catalog)
 	grpcDiscovery.Observe(func(outcome string) { m.Sync(metrics.TransportGRPC, outcome) })
 	discoverv1.RegisterDiscoverServiceServer(srv, grpcDiscovery)
-	return srv
+	return srv, nil
 }
 
 // syncForwarder returns the forwarder of a follower's gRPC discovery syncs with

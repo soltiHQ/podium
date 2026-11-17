@@ -3,10 +3,12 @@ package workload
 import (
 	"bytes"
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -142,10 +144,10 @@ func TestExchangeKeepsTheFirstAgent(t *testing.T) {
 	}
 }
 
-// countingStore counts the writes that reach the store.
+// countingStore counts the writes and the reads of the catalog that reach the store.
 type countingStore struct {
 	storage.Storage
-	writes atomic.Int64
+	writes, reads atomic.Int64
 }
 
 func (c *countingStore) UpsertWorkloadSchema(ctx context.Context, s *model.WorkloadSchema) error {
@@ -153,22 +155,75 @@ func (c *countingStore) UpsertWorkloadSchema(ctx context.Context, s *model.Workl
 	return c.Storage.UpsertWorkloadSchema(ctx, s)
 }
 
+func (c *countingStore) GetWorkloadSchema(ctx context.Context, fp string) (*model.WorkloadSchema, error) {
+	c.reads.Add(1)
+	return c.Storage.GetWorkloadSchema(ctx, fp)
+}
+
+// The catalog already holds the schema (another node, or an earlier process):
+// 1000 exchanges that re-offer it, with an undeclared schema and garbage for
+// company, write nothing and read the store once.
 func TestExchangeWritesNothingWithoutNewSchemas(t *testing.T) {
 	ctx := context.Background()
-	inner := inmemory.New()
-	store := &countingStore{Storage: inner}
-	svc := New(store, zerolog.Nop())
+	store := &countingStore{Storage: inmemory.New()}
 	fp := fingerprintOf(t, validSchema)
-	svc.Exchange(ctx, "agent-1", declares(fp), []OfferedSchema{{fp, []byte(validSchema)}})
-	if store.writes.Load() != 1 {
-		t.Fatalf("setup wrote %d", store.writes.Load())
+	seed, err := model.NewWorkloadSchema(fp, "solti.io/v1", "KindA", []byte(validSchema), "seeder", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Storage.UpsertWorkloadSchema(ctx, seed); err != nil {
+		t.Fatal(err)
+	}
+	svc := New(store, zerolog.Nop())
+	other := fingerprintOf(t, `{"type":"string"}`)
+	offered := []OfferedSchema{
+		{fp, []byte(validSchema)},
+		{other, []byte(`{"type":"string"}`)}, // not declared
+		{fp, []byte(`garbage`)},
+		{strings.Repeat("e", 64), []byte(`garbage`)},
 	}
 	for range 1000 {
-		if got := svc.Exchange(ctx, "agent-1", declares(fp), nil); len(got) != 0 {
+		if got := svc.Exchange(ctx, "agent-1", declares(fp), offered); len(got) != 0 {
 			t.Fatalf("got %v", got)
 		}
 	}
-	if n := store.writes.Load(); n != 1 {
-		t.Fatalf("1000 exchanges wrote %d times in all, want only the setup write", n)
+	if n := store.writes.Load(); n != 0 {
+		t.Fatalf("1000 exchanges wrote %d times, want 0", n)
+	}
+	if n := store.reads.Load(); n > 1 {
+		t.Fatalf("1000 exchanges of a known fingerprint read the store %d times, want at most 1", n)
+	}
+}
+
+func TestExchangeLogsARepeatedOfferOnce(t *testing.T) {
+	svc, _, logs := newService(t)
+	o := OfferedSchema{strings.Repeat("f", 64), []byte(`x`)}
+	svc.Exchange(context.Background(), "agent-1", nil, []OfferedSchema{o, o, o, o})
+	if n := strings.Count(logs.String(), "rejected"); n != 1 {
+		t.Fatalf("%d log lines for one repeated offer, want 1", n)
+	}
+}
+
+// failingStore fails every lookup and every write.
+type failingStore struct{ storage.Storage }
+
+func (failingStore) GetWorkloadSchema(context.Context, string) (*model.WorkloadSchema, error) {
+	return nil, errors.New("store down")
+}
+
+func (failingStore) UpsertWorkloadSchema(context.Context, *model.WorkloadSchema) error {
+	return errors.New("store down")
+}
+
+func TestExchangeLogsALookupFailureOncePerFingerprint(t *testing.T) {
+	logs := &bytes.Buffer{}
+	svc := New(failingStore{inmemory.New()}, zerolog.New(logs))
+	fp := fingerprintOf(t, validSchema)
+	got := svc.Exchange(context.Background(), "agent-1", declares(fp), []OfferedSchema{{fp, []byte(validSchema)}})
+	if !slices.Equal(got, []string{fp}) {
+		t.Fatalf("a failed lookup must stay wanted, got %v", got)
+	}
+	if n := strings.Count(logs.String(), "lookup failed"); n != 1 {
+		t.Fatalf("%d lookup failure lines, want 1", n)
 	}
 }
