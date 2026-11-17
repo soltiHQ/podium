@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -260,17 +261,17 @@ func TestAChangedFingerprintChangesTheCapabilities(t *testing.T) {
 		}
 		return a
 	}
-	if _, err := svc.Upsert(ctx, with("aaaa")); err != nil {
+	if _, err := svc.Upsert(ctx, with(strings.Repeat("a", 64))); err != nil {
 		t.Fatal(err)
 	}
-	same, err := svc.Upsert(ctx, with("aaaa"))
+	same, err := svc.Upsert(ctx, with(strings.Repeat("a", 64)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if same.Visible {
 		t.Fatal("the same fingerprint is a visible change")
 	}
-	changed, err := svc.Upsert(ctx, with("bbbb"))
+	changed, err := svc.Upsert(ctx, with(strings.Repeat("b", 64)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +282,7 @@ func TestAChangedFingerprintChangesTheCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := stored.Capabilities()[0].Workloads[0].SchemaFingerprint; got != "bbbb" {
-		t.Fatalf("stored fingerprint = %q, want bbbb", got)
+	if got := stored.Capabilities()[0].Workloads[0].SchemaFingerprint; got != strings.Repeat("b", 64) {
+		t.Fatalf("stored fingerprint = %q, want the b one", got)
 	}
 }

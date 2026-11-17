@@ -616,6 +616,17 @@ func TestCapabilityCapsRefuseOversizedFields(t *testing.T) {
 		{"workloads", secondRunner(func(r *agentv1.RunnerCapability) { r.Workloads = workloads(257) }), "agent capabilities.runners[1].workloads exceed 256 entries"},
 		{"workload api_version", secondRunner(func(r *agentv1.RunnerCapability) { r.Workloads[1].ApiVersion = text(318) }), "agent capabilities.runners[1].workloads[1].api_version exceeds 317 bytes"},
 		{"workload kind", secondRunner(func(r *agentv1.RunnerCapability) { r.Workloads[1].Kind = text(129) }), "agent capabilities.runners[1].workloads[1].kind exceeds 128 bytes"},
+		{"workload schema_fingerprint", secondRunner(func(r *agentv1.RunnerCapability) { r.Workloads[1].SchemaFingerprint = "aaaa" }), "agent capabilities.runners[1].workloads[1].schema_fingerprint must be empty or 64 lowercase hex characters"},
+		{"schema fingerprints", func(r *discoverv1.SyncRequest) {
+			fingerprints := func(from, n int) []*agentv1.WorkloadType {
+				out := workloads(n)
+				for i := range out {
+					out[i].SchemaFingerprint = fmt.Sprintf("%064x", from+i)
+				}
+				return out
+			}
+			r.Capabilities.Runners = []*agentv1.RunnerCapability{{Name: "first", Workloads: fingerprints(0, 200)}, {Name: "second", Workloads: fingerprints(200, 57)}}
+		}, "agent capabilities declare more than 256 distinct schema fingerprints"},
 	} {
 		for _, tr := range limitTransports {
 			t.Run(tr.name+"/"+tc.field, func(t *testing.T) {
@@ -658,7 +669,7 @@ func TestCapabilityCapsAcceptWhatTheSDKSends(t *testing.T) {
 		}
 		runners[1].Workloads = make([]*agentv1.WorkloadType, 256)
 		for i := range runners[1].Workloads {
-			runners[1].Workloads[i] = &agentv1.WorkloadType{ApiVersion: text(253) + "/" + text(63), Kind: text(128)}
+			runners[1].Workloads[i] = &agentv1.WorkloadType{ApiVersion: text(253) + "/" + text(63), Kind: text(128), SchemaFingerprint: fmt.Sprintf("%064x", i)}
 		}
 		r.Capabilities.Runners = runners
 	})
@@ -673,8 +684,8 @@ func TestCapabilityCapsAcceptWhatTheSDKSends(t *testing.T) {
 				t.Fatal(err)
 			}
 			caps := stored.Capabilities()
-			if len(caps) != 64 || len(caps[0].Labels) != 256 || len(caps[1].Workloads) != 256 {
-				t.Fatalf("stored %d runners, %d labels, %d workloads, want 64, 256, 256", len(caps), len(caps[0].Labels), len(caps[1].Workloads))
+			if len(caps) != 64 || len(caps[0].Labels) != 256 || len(caps[1].Workloads) != 256 || caps[1].Workloads[255].SchemaFingerprint != fmt.Sprintf("%064x", 255) {
+				t.Fatalf("stored %d runners, %d labels, %d workloads, want 64, 256, 256 with 256 distinct fingerprints", len(caps), len(caps[0].Labels), len(caps[1].Workloads))
 			}
 		})
 	}
