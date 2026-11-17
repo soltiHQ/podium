@@ -6,16 +6,19 @@ require (
 	github.com/a-h/templ v0.3.1100
 	github.com/felixge/httpsnoop v1.1.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/gowebpki/jcs v1.0.2
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/raft v1.8.0
 	github.com/hashicorp/raft-boltdb/v2 v2.4.2
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/rs/zerolog v1.35.1
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/segmentio/ksuid v1.0.4
 	go.etcd.io/bbolt v1.5.0
 	golang.org/x/crypto v0.59.0
 	golang.org/x/sync v0.25.0
+	golang.org/x/text v0.44.0
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261026165753-2ffab32bce7e
 	google.golang.org/grpc v1.85.0
 	google.golang.org/protobuf v1.36.12
@@ -51,7 +54,6 @@ require (
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
-	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/tools v0.52.0 // indirect
 	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.6.2 // indirect
 )
