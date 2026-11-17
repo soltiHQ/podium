@@ -28,12 +28,14 @@ func TestPlacementMatchesDeployBeyond500AndUsesAllLabelUnion(t *testing.T) {
 		a, _ := model.NewAgent(fmt.Sprintf("match-%04d", i), "matching", "http://matching")
 		a.LabelAdd("env", "prod")
 		a.LabelAdd("team", "ops")
+		a.SetCapabilities([]model.RunnerCapability{containerRunner("runner", testFingerprint(t))})
 		if err := store.UpsertAgent(ctx, a); err != nil {
 			t.Fatal(err)
 		}
 	}
 	partial, _ := model.NewAgent("partial", "partial", "http://partial")
 	partial.LabelAdd("env", "prod")
+	partial.SetCapabilities([]model.RunnerCapability{containerRunner("runner", testFingerprint(t))})
 	if err := store.UpsertAgent(ctx, partial); err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +89,7 @@ func TestPlacementPreservesRunnerRegistrationOrderAndObservedLiveness(t *testing
 		{Name: "z-first", Labels: map[string]string{"zone": "a"}, Workloads: sub},
 		{Name: "a-second", Labels: map[string]string{"zone": "a"}, Workloads: sub},
 	})
-	plan, err := buildPlacement(context.Background(), ts, []*model.Agent{a}, now, nil)
+	plan, err := buildPlacement(ts, []*model.Agent{a}, now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,13 +108,31 @@ func TestPlacementPreservesRunnerRegistrationOrderAndObservedLiveness(t *testing
 	}
 }
 
-func TestPlacementUnknownInventoryAcceptedAndKnownIncompatibleBlocksAll(t *testing.T) {
+func TestPlacementUnknownInventoryBlocksLikeTheSchemaReasons(t *testing.T) {
 	svc, store := mkService(t)
 	ctx := context.Background()
-	ts := mkSpec(t, svc, store, "placement-block", []string{"unknown-inventory"})
+	ts := mkSpec(t, svc, store, "placement-block", []string{"quiet"})
+	// mkSpec's agent reports no runners: nothing says it can run the workload.
+	quiet, _ := store.GetAgent(ctx, "quiet")
+	quiet.SetCapabilities(nil)
+	if err := store.UpsertAgent(ctx, quiet); err != nil {
+		t.Fatal(err)
+	}
 	plan, err := svc.PreviewPlacement(ctx, ts.ID())
-	if err != nil || !plan.DeployAllowed || !plan.Targets[0].Eligible || plan.Targets[0].InventoryKnown || plan.Targets[0].EligibilityReason != "inventory_unknown" {
-		t.Fatalf("missing inventory falsely rejected or claims runner: %+v %v", plan, err)
+	if err != nil || plan.DeployAllowed || plan.BlockingReason != "incompatible_targets" || plan.Targets[0].Eligible || plan.Targets[0].InventoryKnown || plan.Targets[0].EligibilityReason != "inventory_unknown" {
+		t.Fatalf("an agent without runners is not blocked: %+v %v", plan, err)
+	}
+	var incompatible *IncompatibleTargetsError
+	if err := svc.Deploy(ctx, ts.ID(), nil); !errors.As(err, &incompatible) || !reflect.DeepEqual(incompatible.Reasons, map[string]string{"quiet": "inventory_unknown"}) {
+		t.Fatalf("Deploy = %v", err)
+	}
+	if rollouts, _ := svc.RolloutsBySpec(ctx, ts.ID()); len(rollouts) != 0 {
+		t.Fatal("a refused deploy wrote rollouts")
+	}
+	// Once it reports a runner, the same spec deploys to it.
+	quiet.SetCapabilities([]model.RunnerCapability{containerRunner("r", testFingerprint(t))})
+	if err := store.UpsertAgent(ctx, quiet); err != nil {
+		t.Fatal(err)
 	}
 	if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
 		t.Fatal(err)
@@ -163,6 +183,7 @@ func TestPlacementReevaluatesMetadataAndEmptyTargetsDrain(t *testing.T) {
 	}
 	a, _ := model.NewAgent("changing", "changing", "http://changing")
 	a.LabelAdd("env", "prod")
+	a.SetCapabilities([]model.RunnerCapability{containerRunner("runner", testFingerprint(t))})
 	if err := store.UpsertAgent(ctx, a); err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +245,7 @@ func TestPlacementNeverMatchesAWorkloadlessSpecToMalformedInventory(t *testing.T
 	ts.SetTargets([]string{"agent"})
 	a, _ := model.NewAgent("agent", "agent", "http://agent")
 	a.SetCapabilities([]model.RunnerCapability{{Name: "malformed", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: ""}}}})
-	plan, err := buildPlacement(context.Background(), ts, []*model.Agent{a}, time.Now(), nil)
+	plan, err := buildPlacement(ts, []*model.Agent{a}, time.Now(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,5 +424,118 @@ func TestDeployRefusesOnlyIncompatibleTargets(t *testing.T) {
 	}
 	if err = svc.Deploy(ctx, ts.ID(), nil); err != nil {
 		t.Fatalf("Deploy after the fix: %v", err)
+	}
+}
+
+// flakySource wraps the catalog and fails to load the fingerprints in broken.
+type flakySource struct {
+	SchemaSource
+	broken map[string]bool
+}
+
+func (f flakySource) Compiled(ctx context.Context, fingerprint string) (*workloadschema.Schema, bool, error) {
+	if f.broken[fingerprint] {
+		return nil, false, errors.New("stored schema no longer compiles")
+	}
+	return f.SchemaSource.Compiled(ctx, fingerprint)
+}
+
+// A schema that cannot be loaded marks its runner schema_incompatible with the
+// error as the detail; it does not fail the plan, and a schema of an unrelated
+// type on the same agent is not even looked at.
+func TestPlacementSurvivesASchemaThatCannotBeLoaded(t *testing.T) {
+	svc, store := mkService(t)
+	ctx := context.Background()
+	ts := mkSpec(t, svc, store, "broken", []string{"agent"})
+	brokenOwn := seedSchema(t, store, portSchema)
+	brokenOther := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	svc.schemas = flakySource{SchemaSource: svc.schemas, broken: map[string]bool{brokenOwn: true, brokenOther: true}}
+	a, _ := store.GetAgent(ctx, "agent")
+	a.SetCapabilities([]model.RunnerCapability{
+		containerRunner("fine", testFingerprint(t)),
+		containerRunner("own-broken", brokenOwn),
+		{Name: "other-type", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Unrelated", SchemaFingerprint: brokenOther}}},
+	})
+	if err := store.UpsertAgent(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := svc.PreviewPlacement(ctx, ts.ID())
+	if err != nil {
+		t.Fatalf("the plan failed on a broken schema: %v", err)
+	}
+	runners := plan.Targets[0].Runners
+	if runners[1].Reason != "schema_incompatible" || !strings.Contains(runners[1].Detail, "no longer compiles") {
+		t.Fatalf("own-broken: %+v", runners[1])
+	}
+	if runners[2].Reason != "workload_unsupported" || runners[2].Detail != "" {
+		t.Fatalf("other-type: %+v", runners[2])
+	}
+	if err = svc.Deploy(ctx, ts.ID(), nil); err != nil {
+		t.Fatalf("a broken schema of another runner blocked the deploy: %v", err)
+	}
+}
+
+func TestOutcomeOfValidationMapsTooExpensive(t *testing.T) {
+	for name, err := range map[string]error{
+		"bare":    workloadschema.ErrValidationTooExpensive,
+		"wrapped": fmt.Errorf("validating: %w", workloadschema.ErrValidationTooExpensive),
+	} {
+		got := outcomeOfValidation(err)
+		if got.reason != "schema_incompatible" || !strings.Contains(got.detail, "too costly to check") {
+			t.Errorf("%s: %+v", name, got)
+		}
+	}
+	if got := outcomeOfValidation(nil); got.reason != "compatible" {
+		t.Errorf("a valid body: %+v", got)
+	}
+	if got := outcomeOfValidation(errors.New("boom")); got.reason != "schema_incompatible" || got.detail != "boom" {
+		t.Errorf("another error: %+v", got)
+	}
+}
+
+// Deploy validates before its transaction. A workload changed in between is not
+// the one the outcomes were computed for: the plan is refused, nothing is written.
+func TestDeployRefusesAWorkloadChangedAfterThePrefetch(t *testing.T) {
+	svc, store := mkService(t)
+	ctx := context.Background()
+	ts := mkSpec(t, svc, store, "changed", []string{"agent"})
+	pre, err := svc.prefetch(ctx, ts.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = loadPlacement(ctx, store, nil, ts, time.Now(), pre); err != nil {
+		t.Fatalf("an unchanged workload: %v", err)
+	}
+	changed := ts.Clone()
+	w := changed.Workload()
+	w.Body = map[string]any{"image": "other"}
+	changed.SetWorkload(w)
+	if _, _, err = loadPlacement(ctx, store, nil, changed, time.Now(), pre); !errors.Is(err, ErrPlacementChanged) {
+		t.Fatalf("a workload changed after the prefetch: %v", err)
+	}
+}
+
+// A running target whose runner now publishes a schema the body does not fit
+// blocks the next deploy, and the deploy leaves its rollout as it was.
+func TestBlockedDeployLeavesTheRolloutOfARunningTarget(t *testing.T) {
+	svc, store := mkService(t)
+	ctx := context.Background()
+	ts := mkSpec(t, svc, store, "running", []string{"agent"})
+	if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := svc.RolloutsBySpec(ctx, ts.ID())
+	a, _ := store.GetAgent(ctx, "agent")
+	a.SetCapabilities([]model.RunnerCapability{containerRunner("runner", seedSchema(t, store, portSchema))})
+	if err := store.UpsertAgent(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	var incompatible *IncompatibleTargetsError
+	if err := svc.Deploy(ctx, ts.ID(), nil); !errors.As(err, &incompatible) || incompatible.Reasons["agent"] != "schema_incompatible" {
+		t.Fatalf("Deploy = %v", err)
+	}
+	after, _ := svc.RolloutsBySpec(ctx, ts.ID())
+	if len(after) != 1 || len(before) != 1 || after[0].Intent() != before[0].Intent() || !after[0].UpdatedAt().Equal(before[0].UpdatedAt()) || after[0].Status() != before[0].Status() {
+		t.Fatal("a blocked deploy changed the rollout of a running target")
 	}
 }

@@ -406,5 +406,5 @@ func incompatibleTargetsMessage(reasons map[string]string) string {
 		}
 	}
 	slices.Sort(distinct)
-	return "Deployment blocked: the workload does not fit the schema of a target's runner (" + strings.Join(distinct, ", ") + "). Review the placement preview."
+	return "Deployment blocked: a target cannot take this workload (" + strings.Join(distinct, ", ") + "). Review the placement preview."
 }

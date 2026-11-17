@@ -34,8 +34,8 @@ func TestPlacementPreservesRunnerOrderAndExplainsBatchBlock(t *testing.T) {
 }
 
 func TestPlacementMakesUnknownInventoryAndEmptyTargetsExplicit(t *testing.T) {
-	html := renderPlacement(t, restv1.SpecPlacement{DeployAllowed: true, Targets: []restv1.PlacementTarget{{AgentID: "legacy", Exists: true, Eligible: true, EligibilityReason: "inventory_unknown"}}})
-	if !strings.Contains(html, "Runner inventory unknown") || !strings.Contains(html, "runner compatibility is unknown") || strings.Contains(html, "Routing compatible") {
+	html := renderPlacement(t, restv1.SpecPlacement{Targets: []restv1.PlacementTarget{{AgentID: "silent", Exists: true, EligibilityReason: "inventory_unknown"}}})
+	if !strings.Contains(html, "Placement blocked") || !strings.Contains(html, "reported no runners") || strings.Contains(html, "Routing compatible") || strings.Contains(html, "legacy") {
 		t.Fatal(html)
 	}
 	html = renderPlacement(t, restv1.SpecPlacement{DeployAllowed: true, NoTargets: true})
@@ -110,5 +110,14 @@ func TestSpecJSONPreviewUsesCurrentTaskManifestLabel(t *testing.T) {
 	html := buf.String()
 	if !strings.Contains(html, "Agent Task Manifest") || strings.Contains(html, "Agent CreateSpec") {
 		t.Fatal("preview uses obsolete API label")
+	}
+}
+
+// The detail of a runner comes from schema text that agents supply: it is shown
+// as text, never as markup.
+func TestPlacementShowsTheRunnerDetailAsText(t *testing.T) {
+	html := renderPlacement(t, restv1.SpecPlacement{Targets: []restv1.PlacementTarget{{AgentID: "a", Exists: true, InventoryKnown: true, EligibilityReason: "schema_incompatible", Runners: []restv1.PlacementRunner{{Name: "r", Reason: "schema_incompatible", Detail: "/image: <script>alert(1)</script> is not valid"}}}}})
+	if strings.Contains(html, "<script>") || !strings.Contains(html, "&lt;script&gt;alert(1)&lt;/script&gt; is not valid") {
+		t.Fatal(html)
 	}
 }

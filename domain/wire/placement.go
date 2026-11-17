@@ -2,6 +2,7 @@ package wire
 
 import (
 	"time"
+	"unicode/utf8"
 
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
 	"github.com/soltiHQ/control-plane/domain/model"
@@ -37,10 +38,25 @@ func PlacementToREST(plan *model.PlacementPlan) restv1.SpecPlacement {
 			}
 			x.Runners = append(x.Runners, restv1.PlacementRunner{
 				Name: r.Name, Labels: labels, WorkloadMatch: r.WorkloadMatch,
-				LabelsMatch: r.LabelsMatch, Eligible: r.Eligible, Reason: r.Reason,
+				LabelsMatch: r.LabelsMatch, Eligible: r.Eligible, Reason: r.Reason, Detail: boundDetail(r.Detail),
 			})
 		}
 		out.Targets = append(out.Targets, x)
 	}
 	return out
+}
+
+// maxRunnerDetail bounds the detail of one runner, in bytes.
+const maxRunnerDetail = 1 << 10
+
+// boundDetail cuts a detail to maxRunnerDetail bytes at a rune boundary.
+func boundDetail(s string) string {
+	if len(s) <= maxRunnerDetail {
+		return s
+	}
+	cut := maxRunnerDetail
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }

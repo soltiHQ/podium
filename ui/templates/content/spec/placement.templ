@@ -84,6 +84,9 @@ templ Placement(plan restv1.SpecPlacement) {
 										}
 									</div>
 									<p class="text-xs">{ placementRunnerReason(runner.Reason) }</p>
+									if runner.Detail!="" {
+										<p class="text-xs text-muted break-words">{ runner.Detail }</p>
+									}
 									<p class="text-xs text-muted">Workload match: { placementMatch(runner.WorkloadMatch) } · label match: { placementMatch(runner.LabelsMatch) }</p>
 									if len(runner.Labels)>0 {
 										<p class="text-[11px] font-mono text-muted break-words">{ placementLabels(runner.Labels) }</p>
@@ -118,17 +121,11 @@ func placementEligibilityLabel(t restv1.PlacementTarget) string {
 	if !t.Eligible {
 		return "Placement blocked"
 	}
-	if !t.InventoryKnown {
-		return "Runner inventory unknown"
-	}
 	return "Routing compatible"
 }
 func placementEligibilityVariant(t restv1.PlacementTarget) visual.Variant {
 	if !t.Eligible {
 		return visual.VariantDanger
-	}
-	if !t.InventoryKnown {
-		return visual.VariantMuted
 	}
 	return visual.VariantPrimary
 }
@@ -141,7 +138,7 @@ func placementBlockingReason(reason string) string {
 	case "unsupported_targets":
 		return "At least one target has no compatible runner. The deployment is blocked for every target."
 	case "incompatible_targets":
-		return "At least one target runs no schema this workload fits. The deployment is blocked for every target."
+		return "At least one target cannot take this workload: no runners reported, or no schema the body fits. The deployment is blocked for every target."
 	default:
 		return reason
 	}
@@ -151,7 +148,7 @@ func placementTargetReason(reason string) string {
 	case "missing_agent":
 		return "The explicit agent ID is not present in discovery inventory."
 	case "inventory_unknown":
-		return "No runner inventory has been advertised. Desired state can be committed, but runner compatibility is unknown."
+		return "The agent has reported no runners, so nothing says it can run this workload. The deployment is blocked."
 	case "workload_unsupported":
 		return "The advertised runners do not support this workload group, version and kind."
 	case "runner_labels_mismatch":

@@ -298,7 +298,7 @@ func (s *Service) Deploy(ctx context.Context, specID string, planTokens []string
 		generation                       int
 		install, update, uninstall, noop int
 	)
-	schemas, err := s.prefetchSchemas(ctx, specID)
+	pre, err := s.prefetch(ctx, specID)
 	if err != nil {
 		return err
 	}
@@ -311,28 +311,22 @@ func (s *Service) Deploy(ctx context.Context, specID string, planTokens []string
 			return storage.ErrInvalidArgument
 		}
 		generation = ts.Generation()
-		plan, steps, err := loadPlacement(ctx, tx, schemas, ts, time.Now())
+		plan, steps, err := loadPlacement(ctx, tx, nil, ts, time.Now(), pre)
 		if err != nil {
 			return err
 		}
 		if planTokens != nil && !slices.Contains(planTokens, plan.Token) {
 			return ErrPlacementChanged
 		}
-		missing, unsupported, incompatible := blockedTargets(plan)
-		if len(missing) > 0 {
-			return &UnknownTargetsError{Agents: missing}
+		blocked := blockedTargets(plan)
+		if len(blocked.missing) > 0 {
+			return &UnknownTargetsError{Agents: blocked.missing}
 		}
-		if len(unsupported) > 0 {
-			return &UnsupportedTargetsError{Agents: unsupported}
+		if len(blocked.unsupported) > 0 {
+			return &UnsupportedTargetsError{Agents: blocked.unsupported}
 		}
-		if len(incompatible) > 0 {
-			reasons := make(map[string]string, len(incompatible))
-			for _, target := range plan.Targets {
-				if slices.Contains(incompatible, target.AgentID) {
-					reasons[target.AgentID] = target.EligibilityReason
-				}
-			}
-			return &IncompatibleTargetsError{Agents: incompatible, Reasons: reasons}
+		if len(blocked.incompatible) > 0 {
+			return &IncompatibleTargetsError{Agents: blocked.incompatible, Reasons: blocked.reasons}
 		}
 
 		for _, step := range steps {

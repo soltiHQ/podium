@@ -50,6 +50,7 @@ func TestLabelSelectorsUnionExplicitAndAllLabels(t *testing.T) {
 		if id == "other" {
 			a.LabelAdd("env", "dev")
 		}
+		a.SetCapabilities([]model.RunnerCapability{containerRunner("runner", testFingerprint(t))})
 		_ = s.UpsertAgent(ctx, a)
 	}
 	ts.SetTargetLabels(map[string]string{"env": "prod", "team": "ops"})

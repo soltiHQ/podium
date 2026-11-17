@@ -41,4 +41,8 @@ type PlacementRunner struct {
 	LabelsMatch   bool              `json:"labels_match"`
 	Eligible      bool              `json:"eligible"`
 	Reason        string            `json:"reason"`
+	// Detail says more about a refusal, such as the schema problems behind
+	// schema_incompatible. It comes from agent-supplied schema text: show it as
+	// text only. At most 1 KiB.
+	Detail string `json:"detail,omitempty"`
 }

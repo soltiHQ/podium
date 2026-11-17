@@ -48,6 +48,7 @@ func mkSpec(t *testing.T, svc *Service, store *inmemory.Store, id string, target
 		if err != nil {
 			t.Fatalf("NewAgentFrom: %v", err)
 		}
+		ag.SetCapabilities([]model.RunnerCapability{containerRunner("runner", testFingerprint(t))})
 		if err = store.UpsertAgent(context.Background(), ag); err != nil {
 			t.Fatalf("UpsertAgent: %v", err)
 		}
@@ -458,7 +459,7 @@ func TestPlanTokenIgnoresObservationTimes(t *testing.T) {
 		a.SetLastSeenAt(now)
 		a.SetStaleAt(now.Add(30 * time.Second))
 	})
-	before, _, err := loadPlacement(ctx, store, nil, ts, now)
+	before, _, err := loadPlacement(ctx, store, nil, ts, now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +471,7 @@ func TestPlanTokenIgnoresObservationTimes(t *testing.T) {
 		a.SetStaleAt(now.Add(90 * time.Second))
 		a.SetUptimeSeconds(3600)
 	})
-	after, _, err := loadPlacement(ctx, store, nil, ts, now.Add(time.Hour))
+	after, _, err := loadPlacement(ctx, store, nil, ts, now.Add(time.Hour), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,11 +616,13 @@ func TestPlanTokenCoversEveryInput(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		// Unknown inventory, then a runner for another workload: only Eligible moves.
-		{name: "a target stops supporting the workload", before: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
+		// No inventory, then a runner for the workload: only Eligible moves.
+		{name: "a target starts supporting the workload", before: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
 			changeAgent(t, store, "agent-a", func(a *model.Agent) { a.SetCapabilities(nil) })
 		}, change: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
-			changeAgent(t, store, "agent-a", func(a *model.Agent) { a.SetCapabilities(wasmOnly) })
+			changeAgent(t, store, "agent-a", func(a *model.Agent) {
+				a.SetCapabilities([]model.RunnerCapability{containerRunner("runner", testFingerprint(t))})
+			})
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

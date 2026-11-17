@@ -39,7 +39,8 @@ type PlacementTarget struct {
 }
 
 // PlacementRunner preserves advertised registration order, which is the SDK's
-// selection order. Eligibility describes workload/labels, not backend health.
+// selection order. Eligibility describes the workload type, the runner labels
+// and the runner's schema (whether the body fits it), not backend health.
 type PlacementRunner struct {
 	Name          string
 	Labels        map[string]string
