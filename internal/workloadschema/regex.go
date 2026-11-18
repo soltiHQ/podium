@@ -104,16 +104,38 @@ func (b *regexBounds) compile(text string) (*pattern, error) {
 // Go's parser does: one that the parser refuses too.
 var errUnreadable = errors.New("is a regular expression that Compile cannot read")
 
-// scanPattern reads a pattern as Go's parser reads it, as far as what parsing
-// builds goes, and counts its Unicode class escapes: \p and \P, with a name
-// in braces or of one letter, inside a class and outside. It refuses an
-// inline flag group, (? followed by a flag (i, m, s, U) or by -, as
-// (?flags) and (?flags:...) begin: JSON Schema's patterns, ECMA-262, have
-// none. Groups that only group or name, (?:, (?P<name> and (?<name>, are kept,
-// and so is text that only looks like a flag group: inside a class, after a
-// backslash, or inside \Q...\E. It refuses a pattern it cannot read, which
-// Go's parser refuses as well.
+// scanPattern bounds what a pattern makes Go's parser build, and counts its
+// Unicode class escapes (\p, \P, with a name in braces or of one letter), as
+// the larger of two counts: that of the structural scan (scanStructure), which
+// reads the pattern as Go's parser does, and that of the raw text, which no
+// misreading can desync. It refuses an inline flag group, (? followed by a
+// flag (i, m, s, U) or by -, as (?flags) and (?flags:...) begin: JSON Schema's
+// patterns, ECMA-262, have none. That is a search of the raw text too, so it
+// refuses such text inside a class, after a backslash and inside \Q...\E as
+// well, which Go reads as no flag group: it fails closed. Groups that only
+// group or name, (?:, (?P<name> and (?<name>, are kept. It refuses a pattern
+// it cannot read, which Go's parser refuses as well.
 func scanPattern(src string) (int, error) {
+	// The raw text, which no misreading of the syntax can hide from: any
+	// (? followed by a flag, wherever it sits, even where Go reads a class
+	// (fail closed); and every \p and \P, an upper bound on the Unicode
+	// classes (an escaped backslash before p counts too).
+	for i := 0; i+2 < len(src); i++ {
+		if strings.HasPrefix(src[i:], "(?") && strings.IndexByte("imsU-", src[i+2]) >= 0 {
+			return 0, fmt.Errorf("is a regular expression with an inline flag group, %s: JSON Schema's patterns have no inline flags", quote(src[i:i+3]))
+		}
+	}
+	raw := strings.Count(src, `\p`) + strings.Count(src, `\P`)
+	classes, err := scanStructure(src)
+	if err != nil {
+		return 0, err
+	}
+	return max(classes, raw), nil
+}
+
+// scanStructure is the structural scan of scanPattern: the Unicode classes
+// that the syntax, as Go reads it, holds.
+func scanStructure(src string) (int, error) {
 	classes := 0
 	for i := 0; i < len(src); {
 		switch {
@@ -139,8 +161,6 @@ func scanPattern(src string) (int, error) {
 			}
 			classes += n
 			i = end
-		case strings.HasPrefix(src[i:], "(?") && i+2 < len(src) && strings.IndexByte("imsU-", src[i+2]) >= 0:
-			return 0, fmt.Errorf("is a regular expression with an inline flag group, %s: JSON Schema's patterns have no inline flags", quote(src[i:i+3]))
 		default:
 			i++
 		}
@@ -188,8 +208,12 @@ func escapeEnd(src string, i int) (int, bool, bool) {
 
 // classEnd is where the class that begins at src[i] ends, as Go's parseClass
 // reads it, and the Unicode classes it holds. Its first ], after an optional
-// ^, is a literal; [:name:] is a POSIX class; an escape is read as escapeEnd
-// reads it. It reports false for a class it cannot read, or without its end.
+// ^, is a literal. An item is read as Go reads one: [:name:] (a POSIX class)
+// and \p, \P (a Unicode class) only at its start; otherwise a class
+// character, an escape or one rune, with an optional range to a second class
+// character, whose upper end is never a POSIX class or a Unicode class: there
+// [ is a plain character, and \p is an escape that Go refuses. It reports
+// false for a class it cannot read, or without its end.
 func classEnd(src string, i int) (int, int, bool) {
 	classes, t := 0, i+1
 	if t < len(src) && src[t] == '^' {
@@ -202,24 +226,38 @@ func classEnd(src string, i int) (int, int, bool) {
 				continue
 			}
 		}
-		if src[t] == '\\' {
-			end, class, ok := escapeEnd(src, t)
-			if !ok {
-				return 0, 0, false
-			}
-			if class {
-				classes++
-			}
+		end, class, ok := classChar(src, t)
+		if !ok {
+			return 0, 0, false
+		}
+		if class {
+			classes++
 			t = end
 			continue
 		}
-		_, size := utf8.DecodeRuneInString(src[t:])
-		t += size
+		t = end
+		if t+1 < len(src) && src[t] == '-' && src[t+1] != ']' { // a range: lo-hi
+			end, class, ok = classChar(src, t+1)
+			if !ok || class {
+				return 0, 0, false
+			}
+			t = end
+		}
 	}
 	if t >= len(src) {
 		return 0, 0, false
 	}
 	return t + 1, classes, true
+}
+
+// classChar is where the class character at src[t] ends: an escape, as
+// escapeEnd reads it, or one rune, and whether it is a Unicode class.
+func classChar(src string, t int) (int, bool, bool) {
+	if src[t] == '\\' {
+		return escapeEnd(src, t)
+	}
+	_, size := utf8.DecodeRuneInString(src[t:])
+	return t + size, false, true
 }
 
 // regexSize is the size of the program that Go compiles from a parsed regular

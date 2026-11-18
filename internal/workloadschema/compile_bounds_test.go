@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"regexp/syntax"
 	"runtime"
 	"strings"
@@ -223,6 +224,8 @@ func TestCompileRefusesInlineFlags(t *testing.T) {
 	for _, p := range []string{
 		`(?i)abc`, `(?m)^a$`, `(?s)a.b`, `(?U)a+`, `(?-i)a`, `(?i:a)b`, `a(?im)b`, `(?is:x)`, `(?U:a+)`, `(?-m:^a)`,
 		`^[a-z]+(?i)[a-z]*$`, `(?:x(?i)y)`,
+		// The raw text has (?i: refused wherever it sits, as an accepted over-refusal.
+		`^\(?i\)?$`, `[(?i)]`, `\Q(?i)\E`,
 	} {
 		c := compileBounded(t, p, onePattern(p))
 		if c.err == nil || !strings.Contains(c.err.Error(), "inline flag") {
@@ -230,7 +233,7 @@ func TestCompileRefusesInlineFlags(t *testing.T) {
 		}
 	}
 	for _, p := range []string{
-		`(?:ab)+`, `(?P<name>a+)`, `(?<name>a+)`, `^\(?i\)?$`, `[(?i)]`, `\Q(?i)\E`, `a\\(?:b)`,
+		`(?:ab)+`, `(?P<name>a+)`, `(?<name>a+)`, `a\\(?:b)`,
 	} {
 		if c := compileBounded(t, p, onePattern(p)); c.err != nil {
 			t.Errorf("Compile(%s): %v", p, c.err)
@@ -322,5 +325,54 @@ func TestCompileErrorsKeepTheirReasonAndCause(t *testing.T) {
 	var parse *syntax.Error
 	if err == nil || len(err.Error()) > maxMessageBytes || !errors.As(err, &parse) || parse.Code != syntax.ErrMissingParen {
 		t.Errorf("Compile of an unclosed group of 900 bytes = %v (%T), want at most %d bytes that wrap a *syntax.Error", err, err, maxMessageBytes)
+	}
+}
+
+// desyncPattern is a class that Go ends at its first ] after a range whose
+// upper end is [, with what follows read at the top level: the reviewer's
+// patterns, which a scan that read [: inside a range as a POSIX class would
+// skip to :], and miss what hides in between.
+func desyncPatterns() map[string]string {
+	x := string(rune(0x1E942))
+	fill := func(unit string, n int) string { return strings.Repeat(unit, n) }
+	return map[string]string{
+		"hidden (?i), folded ranges":   `[A-[:](?i)[` + fill("B-"+x, 168) + `]:]]`,
+		"hidden (?s)":                  `[A-[:](?s)[` + fill("B-"+x, 168) + `]:]]`,
+		"hidden (?m)":                  `[A-[:](?m)[` + fill("B-"+x, 168) + `]:]]`,
+		"hidden \\PC":                  `[A-[:][` + fill(`\PC`, 337) + `]:]]`,
+		"hidden \\pL":                  `[A-[:][` + fill(`\pL`, 337) + `]:]]`,
+		"POSIX class as the lower end": `[A-[:alpha:](?i)[` + fill("B-"+x, 167) + `]:]]`,
+	}
+}
+
+// TestCompileIsNotDesyncedByARangeEndingInABracket compiles the desync
+// patterns: each is refused, or compiled within the time and the bytes a
+// call may take. Sixteen of each, a schema of 16 KiB, too.
+func TestCompileIsNotDesyncedByARangeEndingInABracket(t *testing.T) {
+	for name, p := range desyncPatterns() {
+		if len(p) > maxPatternBytes {
+			t.Fatalf("%s: the test pattern is %d bytes", name, len(p))
+		}
+		compileBounded(t, name, onePattern(p))
+		ps := make([]string, 16)
+		for i := range ps {
+			ps[i] = p
+		}
+		compileBounded(t, name+", sixteen", manyPatterns(ps...))
+	}
+}
+
+// TestCompileTakesWhatGoParsesAfterARangeEndingInABracket compiles patterns
+// that Go parses, with a range whose upper end is [, which a scan that read a
+// POSIX class there refused as unreadable.
+func TestCompileTakesWhatGoParsesAfterARangeEndingInABracket(t *testing.T) {
+	x := string(rune(0x1E942))
+	for _, p := range []string{x + `[P-[:^digit:]\x{1E942}`, `[:><-[:alpha:]`} {
+		if _, err := regexp.Compile(p); err != nil {
+			t.Fatalf("Go does not compile %q: %v", p, err)
+		}
+		if c := compileBounded(t, p, onePattern(p)); c.err != nil {
+			t.Errorf("Compile(%q): %v", p, c.err)
+		}
 	}
 }

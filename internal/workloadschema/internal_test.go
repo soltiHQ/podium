@@ -80,13 +80,19 @@ func TestScanPatternReadsAsGoDoes(t *testing.T) {
 		{`\x{5B}\pL`, 1, ""}, // \x{5B} is "[", one escape
 		{`\x5B\pL`, 1, ""},
 		{`\0\pL\101\pN`, 2, ""}, // octal escapes
-		{`\\pL`, 0, ""},         // an escaped backslash, then "pL"
-		{`\Q\pL\E\pN`, 1, ""},   // \Q...\E is literal text
-		{`\Q\pL`, 0, ""},        // to the end, without \E
+		{`\\pL`, 1, ""},         // an escaped backslash, then "pL": the raw count is an upper bound
+		{`\Q\pL\E\pN`, 2, ""},   // \Q...\E is literal text, but counted in the raw text
+		{`\Q\pL`, 1, ""},
 		{`(?:a)(?P<n>b)(?<m>c)`, 0, ""},
-		{`^\(?i\)?$`, 0, ""}, // an escaped parenthesis, then "?i"
-		{`[(?i)]`, 0, ""},
-		{`\Q(?i)\E`, 0, ""},
+		{`^\(?i\)?$`, 0, "inline flag"}, // the raw text has (?i: an accepted over-refusal
+		{`[(?i)]`, 0, "inline flag"},
+		{`\Q(?i)\E`, 0, "inline flag"},
+		{`[A-[:](?i)[B-` + x + `]:]]`, 0, "inline flag"}, // Go: the class [A-[:], then (?i)
+		{`[A-[:][\PC]:]]`, 1, ""},                        // Go: the class [A-[:], then \PC, then ]
+		{`[A-[:alpha:](?i)[`, 0, "inline flag"},
+		{x + `[P-[:^digit:]\x{1E942}`, 0, ""}, // Go reads [P-[:^digit:] as a class
+		{`[:><-[:alpha:]`, 0, ""},
+		{`[a-\pL]`, 0, "cannot read"}, // Go refuses \p as a range's end
 		{`(?i)a`, 0, "inline flag"},
 		{`a(?-m)b`, 0, "inline flag"},
 		{`(?s:.)`, 0, "inline flag"},
