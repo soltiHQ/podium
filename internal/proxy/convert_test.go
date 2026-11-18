@@ -52,7 +52,7 @@ func TestSpecToProtoSendsTheBodyAsAnExtension(t *testing.T) {
 		t.Fatalf("workload type = %s %s", w.GetApiVersion(), w.GetKind())
 	}
 	ext := w.GetExtension()
-	if ext == nil || w.GetSubprocess() != nil || w.GetContainer() != nil || w.GetWasm() != nil {
+	if ext == nil {
 		t.Fatalf("workload is not an extension: %v", w)
 	}
 	var got map[string]any
