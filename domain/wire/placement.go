@@ -37,7 +37,7 @@ func PlacementToREST(plan *model.PlacementPlan) restv1.SpecPlacement {
 			}
 			x.Runners = append(x.Runners, restv1.PlacementRunner{
 				Name: r.Name, Labels: labels, WorkloadMatch: r.WorkloadMatch,
-				LabelsMatch: r.LabelsMatch, Eligible: r.Eligible, Reason: r.Reason,
+				LabelsMatch: r.LabelsMatch, Eligible: r.Eligible, Reason: r.Reason, Detail: model.BoundPlacementDetail(r.Detail),
 			})
 		}
 		out.Targets = append(out.Targets, x)

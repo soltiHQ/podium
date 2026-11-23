@@ -6,14 +6,41 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/soltiHQ/control-plane/domain/enum"
+	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/internal/auth/identity"
 	"github.com/soltiHQ/control-plane/internal/storage"
+	"github.com/soltiHQ/control-plane/internal/workloadschema"
 )
 
+// handlerSchema is the workload schema the API fixture's catalog holds.
+const handlerSchema = `{"type":"object","required":["image"],"properties":{"image":{"type":"string"}},"additionalProperties":false}`
+
+// handlerFingerprint is the fingerprint of handlerSchema.
+var handlerFingerprint = func() string {
+	fp, err := workloadschema.Fingerprint([]byte(handlerSchema))
+	if err != nil {
+		panic(err)
+	}
+	return fp
+}()
+
 // validKind is the workload of a spec that passes validation.
-const validKind = `"kind_type":"subprocess","kind_config":{"mode":{"command":{"command":"echo"}}}`
+var validKind = `"workload":{"api_version":"solti.io/v1","kind":"Container","schema_fingerprint":"` + handlerFingerprint + `","body":{"image":"busybox"}}`
+
+// seedHandlerSchema puts handlerSchema into the catalog of the store.
+func seedHandlerSchema(t *testing.T, store storage.Storage) {
+	t.Helper()
+	entry, err := model.NewWorkloadSchema(handlerFingerprint, "solti.io/v1", "Container", []byte(handlerSchema), "agent-1", time.Unix(1700000000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertWorkloadSchema(context.Background(), entry); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // Endpoints that read a JSON body require Content-Type application/json, a
 // type an HTML form cannot send: anything else is 415 and changes nothing.
@@ -29,6 +56,7 @@ func TestDecodeJSONRequiresContentType(t *testing.T) {
 	} {
 		t.Run(e.method+" "+e.target, func(t *testing.T) {
 			f := newAPIFixture(t)
+			seedHandlerSchema(t, f.store)
 			f.user(t, "target")
 			f.spec(t, "spec-1")
 			for _, contentType := range []string{

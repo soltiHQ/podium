@@ -1,9 +1,12 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/segmentio/ksuid"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -122,6 +125,15 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 	if err == nil {
 		err = json.Unmarshal(raw, &fields)
 	}
+	// The workload body keeps its numbers exact: it is decoded with json.Number.
+	var sent struct {
+		Workload *restv1.Workload `json:"workload"`
+	}
+	if err == nil {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		err = dec.Decode(&sent)
+	}
 	if err != nil {
 		badBody(w, r, mode, err)
 		return
@@ -173,12 +185,9 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 
-	// Kind
-	if in.KindType != "" {
-		ts.SetKindType(enum.TaskKindType(in.KindType))
-	}
-	if in.KindConfig != nil {
-		ts.SetKindConfig(in.KindConfig)
+	// Workload
+	if wl := sent.Workload; wl != nil {
+		ts.SetWorkload(model.Workload{APIVersion: wl.APIVersion, Kind: wl.Kind, SchemaFingerprint: wl.SchemaFingerprint, Body: wl.Body})
 	}
 
 	// Lifecycle
@@ -231,6 +240,11 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 
 	if action == modeCreate {
 		if err := a.specSVC.Create(r.Context(), ts); err != nil {
+			var bad *spec.WorkloadError
+			if errors.As(err, &bad) {
+				response.BadRequestMsg(w, r, mode, bad.Message)
+				return
+			}
 			a.failure(err).Msg("spec create failed")
 			response.FromError(w, r, mode, err)
 			return
@@ -243,7 +257,8 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		return
 	}
 
-	if err = a.specSVC.Upsert(r.Context(), ts, in.Version); err != nil {
+	changed, err := a.specSVC.Upsert(r.Context(), ts, in.Version)
+	if err != nil {
 		var conflict *spec.ConflictError
 		if errors.As(err, &conflict) {
 			a.logger.Warn().Str("spec", id).
@@ -251,6 +266,11 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 				Int("actual", conflict.Actual).
 				Msg("spec update rejected: version conflict")
 			response.Conflict(w, r, mode, conflict.Error())
+			return
+		}
+		var bad *spec.WorkloadError
+		if errors.As(err, &bad) {
+			response.BadRequestMsg(w, r, mode, bad.Message)
 			return
 		}
 		if errors.Is(err, storage.ErrInvalidArgument) {
@@ -261,9 +281,15 @@ func (a *API) specUpsert(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		response.StoreFailed(w, r, mode, err)
 		return
 	}
-	a.logger.Info().Str("spec", id).Msg("spec updated")
-	a.hub.Record(event.SpecUpdated, event.Payload{ID: id, Name: ts.Name()})
-	a.hub.Notify(event.RefreshSpecs)
+	// A save that changed nothing wrote nothing: there is nothing to record or
+	// to refresh, and it answers as any save does.
+	if changed {
+		a.logger.Info().Str("spec", id).Msg("spec updated")
+		a.hub.Record(event.SpecUpdated, event.Payload{ID: id, Name: ts.Name()})
+		a.hub.Notify(event.RefreshSpecs)
+	} else {
+		a.logger.Debug().Str("spec", id).Msg("spec save changed nothing")
+	}
 	// Mirror the create path: after Save Changes send the user back to
 	// the specs list. The edit form's Alpine submit handler honors the
 	// HX-Redirect header. The old htmx.Trigger(SpecUpdate) no longer
@@ -307,7 +333,9 @@ func (a *API) specForceDelete(w http.ResponseWriter, r *http.Request, mode httpc
 // of placement previews, a placement whose plan has none of them is refused
 // with 412 and nothing is written; the HX-Trigger refreshes the page's
 // placement panel so the operator reviews the new plan. Without If-Match (or
-// with "*") the current placement is deployed unchecked, as before.
+// with "*") no token is checked, but the deploy can still answer 412: when the
+// spec's workload or runner labels changed between the schema check and the
+// write (spec.ErrPlacementChanged).
 func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.RenderMode, id string) {
 	if err := a.specSVC.Deploy(r.Context(), id, planTokensFromIfMatch(r)); err != nil {
 		if errors.Is(err, spec.ErrPlacementChanged) {
@@ -320,6 +348,12 @@ func (a *API) specDeploy(w http.ResponseWriter, r *http.Request, mode httpctx.Re
 		if errors.As(err, &unsupported) {
 			a.logger.Warn().Str("spec", id).Strs("unsupported_agents", unsupported.Agents).Msg("spec deploy rejected")
 			response.BadRequestMsg(w, r, mode, "Deployment blocked: a target has no compatible runner. Review the placement preview.")
+			return
+		}
+		var incompatible *spec.IncompatibleTargetsError
+		if errors.As(err, &incompatible) {
+			a.logger.Warn().Str("spec", id).Strs("incompatible_agents", incompatible.Agents).Interface("reasons", incompatible.Reasons).Msg("spec deploy rejected")
+			response.Conflict(w, r, mode, incompatibleTargetsMessage(incompatible.Reasons))
 			return
 		}
 		var unknown *spec.UnknownTargetsError
@@ -367,4 +401,19 @@ func (a *API) specRollouts(w http.ResponseWriter, r *http.Request, mode httpctx.
 		Data:      items,
 		Component: contentSpec.Rollouts(items),
 	})
+}
+
+// incompatibleTargetsMessage names the placement reasons of a refused deploy,
+// without the agents or runners they belong to.
+func incompatibleTargetsMessage(reasons map[string]string) string {
+	seen := make(map[string]bool, len(reasons))
+	var distinct []string
+	for _, reason := range reasons {
+		if !seen[reason] {
+			seen[reason] = true
+			distinct = append(distinct, reason)
+		}
+	}
+	slices.Sort(distinct)
+	return "Deployment blocked: a target cannot take this workload (" + strings.Join(distinct, ", ") + "). Review the placement preview."
 }

@@ -71,7 +71,7 @@ templ Placement(plan restv1.SpecPlacement) {
 					}
 					if len(target.Runners)>0 {
 						<h5 class="text-xs font-medium mt-4">Runner registration order</h5>
-						<p class="text-xs text-muted mt-1">The first compatible registration is selected. Each runner must support the workload and match every runner label requirement.</p>
+						<p class="text-xs text-muted mt-1">The agent routes the workload to the first registration that supports it and matches every runner label requirement. Placement checks that registration's schema only: a later registration is never used for this workload.</p>
 						<ol class="space-y-2 mt-3">
 							for i,runner:=range target.Runners {
 								<li class="rounded border border-border p-3 space-y-1">
@@ -83,7 +83,10 @@ templ Placement(plan restv1.SpecPlacement) {
 											@visual.Badge("Excluded", visual.VariantMuted)
 										}
 									</div>
-									<p class="text-xs">{ placementRunnerReason(runner.Reason) }</p>
+									<p class="text-xs">{ placementRunnerReason(runner) }</p>
+									if runner.Detail!="" {
+										<p class="text-xs text-muted break-words">{ runner.Detail }</p>
+									}
 									<p class="text-xs text-muted">Workload match: { placementMatch(runner.WorkloadMatch) } · label match: { placementMatch(runner.LabelsMatch) }</p>
 									if len(runner.Labels)>0 {
 										<p class="text-[11px] font-mono text-muted break-words">{ placementLabels(runner.Labels) }</p>
@@ -118,17 +121,11 @@ func placementEligibilityLabel(t restv1.PlacementTarget) string {
 	if !t.Eligible {
 		return "Placement blocked"
 	}
-	if !t.InventoryKnown {
-		return "Runner inventory unknown"
-	}
 	return "Routing compatible"
 }
 func placementEligibilityVariant(t restv1.PlacementTarget) visual.Variant {
 	if !t.Eligible {
 		return visual.VariantDanger
-	}
-	if !t.InventoryKnown {
-		return visual.VariantMuted
 	}
 	return visual.VariantPrimary
 }
@@ -140,6 +137,8 @@ func placementBlockingReason(reason string) string {
 		return "At least one explicit target agent is missing. The deployment is blocked for every target."
 	case "unsupported_targets":
 		return "At least one target has no compatible runner. The deployment is blocked for every target."
+	case "incompatible_targets":
+		return "At least one target cannot take this workload: no runners reported, or the registration its agent routes the workload to cannot take the body. The deployment is blocked for every target."
 	default:
 		return reason
 	}
@@ -149,27 +148,44 @@ func placementTargetReason(reason string) string {
 	case "missing_agent":
 		return "The explicit agent ID is not present in discovery inventory."
 	case "inventory_unknown":
-		return "No runner inventory has been advertised. Desired state can be committed, but runner compatibility is unknown."
+		return "The agent has reported no runners, so nothing says it can run this workload. The deployment is blocked."
 	case "workload_unsupported":
 		return "The advertised runners do not support this workload group, version and kind."
 	case "runner_labels_mismatch":
 		return "The workload is supported, but no runner matches every required runner label."
+	case "schema_incompatible":
+		return "The registration the agent routes this workload to cannot take the body: see its runner below."
+	case "schema_pending":
+		return "The schema of the registration the agent routes this workload to has not reached the control plane yet."
+	case "schema_unpublished":
+		return "The registration the agent routes this workload to publishes no schema for it, so the body cannot be checked."
 	case "compatible_runner":
 		return "A compatible runner is advertised for this saved desired state."
 	default:
 		return reason
 	}
 }
-func placementRunnerReason(reason string) string {
-	switch reason {
+func placementRunnerReason(runner restv1.PlacementRunner) string {
+	switch runner.Reason {
+	case "":
+		if runner.WorkloadMatch && runner.LabelsMatch {
+			return "Not checked: the agent routes this workload to an earlier registration."
+		}
+		return ""
 	case "workload_unsupported":
 		return "This registration does not support the required workload."
 	case "runner_labels_mismatch":
 		return "This registration does not match all required runner labels."
+	case "schema_incompatible":
+		return "The body does not fit the schema this registration publishes, or podium cannot check it against that schema."
+	case "schema_pending":
+		return "The schema this registration publishes has not reached the control plane yet."
+	case "schema_unpublished":
+		return "This registration publishes no schema for the workload."
 	case "compatible":
-		return "This registration matches both workload and runner labels."
+		return "This registration matches the workload, its schema and runner labels."
 	default:
-		return reason
+		return runner.Reason
 	}
 }
 func placementMatch(match bool) string {

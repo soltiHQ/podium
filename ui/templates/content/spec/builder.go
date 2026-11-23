@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	restv1 "github.com/soltiHQ/control-plane/api/rest/v1"
+	"github.com/soltiHQ/control-plane/domain/model"
 	"github.com/soltiHQ/control-plane/ui/templates/jsexpr"
 )
 
@@ -31,19 +32,12 @@ var presets = []backoffPreset{
 // Admission is NOT exposed as a field: the CP reconciles desired state and
 // upgrades via ApplyTask, which force-replaces at the agent — the only policy
 // that converges safely. There is no user knob.
-//
-// Subprocess supports two modes, reflecting `solti.task.v1.SubprocessTask.mode`:
-//
-//   - command — a direct binary to exec with args.
-//   - script — a body of text (bash/python/node/custom interpreter)
-//     passed through the interpreter. The body is transmitted
-//     base64-encoded (UTF-8 bytes) on the wire.
-func builderXData(agentsEndpoint, seedJSON string) string {
+func builderXData(agentsEndpoint, typesEndpoint, seedJSON string) string {
 	presetsJSON, _ := json.Marshal(presets)
 	if seedJSON == "" {
 		seedJSON = "null"
 	}
-	return fmt.Sprintf("soltiSpecBuilder(%s,%s,%s)", seedJSON, presetsJSON, jsexpr.String(agentsEndpoint))
+	return fmt.Sprintf("soltiSpecBuilder(%s,%s,%s,%s)", seedJSON, presetsJSON, jsexpr.String(agentsEndpoint), jsexpr.String(typesEndpoint))
 }
 
 // builderSeed renders a Spec DTO as a JSON literal suitable for
@@ -63,10 +57,41 @@ func builderSeed(initial *restv1.Spec) string {
 	return string(b)
 }
 
-// builderInitExpr returns the Alpine x-init expression that loads active agents.
-func builderInitExpr() string { return "loadAgents()" }
+// builderInitExpr returns the Alpine x-init expression that loads the workload
+// type catalog and the active agents.
+func builderInitExpr() string { return "start()" }
+
+// shortFingerprint is the first 12 characters of a schema fingerprint: enough
+// to tell fingerprints apart, with the full value kept in a title attribute.
+func shortFingerprint(fp string) string {
+	if len(fp) <= 12 {
+		return fp
+	}
+	return fp[:12]
+}
 
 // Conflicts and failures keep the form intact for recovery.
 func builderSubmitExpr(endpoint, method string) string {
 	return fmt.Sprintf("submit(%s,%s)", jsexpr.String(endpoint), jsexpr.String(method))
+}
+
+// workloadType is "apiVersion/kind" of a spec's workload, empty for none.
+func workloadType(w *restv1.Workload) string {
+	if w == nil || w.Kind == "" {
+		return ""
+	}
+	return w.APIVersion + "/" + w.Kind
+}
+
+// workloadFingerprint is the schema fingerprint of a spec's workload.
+func workloadFingerprint(w *restv1.Workload) string {
+	if w == nil {
+		return ""
+	}
+	return w.SchemaFingerprint
+}
+
+// restWorkload converts a stored workload to its REST shape, for display.
+func restWorkload(w model.Workload) *restv1.Workload {
+	return &restv1.Workload{APIVersion: w.APIVersion, Kind: w.Kind, SchemaFingerprint: w.SchemaFingerprint}
 }

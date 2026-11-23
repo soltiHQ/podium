@@ -236,11 +236,15 @@ func TestEntityJSONRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		s.SetKindType(enum.TaskKindContainer)
-		s.SetKindConfig(map[string]any{
-			"image": "registry.example.net/job" + nul,
-			"args":  []any{"--shard" + nul, 1.5},
-			"env":   map[string]any{"MODE" + nul: "fast" + nul},
+		s.SetWorkload(model.Workload{
+			APIVersion:        "example.workloads/v1" + nul,
+			Kind:              "Job" + nul,
+			SchemaFingerprint: "f" + nul,
+			Body: map[string]any{
+				"image": "registry.example.net/job" + nul,
+				"args":  []any{"--shard" + nul, 1.5},
+				"env":   map[string]any{"MODE" + nul: "fast" + nul},
+			},
 		})
 		s.SetTimeoutMs(45000)
 		s.SetRestartType(enum.RestartOnFailure)
@@ -314,14 +318,14 @@ func TestEntityJSONRefusesWhatItCannotCarry(t *testing.T) {
 		{"a last-seen time at the Unix epoch", func(t *testing.T) ([]byte, error) {
 			return snapshot.MarshalAgentJSON(agent(t, func(a *model.Agent) { a.SetLastSeenAt(time.Unix(0, 0)) }))
 		}},
-		{"a spec config the message cannot represent", func(t *testing.T) ([]byte, error) {
+		{"a workload body the message cannot represent", func(t *testing.T) ([]byte, error) {
 			s, err := model.NewSpec("spec-a", "job", "slot")
 			if err != nil {
 				t.Fatal(err)
 			}
 			s.SetCreatedAt(created)
-			// JSON has no function: the message cannot carry the config.
-			s.SetKindConfig(map[string]any{"hook": func() {}})
+			// JSON has no function: the message cannot carry the body.
+			s.SetWorkload(model.Workload{APIVersion: "solti.io/v1", Kind: "Job", SchemaFingerprint: "f", Body: map[string]any{"hook": func() {}}})
 			return snapshot.MarshalSpecJSON(s)
 		}},
 		{"a session expiring after 2262", func(t *testing.T) ([]byte, error) {

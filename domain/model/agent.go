@@ -159,8 +159,10 @@ func (a *Agent) Arch() string { return a.arch }
 // Platform returns the agent's platform.
 func (a *Agent) Platform() string { return a.platform }
 
-// GroupVersionKind identifies an executable workload contract.
-type GroupVersionKind struct{ Group, Version, Kind string }
+// GroupVersionKind identifies an executable workload contract. SchemaFingerprint
+// is the fingerprint of the schema the agent runs this workload against; it is
+// empty when the agent declares none.
+type GroupVersionKind struct{ Group, Version, Kind, SchemaFingerprint string }
 
 // RunnerCapability advertises workload support and runner-routing labels.
 type RunnerCapability struct {

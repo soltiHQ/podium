@@ -65,9 +65,6 @@ func TestBuilderExpressionsQuoteEndpointAndMethodAsLiterals(t *testing.T) {
 	if got, want := builderSubmitExpr(hostile, hostile), "submit("+hostileLiteral+","+hostileLiteral+")"; got != want {
 		t.Errorf("got  %s\nwant %s", got, want)
 	}
-	if got := builderXData(hostile, `{"name":"x"}`); !strings.HasSuffix(got, ","+hostileLiteral+")") {
-		t.Errorf("agents endpoint is not a string literal: %s", got)
-	}
 }
 
 func TestBuilderPageEmbedsSpecAsJSONAndQuotesItsEndpoint(t *testing.T) {
@@ -93,25 +90,5 @@ func TestBuilderPageEmbedsSpecAsJSONAndQuotesItsEndpoint(t *testing.T) {
 	}
 	if strings.Contains(rest, "alert") {
 		t.Fatalf("spec ID leaked into code: %s", submit)
-	}
-}
-
-func TestPresetAndModeChipsQuoteTheirArgumentAsLiteral(t *testing.T) {
-	const value, literal = `a'b"c\d`, `"a'b\"c\\d"`
-
-	preset := render(t, presetButton(value, "Label"))
-	if got, want := attrValue(t, preset, "x-on:click"), "applyPreset("+literal+")"; got != want {
-		t.Errorf("preset click = %s, want %s", got, want)
-	}
-	if got, want := attrValue(t, preset, "x-bind:class"), "backoff_preset === "+literal+" ? "; !strings.HasPrefix(got, want) {
-		t.Errorf("preset class = %s, want prefix %s", got, want)
-	}
-
-	mode := render(t, subprocessModeChip(value, "Label"))
-	if got, want := attrValue(t, mode, "x-on:click"), "subprocess_mode = "+literal; got != want {
-		t.Errorf("mode click = %s, want %s", got, want)
-	}
-	if got, want := attrValue(t, mode, "x-bind:class"), "subprocess_mode === "+literal+" ? "; !strings.HasPrefix(got, want) {
-		t.Errorf("mode class = %s, want prefix %s", got, want)
 	}
 }

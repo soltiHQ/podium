@@ -50,10 +50,11 @@ func TestLabelSelectorsUnionExplicitAndAllLabels(t *testing.T) {
 		if id == "other" {
 			a.LabelAdd("env", "dev")
 		}
+		a.SetCapabilities([]model.RunnerCapability{containerRunner("runner", testFingerprint(t))})
 		_ = s.UpsertAgent(ctx, a)
 	}
 	ts.SetTargetLabels(map[string]string{"env": "prod", "team": "ops"})
-	_ = svc.Upsert(ctx, ts, 0)
+	_, _ = svc.Upsert(ctx, ts, 0)
 	if err := svc.Deploy(ctx, ts.ID(), nil); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +64,7 @@ func TestLabelSelectorsUnionExplicitAndAllLabels(t *testing.T) {
 	}
 	ts.SetTargets(nil)
 	ts.SetTargetLabels(nil)
-	_ = svc.Upsert(ctx, ts, 0)
+	_, _ = svc.Upsert(ctx, ts, 0)
 	_ = svc.Deploy(ctx, ts.ID(), nil)
 	all, _ = svc.RolloutsBySpec(ctx, ts.ID())
 	for _, ro := range all {
@@ -88,7 +89,7 @@ func TestUpsertUsesStoredCountersAndGenerationForDeploy(t *testing.T) {
 	ts.SetVersion(99)
 	ts.SetGeneration(88)
 	ts.SetName("rename")
-	if err := svc.Upsert(ctx, ts, 1); err != nil {
+	if _, err := svc.Upsert(ctx, ts, 1); err != nil {
 		t.Fatal(err)
 	}
 	if ts.Version() != 2 || ts.Generation() != 1 {
@@ -113,16 +114,16 @@ func TestDeployRejectsIncompatibleAdvertisedRunner(t *testing.T) {
 	if !errors.As(err, &unsupported) {
 		t.Fatalf("incompatible advertised runner accepted: %v", err)
 	}
-	ag.SetCapabilities([]model.RunnerCapability{{Name: "sub", Labels: map[string]string{"zone": "a"}, Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Subprocess"}}}})
+	ag.SetCapabilities([]model.RunnerCapability{{Name: "sub", Labels: map[string]string{"zone": "a"}, Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Container", SchemaFingerprint: testFingerprint(t)}}}})
 	_ = s.UpsertAgent(ctx, ag)
 	ts.SetRunnerLabels(map[string]string{"zone": "b"})
-	_ = svc.Upsert(ctx, ts, 0)
+	_, _ = svc.Upsert(ctx, ts, 0)
 	err = svc.Deploy(ctx, ts.ID(), nil)
 	if !errors.As(err, &unsupported) {
 		t.Fatal("runner selector ignored")
 	}
 	ts.SetRunnerLabels(map[string]string{"zone": "a"})
-	_ = svc.Upsert(ctx, ts, 0)
+	_, _ = svc.Upsert(ctx, ts, 0)
 	if err = svc.Deploy(ctx, ts.ID(), nil); err != nil {
 		t.Fatal(err)
 	}

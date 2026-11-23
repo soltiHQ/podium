@@ -72,6 +72,11 @@ func TestAgentChangedVisiblySince(t *testing.T) {
 			c[0].Workloads[0].Kind = "Wasm"
 			a.SetCapabilities(c)
 		}, true},
+		{"runner workload fingerprint", func(a *Agent) {
+			c := a.Capabilities()
+			c[0].Workloads[0].SchemaFingerprint = "aaaa"
+			a.SetCapabilities(c)
+		}, true},
 		{"runner workload added", func(a *Agent) {
 			c := a.Capabilities()
 			c[0].Workloads = append(c[0].Workloads, GroupVersionKind{Group: "solti.io", Version: "v1", Kind: "Wasm"})

@@ -28,6 +28,7 @@ var entityTables = []string{
 	"podium_specs",
 	"podium_users",
 	"podium_verifiers",
+	"podium_workload_schemas",
 }
 
 // latest is the version of the newest migration of the Postgres dialect.
@@ -82,7 +83,7 @@ func versionsNamed(database, podium int) string {
 }
 
 // TestMigrateCreatesSchema migrates an empty database: every table of the
-// schema, version 1 recorded, and the column types the store relies on.
+// schema, versions 1 and 2 recorded, and the column types the store relies on.
 func TestMigrateCreatesSchema(t *testing.T) {
 	db := pgtest.Fresh(t)
 	ctx := t.Context()
@@ -92,11 +93,11 @@ func TestMigrateCreatesSchema(t *testing.T) {
 	if got := tables(t, db); !slices.Equal(got, schemaTables) {
 		t.Errorf("tables %q, want %q", got, schemaTables)
 	}
-	if v, err := SchemaVersion(ctx, db); err != nil || v != 1 || latest(t) != 1 {
-		t.Errorf("SchemaVersion = %d, %v, the dialect's latest %d; want version 1", v, err, latest(t))
+	if v, err := SchemaVersion(ctx, db); err != nil || v != 2 || latest(t) != 2 {
+		t.Errorf("SchemaVersion = %d, %v, the dialect's latest %d; want version 2", v, err, latest(t))
 	}
-	if got := versions(t, db); !slices.Equal(got, []int{1}) {
-		t.Errorf("recorded versions %v, want [1]", got)
+	if got := versions(t, db); !slices.Equal(got, []int{1, 2}) {
+		t.Errorf("recorded versions %v, want [1 2]", got)
 	}
 
 	// An entity's strings and its body are bytea, which compares by bytes and
@@ -141,7 +142,7 @@ func TestMigrateCreatesSchema(t *testing.T) {
 }
 
 // TestMigrateIsIdempotent migrates a database again and again: one schema,
-// version 1 recorded once.
+// versions 1 and 2 recorded once.
 func TestMigrateIsIdempotent(t *testing.T) {
 	databaseURL := pgtest.NewDatabase(t)
 	for i := range 3 {
@@ -154,11 +155,11 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if got := tables(t, db); !slices.Equal(got, schemaTables) {
 		t.Errorf("tables %q, want %q", got, schemaTables)
 	}
-	if got := versions(t, db); !slices.Equal(got, []int{1}) {
-		t.Errorf("recorded versions %v, want [1]", got)
+	if got := versions(t, db); !slices.Equal(got, []int{1, 2}) {
+		t.Errorf("recorded versions %v, want [1 2]", got)
 	}
-	if v, err := SchemaVersion(t.Context(), db); err != nil || v != 1 {
-		t.Errorf("SchemaVersion = %d, %v; want 1", v, err)
+	if v, err := SchemaVersion(t.Context(), db); err != nil || v != 2 {
+		t.Errorf("SchemaVersion = %d, %v; want 2", v, err)
 	}
 }
 
@@ -245,8 +246,8 @@ func TestConcurrentMigrate(t *testing.T) {
 		if got := tables(t, pools[0]); !slices.Equal(got, schemaTables) {
 			t.Errorf("tables %q, want %q", got, schemaTables)
 		}
-		if got := versions(t, pools[0]); !slices.Equal(got, []int{1}) {
-			t.Errorf("recorded versions %v, want [1]", got)
+		if got := versions(t, pools[0]); !slices.Equal(got, []int{1, 2}) {
+			t.Errorf("recorded versions %v, want [1 2]", got)
 		}
 	})
 
@@ -276,8 +277,8 @@ func TestConcurrentMigrate(t *testing.T) {
 		if got := tables(t, db); !slices.Equal(got, schemaTables) {
 			t.Errorf("tables %q, want %q", got, schemaTables)
 		}
-		if got := versions(t, db); !slices.Equal(got, []int{1}) {
-			t.Errorf("recorded versions %v, want [1]", got)
+		if got := versions(t, db); !slices.Equal(got, []int{1, 2}) {
+			t.Errorf("recorded versions %v, want [1 2]", got)
 		}
 	})
 }
@@ -515,8 +516,8 @@ func TestLatestVersion(t *testing.T) {
 // podium_schema_migrations.
 func TestMigrationFiles(t *testing.T) {
 	files, err := migrationFiles(Postgres{}.Migrations())
-	if err != nil || len(files) != 1 || files[0].version != 1 || files[0].name != "0001_init.sql" {
-		t.Fatalf("the Postgres migrations: %+v, %v; want 0001_init.sql alone", files, err)
+	if err != nil || len(files) != 2 || files[0].version != 1 || files[0].name != "0001_init.sql" || files[1].version != 2 || files[1].name != "0002_workload_schemas.sql" {
+		t.Fatalf("the Postgres migrations: %+v, %v; want 0001_init.sql and 0002_workload_schemas.sql", files, err)
 	}
 	// The migrator creates podium_schema_migrations before the first migration,
 	// as it must lock the table; the first migration repeats the statement, so

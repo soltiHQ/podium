@@ -26,13 +26,22 @@ probes, Prometheus     --->  :8081   ops                   /       |           (
 - **Discovery.** Each agent syncs with podium over HTTP
   (`POST /api/v1/discovery/sync` on the discovery listener) or gRPC
   (`solti.discover.v1.DiscoverService/Sync`). A sync is the agent's heartbeat:
-  it carries the agent's endpoint, its runners with their labels and the kinds
-  of workload they support, and its token. The first sync of an agent ID enrolls
-  it. See [Discovery endpoint](internal/handler/README.md#discovery-endpoint).
+  it carries the agent's endpoint, its runners with their labels and the
+  workload types they accept (each with a schema fingerprint), and its token.
+  The first sync of an agent ID enrolls it. See
+  [Discovery endpoint](internal/handler/README.md#discovery-endpoint).
 - **Agent authentication.** With `agent_auth.require`, the default, every later
   sync of an enrolled agent must present its token, and podium presents the same
   token when it calls the agent. Closing the enrollment of new agent IDs is up
   to you: see [Provision agents](#provision-agents).
+- **Workload types.** podium owns the envelope of a spec: identity, slot,
+  targets, restart, interval, timeout, backoff, rollout, history and logs. The
+  body belongs to the agent. Each runner declares the workload types it accepts,
+  a group/version and a kind such as `gitlab.solti.io/v1` / `GroupPolicy`, with
+  a JSON Schema per type, which podium asks for by fingerprint and validates a
+  spec's body against. podium has no built-in task kinds: what an agent runs is
+  whatever it declares. See
+  [Workload types](internal/handler/README.md#workload-types-and-schemas).
 - **Specs and rollouts.** A task spec targets agents by ID and by label.
   Deploying it turns its placement into rollouts: an install or an update for
   each agent it targets, an uninstall for each agent it no longer targets. The
@@ -532,6 +541,19 @@ without what was written since.
   start them again, in one full stop and start, during which the cluster takes
   no write. An upgrade from an earlier version also has prerequisites:
   [Upgrading a raft node](internal/config/README.md#upgrading-a-raft-node).
+- **Workload types.** The version that brought them has no spec in the earlier
+  shape to migrate: a spec carries `workload` in place of the former built-in
+  task kind, and deployments were empty. Raft adds log operation 29 (the
+  workload schema upsert) and snapshot field 12: a replica of an earlier version
+  fails operation 29 and drops field 12, so upgrade every replica before agents
+  on the reworked SDK send schemas. A replica of an earlier version also drops
+  the spec's fields 18 to 21, its workload: a spec written or edited on one, in
+  raft or database mode, or replayed there from the raft log, loses its
+  workload, so write no specs until every replica runs this version. The
+  database mode adds migration `0002` (table `podium_workload_schemas`), which
+  only adds a table. Agents on the current SDK do not accept the tasks podium
+  now sends: see
+  [Agent communication](internal/proxy/README.md#transports-and-resource-identity).
 - **New permissions.** A version that adds permissions gives them to the
   built-in Admin role, which bootstrap reconciles at each memory start and at
   each raft leadership term. A user who holds every permission directly, not
@@ -929,9 +951,9 @@ together: see [Verification](ui/README.md#verification).
 | [internal/raft](internal/raft/README.md) | The runbook of a three-node cluster, transport security, membership, configuration drift, follower reads and writes, and a raft node's metrics and logs. |
 | [internal/bootstrap](internal/bootstrap/README.md) | The built-in roles and the first administrator. |
 | [internal/auth](internal/auth/README.md) | Logins, sessions, passwords, login rate limiting and device cookies. |
-| [internal/handler](internal/handler/README.md) | The REST API's routes and permissions, discovery, and the cluster API. |
+| [internal/handler](internal/handler/README.md) | The REST API's routes and permissions, workload types and their discovery, and the cluster API. |
 | [internal/server](internal/server/README.md) | The runners, the metrics, and the lifecycle and sync runners. |
-| [internal/proxy](internal/proxy/README.md) | How podium calls the agents. |
+| [internal/proxy](internal/proxy/README.md) | How podium calls the agents and sends them a workload. |
 | [internal/transport](internal/transport/README.md) | The HTTP and gRPC request path, client IPs, the leader hint and the TLS wiring. |
 | [ui](ui/README.md) | The web UI and its assets. |
 

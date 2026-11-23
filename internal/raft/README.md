@@ -437,6 +437,9 @@ until each node has taken two snapshots on it and log compaction has dropped its
 version-2 entries (a node keeps the last `trailing_logs` entries behind a
 snapshot, see "Log compaction"), and then upgrade.
 
+The version with workload types adds a log operation and a snapshot field that
+an earlier node fails and drops: see "Upgrade" in the top-level `README.md`.
+
 Earlier versions ran the transport on plain TCP, and a node on TLS and a node on
 plain TCP cannot reach each other (`TestRaftRefusesPeerWithoutClusterCert`): a
 first node upgraded with `raft.tls` would never follow the leader, and the

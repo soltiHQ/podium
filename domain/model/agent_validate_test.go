@@ -147,6 +147,26 @@ func TestNewAgentFromEnforcesCapabilityLimits(t *testing.T) {
 			p.Capabilities = []RunnerCapability{{Name: "first", Labels: map[string]string{}}, r}
 		}
 	}
+	// fingerprint is the i-th of distinct well-formed fingerprints.
+	fingerprint := func(i int) string { return fmt.Sprintf("%064x", i) }
+	const badFingerprint = "agent capabilities.runners[1].workloads[1].schema_fingerprint must be empty or 64 lowercase hex characters"
+	// distinct gives two runners: the first declares fingerprints 0 to a-1, the
+	// second a to a+b-1 and then again 0 to repeat-1.
+	distinct := func(a, b, repeat int) func(*AgentParams) {
+		declare := func(from, n int) []GroupVersionKind {
+			out := workloads(n)
+			for i := range out {
+				out[i].SchemaFingerprint = fingerprint(from + i)
+			}
+			return out
+		}
+		return func(p *AgentParams) {
+			p.Capabilities = []RunnerCapability{
+				{Name: "first", Workloads: declare(0, a)},
+				{Name: "second", Workloads: append(declare(a, b), declare(0, repeat)...)},
+			}
+		}
+	}
 	for _, tc := range []struct {
 		name string
 		edit func(*AgentParams)
@@ -179,6 +199,18 @@ func TestNewAgentFromEnforcesCapabilityLimits(t *testing.T) {
 		}), "agent capabilities.runners[1].workloads[1].api_version exceeds 317 bytes"},
 		{"kind at limit", second(func(r *RunnerCapability) { r.Workloads[1].Kind = text(128) }), ""},
 		{"kind over limit", second(func(r *RunnerCapability) { r.Workloads[1].Kind = text(129) }), "agent capabilities.runners[1].workloads[1].kind exceeds 128 bytes"},
+
+		// A schema fingerprint is empty, or the lowercase hex of a sha256 digest.
+		{"fingerprint of 64 lowercase hex", second(func(r *RunnerCapability) { r.Workloads[1].SchemaFingerprint = fingerprint(1) }), ""},
+		{"fingerprint in upper case", second(func(r *RunnerCapability) { r.Workloads[1].SchemaFingerprint = strings.ToUpper(fingerprint(0xabc)) }), badFingerprint},
+		{"fingerprint too short", second(func(r *RunnerCapability) { r.Workloads[1].SchemaFingerprint = fingerprint(1)[:63] }), badFingerprint},
+		{"fingerprint too long", second(func(r *RunnerCapability) { r.Workloads[1].SchemaFingerprint = fingerprint(1) + "0" }), badFingerprint},
+		{"fingerprint not hex", second(func(r *RunnerCapability) { r.Workloads[1].SchemaFingerprint = fingerprint(1)[:63] + "g" }), badFingerprint},
+		{"fingerprint of a few bytes", second(func(r *RunnerCapability) { r.Workloads[1].SchemaFingerprint = "aaaa" }), badFingerprint},
+		// At most 256 distinct fingerprints in all the runners; a repeated one counts once.
+		{"distinct fingerprints at limit", distinct(200, 56, 0), ""},
+		{"distinct fingerprints repeated", distinct(256, 0, 256), ""},
+		{"distinct fingerprints over limit", distinct(200, 57, 0), "agent capabilities declare more than 256 distinct schema fingerprints"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := AgentParams{ID: "agent-1", Name: "Agent", Endpoint: "http://10.0.0.5:8085", EndpointType: 2, APIVersion: 1}

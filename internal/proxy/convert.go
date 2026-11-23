@@ -2,15 +2,11 @@ package proxy
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
 	"regexp"
 	"strings"
-	"unicode/utf8"
-
-	"google.golang.org/protobuf/encoding/protojson"
 
 	taskv1 "github.com/soltiHQ/control-plane/api/gen/solti/task/v1"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -25,7 +21,8 @@ func TaskNameForSpec(id string) string {
 }
 
 // SpecToProto converts desired control-plane state to the current Task manifest.
-// KindConfig uses strict protobuf JSON for the selected built-in workload spec.
+// Every workload travels as an extension: its type and the JSON of its body,
+// which the agent's runner validates against its own schema.
 func SpecToProto(ts *model.Spec) (*taskv1.TaskManifest, error) {
 	if ts == nil {
 		return nil, fmt.Errorf("proxy: nil spec")
@@ -44,7 +41,7 @@ func SpecToProto(ts *model.Spec) (*taskv1.TaskManifest, error) {
 			return nil, fmt.Errorf("proxy: invalid runner label %q", key)
 		}
 	}
-	workload, err := buildTaskWorkload(ts.KindType(), ts.KindConfig())
+	workload, err := buildTaskWorkload(ts.Workload())
 	if err != nil {
 		return nil, err
 	}
@@ -76,118 +73,24 @@ func SpecToProto(ts *model.Spec) (*taskv1.TaskManifest, error) {
 	}, nil
 }
 
-func buildTaskWorkload(kt enum.TaskKindType, cfg map[string]any) (*taskv1.TaskWorkload, error) {
-	field, kind := "", ""
-	switch kt {
-	case enum.TaskKindSubprocess:
-		field, kind = "subprocess", "Subprocess"
-	case enum.TaskKindContainer:
-		field, kind = "container", "Container"
-	case enum.TaskKindWasm:
-		field, kind = "wasm", "Wasm"
-	default:
-		return nil, fmt.Errorf("proxy: unknown task kind %q", kt)
+// buildTaskWorkload sends the workload's type and the JSON of its body as an
+// extension task. A missing body is sent as an empty object.
+func buildTaskWorkload(w model.Workload) (*taskv1.TaskWorkload, error) {
+	if w.APIVersion == "" || w.Kind == "" {
+		return nil, fmt.Errorf("proxy: spec has no workload")
 	}
-	// Earlier Podium specs used an inline command/script oneof. Normalize only
-	// that exact shape; strict decoding still rejects unknown or mixed fields.
-	if kt == enum.TaskKindSubprocess {
-		if _, current := cfg["mode"]; !current {
-			_, command := cfg["command"]
-			_, script := cfg["script"]
-			if command != script {
-				normalized := make(map[string]any, len(cfg))
-				for key, value := range cfg {
-					normalized[key] = value
-				}
-				variant := "command"
-				if script {
-					variant = "script"
-				}
-				normalized["mode"] = map[string]any{variant: normalized[variant]}
-				delete(normalized, variant)
-				cfg = normalized
-			}
-		}
+	body := w.Body
+	if body == nil {
+		body = map[string]any{}
 	}
-	if kt == enum.TaskKindSubprocess {
-		if mode, ok := cfg["mode"].(map[string]any); ok {
-			if script, ok := mode["script"].(map[string]any); ok {
-				if _, old := script["wellKnown"]; old {
-					return nil, fmt.Errorf("proxy: legacy wellKnown script runtime requires explicit migration to an interpreter; inline-script and file-script arguments differ")
-				}
-				if _, old := script["well_known"]; old {
-					return nil, fmt.Errorf("proxy: legacy well_known script runtime requires explicit migration to an interpreter; inline-script and file-script arguments differ")
-				}
-				if _, old := script["custom"]; old {
-					return nil, fmt.Errorf("proxy: legacy custom script runtime requires explicit migration; its inline flag cannot be dropped when choosing a file interpreter")
-				}
-			}
-		}
-	}
-	if kt == enum.TaskKindContainer {
-		if command, exists := cfg["command"]; exists {
-			switch items := command.(type) {
-			case []string:
-				normalized := make(map[string]any, len(cfg))
-				for key, value := range cfg {
-					normalized[key] = value
-				}
-				if len(items) == 0 {
-					delete(normalized, "command")
-				} else {
-					normalized["command"] = map[string]any{"items": items}
-				}
-				cfg = normalized
-			case []any:
-				normalized := make(map[string]any, len(cfg))
-				for key, value := range cfg {
-					normalized[key] = value
-				}
-				if len(items) == 0 {
-					delete(normalized, "command")
-				} else {
-					normalized["command"] = map[string]any{"items": items}
-				}
-				cfg = normalized
-			}
-		}
-	}
-	data, err := json.Marshal(map[string]any{"apiVersion": "solti.io/v1", "kind": kind, field: cfg})
+	raw, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("proxy: marshal workload: %w", err)
+		return nil, fmt.Errorf("proxy: marshal workload body: %w", err)
 	}
-	var out taskv1.TaskWorkload
-	if err := (protojson.UnmarshalOptions{DiscardUnknown: false}).Unmarshal(data, &out); err != nil {
-		return nil, fmt.Errorf("proxy: invalid %s config: %w", kt, err)
-	}
-	switch kt {
-	case enum.TaskKindSubprocess:
-		sub := out.GetSubprocess()
-		if sub == nil || sub.GetMode() == nil || sub.GetMode().GetMode() == nil {
-			return nil, fmt.Errorf("proxy: subprocess requires mode.command or mode.script")
-		}
-		if cmd := sub.GetMode().GetCommand(); cmd != nil && strings.TrimSpace(cmd.GetCommand()) == "" {
-			return nil, fmt.Errorf("proxy: subprocess command must not be empty")
-		}
-		if script := sub.GetMode().GetScript(); script != nil {
-			if len(script.GetBody()) > ((2*1024*1024+2)/3)*4 {
-				return nil, fmt.Errorf("proxy: script body exceeds 2 MiB decoded limit")
-			}
-			body, err := base64.StdEncoding.DecodeString(script.GetBody())
-			if strings.TrimSpace(script.GetInterpreter()) == "" || err != nil || len(body) == 0 || len(body) > 2*1024*1024 || !utf8.Valid(body) {
-				return nil, fmt.Errorf("proxy: script requires an interpreter and non-empty UTF-8 base64 body up to 2 MiB")
-			}
-		}
-	case enum.TaskKindContainer:
-		if strings.TrimSpace(out.GetContainer().GetImage()) == "" {
-			return nil, fmt.Errorf("proxy: container image must not be empty")
-		}
-	case enum.TaskKindWasm:
-		if strings.TrimSpace(out.GetWasm().GetModule()) == "" {
-			return nil, fmt.Errorf("proxy: wasm module must not be empty")
-		}
-	}
-	return &out, nil
+	return &taskv1.TaskWorkload{
+		ApiVersion: w.APIVersion, Kind: w.Kind,
+		Spec: &taskv1.TaskWorkload_Extension{Extension: &taskv1.ExtensionTask{Spec: &taskv1.RawExtension{Raw: raw}}},
+	}, nil
 }
 
 // CreateSpecWirePreview returns the exact HTTP TaskManifest JSON sent to agents.
@@ -205,39 +108,9 @@ func TaskManifestJSON(manifest *taskv1.TaskManifest) ([]byte, error) {
 	}
 	spec := manifest.GetSpec()
 	w := spec.GetWorkload()
-	data, err := protojson.Marshal(w)
-	if err != nil {
-		return nil, err
-	}
-	var typed map[string]json.RawMessage
-	if err = json.Unmarshal(data, &typed); err != nil {
-		return nil, err
-	}
-	var config map[string]any
-	field := ""
-	switch w.GetSpec().(type) {
-	case *taskv1.TaskWorkload_Subprocess:
-		field = "subprocess"
-	case *taskv1.TaskWorkload_Container:
-		field = "container"
-	case *taskv1.TaskWorkload_Wasm:
-		field = "wasm"
-	default:
+	ext := w.GetExtension()
+	if ext == nil || len(ext.GetSpec().GetRaw()) == 0 {
 		return nil, fmt.Errorf("proxy: unsupported HTTP workload")
-	}
-	if err = json.Unmarshal(typed[field], &config); err != nil {
-		return nil, err
-	}
-	if field == "subprocess" {
-		// The SDK's HTTP default is true; a protobuf false must stay explicit.
-		config["failOnNonZero"] = w.GetSubprocess().GetFailOnNonZero()
-	}
-	if command, ok := config["command"].(map[string]any); ok && field == "container" {
-		items := command["items"]
-		if items == nil {
-			items = []string{}
-		}
-		config["command"] = items
 	}
 	restart := map[string]any{"type": restartPolicyString(spec.GetRestart())}
 	if spec.RestartIntervalMs != nil {
@@ -248,7 +121,7 @@ func TaskManifestJSON(manifest *taskv1.TaskManifest) ([]byte, error) {
 		return nil, fmt.Errorf("proxy: missing backoff")
 	}
 	desired := map[string]any{
-		"slot": spec.GetSlot(), "workload": map[string]any{"apiVersion": w.GetApiVersion(), "kind": w.GetKind(), "spec": config},
+		"slot": spec.GetSlot(), "workload": map[string]any{"apiVersion": w.GetApiVersion(), "kind": w.GetKind(), "spec": json.RawMessage(ext.GetSpec().GetRaw())},
 		"timeout": spec.GetTimeoutMs(), "restart": restart,
 		"backoff":   map[string]any{"jitter": jitterPolicyString(backoff.GetJitter()), "firstMs": backoff.GetFirstMs(), "maxMs": backoff.GetMaxMs(), "factor": backoff.GetFactor()},
 		"admission": admissionPolicyString(spec.GetAdmission()),

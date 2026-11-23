@@ -3,18 +3,21 @@
 Podium calls each agent through `AgentProxy`, using the endpoint, API version
 and bearer token registered by discovery. API v1 uses the current TaskService
 contract in `api/proto/solti/task/v1`; discovery capabilities describe named
-workload runners, their labels and supported group/version/kinds.
+workload runners, their labels and the workload types they declare
+(group/version, kind and schema fingerprint).
 
 ## Transports and resource identity
 
 `v1_grpc.go` sends generated protobuf messages. `v1_http.go` uses the SDK CRD
 JSON binding at `/apis/solti.io/v1/tasks`. Task HTTP JSON differs from protobuf
-JSON: workload fields live under `workload.spec`, restart is an object and
-container command is an optional array. `TaskManifestJSON` performs the explicit
-mapping. Ordered environment entries and duplicate keys retain their order;
-`failOnNonZero: false` stays explicit because the SDK HTTP default is true.
+JSON: the body lives under `spec`, restart is an object. One path serves every
+workload type: gRPC sends `TaskWorkload{api_version, kind, extension.raw}` with
+the body as the raw bytes, HTTP sends `{"apiVersion", "kind", "spec": body}`.
+Podium has no kind of its own to map. `TaskManifestJSON` performs the explicit
+mapping of the envelope. Agents on the current SDK do not accept this until the
+SDK rework.
 
-`SpecToProto` validates workload fields and policies before persistence or
+`SpecToProto` validates the envelope's policies before persistence or
 submission. A Podium spec receives a stable DNS-compatible resource name from
 its case-sensitive ID, and carries that original ID in an annotation. Applying a
 manifest commits named desired state; admission and runtime cancellation
@@ -185,14 +188,6 @@ under 16 bytes; a listing that hits it only through its page size is asked again
 smaller by the sync runner.
 
 ## Migration
-
-Legacy subprocess `command`/`script` envelopes are normalized to `mode` when
-inner fields already match the current schema. Legacy container command arrays
-preserve arguments; an empty array retains the image default. Unknown fields are
-rejected. Legacy script `wellKnown` and `custom.flag` runtimes require an
-explicit migration: old inline-script flags cannot safely be inferred as the new
-file-script interpreter arguments. The original saved configuration stays
-available to the user for that choice.
 
 Raft snapshot version 4 and the `SOLTI-CMD` command header/version 4 retain
 structured capabilities, durable terminal execution records and derived agent

@@ -35,6 +35,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/session"
 	"github.com/soltiHQ/control-plane/internal/service/spec"
 	"github.com/soltiHQ/control-plane/internal/service/user"
+	"github.com/soltiHQ/control-plane/internal/service/workload"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/http/middleware"
@@ -116,6 +117,7 @@ func newAPIFixtureLogging(t *testing.T, wrap func(storage.Storage) storage.Stora
 		agent.New(st, logger, agentOpts...),
 		spec.New(st, logger),
 		archive, pool, hub, logs, streams, allowAccess,
+		WithCatalog(workload.New(st, logger)),
 		WithCluster(clustersvc.New(raft, logger, clustersvc.WithFingerprint(fixtureFingerprint))),
 	)
 	mux := http.NewServeMux()
@@ -278,6 +280,8 @@ var routePermissionMatrix = []routePermission{
 	{method: http.MethodPost, pattern: "/api/v1/specs/{id}/deploy", id: "spec-1", perms: []enum.Permission{enum.SpecsDeploy}},
 	{method: http.MethodGet, pattern: "/api/v1/specs/{id}/sync", id: "spec-1", perms: []enum.Permission{enum.SpecsGet}},
 	{method: http.MethodGet, pattern: "/api/v1/specs/{id}/placement", id: "spec-1", perms: []enum.Permission{enum.SpecsGet, enum.AgentsGet}},
+	{method: http.MethodGet, pattern: "/api/v1/workload-types", perms: []enum.Permission{enum.SpecsGet}},
+	{method: http.MethodGet, pattern: "/api/v1/workload-types/", perms: []enum.Permission{enum.SpecsGet}},
 	{method: http.MethodGet, pattern: "/api/v1/dashboard"},
 	{method: http.MethodDelete, pattern: "/api/v1/dashboard/issues", query: "?kind=agent_inactive&entity=agent-1", perms: []enum.Permission{enum.AgentsEdit}},
 	{method: http.MethodDelete, pattern: "/api/v1/dashboard/issues", query: "?kind=sync_failed&entity=spec-1", perms: []enum.Permission{enum.SpecsEdit}},

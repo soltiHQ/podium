@@ -29,6 +29,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/metrics"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/service/agent"
+	"github.com/soltiHQ/control-plane/internal/service/workload"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/transport/clientip"
 	"github.com/soltiHQ/control-plane/internal/transport/grpc/interceptor"
@@ -133,11 +134,18 @@ type HTTPDiscovery struct {
 	clock       func() time.Time
 	requireAuth bool
 	observe     SyncObserver
+	catalog     *workload.Service
 }
 
 // Observe tells o how each sync ends, from now on. Call it before the handler
 // serves.
 func (h *HTTPDiscovery) Observe(o SyncObserver) { h.observe = o }
+
+// UseCatalog makes the handler take in the workload schemas that agents offer
+// and answer with the ones it wants, see workload.Service.Exchange. Call it
+// before the handler serves; without a catalog the handler neither stores nor
+// wants any schema.
+func (h *HTTPDiscovery) UseCatalog(c *workload.Service) { h.catalog = c }
 
 // NewHTTPDiscovery creates a new HTTP discovery handler.
 //
@@ -268,7 +276,7 @@ func (h *HTTPDiscovery) Sync(w http.ResponseWriter, r *http.Request) {
 	// The agent is written: the sync is done, whatever the answer below does.
 	h.observe.done(syncDone(getErr))
 
-	resp := &discoverv1.SyncResponse{Success: true}
+	resp := &discoverv1.SyncResponse{Success: true, WantSchemas: exchangeSchemas(r.Context(), h.catalog, in.GetId(), a, in.GetSchemas())}
 	respBytes, err := discoverySyncMarshal.Marshal(resp)
 	if err != nil {
 		h.logger.Error().Err(err).Msg("marshal SyncResponse")
@@ -290,11 +298,15 @@ type GRPCDiscovery struct {
 	clock       func() time.Time
 	requireAuth bool
 	observe     SyncObserver
+	catalog     *workload.Service
 }
 
 // Observe tells o how each sync ends, from now on. Call it before the handler
 // serves.
 func (g *GRPCDiscovery) Observe(o SyncObserver) { g.observe = o }
+
+// UseCatalog is HTTPDiscovery.UseCatalog.
+func (g *GRPCDiscovery) UseCatalog(c *workload.Service) { g.catalog = c }
 
 // NewGRPCDiscovery creates a new gRPC discovery handler.
 //
@@ -376,7 +388,21 @@ func (g *GRPCDiscovery) Sync(ctx context.Context, req *discoverv1.SyncRequest) (
 	}
 	recordSyncEvents(g.hub, req.GetId(), req.GetName(), existing, getErr, res)
 	g.observe.done(syncDone(getErr))
-	return &discoverv1.SyncResponse{Success: true}, nil
+	return &discoverv1.SyncResponse{Success: true, WantSchemas: exchangeSchemas(ctx, g.catalog, req.GetId(), a, req.GetSchemas())}, nil
+}
+
+// exchangeSchemas runs the schema exchange of a sync that wrote its agent, for
+// both transports: the fingerprints a still wants, after the schemas the agent
+// offered are taken in. A nil catalog wants nothing.
+func exchangeSchemas(ctx context.Context, catalog *workload.Service, agentID string, a *model.Agent, offered []*discoverv1.WorkloadSchema) []string {
+	if catalog == nil {
+		return nil
+	}
+	schemas := make([]workload.OfferedSchema, 0, len(offered))
+	for _, o := range offered {
+		schemas = append(schemas, workload.OfferedSchema{Fingerprint: o.GetFingerprint(), Schema: o.GetSchema()})
+	}
+	return catalog.Exchange(ctx, agentID, a.Capabilities(), schemas)
 }
 
 // syncFailure starts the log line of a sync that the store failed, with err on

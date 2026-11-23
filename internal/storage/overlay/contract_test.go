@@ -2,12 +2,15 @@ package overlay_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1033,6 +1036,57 @@ func readYourWrites() []rywCase {
 				return listingOrder(rows, executionIDs(t, "b", "e", "c", "a", "d")...)
 			},
 		},
+
+		// Workload schemas.
+		{
+			"GetWorkloadSchema/created", "GetWorkloadSchema",
+			func(t *testing.T, tx storage.Storage) error {
+				return tx.UpsertWorkloadSchema(t.Context(), workloadSchema(t, "a", 1))
+			},
+			func(t *testing.T, tx storage.Storage) error {
+				return present(tx.GetWorkloadSchema(t.Context(), workloadSchema(t, "a", 1).ID()))
+			},
+		},
+		{
+			"GetWorkloadSchema/replayed", "GetWorkloadSchema",
+			func(t *testing.T, tx storage.Storage) error {
+				ctx := t.Context()
+				return errors.Join(
+					tx.UpsertWorkloadSchema(ctx, workloadSchema(t, "b", 1)),
+					tx.UpsertWorkloadSchema(ctx, workloadSchema(t, "b", 9)),
+				)
+			},
+			func(t *testing.T, tx storage.Storage) error {
+				w, err := tx.GetWorkloadSchema(t.Context(), workloadSchema(t, "b", 1).ID())
+				if err != nil {
+					return err
+				}
+				return field("first-seen time of the first record, which a replay keeps", strconv.FormatInt(w.FirstSeenAt().UnixNano(), 10), strconv.FormatInt(minute(1).UnixNano(), 10))
+			},
+		},
+		{
+			"ListWorkloadSchemas/listing order", "ListWorkloadSchemas",
+			func(t *testing.T, tx storage.Storage) error {
+				ctx := t.Context()
+				return errors.Join(
+					tx.UpsertWorkloadSchema(ctx, workloadSchema(t, "a", 1)),
+					tx.UpsertWorkloadSchema(ctx, workloadSchema(t, "c", 2)),
+					tx.UpsertWorkloadSchema(ctx, workloadSchema(t, "d", 2)),
+				)
+			},
+			func(t *testing.T, tx storage.Storage) error {
+				rows, err := paged(func(o storage.ListOptions) (*storage.WorkloadSchemaListResult, error) {
+					return tx.ListWorkloadSchemas(t.Context(), o)
+				})
+				if err != nil {
+					return err
+				}
+				// c and d share a time, so the one with the smaller fingerprint comes first.
+				tied := []string{workloadSchema(t, "c", 2).ID(), workloadSchema(t, "d", 2).ID()}
+				slices.Sort(tied)
+				return listingOrder(rows, append(tied, workloadSchema(t, "a", 1).ID())...)
+			},
+		},
 	}
 }
 
@@ -1485,4 +1539,16 @@ func run(t *testing.T, uid string, created int) *model.ExecutionRecord {
 		t.Fatal(err)
 	}
 	return e
+}
+
+// workloadSchema returns the catalog entry of the schema named name, first seen
+// created minutes after the suite's epoch.
+func workloadSchema(t *testing.T, name string, created int) *model.WorkloadSchema {
+	t.Helper()
+	sum := sha256.Sum256([]byte("schema-" + name))
+	w, err := model.NewWorkloadSchema(hex.EncodeToString(sum[:]), "solti.io/v1", "Subprocess", []byte(`{"title":"`+name+`"}`), "agent-"+name, minute(created))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w
 }

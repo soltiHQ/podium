@@ -9,13 +9,19 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/internal/proxy"
+	//__DEL__
+	//__DEL__
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
+	"github.com/soltiHQ/control-plane/domain/wire"
 	"github.com/soltiHQ/control-plane/internal/service"
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
+
+// Option configures a Service.
+type Option func(*Service)
 
 // Service provides task spec management operations.
 type Service struct {
@@ -24,14 +30,18 @@ type Service struct {
 }
 
 // New creates a new task spec service.
-func New(store storage.Storage, logger zerolog.Logger) *Service {
+func New(store storage.Storage, logger zerolog.Logger, opts ...Option) *Service {
 	if store == nil {
 		panic("spec.Service: store is nil")
 	}
-	return &Service{
+	s := &Service{
 		logger: logger.With().Str("service", "specs").Logger(),
 		store:  store,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // List returns a page of task specs matching the query.
@@ -60,7 +70,7 @@ func (s *Service) Get(ctx context.Context, id string) (*model.Spec, error) {
 
 // Create persists a new spec.
 func (s *Service) Create(ctx context.Context, ts *model.Spec) error {
-	if err := validateSpec(ts); err != nil {
+	if err := s.validateSpec(ctx, ts); err != nil {
 		return err
 	}
 	if ts.DeletionRequested() {
@@ -84,20 +94,25 @@ func (s *Service) Create(ctx context.Context, ts *model.Spec) error {
 	return nil
 }
 
-// Upsert persists changes to an existing task spec. `Version` bumps on every save (edits counter).
+// Upsert persists changes to an existing task spec. `Version` bumps on every save that changes something (edits counter).
 // `Generation` bumps only if the **runtime** fields - those that end up in `SpecToProto`: actually changed;
-// metadata-only edits (rename, target-list) never rotate live tasks.
+// metadata-only edits (rename, target-list) never rotate live tasks. A save that changes nothing bumps neither and
+// writes nothing. changed reports whether the save changed something, so that a caller records and announces only a
+// save that did.
 //
 // `expectedVersion` is the optimistic-concurrency CAS token:
 // the client sends the version it last read, and Upsert rejects with a [ConflictError] if the stored version has advanced in the meantime.
 // Pass `0` to opt out of the check (background jobs with no rival writer); interactive UI flows should always pass the observed version.
-func (s *Service) Upsert(ctx context.Context, ts *model.Spec, expectedVersion int) error {
-	if err := validateSpec(ts); err != nil {
-		return err
+func (s *Service) Upsert(ctx context.Context, ts *model.Spec, expectedVersion int) (changed bool, err error) {
+	if err = s.validateSpec(ctx, ts); err != nil {
+		return false, err
 	}
 
-	var runtimeChanged bool
-	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
+	var (
+		runtimeChanged bool
+		unchanged      bool
+	)
+	err = s.store.WithTx(ctx, func(tx storage.Storage) error {
 		old, err := tx.GetSpec(ctx, ts.ID())
 		if err != nil {
 			return err
@@ -115,6 +130,12 @@ func (s *Service) Upsert(ctx context.Context, ts *model.Spec, expectedVersion in
 		ts.SetVersion(old.Version())
 		ts.SetGeneration(old.Generation())
 		ts.SetCreatedAt(old.CreatedAt())
+		if !runtimeChanged && old.ContentEquals(ts) {
+			// Nothing changed: neither counter moves and nothing is written.
+			unchanged = true
+			ts.SetUpdatedAt(old.UpdatedAt())
+			return nil
+		}
 		ts.IncrementVersion()
 		if runtimeChanged {
 			ts.BumpGeneration()
@@ -122,7 +143,11 @@ func (s *Service) Upsert(ctx context.Context, ts *model.Spec, expectedVersion in
 		return tx.UpsertSpec(ctx, ts)
 	})
 	if err != nil {
-		return err
+		return false, err
+	}
+
+	if unchanged {
+		return false, nil
 	}
 
 	s.logger.Debug().
@@ -131,7 +156,7 @@ func (s *Service) Upsert(ctx context.Context, ts *model.Spec, expectedVersion in
 		Int("generation", ts.Generation()).
 		Bool("runtime_changed", runtimeChanged).
 		Msg("spec updated")
-	return nil
+	return true, nil
 }
 
 // Delete soft-deletes a spec:
@@ -253,8 +278,8 @@ func (s *Service) RolloutsBySpec(ctx context.Context, specID string) ([]*model.R
 //
 // `planTokens` are the plan tokens of the placements the caller reviewed (see [Service.PreviewPlacement]). Unless it
 // is nil, the token of the plan recomputed inside the transaction must be one of them, else Deploy writes nothing and
-// returns [ErrPlacementChanged]; an empty list names no plan. Pass nil to deploy the current placement unchecked (API
-// clients that never preview).
+// returns [ErrPlacementChanged]; an empty list names no plan. Pass nil to skip the token check (API clients that never
+// preview). Deploy refuses targets that are not compatible.
 func (s *Service) Deploy(ctx context.Context, specID string, planTokens []string) error {
 	if specID == "" {
 		return storage.ErrInvalidArgument
@@ -280,12 +305,15 @@ func (s *Service) Deploy(ctx context.Context, specID string, planTokens []string
 		if planTokens != nil && !slices.Contains(planTokens, plan.Token) {
 			return ErrPlacementChanged
 		}
-		missing, unsupported := blockedTargets(plan)
-		if len(missing) > 0 {
-			return &UnknownTargetsError{Agents: missing}
+		blocked := blockedTargets(plan)
+		if len(blocked.missing) > 0 {
+			return &UnknownTargetsError{Agents: blocked.missing}
 		}
-		if len(unsupported) > 0 {
-			return &UnsupportedTargetsError{Agents: unsupported}
+		if len(blocked.unsupported) > 0 {
+			return &UnsupportedTargetsError{Agents: blocked.unsupported}
+		}
+		if len(blocked.incompatible) > 0 {
+			return &IncompatibleTargetsError{Agents: blocked.incompatible, Reasons: blocked.reasons}
 		}
 
 		for _, step := range steps {
@@ -342,17 +370,58 @@ func (s *Service) Deploy(ctx context.Context, specID string, planTokens []string
 	return nil
 }
 
-func validateSpec(ts *model.Spec) error {
+func (s *Service) validateSpec(ctx context.Context, ts *model.Spec) error {
 	if ts == nil || strings.TrimSpace(ts.Name()) == "" {
 		return fmt.Errorf("%w: spec name is required", storage.ErrInvalidArgument)
-	}
-	if _, err := proxy.SpecToProto(ts); err != nil {
-		return fmt.Errorf("%w: %v", storage.ErrInvalidArgument, err)
 	}
 	for k, v := range ts.TargetLabels() {
 		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
 			return fmt.Errorf("%w: target selector key/value required", storage.ErrInvalidArgument)
 		}
 	}
+	if err := s.validateWorkload(ctx, ts.Workload()); err != nil {
+		return err
+	}
+	// The envelope (slot, restart, timeout, backoff, runner labels) is what the
+	// proxy sends with the body; a spec it cannot convert is refused here.
+	if _, err := proxy.SpecToProto(ts); err != nil {
+		return fmt.Errorf("%w: %v", storage.ErrInvalidArgument, err)
+	}
 	return nil
+}
+
+// validateWorkload requires a workload and checks it against the catalog: the
+// fingerprint is known, podium does not refuse its schema, the body satisfies
+// the schema, and every number of the body can be stored as it is written. The
+// type is not compared with the one the catalog stored with the schema: two
+// types may share one schema, and the catalog keeps the first type it saw. A
+// refusal is a [WorkloadError].
+func (s *Service) validateWorkload(ctx context.Context, w model.Workload) error {
+	if w.APIVersion == "" || w.Kind == "" || w.SchemaFingerprint == "" {
+		return &WorkloadError{Message: "the workload requires api_version, kind and schema_fingerprint"}
+	}
+	if _, err := w.GVK(); err != nil {
+		return &WorkloadError{Message: err.Error()}
+	}
+	body := w.Body
+	if body == nil {
+		body = map[string]any{}
+	}
+	return numberRefusal(wire.CheckWorkloadBody(body))
+}
+
+// numberRefusal turns what the storage encoding refuses in a valid body into
+// the error a save returns: nil when it refuses nothing, a [WorkloadError] that
+// names the path of a number it cannot keep, as every storage mode refuses it,
+// the memory mode included.
+func numberRefusal(err error) error {
+	var nerr *wire.NumberError
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &nerr):
+		return &WorkloadError{Message: nerr.Error()}
+	default:
+		return &WorkloadError{Message: err.Error()}
+	}
 }

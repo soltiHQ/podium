@@ -26,6 +26,7 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/credential"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
+	"github.com/soltiHQ/control-plane/internal/workloadschema"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -276,13 +277,24 @@ func TestSameOriginMutationsAllowed(t *testing.T) {
 	if err := f.store.UpsertAgent(ctx, ag); err != nil {
 		t.Fatal(err)
 	}
+	const schema = `{"type":"object","required":["image"],"properties":{"image":{"type":"string"}},"additionalProperties":false}`
+	fp, err := workloadschema.Fingerprint([]byte(schema))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := model.NewWorkloadSchema(fp, "solti.io/v1", "Container", []byte(schema), "agent-1", time.Unix(1700000000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.UpsertWorkloadSchema(ctx, entry); err != nil {
+		t.Fatal(err)
+	}
 	for _, id := range []string{"spec-1", "spec-2"} {
 		ts, err := model.NewSpec(id, "Spec "+id, "slot-"+id)
 		if err != nil {
 			t.Fatal(err)
 		}
-		ts.SetKindType(enum.TaskKindSubprocess)
-		ts.SetKindConfig(map[string]any{"mode": map[string]any{"command": map[string]any{"command": "echo"}}})
+		ts.SetWorkload(model.Workload{APIVersion: "solti.io/v1", Kind: "Container", SchemaFingerprint: fp, Body: map[string]any{"image": "busybox"}})
 		if err := f.store.UpsertSpec(ctx, ts); err != nil {
 			t.Fatal(err)
 		}
@@ -305,7 +317,7 @@ func TestSameOriginMutationsAllowed(t *testing.T) {
 		{"agent labels", http.MethodPut, "/api/v1/agents/agent-1/labels", "json", `{"env":"prod"}`, http.StatusNoContent},
 		// The request reaches the agent, which knows no such task.
 		{"task cancel", http.MethodPost, "/api/v1/agents/agent-1/tasks/task-1/cancel", "htmx", "", http.StatusNotFound},
-		{"spec create", http.MethodPost, "/api/v1/specs", "json", `{"name":"New spec","slot":"new-slot","kind_type":"subprocess","kind_config":{"mode":{"command":{"command":"echo"}}}}`, http.StatusNoContent},
+		{"spec create", http.MethodPost, "/api/v1/specs", "json", `{"name":"New spec","slot":"new-slot","workload":{"api_version":"solti.io/v1","kind":"Container","schema_fingerprint":"` + fp + `","body":{"image":"busybox"}}}`, http.StatusNoContent},
 		{"spec save", http.MethodPut, "/api/v1/specs/spec-1", "json", `{"version":1,"name":"Renamed"}`, http.StatusNoContent},
 		{"spec deploy", http.MethodPost, "/api/v1/specs/spec-1/deploy", "htmx", "", http.StatusNoContent},
 		{"spec delete", http.MethodDelete, "/api/v1/specs/spec-1", "htmx", "", http.StatusNoContent},

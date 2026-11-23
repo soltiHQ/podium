@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -239,10 +240,10 @@ func checkAllocated(t *testing.T, grew uint64) {
 }
 
 // A task is one item of a page, but it holds lists of its own: its conditions; the
-// args and env of its workload and the rules of its selector in its spec; the
-// labels of its metadata. An empty element takes two bytes on the wire and about a
-// hundred on the heap, so one task can hold a million of them, and a page of a
-// thousand tasks a thousand each. The proxy scans the wire bytes of every answer
+// labels and annotations of its metadata and the match expressions and match
+// labels of its runner selector in its spec. An empty element takes two bytes on
+// the wire and about a hundred on the heap, so one task can hold a million of
+// them, and a page of a thousand tasks a thousand each. The proxy scans the wire bytes of every answer
 // before it decodes them. It refuses a status at its 65th condition, a bound of the
 // task (ErrTooManyConditions), and the answer whose elements of every repeated
 // field and map in the tree add up past the budget (ErrTooManyElements).
@@ -250,8 +251,8 @@ func TestGRPCListTasksRefusesNestedElementFloodBeforeDecode(t *testing.T) {
 	oneTaskOfConditions := func(n int) []byte {
 		return flood(&taskv1.ListTasksResponse{}, n, "tasks", "status", "conditions")
 	}
-	oneTaskOfEnv := func(n int) []byte {
-		return flood(&taskv1.ListTasksResponse{}, n, "tasks", "spec", "workload", "subprocess", "env")
+	oneTaskOfLabels := func(n int) []byte {
+		return flood(&taskv1.ListTasksResponse{}, n, "tasks", "metadata", "labels")
 	}
 	for _, tc := range []struct {
 		name string
@@ -259,11 +260,12 @@ func TestGRPCListTasksRefusesNestedElementFloodBeforeDecode(t *testing.T) {
 		want func(t *testing.T, err, op error) // the refusal
 	}{
 		{"a task with a million empty conditions", oneTaskOfConditions(million), wantTooManyConditions},
-		{"a task with a million empty env entries in its spec", oneTaskOfEnv(million), wantTooManyElements},
-		{"a task with a million empty args in its spec", flood(&taskv1.ListTasksResponse{}, million, "tasks", "spec", "workload", "wasm", "args"), wantTooManyElements},
-		{"a task with a million labels", flood(&taskv1.ListTasksResponse{}, million, "tasks", "metadata", "labels"), wantTooManyElements},
+		{"a task with a million empty labels in its metadata", oneTaskOfLabels(million), wantTooManyElements},
+		{"a task with a million empty annotations in its metadata", flood(&taskv1.ListTasksResponse{}, million, "tasks", "metadata", "annotations"), wantTooManyElements},
+		{"a task with a million empty match expressions in its runner selector", flood(&taskv1.ListTasksResponse{}, million, "tasks", "spec", "runner_selector", "match_expressions"), wantTooManyElements},
+		{"a task with a million empty match labels in its runner selector", flood(&taskv1.ListTasksResponse{}, million, "tasks", "spec", "runner_selector", "match_labels"), wantTooManyElements},
 		{"a thousand tasks with a thousand empty conditions each", bytes.Repeat(oneTaskOfConditions(1000), 1000), wantTooManyConditions},
-		{"a thousand tasks with three hundred empty env entries each", bytes.Repeat(oneTaskOfEnv(300), 1000), wantTooManyElements},
+		{"a thousand tasks with three hundred empty labels each", bytes.Repeat(oneTaskOfLabels(300), 1000), wantTooManyElements},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := newRawAnswers(answers{list: tc.page}).proxy(t)
@@ -493,8 +495,8 @@ func TestGetTaskRefusesNestedElementFlood(t *testing.T) {
 		{"grpc/a million empty conditions", func(t *testing.T) AgentProxy {
 			return newRawAnswers(answers{get: flood(&taskv1.GetTaskResponse{}, million, "task", "status", "conditions")}).proxy(t)
 		}, wantTooManyConditions},
-		{"grpc/a million empty env entries", func(t *testing.T) AgentProxy {
-			return newRawAnswers(answers{get: flood(&taskv1.GetTaskResponse{}, million, "task", "spec", "workload", "container", "env")}).proxy(t)
+		{"grpc/a million empty labels", func(t *testing.T) AgentProxy {
+			return newRawAnswers(answers{get: flood(&taskv1.GetTaskResponse{}, million, "task", "metadata", "labels")}).proxy(t)
 		}, wantTooManyElements},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -675,20 +677,20 @@ func TestListTasksRefusesLongCursor(t *testing.T) {
 }
 
 // The budget refuses what no agent sends and nothing else. A page of a thousand
-// tasks, each at the cap of conditions with a hundred and fifty env entries, is
+// tasks, each at the cap of conditions with a hundred and fifty labels, is
 // 215000 elements, over four fifths of the budget, and decodes; so does an answer
 // of exactly the budget, at the cost the tests measure, and one element more is
 // refused.
 func TestCompliantAnswersNearTheBudgetStillDecode(t *testing.T) {
 	t.Run("grpc/a page of a thousand full tasks", func(t *testing.T) {
-		task := &taskv1.Task{Metadata: &taskv1.ObjectMeta{Name: "task", Uid: "u"}, Status: &taskv1.TaskStatus{}, Spec: &taskv1.TaskSpec{Workload: &taskv1.TaskWorkload{
-			Spec: &taskv1.TaskWorkload_Subprocess{Subprocess: &taskv1.SubprocessTask{}},
+		task := &taskv1.Task{Metadata: &taskv1.ObjectMeta{Name: "task", Uid: "u", Labels: map[string]string{}}, Status: &taskv1.TaskStatus{}, Spec: &taskv1.TaskSpec{Workload: &taskv1.TaskWorkload{
+			Spec: &taskv1.TaskWorkload_Extension{Extension: &taskv1.ExtensionTask{}},
 		}}}
 		for range MaxTaskConditions {
 			task.Status.Conditions = append(task.Status.Conditions, &taskv1.TaskCondition{Type: "T", Status: taskv1.ConditionStatus_CONDITION_STATUS_TRUE, Reason: "r"})
 		}
-		for range 150 {
-			task.Spec.Workload.GetSubprocess().Env = append(task.Spec.Workload.GetSubprocess().Env, &taskv1.KeyValue{Key: "k", Value: "v"})
+		for i := range 150 {
+			task.Metadata.Labels["k"+strconv.Itoa(i)] = "v"
 		}
 		// A thousand entries of the tasks field: the bytes of one, a thousand times.
 		wire := bytes.Repeat(marshal(t, &taskv1.ListTasksResponse{Tasks: []*taskv1.Task{task}}), 1000)
@@ -721,14 +723,14 @@ func TestCompliantAnswersNearTheBudgetStillDecode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A task of n empty env entries in its spec, with an identity.
-	taskOfEnv := func(n int) []byte {
+	// A task of n empty labels in its metadata, with an identity.
+	taskOfLabels := func(n int) []byte {
 		task := path(&taskv1.GetTaskResponse{}, "task")
-		inner := append(field(path(&taskv1.Task{}, "metadata")[0], meta), flood(&taskv1.Task{}, n, "spec", "workload", "subprocess", "env")...)
+		inner := append(field(path(&taskv1.Task{}, "metadata")[0], meta), flood(&taskv1.Task{}, n, "metadata", "labels")...)
 		return within(task, inner)
 	}
 	t.Run("grpc/an answer of exactly the budget", func(t *testing.T) {
-		p := newRawAnswers(answers{get: taskOfEnv(maxAnswerElements)}).proxy(t)
+		p := newRawAnswers(answers{get: taskOfLabels(maxAnswerElements)}).proxy(t)
 
 		var err error
 		grew := allocated(func() { _, err = p.GetTask(context.Background(), "task") })
@@ -739,7 +741,7 @@ func TestCompliantAnswersNearTheBudgetStillDecode(t *testing.T) {
 		}
 	})
 	t.Run("grpc/an answer one element over the budget", func(t *testing.T) {
-		p := newRawAnswers(answers{get: taskOfEnv(maxAnswerElements + 1)}).proxy(t)
+		p := newRawAnswers(answers{get: taskOfLabels(maxAnswerElements + 1)}).proxy(t)
 
 		_, err := p.GetTask(context.Background(), "task")
 
@@ -868,13 +870,13 @@ func TestScanElements(t *testing.T) {
 		getResponse  = (&taskv1.GetTaskResponse{}).ProtoReflect().Descriptor()
 		listResponse = (&taskv1.ListTasksResponse{}).ProtoReflect().Descriptor()
 		listRequest  = (&taskv1.ListTasksRequest{}).ProtoReflect().Descriptor()
-		// A task of n empty env entries in its spec, as the answer of GetTask.
+		// A task of n empty labels in its metadata, as the answer of GetTask.
 		taskOf = func(n int) []byte {
-			return flood(&taskv1.GetTaskResponse{}, n, "task", "spec", "workload", "subprocess", "env")
+			return flood(&taskv1.GetTaskResponse{}, n, "task", "metadata", "labels")
 		}
-		// A page of n tasks of perTask empty env entries each.
+		// A page of n tasks of perTask empty labels each.
 		tasks = func(n, perTask int) []byte {
-			return bytes.Repeat(flood(&taskv1.ListTasksResponse{}, perTask, "tasks", "spec", "workload", "subprocess", "env"), n)
+			return bytes.Repeat(flood(&taskv1.ListTasksResponse{}, perTask, "tasks", "metadata", "labels"), n)
 		}
 		// A task of n conditions in one status, as the answer of GetTask.
 		conditionsOf = func(n int) []byte { return flood(&taskv1.GetTaskResponse{}, n, "task", "status", "conditions") }

@@ -20,7 +20,7 @@ func CapabilitiesToProto(runners []model.RunnerCapability) *agentv1.AgentCapabil
 			if workload.Group != "" {
 				apiVersion = workload.Group + "/" + workload.Version
 			}
-			p.Workloads = append(p.Workloads, &agentv1.WorkloadType{ApiVersion: apiVersion, Kind: workload.Kind})
+			p.Workloads = append(p.Workloads, &agentv1.WorkloadType{ApiVersion: apiVersion, Kind: workload.Kind, SchemaFingerprint: workload.SchemaFingerprint})
 		}
 		out.Runners = append(out.Runners, p)
 	}
@@ -40,7 +40,7 @@ func CapabilitiesFromProto(in *agentv1.AgentCapabilities) []model.RunnerCapabili
 			if !found {
 				version, group = group, ""
 			}
-			r.Workloads = append(r.Workloads, model.GroupVersionKind{Group: group, Version: version, Kind: workload.GetKind()})
+			r.Workloads = append(r.Workloads, model.GroupVersionKind{Group: group, Version: version, Kind: workload.GetKind(), SchemaFingerprint: workload.GetSchemaFingerprint()})
 		}
 		out = append(out, r)
 	}

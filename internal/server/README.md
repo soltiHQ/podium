@@ -350,6 +350,17 @@ Failing work backs off by `tick_interval` × 2^(n−1), at most 5m (10s, 20s, 40
   pushes, the agent's task list can be listed within those bounds, with the last
   page starting inside `push_timeout`; an agent whose list cannot is not
   observed. A synced rollout without a task makes no call.
+- **Every push checks its target first.** Before each install or update, be it a
+  new generation, a retry or a reinstall that an observation queued, the runner
+  checks the target as placement does (`spec.CheckTarget`, see "Workload types
+  and schemas" in `internal/handler/README.md`): the runner the agent routes the
+  workload to, the first in declared order whose type and labels match, must
+  take the body, its schema read from the workload catalog outside any store
+  transaction. A target that is no longer compatible since the deploy gets no
+  call: the rollout is marked failed with `target not compatible: <reason>` and,
+  for a schema refusal, the runner's detail, cut to 1 KiB, and backs off as any
+  failed push. A task the agent runs is not touched, and one it lost is not
+  reinstalled.
 - **Reinstalls are not bounded by `push_timeout`.** After a complete listing,
   each rollout whose task is missing is queued for a reinstall by a write to the
   store, quick on the memory backend; in raft mode each write is a replicated

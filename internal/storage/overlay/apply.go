@@ -140,6 +140,12 @@ func applyOp(ctx context.Context, dst storage.Storage, op *raftv1.Op) error {
 		return dst.UpsertExecution(ctx, e)
 	case *raftv1.Op_ExecutionDelete:
 		return dst.DeleteExecution(ctx, v.ExecutionDelete)
+	case *raftv1.Op_WorkloadSchemaUpsert:
+		w, err := wire.WorkloadSchemaFromProto(v.WorkloadSchemaUpsert)
+		if err != nil {
+			return err
+		}
+		return dst.UpsertWorkloadSchema(ctx, w)
 	default:
 		return fmt.Errorf("%w: %T", wire.ErrUnknownOp, op.GetOp())
 	}

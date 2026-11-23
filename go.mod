@@ -6,6 +6,7 @@ require (
 	github.com/a-h/templ v0.3.1100
 	github.com/felixge/httpsnoop v1.1.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/gowebpki/jcs v1.0.2
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/raft v1.8.0
 	github.com/hashicorp/raft-boltdb/v2 v2.4.2

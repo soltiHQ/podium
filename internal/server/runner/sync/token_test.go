@@ -53,7 +53,7 @@ func TestOutboundUsesDerivedToken(t *testing.T) {
 			r.pool = pool
 			r.tokens = agentsvc.New(s, zerolog.Nop(), agentsvc.WithEnrollSecret(tc.secret))
 			pushed := seedRollout(t, s, "sp-pushed", "agent-a", enum.RolloutIntentInstall, "")
-			ag, err := model.NewAgentFrom(model.AgentParams{ID: "agent-a", Name: "agent-a", Endpoint: agent.URL, EndpointType: 2, APIVersion: 1})
+			ag, err := model.NewAgentFrom(model.AgentParams{ID: "agent-a", Name: "agent-a", Endpoint: agent.URL, EndpointType: 2, APIVersion: 1, Capabilities: seedCapabilities()})
 			if err != nil {
 				t.Fatal(err)
 			}

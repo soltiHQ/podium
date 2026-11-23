@@ -390,7 +390,7 @@ func sessionTimeFromUnixNano(ns int64, present bool) time.Time {
 
 // === Specs ===
 
-// SpecToProto serialises a model.Spec for Raft replication. KindConfig is
+// SpecToProto serialises a model.Spec for Raft replication. The workload body is
 // converted to google.protobuf.Struct; non-JSON-friendly values inside the
 // map (channels, functions) will fail here loudly.
 func SpecToProto(ts *model.Spec) (*raftv1.SpecMsg, error) {
@@ -406,37 +406,28 @@ func SpecToProto(ts *model.Spec) (*raftv1.SpecMsg, error) {
 		rl[k] = v
 	}
 	b := ts.Backoff()
-	// JSON normalization supports typed slices/maps from domain callers while
-	// retaining explicit errors for functions, channels and non-finite numbers.
-	raw, err := json.Marshal(ts.KindConfig())
-	if err != nil {
-		return nil, fmt.Errorf("wire: encode spec config: %w", err)
-	}
-	var normalized map[string]any
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	if err := decoder.Decode(&normalized); err != nil {
-		return nil, fmt.Errorf("wire: normalize spec config: %w", err)
-	}
-	if err := normalizeConfigNumbers(normalized); err != nil {
-		return nil, fmt.Errorf("wire: represent spec config: %w", err)
-	}
-	kc, err := structpb.NewStruct(normalized)
-	if err != nil {
-		return nil, fmt.Errorf("wire: represent spec config: %w", err)
+	w := ts.Workload()
+	var body *structpb.Struct
+	if w.Body != nil {
+		var err error
+		if body, err = configStruct(w.Body, "workload body"); err != nil {
+			return nil, err
+		}
 	}
 	return &raftv1.SpecMsg{
-		Id:                ts.ID(),
-		Name:              ts.Name(),
-		Slot:              ts.Slot(),
-		Version:           int32(ts.Version()),
-		Generation:        int32(ts.Generation()),
-		DeletionRequested: ts.DeletionRequested(),
-		KindType:          string(ts.KindType()),
-		KindConfig:        kc,
-		TimeoutMs:         ts.TimeoutMs(),
-		RestartType:       string(ts.RestartType()),
-		IntervalMs:        ts.IntervalMs(),
+		Id:                        ts.ID(),
+		Name:                      ts.Name(),
+		Slot:                      ts.Slot(),
+		Version:                   int32(ts.Version()),
+		Generation:                int32(ts.Generation()),
+		DeletionRequested:         ts.DeletionRequested(),
+		WorkloadApiVersion:        w.APIVersion,
+		WorkloadKind:              w.Kind,
+		WorkloadBody:              body,
+		WorkloadSchemaFingerprint: w.SchemaFingerprint,
+		TimeoutMs:                 ts.TimeoutMs(),
+		RestartType:               string(ts.RestartType()),
+		IntervalMs:                ts.IntervalMs(),
 		Backoff: &raftv1.BackoffMsg{
 			Jitter:  string(b.Jitter),
 			FirstMs: b.FirstMs,
@@ -451,6 +442,30 @@ func SpecToProto(ts *model.Spec) (*raftv1.SpecMsg, error) {
 	}, nil
 }
 
+// configStruct converts a JSON-compatible map to a protobuf Struct. JSON
+// normalization supports typed slices and maps from domain callers while
+// retaining explicit errors for functions, channels and non-finite numbers.
+func configStruct(m map[string]any, what string) (*structpb.Struct, error) {
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return nil, fmt.Errorf("wire: encode %s: %w", what, err)
+	}
+	var normalized map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&normalized); err != nil {
+		return nil, fmt.Errorf("wire: normalize %s: %w", what, err)
+	}
+	if err := normalizeConfigNumbers(normalized, ""); err != nil {
+		return nil, fmt.Errorf("wire: represent %s: %w", what, err)
+	}
+	out, err := structpb.NewStruct(normalized)
+	if err != nil {
+		return nil, fmt.Errorf("wire: represent %s: %w", what, err)
+	}
+	return out, nil
+}
+
 // SpecFromProto reconstructs a model.Spec from its Raft representation.
 func SpecFromProto(p *raftv1.SpecMsg) (*model.Spec, error) {
 	if p == nil {
@@ -460,8 +475,14 @@ func SpecFromProto(p *raftv1.SpecMsg) (*model.Spec, error) {
 	if err != nil {
 		return nil, err
 	}
-	ts.SetKindType(enum.TaskKindType(p.GetKindType()))
-	ts.SetKindConfig(p.GetKindConfig().AsMap())
+	if p.GetWorkloadApiVersion() != "" || p.GetWorkloadKind() != "" || p.GetWorkloadSchemaFingerprint() != "" || p.GetWorkloadBody() != nil {
+		ts.SetWorkload(model.Workload{
+			APIVersion:        p.GetWorkloadApiVersion(),
+			Kind:              p.GetWorkloadKind(),
+			SchemaFingerprint: p.GetWorkloadSchemaFingerprint(),
+			Body:              p.GetWorkloadBody().AsMap(),
+		})
+	}
 	ts.SetTimeoutMs(p.GetTimeoutMs())
 	ts.SetRestartType(enum.RestartType(p.GetRestartType()))
 	ts.SetIntervalMs(p.GetIntervalMs())
@@ -532,3 +553,24 @@ func RolloutFromProto(p *raftv1.RolloutMsg) (*model.Rollout, error) {
 // ErrUnknownOp is returned by raft FSM Apply when the oneof variant carried
 // in raftv1.Op is not recognised.
 var ErrUnknownOp = fmt.Errorf("wire: unknown op variant")
+
+// WorkloadSchemaToProto encodes a catalog entry as raft's message.
+func WorkloadSchemaToProto(w *model.WorkloadSchema) *raftv1.WorkloadSchemaMsg {
+	return &raftv1.WorkloadSchemaMsg{
+		Fingerprint:   w.ID(),
+		ApiVersion:    w.APIVersion(),
+		Kind:          w.Kind(),
+		Schema:        w.Schema(),
+		FirstSeenAtNs: w.FirstSeenAt().UnixNano(),
+		FirstAgentId:  w.FirstAgentID(),
+	}
+}
+
+// WorkloadSchemaFromProto decodes raft's message; the model's constructor
+// checks it.
+func WorkloadSchemaFromProto(m *raftv1.WorkloadSchemaMsg) (*model.WorkloadSchema, error) {
+	if m == nil {
+		return nil, fmt.Errorf("workload schema: missing message")
+	}
+	return model.NewWorkloadSchema(m.GetFingerprint(), m.GetApiVersion(), m.GetKind(), m.GetSchema(), m.GetFirstAgentId(), timeFromUnixNano(m.GetFirstSeenAtNs()))
+}

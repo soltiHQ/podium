@@ -34,8 +34,8 @@ func TestPlacementPreservesRunnerOrderAndExplainsBatchBlock(t *testing.T) {
 }
 
 func TestPlacementMakesUnknownInventoryAndEmptyTargetsExplicit(t *testing.T) {
-	html := renderPlacement(t, restv1.SpecPlacement{DeployAllowed: true, Targets: []restv1.PlacementTarget{{AgentID: "legacy", Exists: true, Eligible: true, EligibilityReason: "inventory_unknown"}}})
-	if !strings.Contains(html, "Runner inventory unknown") || !strings.Contains(html, "runner compatibility is unknown") || strings.Contains(html, "Routing compatible") {
+	html := renderPlacement(t, restv1.SpecPlacement{Targets: []restv1.PlacementTarget{{AgentID: "silent", Exists: true, EligibilityReason: "inventory_unknown"}}})
+	if !strings.Contains(html, "Placement blocked") || !strings.Contains(html, "reported no runners") || strings.Contains(html, "Routing compatible") || strings.Contains(html, "legacy") {
 		t.Fatal(html)
 	}
 	html = renderPlacement(t, restv1.SpecPlacement{DeployAllowed: true, NoTargets: true})

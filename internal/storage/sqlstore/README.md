@@ -50,9 +50,10 @@ sqlstore/
 [migrations](../../../migrations/README.md)), creates one table per entity group
 — `podium_agents`, `podium_agent_credentials`, `podium_users`,
 `podium_credentials`, `podium_verifiers`, `podium_sessions`, `podium_roles`,
-`podium_specs`, `podium_rollouts`, `podium_executions` — and `podium_leader`
-(the database leadership's lease), `podium_replicas` (the replica registry),
-`podium_events` (the events every replica applies) and
+`podium_specs`, `podium_rollouts`, `podium_executions`,
+`podium_workload_schemas` (from `0002_workload_schemas.sql`) — and
+`podium_leader` (the database leadership's lease), `podium_replicas` (the
+replica registry), `podium_events` (the events every replica applies) and
 `podium_schema_migrations` (the migrations applied).
 
 An entity's row is its ID, its creation time, the columns its lookups, criteria
@@ -255,6 +256,10 @@ transaction, and so are its reads.
   (`model.NewExecutionRecord` of its parameters, its ID against its run's), then
   inserts only a new ID: `ON CONFLICT (id) DO NOTHING`. A replay is no error and
   changes nothing, its capture time included
+- **Workload schemas.** `UpsertWorkloadSchema` validates the entry as the model
+  does, then inserts only a new fingerprint (`ON CONFLICT (id) DO NOTHING`): the
+  first agent and first-seen time of a fingerprint stay those of its first
+  record. `GetWorkloadSchema` answers `ErrNotFound` for an unknown fingerprint
 - **Scans.** A `Scan*` outside a transaction is one read-only REPEATABLE READ
   transaction on the database the routing picks; inside a transaction it reads
   that transaction. It returns the rows in the listing order, nil when none

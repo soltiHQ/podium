@@ -35,6 +35,10 @@ const (
 	// labelSpecs is how many specs, from the first, select agents by label. The
 	// rest list agents by ID.
 	labelSpecs = 10
+
+	// subprocessFingerprint is the schema fingerprint every subprocess runner
+	// declares and every spec carries, so placement finds them compatible.
+	subprocessFingerprint = "5d1b0c8e2f4a6b7c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e"
 )
 
 var (
@@ -103,7 +107,7 @@ func AgentParams(i int) model.AgentParams {
 			{
 				Name:      "subprocess",
 				Labels:    map[string]string{"pool": "general", "zone": zones[i%len(zones)]},
-				Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Subprocess"}},
+				Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Subprocess", SchemaFingerprint: subprocessFingerprint}},
 			},
 			{
 				Name:      "container",
@@ -153,7 +157,12 @@ func newSpec(j int) (*model.Spec, error) {
 	if err != nil {
 		return nil, err
 	}
-	ts.SetKindConfig(map[string]any{"command": map[string]any{"command": "/usr/local/bin/job", "args": []any{"--shard", fmt.Sprint(j)}}})
+	ts.SetWorkload(model.Workload{
+		APIVersion:        "solti.io/v1",
+		Kind:              "Subprocess",
+		SchemaFingerprint: subprocessFingerprint,
+		Body:              map[string]any{"command": "/usr/local/bin/job", "args": []any{"--shard", fmt.Sprint(j)}},
+	})
 	if j < labelSpecs {
 		selector := map[string]string{"env": "prod"}
 		if j > 0 {

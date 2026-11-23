@@ -75,9 +75,13 @@ templ Cards(items []*model.Spec) {
 						{ ts.ID() }
 					</div>
 
+					<div class="text-[11px] font-mono text-muted" title={ ts.Workload().SchemaFingerprint }>
+						{ shortFingerprint(ts.Workload().SchemaFingerprint) }
+					</div>
+
 					<div class="flex items-center gap-1.5 flex-wrap">
 						@visual.Badge(ts.Slot(), visual.VariantPrimary)
-						@visual.Badge(string(ts.KindType()), visual.VariantSecondary)
+						@visual.Badge(workloadType(restWorkload(ts.Workload())), visual.VariantSecondary)
 						if len(ts.Targets()) > 0 {
 							@visual.Badge(fmt.Sprintf("%d targets", len(ts.Targets())), visual.VariantMuted)
 						}

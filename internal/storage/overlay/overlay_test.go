@@ -46,7 +46,7 @@ func TestOverlayRefusesWhatApplyRefuses(t *testing.T) {
 	undatedRollout := rollout(t, "spec-d", "agent-d", 1)
 	undatedRollout.SetCreatedAt(time.Time{})
 	unencodable := spec(t, "spec-a", 1)
-	unencodable.SetKindConfig(map[string]any{"channel": make(chan int)})
+	unencodable.SetWorkload(model.Workload{APIVersion: "solti.io/v1", Kind: "Job", SchemaFingerprint: "f", Body: map[string]any{"channel": make(chan int)}})
 	again := session(t, "sess-b", "user-b", "cred-b", 3)
 	if err := again.RotateRefreshAt([]byte("replaced"), minute(9), minute(4)); err != nil {
 		t.Fatal(err)

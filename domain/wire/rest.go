@@ -19,7 +19,7 @@ func AgentToREST(a *model.Agent) restv1.Agent {
 	for _, c := range a.Capabilities() {
 		workloads := make([]restv1.WorkloadGVK, 0, len(c.Workloads))
 		for _, gvk := range c.Workloads {
-			workloads = append(workloads, restv1.WorkloadGVK{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind})
+			workloads = append(workloads, restv1.WorkloadGVK{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind, SchemaFingerprint: gvk.SchemaFingerprint})
 		}
 		caps = append(caps, restv1.RunnerCapability{Name: c.Name, Labels: c.Labels, Workloads: workloads})
 	}
@@ -130,9 +130,6 @@ func SpecToREST(ts *model.Spec) restv1.Spec {
 		Generation:        ts.Generation(),
 		DeletionRequested: ts.DeletionRequested(),
 
-		KindType:   string(ts.KindType()),
-		KindConfig: ts.KindConfig(),
-
 		TimeoutMs:      ts.TimeoutMs(),
 		IntervalMs:     ts.IntervalMs(),
 		BackoffFirstMs: ts.Backoff().FirstMs,
@@ -148,6 +145,9 @@ func SpecToREST(ts *model.Spec) restv1.Spec {
 
 		CreatedAt: ts.CreatedAt().Format(time.RFC3339),
 		UpdatedAt: ts.UpdatedAt().Format(time.RFC3339),
+	}
+	if w := ts.Workload(); !w.IsZero() {
+		out.Workload = &restv1.Workload{APIVersion: w.APIVersion, Kind: w.Kind, SchemaFingerprint: w.SchemaFingerprint, Body: w.Body}
 	}
 	if p, err := proxy.SpecToProto(ts); err == nil {
 		if preview, perr := proxy.CreateSpecWirePreview(p); perr == nil && len(preview) > 0 {

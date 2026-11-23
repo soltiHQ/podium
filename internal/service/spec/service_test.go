@@ -20,6 +20,7 @@ func mkService(t *testing.T) (*Service, *inmemory.Store) {
 	t.Helper()
 	store := inmemory.New()
 	log := zerolog.New(io.Discard)
+	seedTestSchema(t, store)
 	return New(store, log), store
 }
 
@@ -30,7 +31,7 @@ func mkSpec(t *testing.T, svc *Service, store *inmemory.Store, id string, target
 		t.Fatalf("NewSpec: %v", err)
 	}
 	ts.SetTargets(targets)
-	ts.SetKindConfig(map[string]any{"command": map[string]any{"command": "echo"}})
+	ts.SetWorkload(testWorkload(t))
 	if err = store.UpsertSpec(context.Background(), ts); err != nil {
 		t.Fatalf("UpsertSpec: %v", err)
 	}
@@ -42,6 +43,7 @@ func mkSpec(t *testing.T, svc *Service, store *inmemory.Store, id string, target
 		if err != nil {
 			t.Fatalf("NewAgentFrom: %v", err)
 		}
+		ag.SetCapabilities([]model.RunnerCapability{containerRunner("runner", testFingerprint(t))})
 		if err = store.UpsertAgent(context.Background(), ag); err != nil {
 			t.Fatalf("UpsertAgent: %v", err)
 		}
@@ -55,7 +57,7 @@ func TestUpsertBumpsVersionAlwaysGenerationOnRuntimeChange(t *testing.T) {
 
 	renamed := ts.Clone()
 	renamed.SetName("new-name")
-	if err := svc.Upsert(context.Background(), renamed, 0); err != nil {
+	if _, err := svc.Upsert(context.Background(), renamed, 0); err != nil {
 		t.Fatalf("Upsert rename: %v", err)
 	}
 	afterRename, _ := store.GetSpec(context.Background(), ts.ID())
@@ -68,7 +70,7 @@ func TestUpsertBumpsVersionAlwaysGenerationOnRuntimeChange(t *testing.T) {
 
 	changed := afterRename.Clone()
 	changed.SetTimeoutMs(60_000)
-	if err := svc.Upsert(context.Background(), changed, 0); err != nil {
+	if _, err := svc.Upsert(context.Background(), changed, 0); err != nil {
 		t.Fatalf("Upsert runtime: %v", err)
 	}
 	afterRuntime, _ := store.GetSpec(context.Background(), ts.ID())
@@ -141,7 +143,7 @@ func TestDeployQueuesUpdateForStaleRollout(t *testing.T) {
 	_ = store.UpsertRollout(context.Background(), rA)
 
 	ts.SetTimeoutMs(60_000)
-	if err := svc.Upsert(context.Background(), ts, 0); err != nil {
+	if _, err := svc.Upsert(context.Background(), ts, 0); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
@@ -169,7 +171,7 @@ func TestDeployQueuesUninstallForRemovedTarget(t *testing.T) {
 	}
 
 	ts.SetTargets([]string{"agent-a"})
-	_ = svc.Upsert(context.Background(), ts, 0)
+	_, _ = svc.Upsert(context.Background(), ts, 0)
 	_ = svc.Deploy(context.Background(), "sp-1", nil)
 
 	rB, _ := store.GetRollout(context.Background(), model.RolloutID("sp-1", "agent-b"))
@@ -339,7 +341,7 @@ func TestUpsertRejectsStaleVersion(t *testing.T) {
 
 	first := ts.Clone()
 	first.SetName("first-save")
-	if err := svc.Upsert(context.Background(), first, 1); err != nil {
+	if _, err := svc.Upsert(context.Background(), first, 1); err != nil {
 		t.Fatalf("first Upsert: %v", err)
 	}
 	afterFirst, _ := store.GetSpec(context.Background(), "sp-1")
@@ -349,7 +351,7 @@ func TestUpsertRejectsStaleVersion(t *testing.T) {
 
 	stale := ts.Clone()
 	stale.SetName("stale-save")
-	err := svc.Upsert(context.Background(), stale, 1)
+	_, err := svc.Upsert(context.Background(), stale, 1)
 	if err == nil {
 		t.Fatal("stale Upsert must fail")
 	}
@@ -382,7 +384,7 @@ func TestUpsertRejectsTombstonedSpec(t *testing.T) {
 
 	mutated := ts.Clone()
 	mutated.SetName("trying to resurrect")
-	if err := svc.Upsert(context.Background(), mutated, 0); err == nil {
+	if _, err := svc.Upsert(context.Background(), mutated, 0); err == nil {
 		t.Fatal("Upsert on tombstoned spec must return an error")
 	}
 
@@ -399,7 +401,7 @@ func mkTokenFixture(t *testing.T) (*Service, *inmemory.Store, *model.Spec) {
 	svc, store := mkService(t)
 	ts := mkSpec(t, svc, store, "sp-token", nil)
 	ts.SetTargetLabels(map[string]string{"env": "prod"})
-	if err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
+	if _, err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
 		t.Fatal(err)
 	}
 	addMatchingAgent(t, store, "agent-a")
@@ -407,7 +409,7 @@ func mkTokenFixture(t *testing.T) (*Service, *inmemory.Store, *model.Spec) {
 }
 
 // addMatchingAgent stores an agent labelled env=prod whose runner "sub" runs
-// the fixture's Subprocess workload.
+// the fixture's Container workload.
 func addMatchingAgent(t *testing.T, store *inmemory.Store, id string) {
 	t.Helper()
 	a, err := model.NewAgent(id, "name-"+id, "http://"+id)
@@ -415,7 +417,7 @@ func addMatchingAgent(t *testing.T, store *inmemory.Store, id string) {
 		t.Fatal(err)
 	}
 	a.LabelAdd("env", "prod")
-	a.SetCapabilities([]model.RunnerCapability{{Name: "sub", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Subprocess"}}}})
+	a.SetCapabilities([]model.RunnerCapability{{Name: "sub", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Container", SchemaFingerprint: testFingerprint(t)}}}})
 	if err = store.UpsertAgent(context.Background(), a); err != nil {
 		t.Fatal(err)
 	}
@@ -554,7 +556,7 @@ func TestPlanTokenChangesWithTargets(t *testing.T) {
 
 	// A rename bumps the version only: generation stays, so it alone cannot tell.
 	ts.SetName("renamed")
-	if err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
+	if _, err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
 		t.Fatal(err)
 	}
 	if ts.Generation() != 1 {
@@ -565,14 +567,14 @@ func TestPlanTokenChangesWithTargets(t *testing.T) {
 	}
 }
 
-// wasmOnly is runner inventory that cannot run the fixture's Subprocess workload.
+// wasmOnly is runner inventory that cannot run the fixture's Container workload.
 var wasmOnly = []model.RunnerCapability{{Name: "wasm", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Wasm"}}}}
 
 // addMissingTarget adds an explicit target that discovery does not know.
 func addMissingTarget(t *testing.T, svc *Service, _ *inmemory.Store, ts *model.Spec) {
 	t.Helper()
 	ts.SetTargets([]string{"agent-x"})
-	if err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
+	if _, err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -609,11 +611,13 @@ func TestPlanTokenCoversEveryInput(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		// Unknown inventory, then a runner for another workload: only Eligible moves.
-		{name: "a target stops supporting the workload", before: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
+		// No inventory, then a runner for the workload: only Eligible moves.
+		{name: "a target starts supporting the workload", before: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
 			changeAgent(t, store, "agent-a", func(a *model.Agent) { a.SetCapabilities(nil) })
 		}, change: func(t *testing.T, _ *Service, store *inmemory.Store, _ *model.Spec) {
-			changeAgent(t, store, "agent-a", func(a *model.Agent) { a.SetCapabilities(wasmOnly) })
+			changeAgent(t, store, "agent-a", func(a *model.Agent) {
+				a.SetCapabilities([]model.RunnerCapability{containerRunner("runner", testFingerprint(t))})
+			})
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -633,7 +637,7 @@ func TestPlanTokenCoversEveryInput(t *testing.T) {
 		svc, store, ts := mkTokenFixture(t)
 		twin := mkSpec(t, svc, store, "sp-twin", nil)
 		twin.SetTargetLabels(ts.TargetLabels())
-		if err := svc.Upsert(context.Background(), twin, twin.Version()); err != nil {
+		if _, err := svc.Upsert(context.Background(), twin, twin.Version()); err != nil {
 			t.Fatal(err)
 		}
 		if previewToken(t, svc, twin.ID()) == previewToken(t, svc, ts.ID()) {
@@ -652,7 +656,7 @@ func TestDeployRefusesChangedPlacement(t *testing.T) {
 		}},
 		{name: "the spec is edited", change: func(t *testing.T, svc *Service, _ *inmemory.Store, ts *model.Spec) {
 			ts.SetTimeoutMs(60_000)
-			if err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
+			if _, err := svc.Upsert(context.Background(), ts, ts.Version()); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -719,7 +723,7 @@ func TestDeployAcceptsUnchangedPlacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	ts.SetTimeoutMs(60_000)
-	if err := svc.Upsert(ctx, ts, ts.Version()); err != nil {
+	if _, err := svc.Upsert(ctx, ts, ts.Version()); err != nil {
 		t.Fatal(err)
 	}
 	changeAgent(t, store, "agent-c", func(a *model.Agent) { a.LabelAdd("env", "dev") })

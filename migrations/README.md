@@ -29,6 +29,10 @@ them.
 - `0001_init.sql` creates `podium_schema_migrations` first, with the statement
   the migrator runs before it, which a test keeps alike.
 
+- `0002_workload_schemas.sql` adds `podium_workload_schemas`, the catalog of
+  workload schemas, one row per fingerprint. It only adds a table, so the
+  previous podium runs on the schema it leaves.
+
 - A file runs in one transaction, whoever applies it: no `BEGIN`, `COMMIT`,
   `SAVEPOINT` or other transaction control, and nothing that runs outside a
   transaction, as `CREATE INDEX CONCURRENTLY` or `VACUUM`.

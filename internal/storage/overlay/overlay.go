@@ -56,6 +56,8 @@ type Tx struct {
 	specs       writes[*model.Spec]
 	rollouts    writes[*model.Rollout]
 	executions  writes[*model.ExecutionRecord]
+
+	workloadSchemas writes[*model.WorkloadSchema]
 }
 
 // New starts a transaction over base.

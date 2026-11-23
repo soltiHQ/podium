@@ -42,6 +42,8 @@ type state struct {
 	specs       *GenericStore[*model.Spec]
 	rollouts    *GenericStore[*model.Rollout]
 	executions  *GenericStore[*model.ExecutionRecord]
+
+	workloadSchemas *GenericStore[*model.WorkloadSchema]
 }
 
 // New creates a new in-memory store with an empty state.
@@ -57,6 +59,8 @@ func New() *Store {
 		specs:       NewGenericStore[*model.Spec](),
 		rollouts:    NewGenericStore[*model.Rollout](),
 		executions:  NewGenericStore[*model.ExecutionRecord](),
+
+		workloadSchemas: NewGenericStore[*model.WorkloadSchema](),
 	}}
 }
 

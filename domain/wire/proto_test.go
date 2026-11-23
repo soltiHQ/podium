@@ -88,8 +88,7 @@ func TestUser_ProtoRoundtrip(t *testing.T) {
 
 func TestSpec_ProtoRoundtrip(t *testing.T) {
 	ts, _ := model.NewSpec("s1", "my-spec", "slot-a")
-	ts.SetKindType(enum.TaskKindType("subprocess"))
-	ts.SetKindConfig(map[string]any{"cmd": "echo"})
+	setBody(ts, map[string]any{"cmd": "echo"})
 	ts.SetTimeoutMs(1000)
 	ts.SetTargets([]string{"a1", "a2"})
 	ts.SetVersion(3)
@@ -113,51 +112,6 @@ func TestSpec_ProtoRoundtrip(t *testing.T) {
 	}
 	if len(back.Targets()) != 2 {
 		t.Fatalf("targets: %v", back.Targets())
-	}
-}
-
-// TestSpec_KindConfigNestedRoundtrip — typical POST /api/v1/specs comes
-// with KindConfig of shape {"env": {...}, "args": [...]} — after JSON
-// unmarshal it carries map[string]any / []any. Verify structpb passes it
-// through proto Marshal+Unmarshal without losing structure.
-func TestSpec_KindConfigNestedRoundtrip(t *testing.T) {
-	ts, _ := model.NewSpec("s1", "my-spec", "slot")
-	ts.SetKindConfig(map[string]any{
-		"cmd":    "echo",
-		"args":   []any{"hello", "world"},
-		"env":    map[string]any{"KEY": "value", "PORT": 8080},
-		"config": map[string]any{"nested": map[string]any{"deep": true}},
-	})
-	ts.SetCreatedAt(nowTruncated())
-
-	message, err := wire.SpecToProto(ts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := proto.Marshal(message)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	var msg raftv1.SpecMsg
-	if err := proto.Unmarshal(data, &msg); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	back, err := wire.SpecFromProto(&msg)
-	if err != nil {
-		t.Fatalf("FromProto: %v", err)
-	}
-
-	kc := back.KindConfig()
-	if kc["cmd"] != "echo" {
-		t.Fatalf("cmd lost: %v", kc["cmd"])
-	}
-	env, ok := kc["env"].(map[string]any)
-	if !ok || env["KEY"] != "value" {
-		t.Fatalf("nested env lost: %v", kc["env"])
-	}
-	// structpb stores all numbers as float64.
-	if port, _ := env["PORT"].(float64); port != 8080 {
-		t.Fatalf("nested numeric lost: %v (type %T)", env["PORT"], env["PORT"])
 	}
 }
 

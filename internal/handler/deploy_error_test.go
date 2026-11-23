@@ -39,7 +39,6 @@ func TestBlockedDeployReportsSafePlacementReasonWithoutSuccess(t *testing.T) {
 				t.Fatal(err)
 			}
 			saved.SetTargets([]string{"private-agent"})
-			saved.SetKindType(enum.TaskKindSubprocess)
 			if err := store.UpsertSpec(ctx, saved); err != nil {
 				t.Fatal(err)
 			}
@@ -109,6 +108,7 @@ func newDeployFixture(t *testing.T) *deployFixture {
 		t.Fatal(err)
 	}
 	saved.SetTargetLabels(map[string]string{"env": "prod"})
+	saved.SetWorkload(model.Workload{APIVersion: "solti.io/v1", Kind: "Container", SchemaFingerprint: "fixture-fp", Body: map[string]any{"image": "busybox"}})
 	if err := store.UpsertSpec(context.Background(), saved); err != nil {
 		t.Fatal(err)
 	}
@@ -131,6 +131,7 @@ func (f *deployFixture) agent(t *testing.T, id string) {
 		t.Fatal(err)
 	}
 	a.LabelAdd("env", "prod")
+	a.SetCapabilities([]model.RunnerCapability{{Name: "runner", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Container", SchemaFingerprint: "fixture-fp"}}}})
 	if err := f.store.UpsertAgent(context.Background(), a); err != nil {
 		t.Fatal(err)
 	}

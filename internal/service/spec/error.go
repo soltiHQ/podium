@@ -50,9 +50,34 @@ func (e *UnsupportedTargetsError) Error() string {
 }
 func (e *UnsupportedTargetsError) Unwrap() error { return storage.ErrInvalidArgument }
 
+// IncompatibleTargetsError identifies targets whose runners publish a schema the
+// workload body does not satisfy, or none that can be compared. Reasons gives the
+// placement reason of each agent in Agents.
+type IncompatibleTargetsError struct {
+	Agents  []string
+	Reasons map[string]string
+}
+
+func (e *IncompatibleTargetsError) Error() string {
+	return fmt.Sprintf("deploy rejected: workload schema incompatible on agents: %s", strings.Join(e.Agents, ", "))
+}
+func (e *IncompatibleTargetsError) Unwrap() error { return storage.ErrInvalidArgument }
+
 // ErrPlacementChanged is returned by Deploy when the caller's plan token no
 // longer matches the plan recomputed inside the transaction: since the preview
 // the spec was saved, the set of targets changed, a target was registered or
 // changed eligibility or selected runner, or another deploy created rollouts.
-// Deploy writes nothing; the caller previews again.
+// Deploy returns it without a token too, when the spec's workload or runner
+// labels changed between the schema check it runs before its transaction and the
+// transaction. Deploy writes nothing; the caller previews again.
 var ErrPlacementChanged = errors.New("placement changed since preview")
+
+// WorkloadError is a workload the service refuses: it is missing, unknown to the
+// catalog, refused by podium with its schema, rejected by its schema, or holds a
+// number the store cannot keep. Message is for the client; for a body the
+// schema rejects it lists "path: message" problems, the first 20, separated by
+// "; ", and for a number it names the number's path.
+type WorkloadError struct{ Message string }
+
+func (e *WorkloadError) Error() string { return "invalid workload: " + e.Message }
+func (e *WorkloadError) Unwrap() error { return storage.ErrInvalidArgument }

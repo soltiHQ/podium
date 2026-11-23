@@ -8,6 +8,7 @@ import (
 	"io"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -180,6 +181,17 @@ func newFakeRunner(t *testing.T, fp *fakeProxy) (*Runner, *inmemory.Store, *even
 	return r, store, hub
 }
 
+// seedFingerprint is the schema fingerprint of the workload of the specs
+// seedSpecAndAgent stores, which their agents declare: each push to them passes
+// the target check without the catalog.
+var seedFingerprint = strings.Repeat("a", 64)
+
+// seedCapabilities is the runner inventory of an agent that takes the workload
+// of the specs seedSpecAndAgent stores.
+func seedCapabilities() []model.RunnerCapability {
+	return []model.RunnerCapability{{Name: "default", Workloads: []model.GroupVersionKind{{Group: "solti.io", Version: "v1", Kind: "Container", SchemaFingerprint: seedFingerprint}}}}
+}
+
 func seedSpecAndAgent(t *testing.T, store storage.Storage, specID, agentID string) *model.Spec {
 	t.Helper()
 	ts, err := model.NewSpec(specID, "n", "slot-"+specID)
@@ -187,7 +199,7 @@ func seedSpecAndAgent(t *testing.T, store storage.Storage, specID, agentID strin
 		t.Fatalf("NewSpec: %v", err)
 	}
 	ts.SetTargets([]string{agentID})
-	ts.SetKindConfig(map[string]any{"command": map[string]any{"command": "echo", "args": []any{"hi"}}})
+	ts.SetWorkload(model.Workload{APIVersion: "solti.io/v1", Kind: "Container", SchemaFingerprint: seedFingerprint, Body: map[string]any{"image": "busybox", "args": []any{"hi"}}})
 	if err := store.UpsertSpec(context.Background(), ts); err != nil {
 		t.Fatalf("UpsertSpec: %v", err)
 	}
@@ -197,6 +209,7 @@ func seedSpecAndAgent(t *testing.T, store storage.Storage, specID, agentID strin
 		Endpoint:     "http://" + agentID,
 		EndpointType: 2, // proto enum for HTTP
 		APIVersion:   1,
+		Capabilities: seedCapabilities(),
 	})
 	if err != nil {
 		t.Fatalf("NewAgentFrom: %v", err)

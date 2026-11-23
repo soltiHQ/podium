@@ -549,6 +549,7 @@ type Counter interface {
 // Storage aggregates all storage capabilities for domain entities.
 type Storage interface {
 	ExecutionStore
+	WorkloadSchemaStore
 	CredentialStore
 	FilterFactory
 	VerifierStore

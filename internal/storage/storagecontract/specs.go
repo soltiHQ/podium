@@ -156,7 +156,7 @@ func listedSpecs(ctx context.Context, s storage.Storage, filter storage.SpecFilt
 }
 
 // newSpec is spec id with name and slot and every other field set from v. Its
-// kind config holds only what a JSON document decodes to: strings, float64
+// workload body holds only what a JSON document decodes to: strings, float64
 // numbers, booleans, lists and objects.
 func newSpec(t *testing.T, id, name, slot string, v int, created time.Time) *model.Spec {
 	t.Helper()
@@ -164,12 +164,16 @@ func newSpec(t *testing.T, id, name, slot string, v int, created time.Time) *mod
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.SetKindType([]enum.TaskKindType{enum.TaskKindContainer, enum.TaskKindWasm}[v%2])
-	s.SetKindConfig(map[string]any{
-		"image":      fmt.Sprintf("registry.example.net/job:%d", v),
-		"args":       []any{"--shard", fmt.Sprint(v), float64(v) + 0.5},
-		"env":        map[string]any{"MODE": fmt.Sprintf("mode-%d", v), "LIMITS": map[string]any{"cpus": float64(v) + 1.5}},
-		"privileged": v%2 == 0,
+	s.SetWorkload(model.Workload{
+		APIVersion:        "example.workloads/v1",
+		Kind:              []string{"ContainerJob", "WasmJob"}[v%2],
+		SchemaFingerprint: fmt.Sprintf("%064x", v),
+		Body: map[string]any{
+			"image":      fmt.Sprintf("registry.example.net/job:%d", v),
+			"args":       []any{"--shard", fmt.Sprint(v), float64(v) + 0.5},
+			"env":        map[string]any{"MODE": fmt.Sprintf("mode-%d", v), "LIMITS": map[string]any{"cpus": float64(v) + 1.5}},
+			"privileged": v%2 == 0,
+		},
 	})
 	s.SetTimeoutMs(int64(45000 + v))
 	s.SetRestartType([]enum.RestartType{enum.RestartAlways, enum.RestartOnFailure}[v%2])
@@ -229,8 +233,7 @@ func equalSpec(t *testing.T, what string, got, want *model.Spec) {
 	f.same("Version", got.Version(), want.Version())
 	f.same("Generation", got.Generation(), want.Generation())
 	f.same("DeletionRequested", got.DeletionRequested(), want.DeletionRequested())
-	f.same("KindType", got.KindType(), want.KindType())
-	f.same("KindConfig", got.KindConfig(), want.KindConfig())
+	f.same("Workload", got.Workload(), want.Workload())
 	f.same("TimeoutMs", got.TimeoutMs(), want.TimeoutMs())
 	f.same("RestartType", got.RestartType(), want.RestartType())
 	f.same("IntervalMs", got.IntervalMs(), want.IntervalMs())

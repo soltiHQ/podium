@@ -35,9 +35,12 @@ const (
 // and kinds are 63 at most, below the limits here. The counts are another
 // matter: the SDK sets none, so the caps on runners, labels and workloads are
 // below what it lets an agent send, and an agent over them gets a 400 that the
-// SDK does not retry. os, arch and platform are cut to their limit, never
-// refused: on Linux, os is the PRETTY_NAME of the host's os-release, which the
-// SDK does not bound.
+// SDK does not retry. A schema fingerprint is empty or the lowercase hex of a
+// sha256 digest, as the contract fixes it, and the fingerprints of all the
+// runners are at most agentFingerprintsMax distinct ones: each unknown one costs
+// discovery a lookup on every sync and stays in the catalog. os, arch and
+// platform are cut to their limit, never refused: on Linux, os is the
+// PRETTY_NAME of the host's os-release, which the SDK does not bound.
 const (
 	agentPlatformMaxBytes           = 256 // os, arch and platform are cut to this, each
 	agentRunnersMax                 = 64
@@ -48,6 +51,7 @@ const (
 	agentRunnerWorkloadsMax         = 256
 	agentWorkloadAPIVersionMaxBytes = 317
 	agentWorkloadKindMaxBytes       = 128
+	agentFingerprintsMax            = 256
 )
 
 // agentIDPattern is the SDK AgentId charset.
@@ -202,17 +206,26 @@ func cutUTF8(s string, limit int) string {
 }
 
 // validateCapabilities bounds the runner inventory of a discovery payload: the
-// runners, and per runner its name, labels and workloads. A refusal names the
-// field, as the SDK's SyncRequest does, with the index of the runner or the
-// workload.
+// runners, per runner its name, labels and workloads, and the distinct schema
+// fingerprints of them all. A refusal names the field, as the SDK's SyncRequest
+// does, with the index of the runner or the workload.
 func validateCapabilities(runners []RunnerCapability) error {
 	if len(runners) > agentRunnersMax {
 		return fmt.Errorf("%w: agent capabilities exceed %d runners", domain.ErrInvalidArgument, agentRunnersMax)
 	}
+	fingerprints := make(map[string]struct{})
 	for i, r := range runners {
 		if err := validateRunner(i, r); err != nil {
 			return err
 		}
+		for _, w := range r.Workloads {
+			if w.SchemaFingerprint != "" {
+				fingerprints[w.SchemaFingerprint] = struct{}{}
+			}
+		}
+	}
+	if len(fingerprints) > agentFingerprintsMax {
+		return fmt.Errorf("%w: agent capabilities declare more than %d distinct schema fingerprints", domain.ErrInvalidArgument, agentFingerprintsMax)
 	}
 	return nil
 }
@@ -240,6 +253,8 @@ func validateRunner(i int, r RunnerCapability) error {
 			return invalidRunner(i, ".workloads[%d].api_version exceeds %d bytes", j, agentWorkloadAPIVersionMaxBytes)
 		case len(w.Kind) > agentWorkloadKindMaxBytes:
 			return invalidRunner(i, ".workloads[%d].kind exceeds %d bytes", j, agentWorkloadKindMaxBytes)
+		case w.SchemaFingerprint != "" && !workloadSchemaFingerprint.MatchString(w.SchemaFingerprint):
+			return invalidRunner(i, ".workloads[%d].schema_fingerprint must be empty or 64 lowercase hex characters", j)
 		}
 	}
 	return nil

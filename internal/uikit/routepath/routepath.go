@@ -36,6 +36,9 @@ const (
 	ApiSpecs = "/api/v1/specs"
 	ApiSpec  = "/api/v1/specs/"
 
+	ApiWorkloadTypes = "/api/v1/workload-types"
+	ApiWorkloadType  = "/api/v1/workload-types/"
+
 	ApiDashboard       = "/api/v1/dashboard"
 	ApiDashboardIssues = "/api/v1/dashboard/issues"
 	ApiEventStream     = "/api/v1/events/stream"
