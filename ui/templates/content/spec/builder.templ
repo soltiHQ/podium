@@ -15,7 +15,9 @@ import (
 // `initial = nil` for create mode; pass a populated `*restv1.Spec` for
 // edit mode — Alpine seeds itself from it and the form posts PUT
 // `/specs/{id}` instead of POST `/specs`.
-// Left: form sections (identity, workload, lifecycle, targets).
+// Left: form sections (targets, workload, identity, lifecycle). The targets
+// come first: the workload type is one the chosen agents declare with one
+// schema, and its form is built from that schema.
 // Right: live JSON preview updated reactively via Alpine.js.
 templ BuilderPage(initial *restv1.Spec) {
 	<form
@@ -33,6 +35,59 @@ templ BuilderPage(initial *restv1.Spec) {
 					<h2 class="text-lg font-semibold text-fg">Edit Spec</h2>
 				}
 
+				<!-- Targets: first, as the workload form follows from their schema -->
+				@builderSection("Targets") {
+					<div>
+						<div class="flex gap-2 mb-3">
+							<button type="button"
+								class="px-3 py-1.5 text-xs rounded-full border transition-colors"
+								x-bind:class="target_mode === 'agents' ? 'bg-primary/10 border-primary text-primary' : 'border-border text-muted hover:text-fg'"
+								x-on:click="setMode('agents')">Agents</button>
+							<button type="button"
+								class="px-3 py-1.5 text-xs rounded-full border transition-colors"
+								x-bind:class="target_mode === 'labels' ? 'bg-primary/10 border-primary text-primary' : 'border-border text-muted hover:text-fg'"
+								x-on:click="setMode('labels')">Labels</button>
+						</div>
+						<p x-show="agent_error" x-text="agent_error" class="text-xs text-danger" role="alert"></p>
+						<button type="button" x-show="agent_error" x-on:click="loadAgents()" class="text-xs text-primary">Retry agent lookup</button>
+						<template x-if="target_mode === 'agents'">
+							<div class="space-y-3">
+								<p class="text-xs text-muted">Pick agents, or a whole group that declares one type with one schema. The workload form is built from that schema.</p>
+								@groupSelect("Group with one schema (optional)")
+								@agentMultiSelect()
+							</div>
+						</template>
+						<template x-if="target_mode === 'labels'">
+							<div class="space-y-3">
+								<p class="text-xs text-muted">The group gives the workload form; the labels pick the agents. A matching agent with another schema is refused at placement.</p>
+								@groupSelect("Group with one schema")
+								<div>
+									<label class={ form.LabelClass }>Target Labels</label>
+									@kvEditor("label_rows")
+								</div>
+							</div>
+						</template>
+					</div>
+				}
+
+				<!-- Workload: a type the targets share, and the fields of its schema -->
+				@builderSection("Workload") {
+					<div>
+						<label for="workload_type" class={ form.LabelClass }>Workload type</label>
+						<select id="workload_type" x-on:change="selectType($event.target.value)" x-bind:disabled="candidates.length === 0" class={ form.SelectClass(false, false) }>
+							<option value="">Select a type...</option>
+							<template x-for="c in candidates" :key="c.key">
+								<option x-bind:value="c.key" x-bind:disabled="!c.fingerprint" x-bind:selected="c.key === type_key" x-text="c.label"></option>
+							</template>
+						</select>
+						<p x-show="candidates.length === 0" class="mt-1 text-xs text-muted" x-text="target_mode === 'agents' ? 'Select agents first: the types they declare appear here.' : 'Select a group first.'"></p>
+						<p x-show="candidates.length > 0 && !candidates.some(c => c.fingerprint)" class="mt-1 text-xs text-danger">The selected agents share no type with one schema.</p>
+					</div>
+					<p x-show="schema_loading" class="text-xs text-muted">Loading the schema...</p>
+					<p x-show="schema_error" x-text="schema_error" class="text-xs text-danger" role="alert"></p>
+					<div x-ref="workload_form" x-show="type_key"></div>
+				}
+
 				<!-- Identity -->
 				@builderSection("Identity") {
 					@builderField("name", "Name", "Spec name", true)
@@ -41,37 +96,6 @@ templ BuilderPage(initial *restv1.Spec) {
  } else {
  <div><label for="slot" class={ form.LabelClass }>Slot</label><input id="slot" x-model="slot" readonly class={ form.BaseInputClass + "h-11 px-4" }/><p class="mt-1 text-xs text-muted">The execution lane is immutable. Create another spec for a different slot.</p></div>
  }
-				}
-
-				<!-- Workload -->
-				@builderSection("Workload") {
-					<div>
-						<label for="workload_type" class={ form.LabelClass }>Workload type</label>
-						<select id="workload_type" x-model="type_key" x-on:change="onTypeChange()" class={ form.SelectClass(false, false) }>
-							<option value="">Select a type...</option>
-							<template x-for="t in typeOptions" :key="t.key">
-								<option x-bind:value="t.key" x-bind:selected="t.key === type_key" x-text="t.label"></option>
-							</template>
-						</select>
-						<p x-show="types_error" x-text="types_error" class="mt-1 text-xs text-danger" role="alert"></p>
-						<button type="button" x-show="types_error" x-on:click="loadTypes()" class="text-xs text-primary">Retry type lookup</button>
-						<p x-show="!types_error && typeOptions.length === 0" class="mt-1 text-xs text-muted">No agent has declared a workload type yet.</p>
-					</div>
-					<div x-show="type_key">
-						<label for="workload_fingerprint" class={ form.LabelClass }>Schema</label>
-						<select id="workload_fingerprint" x-model="fingerprint" class={ form.SelectClass(false, false) }>
-							<template x-for="f in fingerprintOptions" :key="f.value">
-								<option x-bind:value="f.value" x-bind:title="f.title" x-bind:selected="f.value === fingerprint" x-text="f.label"></option>
-							</template>
-						</select>
-						<p x-show="fingerprintOptions.length === 0" class="mt-1 text-xs text-muted">No schema of this type has arrived yet.</p>
-					</div>
-					<div>
-						<label for="workload_body" class={ form.LabelClass }>Body (JSON object)</label>
-						<textarea id="workload_body" x-model="body_json" rows="10" spellcheck="false"
-							class={ textareaClass }
-							placeholder="{}"></textarea>
-					</div>
 				}
 
 				<!-- Lifecycle -->
@@ -131,38 +155,6 @@ templ BuilderPage(initial *restv1.Spec) {
 							</div>
 						</div>
 					</template>
-				}
-
-				<!-- Targets -->
-				@builderSection("Targets") {
-					<div>
-						<div class="flex gap-2 mb-3">
-							<button type="button"
-								class="px-3 py-1.5 text-xs rounded-full border transition-colors"
-								x-bind:class="target_mode === 'agents' ? 'bg-primary/10 border-primary text-primary' : 'border-border text-muted hover:text-fg'"
-								x-on:click="target_mode = 'agents'">Agents</button>
-							<button type="button"
-								class="px-3 py-1.5 text-xs rounded-full border transition-colors"
-								x-bind:class="target_mode === 'labels' ? 'bg-primary/10 border-primary text-primary' : 'border-border text-muted hover:text-fg'"
-								x-on:click="target_mode = 'labels'">Labels</button>
-						</div>
-
-						<p class="text-xs text-muted">Explicit agents and label matches are combined. All labels must match.</p>
- <p x-show="agent_error" x-text="agent_error" class="text-xs text-danger" role="alert"></p>
- <button type="button" x-show="agent_error" x-on:click="loadAgents()" class="text-xs text-primary">Retry agent lookup</button>
- <template x-if="target_mode === 'agents'">
-							<div>
-								@agentMultiSelect()
-							</div>
-						</template>
-
-						<template x-if="target_mode === 'labels'">
-							<div>
-								<label class={ form.LabelClass }>Target Labels</label>
-								@kvEditor("label_rows")
-							</div>
-						</template>
-					</div>
 				}
 
 				<!-- Runner Labels -->
@@ -270,30 +262,47 @@ templ presetButton(preset string, label string) {
 		x-on:click={ "applyPreset(" + jsexpr.String(preset) + ")" }>{ label }</button>
 }
 
-// agentMultiSelect renders the agent multi-select dropdown.
+// groupSelect renders the choice of a catalog group: the agents that declare
+// one workload type with one schema.
+templ groupSelect(label string) {
+	<div>
+		<label class={ form.LabelClass }>{ label }</label>
+		<select x-on:change="pickGroup($event.target.value)" class={ form.SelectClass(false, false) }>
+			<option value="">Select a group...</option>
+			<template x-for="g in groupList" :key="g.key">
+				<option x-bind:value="g.key" x-bind:selected="g.key === group_key" x-text="g.label"></option>
+			</template>
+		</select>
+		<p x-show="types_error" x-text="types_error" class="mt-1 text-xs text-danger" role="alert"></p>
+		<button type="button" x-show="types_error" x-on:click="loadTypes()" class="text-xs text-primary">Retry type lookup</button>
+	</div>
+}
+
+// agentMultiSelect renders the agent multi-select dropdown, each agent with
+// the workload kinds it declares.
 templ agentMultiSelect() {
-	<label class={ form.LabelClass }>Select Agents</label>
+	<label class={ form.LabelClass }>Agents</label>
 	<div class={ form.MsWrapper } x-on:click.outside="agents_open = false">
 		<div class={ form.MsTrigger } x-on:click="agents_open = !agents_open">
 			<template x-for="tag in agents" :key="tag">
 				<span class={ form.MsTag }>
 					<span x-text="tag"></span>
 					<span class={ form.MsTagRemove }
-						x-on:click.stop="agents = agents.filter(x => x !== tag)">&times;</span>
+						x-on:click.stop="toggleAgent(tag)">&times;</span>
 				</span>
 			</template>
 			<span x-show="agents.length === 0" class={ form.MsPlaceholder }>Select agents...</span>
 		</div>
 		<div x-show="agents_open" x-cloak x-transition.opacity class={ form.MsDropdown }>
 			<template x-for="opt in agentOptions" :key="opt">
-				<div class={ form.MsOption }
-					x-on:click="agents.includes(opt) ? agents = agents.filter(x => x !== opt) : agents.push(opt)">
+				<div class={ form.MsOption } x-on:click="toggleAgent(opt)">
 					<input type="checkbox" class={ form.MsCheckbox } x-bind:checked="agents.includes(opt)"/>
 					<span x-text="opt"></span>
+					<span class="ml-auto text-xs text-muted" x-text="agentTypes(opt)"></span>
 				</div>
 			</template>
 			<div x-show="agentOptions.length === 0" class="px-3 py-2 text-sm text-muted">
-				No agents declare this type
+				No agents in discovery
 			</div>
 		</div>
 	</div>
@@ -326,13 +335,6 @@ func kvIterExpr(v string) string {
 }
 
 // Style constants for builder-specific form elements.
-const textareaClass = "block w-full px-4 py-3 " +
-	"rounded-[var(--r-xs)] " +
-	"bg-card text-fg text-sm font-mono " +
-	"border border-input " +
-	"hover:border-border " +
-	"focus:ring-2 focus:ring-primary/25 focus:border-primary " +
-	"outline-none transition-colors resize-y "
 const kvInput = "flex-1 min-w-0 h-9 px-3 " +
 	"rounded-[var(--r-xs)] " +
 	"bg-card text-fg text-sm " +

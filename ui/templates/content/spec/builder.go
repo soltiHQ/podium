@@ -59,7 +59,7 @@ func builderSeed(initial *restv1.Spec) string {
 
 // builderInitExpr returns the Alpine x-init expression that loads the workload
 // type catalog and the active agents.
-func builderInitExpr() string { return "loadTypes(); loadAgents()" }
+func builderInitExpr() string { return "start()" }
 
 // shortFingerprint is the first 12 characters of a schema fingerprint: enough
 // to tell fingerprints apart, with the full value kept in a title attribute.
