@@ -2,12 +2,9 @@ package spec
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"regexp"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,10 +12,8 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
 	"github.com/soltiHQ/control-plane/domain/model"
-	"github.com/soltiHQ/control-plane/internal/service/workload"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
-	"github.com/soltiHQ/control-plane/internal/workloadschema"
 )
 
 func mkService(t *testing.T) (*Service, *inmemory.Store) {
@@ -26,7 +21,7 @@ func mkService(t *testing.T) (*Service, *inmemory.Store) {
 	store := inmemory.New()
 	log := zerolog.New(io.Discard)
 	seedTestSchema(t, store)
-	return New(store, log, WithSchemaSource(workload.New(store, log))), store
+	return New(store, log), store
 }
 
 func mkSpec(t *testing.T, svc *Service, store *inmemory.Store, id string, targets []string) *model.Spec {
@@ -459,7 +454,7 @@ func TestPlanTokenIgnoresObservationTimes(t *testing.T) {
 		a.SetLastSeenAt(now)
 		a.SetStaleAt(now.Add(30 * time.Second))
 	})
-	before, _, err := loadPlacement(ctx, store, nil, zerolog.Nop(), ts, now, nil)
+	before, _, err := loadPlacement(ctx, store, ts, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +466,7 @@ func TestPlanTokenIgnoresObservationTimes(t *testing.T) {
 		a.SetStaleAt(now.Add(90 * time.Second))
 		a.SetUptimeSeconds(3600)
 	})
-	after, _, err := loadPlacement(ctx, store, nil, zerolog.Nop(), ts, now.Add(time.Hour), nil)
+	after, _, err := loadPlacement(ctx, store, ts, now.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -779,280 +774,4 @@ func listRollouts(t *testing.T, store *inmemory.Store, specID string) []*model.R
 		}
 	}
 	return out
-}
-
-// workloadSpec is a new spec whose workload is w.
-func workloadSpec(t *testing.T, id string, w model.Workload) *model.Spec {
-	t.Helper()
-	ts, err := model.NewSpec(id, "n-"+id, "slot-"+id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ts.SetWorkload(w)
-	return ts
-}
-
-func TestCreateStoresTheWorkload(t *testing.T) {
-	svc, store := mkService(t)
-	w := testWorkload(t)
-	w.Body["replicas"] = json.Number("2")
-	if err := svc.Create(context.Background(), workloadSpec(t, "sp-1", w)); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	got, err := store.GetSpec(context.Background(), "sp-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !got.Workload().Equal(w) {
-		t.Fatalf("stored workload = %+v, want %+v", got.Workload(), w)
-	}
-}
-
-func TestCreateRefusesAnUnknownFingerprint(t *testing.T) {
-	svc, store := mkService(t)
-	w := testWorkload(t)
-	w.SchemaFingerprint = strings.Repeat("0", 64)
-	err := svc.Create(context.Background(), workloadSpec(t, "sp-1", w))
-	var bad *WorkloadError
-	if !errors.As(err, &bad) || !errors.Is(err, storage.ErrInvalidArgument) || !strings.Contains(bad.Message, "not in the catalog") {
-		t.Fatalf("Create = %v", err)
-	}
-	if _, err := store.GetSpec(context.Background(), "sp-1"); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("a refused spec was stored: %v", err)
-	}
-}
-
-func TestCreateRefusesABodyTheSchemaRejects(t *testing.T) {
-	svc, _ := mkService(t)
-	w := testWorkload(t)
-	w.Body = map[string]any{"image": 7, "extra": true}
-	err := svc.Create(context.Background(), workloadSpec(t, "sp-1", w))
-	var bad *WorkloadError
-	if !errors.As(err, &bad) || !errors.Is(err, storage.ErrInvalidArgument) {
-		t.Fatalf("Create = %v", err)
-	}
-	if !strings.Contains(bad.Message, "/image: ") || !strings.Contains(bad.Message, "; ") {
-		t.Fatalf("message lists no paths: %q", bad.Message)
-	}
-}
-
-// Two types may share one canonical schema, hence one fingerprint, and the
-// catalog keeps the first type it saw: a spec of another type is not refused for it.
-func TestCreateAcceptsATypeThatSharesTheSchemaOfAnother(t *testing.T) {
-	for name, mutate := range map[string]func(*model.Workload){
-		"kind":        func(w *model.Workload) { w.Kind = "Other" },
-		"api version": func(w *model.Workload) { w.APIVersion = "solti.io/v2" },
-		"no group":    func(w *model.Workload) { w.APIVersion = "v1" },
-	} {
-		t.Run(name, func(t *testing.T) {
-			svc, _ := mkService(t)
-			w := testWorkload(t)
-			mutate(&w)
-			if err := svc.Create(context.Background(), workloadSpec(t, "sp-1", w)); err != nil {
-				t.Fatalf("Create = %v", err)
-			}
-		})
-	}
-}
-
-// The envelope is checked for every spec, whatever its workload: a slot the
-// proxy refuses is a validation error at create and at update.
-func TestCreateRefusesAnInvalidEnvelope(t *testing.T) {
-	ctx := context.Background()
-	svc, store := mkService(t)
-	ts, err := model.NewSpec("sp-slot", "name", "a b")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ts.SetWorkload(testWorkload(t))
-	if err = svc.Create(ctx, ts); !errors.Is(err, storage.ErrInvalidArgument) {
-		t.Fatalf("Create with slot %q = %v", "a b", err)
-	}
-	if _, err = store.GetSpec(ctx, "sp-slot"); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("a refused spec was stored: %v", err)
-	}
-	good := mkSpec(t, svc, store, "sp-env", nil)
-	for name, edit := range map[string]func(*model.Spec){
-		"timeout":      func(s *model.Spec) { s.SetTimeoutMs(0) },
-		"runner label": func(s *model.Spec) { s.SetRunnerLabels(map[string]string{"-bad": "v"}) },
-		"interval":     func(s *model.Spec) { s.SetIntervalMs(100) },
-	} {
-		bad := good.Clone()
-		edit(bad)
-		if _, err = svc.Upsert(ctx, bad, 0); !errors.Is(err, storage.ErrInvalidArgument) {
-			t.Errorf("Upsert with a bad %s = %v", name, err)
-		}
-	}
-}
-
-// An overrun of the validator, however it is wrapped, is refused with a message
-// that says so; the mapping does not depend on what makes a schema expensive.
-func TestWorkloadRefusalMapsTooExpensive(t *testing.T) {
-	for name, err := range map[string]error{
-		"bare":    workloadschema.ErrValidationTooExpensive,
-		"wrapped": fmt.Errorf("validating: %w", workloadschema.ErrValidationTooExpensive),
-	} {
-		var bad *WorkloadError
-		got := workloadRefusal(err)
-		if !errors.As(got, &bad) || bad.Message != "the workload schema is too expensive to validate this body" || !errors.Is(got, storage.ErrInvalidArgument) {
-			t.Errorf("%s: %v", name, got)
-		}
-	}
-	if workloadRefusal(nil) != nil {
-		t.Error("a valid body is refused")
-	}
-}
-
-func TestCreateRequiresAWorkload(t *testing.T) {
-	svc, _ := mkService(t)
-	for name, w := range map[string]model.Workload{
-		"none":           {},
-		"no fingerprint": {APIVersion: testAPIVersion, Kind: testKind},
-		"bad api":        {APIVersion: "a/b/c", Kind: testKind, SchemaFingerprint: testFingerprint(t)},
-	} {
-		if err := svc.Create(context.Background(), workloadSpec(t, "sp-1", w)); !errors.Is(err, storage.ErrInvalidArgument) {
-			t.Errorf("%s: Create = %v", name, err)
-		}
-	}
-}
-
-func TestUpsertValidatesTheWorkload(t *testing.T) {
-	svc, store := mkService(t)
-	ts := mkSpec(t, svc, store, "sp-1", nil)
-	bad := ts.Clone()
-	w := bad.Workload()
-	w.Body = map[string]any{"image": 1}
-	bad.SetWorkload(w)
-	var werr *WorkloadError
-	if _, err := svc.Upsert(context.Background(), bad, 0); !errors.As(err, &werr) {
-		t.Fatalf("Upsert = %v", err)
-	}
-	if got, _ := store.GetSpec(context.Background(), "sp-1"); got.Version() != 1 || !got.Workload().Equal(testWorkload(t)) {
-		t.Fatalf("a refused update changed the spec: v%d %+v", got.Version(), got.Workload())
-	}
-}
-
-// TestRuntimeEqualsSeesABodyChangeThroughTheService is Review Focus 4 in the
-// service's upsert path: a change of the workload body alone bumps the
-// generation, and a save that changes nothing bumps neither counter.
-func TestRuntimeEqualsSeesABodyChangeThroughTheService(t *testing.T) {
-	ctx := context.Background()
-	svc, store := mkService(t)
-	ts := mkSpec(t, svc, store, "sp-1", nil)
-
-	same := ts.Clone()
-	if changed, err := svc.Upsert(ctx, same, 0); err != nil || changed {
-		t.Fatalf("Upsert unchanged: changed %v, %v; want nothing changed", changed, err)
-	}
-	got, _ := store.GetSpec(ctx, "sp-1")
-	if got.Version() != 1 || got.Generation() != 1 {
-		t.Fatalf("an unchanged spec moved to v%d g%d", got.Version(), got.Generation())
-	}
-	if same.Version() != 1 || same.Generation() != 1 {
-		t.Fatalf("the caller's unchanged spec reads v%d g%d", same.Version(), same.Generation())
-	}
-
-	changed := got.Clone()
-	w := changed.Workload()
-	w.Body["replicas"] = json.Number("5")
-	changed.SetWorkload(w)
-	if saved, err := svc.Upsert(ctx, changed, 1); err != nil || !saved {
-		t.Fatalf("Upsert body change: changed %v, %v; want it changed", saved, err)
-	}
-	got, _ = store.GetSpec(ctx, "sp-1")
-	if got.Version() != 2 || got.Generation() != 2 {
-		t.Fatalf("a body-only change gave v%d g%d, want v2 g2", got.Version(), got.Generation())
-	}
-	if _, ok := got.Workload().Body["replicas"]; !ok {
-		t.Fatalf("the new body was not stored: %+v", got.Workload())
-	}
-
-	renamed := got.Clone()
-	renamed.SetName("other")
-	if _, err := svc.Upsert(ctx, renamed, 2); err != nil {
-		t.Fatal(err)
-	}
-	got, _ = store.GetSpec(ctx, "sp-1")
-	if got.Version() != 3 || got.Generation() != 2 {
-		t.Fatalf("a rename gave v%d g%d, want v3 g2", got.Version(), got.Generation())
-	}
-}
-
-// A save that names a schema podium refuses, here one stored by another version
-// that this binary cannot compile, is a 400 that names the fingerprint and the
-// reason, not a store failure.
-func TestSaveNamingARefusedSchemaIsAWorkloadError(t *testing.T) {
-	svc, store := mkService(t)
-	ctx := context.Background()
-	const broken = `{"type":"nonsense"}`
-	fp, err := workloadschema.Fingerprint([]byte(broken))
-	if err != nil {
-		t.Fatal(err)
-	}
-	entry, err := model.NewWorkloadSchema(fp, testAPIVersion, testKind, []byte(broken), "older-podium", time.Unix(1700000000, 0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = store.UpsertWorkloadSchema(ctx, entry); err != nil {
-		t.Fatal(err)
-	}
-	w := testWorkload(t)
-	w.SchemaFingerprint = fp
-	for name, save := range map[string]func() error{
-		"create": func() error { return svc.Create(ctx, workloadSpec(t, "sp-new", w)) },
-		"update": func() error {
-			ts := mkSpec(t, svc, store, "sp-old", nil)
-			ts.SetWorkload(w)
-			_, err := svc.Upsert(ctx, ts, ts.Version())
-			return err
-		},
-	} {
-		var bad *WorkloadError
-		if err := save(); !errors.As(err, &bad) || !errors.Is(err, storage.ErrInvalidArgument) || !strings.Contains(bad.Message, fp) || !strings.Contains(bad.Message, "nonsense") {
-			t.Errorf("%s: %v, want a workload error naming %s and the reason", name, err, fp)
-		}
-	}
-}
-
-// A body integer that a protobuf Struct, which holds the body in the raft and
-// database modes, cannot keep exactly is refused at the save in every mode, as
-// a 400 that names its path; the store never sees it. Integers within ±2^53 are
-// kept.
-func TestSaveRefusesAnIntegerTheStoreWouldChange(t *testing.T) {
-	ctx := context.Background()
-	svc, store := mkService(t)
-	svc.store = noSpecWrites{Storage: store, t: t}
-	permissive := seedSchema(t, store, permissiveSchema)
-	for name, tc := range map[string]struct {
-		body map[string]any
-		path string
-	}{
-		"top level":       {map[string]any{"image": "x", "replicas": json.Number("9007199254740993")}, "/replicas"},
-		"negative":        {map[string]any{"image": "x", "replicas": json.Number("-9007199254740993")}, "/replicas"},
-		"in an array":     {map[string]any{"ids": []any{json.Number("1"), json.Number("18446744073709551615")}}, "/ids/1"},
-		"in a nested key": {map[string]any{"a/b": map[string]any{"c~d": json.Number("1e300")}}, "/a~1b/c~0d"},
-	} {
-		w := testWorkload(t)
-		w.SchemaFingerprint = permissive
-		w.Body = tc.body
-		var bad *WorkloadError
-		if err := svc.Create(ctx, workloadSpec(t, "sp-big", w)); !errors.As(err, &bad) || !strings.Contains(bad.Message, tc.path+": ") || !strings.Contains(bad.Message, "2^53") {
-			t.Errorf("%s: %v, want a workload error naming %s", name, err, tc.path)
-		}
-	}
-}
-
-// noSpecWrites fails the test on a spec write.
-type noSpecWrites struct {
-	storage.Storage
-	t *testing.T
-}
-
-func (n noSpecWrites) WithTx(ctx context.Context, fn func(storage.Storage) error) error {
-	return n.Storage.WithTx(ctx, func(tx storage.Storage) error { return fn(noSpecWrites{Storage: tx, t: n.t}) })
-}
-
-func (n noSpecWrites) UpsertSpec(context.Context, *model.Spec) error {
-	n.t.Error("a refused spec reached the store")
-	return errors.New("refused spec written")
 }

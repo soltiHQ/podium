@@ -19,16 +19,12 @@ type TypeView struct {
 
 // FingerprintView is a schema fingerprint of a workload type: the agents that
 // declare it, and its schema once it has arrived in the catalog. Schema is nil
-// and FirstSeenAt zero until then. Refused is why this podium refuses the
-// schema (see Service.Refusal), empty for one it does not refuse: a schema it
-// refused when an agent offered it never arrives, and one in the catalog that it
-// cannot compile shows as refused once podium has tried to compile it.
+// and FirstSeenAt zero until then.
 type FingerprintView struct {
 	Fingerprint string
 	Agents      []string
 	Schema      []byte
 	FirstSeenAt time.Time
-	Refused     string
 }
 
 type typeKey struct{ apiVersion, kind string }
@@ -123,7 +119,6 @@ func (s *Service) collect(ctx context.Context) (map[typeKey]TypeView, error) {
 		v := TypeView{APIVersion: k.apiVersion, Kind: k.kind, Fingerprints: []FingerprintView{}}
 		for fp, ids := range fps {
 			fv := FingerprintView{Fingerprint: fp, Agents: make([]string, 0, len(ids))}
-			fv.Refused, _ = s.Refusal(fp)
 			for id := range ids {
 				fv.Agents = append(fv.Agents, id)
 			}

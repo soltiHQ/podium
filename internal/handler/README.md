@@ -306,15 +306,10 @@ names, Deploy writes nothing and answers 412
 matches, and a blank `If-Match`, or one of empty list elements only, names no
 plan and gets the same answer. Only without `If-Match`, or with `*` anywhere in
 it, Deploy checks no token, as before, so API clients that never preview keep
-working. A deploy whose spec workload or runner labels changed between the
-schema check, which runs before the deploy's transaction, and the write answers
-the same 412, even without a token.
+working.
 
-Each runner of the placement may carry `detail`, a string of at most 1 KiB that
-says why the runner is `schema_incompatible`: the schema problems, "the body is
-too costly to check against this schema", "podium refused this schema: <reason>"
-(see "Refused schemas" below), or "the schema could not be loaded", whose error
-podium logs with the fingerprint instead. The UI shows it as text.
+A runner that is `schema_incompatible` carries `detail`: its schema fingerprint
+differs from the spec's. The UI shows it as text.
 
 A spec carries its workload beside the envelope, on create and update and in
 every response:
@@ -358,10 +353,7 @@ The list answers a JSON array of
 `agents` are the IDs of the agents that declare the fingerprint and `received`
 says whether podium holds its schema. The type answers
 `{api_version, kind, fingerprints: [{fingerprint, agents, received, schema}]}`;
-`schema` is the raw JSON an agent sent, untrusted text. In both, a fingerprint
-whose schema podium refuses also carries `refused`, the reason, at most 512
-bytes that may quote the schema: untrusted text too (see "Refused schemas"
-below).
+`schema` is the raw JSON an agent sent, untrusted text.
 
 ### Dashboard `/api/v1/dashboard`
 
@@ -506,46 +498,15 @@ HTTP the JSON carries the schema bytes as base64, a third larger, so only about
 two 64 KiB schemas fit in one sync, three over gRPC; a request over 256 KiB is
 refused whole, its heartbeat included (HTTP 413, gRPC `ResourceExhausted`).
 
-**Refused schemas.** A schema whose fingerprint matches its bytes and that
-podium does not compile (see "Schemas podium accepts" below) is refused for
-good: the refusal is the same on every try of this binary. podium remembers it
-in memory, with the reason cut to 512 bytes, logs it once at WARN with the
-reason in a field, and no longer lists the fingerprint in `want_schemas`, so the
-agent stops sending it. The catalog shows the reason as `refused`; a runner that
-declares the fingerprint is `schema_incompatible` with the detail "podium
-refused this schema: <reason>"; a save naming it is a 400 that names the
-fingerprint and the reason. A schema in the catalog that this binary does not
-compile, as one another version stored, is refused the same way once podium
-tries to compile it. Each replica keeps its own refusals, lost with the process:
-after a restart podium asks for the schema once more. It keeps at most 4096;
-past that, a new refusal is not remembered, and its fingerprint stays wanted and
-is refused each time it is sent. What an agent sends reaches the logs only in
-fields, cut: an offered fingerprint to 128 bytes, a reason to 512.
-
 A group-less `api_version` (such as `v1`) is a valid type, and two types may
 share one fingerprint when their canonical schemas are identical.
 
 **Fingerprint.** The lowercase hex sha256 of the RFC 8785 (JCS) canonical JSON
 of the schema.
 
-**Schemas podium accepts.** Draft 2020-12, also when `$schema` is absent, as a
-subset. Refused: `$dynamicRef`, `$dynamicAnchor`, `$recursiveRef`,
-`$recursiveAnchor`, `$vocabulary`, `unevaluatedItems`, `unevaluatedProperties`,
-any other `$schema`, any `$ref` that is not same-document (`#…`), and `$id`
-below the root. `format` and `content*` are annotations, never asserted.
-
-| Limit | Value |
-| -- | -- |
-| Schema size | 64 KiB |
-| Nesting | 32 levels |
-| Objects and booleans in a schema | 512 |
-| One regular expression | 2 000 compiled instructions |
-| All regular expressions of a schema | 20 000 compiled instructions |
-| `$ref` cycle at the same location | refused |
-| Body size | 256 KiB |
-| JSON values in a body | 10 000 |
-
-Validation runs under a fixed work budget.
+podium does not validate schemas or bodies: it stores a schema an agent sends
+under its fingerprint, renders the spec page from it and places a spec on the
+agents whose runner declares the same fingerprint. A schema is at most 64 KiB.
 
 **Placement.** The agent routes a task to the first runner, in declared order,
 whose type and labels match: the SDK router takes the first runner that declares
@@ -559,11 +520,10 @@ Each runner gets one of these reasons, or none when it is not evaluated:
 
 | Runner reason | Meaning |
 | -- | -- |
-| `compatible` | The runner takes the body. |
+| `compatible` | The runner declares the spec's schema fingerprint. |
 | `workload_unsupported` | The runner does not declare the spec's exact type. |
 | `runner_labels_mismatch` | The runner's labels do not match the spec's runner labels. |
-| `schema_incompatible` | The body is invalid against the runner's schema or too costly to check, or podium refused the schema or could not load it: `detail` says which. |
-| `schema_pending` | The runner's schema has not arrived yet, normally for one sync. |
+| `schema_incompatible` | The runner declares another schema fingerprint. |
 | `schema_unpublished` | The runner declares the type without a fingerprint. |
 
 Each target gets one of these:
@@ -575,10 +535,9 @@ Each target gets one of these:
 | `inventory_unknown` | The agent has reported no runners. |
 | `workload_unsupported` | No runner declares the spec's exact type. |
 | `runner_labels_mismatch` | A runner declares the type, but none matches the runner labels. |
-| `schema_incompatible`, `schema_pending`, `schema_unpublished` | The reason of the evaluated runner. |
+| `schema_incompatible`, `schema_unpublished` | The reason of the evaluated runner. |
 
-A target whose fingerprint differs from the spec's is compatible when the body
-is valid against the target's schema; the spec keeps its own fingerprint. Deploy
+A target whose fingerprint differs from the spec's is not compatible. Deploy
 refuses incompatible targets, and `inventory_unknown` ones, with 409
 `Deployment blocked: a target cannot take this workload (<codes>). Review the placement preview.`
 

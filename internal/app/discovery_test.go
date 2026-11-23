@@ -3,14 +3,12 @@ package app
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +20,6 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
-	agentv1 "github.com/soltiHQ/control-plane/api/gen/solti/agent/v1"
 	discoverv1 "github.com/soltiHQ/control-plane/api/gen/solti/discover/v1"
 	"github.com/soltiHQ/control-plane/internal/auth"
 	"github.com/soltiHQ/control-plane/internal/auth/kit"
@@ -35,7 +32,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/service/workload"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
-	"github.com/soltiHQ/control-plane/internal/workloadschema"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -693,66 +689,6 @@ func TestDiscoveryListenerSkipsCrossOriginCheck(t *testing.T) {
 	}
 }
 
-// The built listeners answer a sync that declares a schema with the want, over
-// HTTP and gRPC alike, and stop wanting it once an agent offers it.
-func TestDiscoveryListenersExchangeWorkloadSchemas(t *testing.T) {
-	cfg := config.Default()
-	cfg.AgentAuth.Require = false
-	c := newDiscoveryClientsFor(t, cfg)
-	const schema = `{"type":"object"}`
-	fp, err := workloadschema.Fingerprint([]byte(schema))
-	if err != nil {
-		t.Fatal(err)
-	}
-	httpSync := func(offer bool) []string {
-		body := `{"id":"http-schema-agent","endpoint":"http://10.0.0.5:8085","endpointType":"ENDPOINT_TYPE_HTTP","apiVersion":1,"capabilities":{"runners":[{"name":"r","workloads":[{"apiVersion":"solti.io/v1","kind":"K","schemaFingerprint":"` + fp + `"}]}]}`
-		if offer {
-			body += `,"schemas":[{"fingerprint":"` + fp + `","schema":"` + base64.StdEncoding.EncodeToString([]byte(schema)) + `"}]`
-		}
-		r := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/sync", strings.NewReader(body+"}"))
-		r.RemoteAddr = "127.0.0.1:40000"
-		w := httptest.NewRecorder()
-		c.http.ServeHTTP(w, r)
-		if w.Code != http.StatusOK {
-			t.Fatalf("HTTP %d %s", w.Code, w.Body.String())
-		}
-		var out struct {
-			WantSchemas []string `json:"wantSchemas"`
-		}
-		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
-			t.Fatal(err)
-		}
-		return out.WantSchemas
-	}
-	grpcSync := func(offer bool) []string {
-		req := &discoverv1.SyncRequest{
-			Id: "grpc-schema-agent", Endpoint: "10.0.0.5:50051", EndpointType: discoverv1.EndpointType_ENDPOINT_TYPE_GRPC, ApiVersion: 1,
-			Capabilities: &agentv1.AgentCapabilities{Runners: []*agentv1.RunnerCapability{{Name: "r", Workloads: []*agentv1.WorkloadType{{ApiVersion: "solti.io/v1", Kind: "K", SchemaFingerprint: fp}}}}},
-		}
-		if offer {
-			req.Schemas = []*discoverv1.WorkloadSchema{{Fingerprint: fp, Schema: []byte(schema)}}
-		}
-		resp, err := c.grpc.Sync(context.Background(), req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return resp.GetWantSchemas()
-	}
-	if got := httpSync(false); !slices.Equal(got, []string{fp}) {
-		t.Fatalf("HTTP sync wants %v", got)
-	}
-	if got := grpcSync(false); !slices.Equal(got, []string{fp}) {
-		t.Fatalf("gRPC sync wants %v", got)
-	}
-	if got := grpcSync(true); len(got) != 0 {
-		t.Fatalf("gRPC sync that offers the schema wants %v", got)
-	}
-	// The catalog is shared: the HTTP agent no longer wants what the gRPC one gave.
-	if got := httpSync(false); len(got) != 0 {
-		t.Fatalf("HTTP sync wants %v after the schema was offered", got)
-	}
-}
-
 // testCatalog is a workload catalog over a store of its own.
 func testCatalog() *workload.Service { return workload.New(inmemory.New(), zerolog.Nop()) }
 
@@ -763,22 +699,4 @@ func newGRPCServer(t *testing.T, logger zerolog.Logger, svc *agent.Service, hub 
 		t.Fatal(err)
 	}
 	return srv
-}
-
-// A discovery build without the workload catalog fails, instead of serving
-// listeners that quietly never exchange schemas.
-func TestDiscoveryBuildRefusesANilCatalog(t *testing.T) {
-	logger := zerolog.Nop()
-	agents := agent.New(inmemory.New(), logger)
-	hub := event.NewHub(logger)
-	t.Cleanup(hub.Close)
-	if _, _, err := buildDiscoveryListeners(logger, agents, nil, hub, memory.NewLeadership(), config.Default(), nil, nil, nil, nil, nil); err == nil {
-		t.Fatal("buildDiscoveryListeners accepted a nil catalog")
-	}
-	if _, err := buildDiscoveryHandler(logger, agents, nil, hub, memory.NewLeadership(), 0, kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, false, false, nil, nil); err == nil {
-		t.Fatal("buildDiscoveryHandler accepted a nil catalog")
-	}
-	if _, err := buildGRPCServer(logger, agents, nil, hub, memory.NewLeadership(), kit.NewLimiter(auth.Config{}), handler.NewSyncBuckets(), nil, nil, false, 0, nil, nil); err == nil {
-		t.Fatal("buildGRPCServer accepted a nil catalog")
-	}
 }

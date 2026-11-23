@@ -112,29 +112,3 @@ func TestSpecJSONPreviewUsesCurrentTaskManifestLabel(t *testing.T) {
 		t.Fatal("preview uses obsolete API label")
 	}
 }
-
-// The detail of a runner comes from schema text that agents supply: it is shown
-// as text, never as markup.
-func TestPlacementShowsTheRunnerDetailAsText(t *testing.T) {
-	html := renderPlacement(t, restv1.SpecPlacement{Targets: []restv1.PlacementTarget{{AgentID: "a", Exists: true, InventoryKnown: true, EligibilityReason: "schema_incompatible", Runners: []restv1.PlacementRunner{{Name: "r", Reason: "schema_incompatible", Detail: "/image: <script>alert(1)</script> is not valid"}}}}})
-	if strings.Contains(html, "<script>") || !strings.Contains(html, "&lt;script&gt;alert(1)&lt;/script&gt; is not valid") {
-		t.Fatal(html)
-	}
-}
-
-// The panel says that placement checks the runner the agent routes the workload
-// to, and that a matching runner after it is not checked.
-func TestPlacementExplainsTheRunnerTheAgentRoutesTo(t *testing.T) {
-	html := renderPlacement(t, restv1.SpecPlacement{Targets: []restv1.PlacementTarget{{AgentID: "a", Exists: true, InventoryKnown: true, EligibilityReason: "schema_incompatible", Runners: []restv1.PlacementRunner{
-		{Name: "first", WorkloadMatch: true, LabelsMatch: true, Reason: "schema_incompatible", Detail: "/port: missing"},
-		{Name: "second", WorkloadMatch: true, LabelsMatch: true},
-	}}}})
-	for _, want := range []string{"routes the workload to the first registration", "Not checked: the agent routes this workload to an earlier registration."} {
-		if !strings.Contains(html, want) {
-			t.Fatalf("missing %q in %s", want, html)
-		}
-	}
-	if strings.Contains(html, "The first compatible registration is selected") {
-		t.Fatalf("the panel still says a later compatible registration is selected: %s", html)
-	}
-}

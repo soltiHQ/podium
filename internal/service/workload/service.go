@@ -25,30 +25,12 @@ type OfferedSchema struct {
 	Schema      []byte
 }
 
-// The refusals the service remembers: at most maxRefused fingerprints, each
-// with its reason cut to maxRefusalBytes.
-const (
-	maxRefused      = 4096
-	maxRefusalBytes = 512
-)
+// maxRefusalBytes bounds the reason a rejected schema logs.
+const maxRefusalBytes = 512
 
 // maxLoggedFingerprintBytes bounds an offered fingerprint in a log line: a real
 // one is 64 bytes, but an agent may offer a schema under any string.
 const maxLoggedFingerprintBytes = 128
-
-// RefusedError is what Compiled returns for a schema this podium refuses: one
-// whose bytes match its fingerprint and that Compile refuses, offered by an
-// agent or stored in the catalog by another version. The refusal is
-// deterministic for this binary. Reason says why, cut to 512 bytes; it quotes
-// agent-supplied schema text.
-type RefusedError struct {
-	Fingerprint string
-	Reason      string
-}
-
-func (e *RefusedError) Error() string {
-	return "workload: podium refused the schema " + e.Fingerprint + ": " + e.Reason
-}
 
 // Service is the workload catalog.
 type Service struct {
@@ -56,28 +38,19 @@ type Service struct {
 	logger zerolog.Logger
 	clock  func() time.Time
 
-	mu       sync.Mutex
-	compiled map[string]*workloadschema.Schema
+	mu sync.Mutex
 	// known holds the fingerprints seen in the catalog. An entry never changes
 	// or goes, so a fingerprint seen once never hits the store again.
 	known map[string]struct{}
-	// refused holds, by fingerprint, why this process refuses a schema whose
-	// bytes match the fingerprint: a refusal that is the same on every try. At
-	// most maxRefused entries; once full, a new refusal is not remembered, and
-	// its fingerprint is asked for and refused again, as each is the first time.
-	// An entry never changes or goes, but with the process.
-	refused map[string]string
 }
 
 // New returns the catalog service over store.
 func New(store storage.Storage, logger zerolog.Logger) *Service {
 	return &Service{
-		store:    store,
-		logger:   logger.With().Str("service", "workload").Logger(),
-		clock:    time.Now,
-		compiled: make(map[string]*workloadschema.Schema),
-		known:    make(map[string]struct{}),
-		refused:  make(map[string]string),
+		store:  store,
+		logger: logger.With().Str("service", "workload").Logger(),
+		clock:  time.Now,
+		known:  make(map[string]struct{}),
 	}
 }
 
@@ -136,9 +109,6 @@ func (s *Service) Exchange(ctx context.Context, agentID string, declared []model
 			s.reject(agentID, o.Fingerprint, "the schema is not declared by the agent")
 			continue
 		}
-		if _, refused := s.Refusal(o.Fingerprint); refused {
-			continue
-		}
 		if s.has(ctx, agentID, o.Fingerprint, absent) {
 			continue
 		}
@@ -155,10 +125,6 @@ func (s *Service) Exchange(ctx context.Context, agentID string, declared []model
 			s.reject(agentID, o.Fingerprint, "the fingerprint does not match the schema")
 			continue
 		}
-		if _, err := workloadschema.Compile(o.Schema); err != nil {
-			s.refuse(agentID, fp, err)
-			continue
-		}
 		entry, err := model.NewWorkloadSchema(fp, d.apiVersion, d.kind, o.Schema, agentID, s.clock())
 		if err != nil {
 			s.reject(agentID, o.Fingerprint, err.Error())
@@ -173,9 +139,6 @@ func (s *Service) Exchange(ctx context.Context, agentID string, declared []model
 
 	var want []string
 	for _, fp := range order {
-		if _, refused := s.Refusal(fp); refused {
-			continue
-		}
 		if !s.has(ctx, agentID, fp, absent) {
 			want = append(want, fp)
 		}
@@ -225,47 +188,6 @@ func (s *Service) reject(agentID, fingerprint, reason string) {
 		Msg("workload schema rejected")
 }
 
-// Refusal returns why this podium refuses the schema of fingerprint, and false
-// for one it does not refuse, or no longer remembers refusing.
-func (s *Service) Refusal(fingerprint string) (string, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	reason, ok := s.refused[fingerprint]
-	return reason, ok
-}
-
-// refuse remembers that this podium refuses the schema of fingerprint, whose
-// bytes match it, for the reason err gives, cut to maxRefusalBytes, and returns
-// the reason. The refusal is logged once, at WARN, the reason in a field: when
-// it is remembered, or every time while the refusals kept are at their bound.
-// agentID is the agent that offered the schema, empty for one in the catalog.
-func (s *Service) refuse(agentID, fingerprint string, err error) string {
-	reason := capText(err.Error(), maxRefusalBytes)
-	s.mu.Lock()
-	_, had := s.refused[fingerprint]
-	kept := had || len(s.refused) < maxRefused
-	if kept && !had {
-		s.refused[fingerprint] = reason
-	}
-	s.mu.Unlock()
-	if had {
-		return reason
-	}
-	ev := s.logger.Warn().Str("fingerprint", fingerprint).Str("reason", reason)
-	if agentID != "" {
-		ev = ev.Str("agent_id", agentID)
-	}
-	switch {
-	case !kept:
-		ev.Int("refused", maxRefused).Msg("workload schema refused; the refusals kept are at their bound, so podium asks for it again")
-	case agentID == "":
-		ev.Msg("stored workload schema refused: this podium does not compile it")
-	default:
-		ev.Msg("workload schema refused; podium no longer asks for it")
-	}
-	return reason
-}
-
 // capText cuts s to at most limit bytes on a UTF-8 boundary, and ends a cut
 // text with a marker, as proxy.CapAgentText does for an agent's error.
 func capText(s string, limit int) string {
@@ -277,36 +199,4 @@ func capText(s string, limit int) string {
 		cut--
 	}
 	return s[:cut] + "…"
-}
-
-// Compiled returns the compiled schema of a fingerprint in the catalog, and
-// false for one that is not in it. Compiled schemas are cached by fingerprint;
-// a fingerprint that is not in the catalog is not cached, as it can arrive. A
-// schema this podium refuses, offered or stored, is a *RefusedError.
-func (s *Service) Compiled(ctx context.Context, fingerprint string) (*workloadschema.Schema, bool, error) {
-	s.mu.Lock()
-	c, ok := s.compiled[fingerprint]
-	reason, refused := s.refused[fingerprint]
-	s.mu.Unlock()
-	if ok {
-		return c, true, nil
-	}
-	if refused {
-		return nil, false, &RefusedError{Fingerprint: fingerprint, Reason: reason}
-	}
-	entry, err := s.store.GetWorkloadSchema(ctx, fingerprint)
-	if errors.Is(err, storage.ErrNotFound) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, err
-	}
-	c, err = workloadschema.Compile(entry.Schema())
-	if err != nil {
-		return nil, false, &RefusedError{Fingerprint: fingerprint, Reason: s.refuse("", fingerprint, err)}
-	}
-	s.mu.Lock()
-	s.compiled[fingerprint] = c
-	s.mu.Unlock()
-	return c, true, nil
 }

@@ -115,7 +115,7 @@ func newAPIFixtureLogging(t *testing.T, wrap func(storage.Storage) storage.Stora
 		session.New(st, logger),
 		credential.New(st, logger, bcrypt.MinCost),
 		agent.New(st, logger, agentOpts...),
-		spec.New(st, logger, spec.WithSchemaSource(workload.New(st, logger))),
+		spec.New(st, logger),
 		archive, pool, hub, logs, streams, allowAccess,
 		WithCatalog(workload.New(st, logger)),
 		WithCluster(clustersvc.New(raft, logger, clustersvc.WithFingerprint(fixtureFingerprint))),

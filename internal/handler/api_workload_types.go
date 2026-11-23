@@ -48,7 +48,7 @@ func (a *API) workloadTypeList(w http.ResponseWriter, r *http.Request, mode http
 	for _, t := range types {
 		dto := restv1.WorkloadType{APIVersion: t.APIVersion, Kind: t.Kind, Fingerprints: make([]restv1.WorkloadFingerprint, 0, len(t.Fingerprints))}
 		for _, f := range t.Fingerprints {
-			dto.Fingerprints = append(dto.Fingerprints, restv1.WorkloadFingerprint{Fingerprint: f.Fingerprint, Agents: f.Agents, Received: f.Schema != nil, Refused: f.Refused})
+			dto.Fingerprints = append(dto.Fingerprints, restv1.WorkloadFingerprint{Fingerprint: f.Fingerprint, Agents: f.Agents, Received: f.Schema != nil})
 		}
 		items = append(items, dto)
 	}
@@ -78,7 +78,7 @@ func (a *API) workloadTypeDetail(w http.ResponseWriter, r *http.Request, mode ht
 	}
 	dto := restv1.WorkloadTypeDetail{APIVersion: t.APIVersion, Kind: t.Kind, Fingerprints: make([]restv1.WorkloadFingerprintDetail, 0, len(t.Fingerprints))}
 	for _, f := range t.Fingerprints {
-		dto.Fingerprints = append(dto.Fingerprints, restv1.WorkloadFingerprintDetail{Fingerprint: f.Fingerprint, Agents: f.Agents, Received: f.Schema != nil, Refused: f.Refused, Schema: f.Schema})
+		dto.Fingerprints = append(dto.Fingerprints, restv1.WorkloadFingerprintDetail{Fingerprint: f.Fingerprint, Agents: f.Agents, Received: f.Schema != nil, Schema: f.Schema})
 	}
 	response.OK(w, r, mode, &responder.View{Data: dto})
 }

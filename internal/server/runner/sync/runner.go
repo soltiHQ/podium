@@ -48,8 +48,6 @@ type Runner struct {
 	tokens  tokenSource
 	hub     *event.Hub
 	history *historysvc.Service
-	// schemas is the workload catalog each push checks its target against.
-	schemas specsvc.SchemaSource
 
 	logger zerolog.Logger
 	store  storage.Storage
@@ -126,7 +124,6 @@ func New(cfg Config, logger zerolog.Logger, store storage.Storage, pool *proxy.P
 		store:   store,
 		pool:    pool,
 		tokens:  agents,
-		schemas: catalog,
 		cfg:     cfg,
 		hub:     hub,
 		history: history,
@@ -567,7 +564,7 @@ func (r *Runner) prepareSubmit(ctx context.Context, ss *model.Rollout) (*model.S
 	if !ok {
 		return nil, nil, nil, false
 	}
-	if target := specsvc.CheckTarget(ctx, r.schemas, r.logger, ts, ag, r.now()); !target.Eligible {
+	if target := specsvc.CheckTarget(ts, ag, r.now()); !target.Eligible {
 		r.markFailed(ctx, ss, targetRefusal(target))
 		return nil, nil, nil, false
 	}

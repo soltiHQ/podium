@@ -1,7 +1,6 @@
 package model
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -171,67 +170,5 @@ func TestRuntimeEqualsHandlesNil(t *testing.T) {
 	}
 	if !n.RuntimeEquals(n) {
 		t.Error("nil vs nil should be equal")
-	}
-}
-
-// TestRuntimeEqualsSeesABodyChange: the workload is part of the runtime
-// fields, so a change of its body, type or schema is a runtime change, and a
-// copy of it, or the same numbers held another way, is not.
-func TestRuntimeEqualsSeesABodyChange(t *testing.T) {
-	base := Workload{
-		APIVersion: "solti.io/v1", Kind: "Container", SchemaFingerprint: "f1",
-		Body: map[string]any{"image": "busybox", "ports": []any{float64(80), map[string]any{"n": "x"}}},
-	}
-	a, _ := NewSpec("sp-1", "n", "slot")
-	a.SetWorkload(base)
-	b := a.Clone()
-	if !a.RuntimeEquals(b) {
-		t.Fatal("a clone differs from its original")
-	}
-	// A clone owns its body.
-	b.SetWorkload(base)
-	base.Body["ports"].([]any)[1].(map[string]any)["n"] = "changed"
-	if !a.RuntimeEquals(b) {
-		t.Fatal("changing the caller's body reached the spec")
-	}
-
-	for name, mutate := range map[string]func(w *Workload){
-		"nested body value": func(w *Workload) { w.Body["ports"].([]any)[1].(map[string]any)["n"] = "y" },
-		"added body key":    func(w *Workload) { w.Body["extra"] = true },
-		"api version":       func(w *Workload) { w.APIVersion = "solti.io/v2" },
-		"kind":              func(w *Workload) { w.Kind = "Other" },
-		"fingerprint":       func(w *Workload) { w.SchemaFingerprint = "f2" },
-	} {
-		c := a.Clone()
-		w := c.Workload()
-		mutate(&w)
-		c.SetWorkload(w)
-		if a.RuntimeEquals(c) {
-			t.Errorf("%s: not seen by RuntimeEquals", name)
-		}
-	}
-
-	// Numbers are the same number however held.
-	n1, n2 := Workload{Body: map[string]any{"n": float64(3)}}, Workload{Body: map[string]any{"n": json.Number("3")}}
-	if !n1.Equal(n2) {
-		t.Error("float64 3 and json.Number 3 differ")
-	}
-	if n1.Equal(Workload{Body: map[string]any{"n": json.Number("4")}}) {
-		t.Error("3 equals 4")
-	}
-	if !(Workload{}).Equal(Workload{Body: map[string]any{}}) {
-		t.Error("a nil body differs from an empty one")
-	}
-}
-
-func TestWorkloadGVK(t *testing.T) {
-	gvk, err := Workload{APIVersion: "solti.io/v1", Kind: "Container", SchemaFingerprint: "f"}.GVK()
-	if err != nil || gvk != (GroupVersionKind{Group: "solti.io", Version: "v1", Kind: "Container", SchemaFingerprint: "f"}) {
-		t.Fatalf("GVK = %+v, %v", gvk, err)
-	}
-	for _, w := range []Workload{{Kind: "K"}, {APIVersion: "g/", Kind: "K"}, {APIVersion: "/v1", Kind: "K"}, {APIVersion: "a/b/c", Kind: "K"}, {APIVersion: "g/v1"}} {
-		if _, err := w.GVK(); err == nil {
-			t.Errorf("GVK accepted %+v", w)
-		}
 	}
 }

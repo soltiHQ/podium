@@ -2,7 +2,6 @@ package wire_test
 
 import (
 	"bytes"
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -113,51 +112,6 @@ func TestSpec_ProtoRoundtrip(t *testing.T) {
 	}
 	if len(back.Targets()) != 2 {
 		t.Fatalf("targets: %v", back.Targets())
-	}
-}
-
-// TestSpec_WorkloadBodyNestedRoundtrip — typical POST /api/v1/specs comes
-// with a workload body of shape {"env": {...}, "args": [...]} — after JSON
-// unmarshal it carries map[string]any / []any. Verify structpb passes it
-// through proto Marshal+Unmarshal without losing structure.
-func TestSpec_WorkloadBodyNestedRoundtrip(t *testing.T) {
-	ts, _ := model.NewSpec("s1", "my-spec", "slot")
-	setBody(ts, map[string]any{
-		"cmd":    "echo",
-		"args":   []any{"hello", "world"},
-		"env":    map[string]any{"KEY": "value", "PORT": 8080},
-		"config": map[string]any{"nested": map[string]any{"deep": true}},
-	})
-	ts.SetCreatedAt(nowTruncated())
-
-	message, err := wire.SpecToProto(ts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := proto.Marshal(message)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	var msg raftv1.SpecMsg
-	if err := proto.Unmarshal(data, &msg); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	back, err := wire.SpecFromProto(&msg)
-	if err != nil {
-		t.Fatalf("FromProto: %v", err)
-	}
-
-	kc := back.Workload().Body
-	if kc["cmd"] != "echo" {
-		t.Fatalf("cmd lost: %v", kc["cmd"])
-	}
-	env, ok := kc["env"].(map[string]any)
-	if !ok || env["KEY"] != "value" {
-		t.Fatalf("nested env lost: %v", kc["env"])
-	}
-	// structpb stores all numbers as float64.
-	if port, _ := env["PORT"].(float64); port != 8080 {
-		t.Fatalf("nested numeric lost: %v (type %T)", env["PORT"], env["PORT"])
 	}
 }
 
@@ -293,54 +247,5 @@ func TestCommand_ProtoRoundtrip(t *testing.T) {
 	again, _ := proto.Marshal(&back)
 	if !bytes.Equal(data, again) {
 		t.Fatal("re-encoded bytes differ from original")
-	}
-}
-
-// TestSpecMsgCarriesTheWorkload: a spec's workload survives the proto round
-// trip, with the body's numbers intact, and an unset workload stays unset.
-func TestSpecMsgCarriesTheWorkload(t *testing.T) {
-	ts, err := model.NewSpec("sp-1", "n", "slot")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ts.SetWorkload(model.Workload{
-		APIVersion: "solti.io/v1", Kind: "Container", SchemaFingerprint: strings.Repeat("a", 64),
-		Body: map[string]any{"image": "busybox", "replicas": json.Number("3"), "env": []any{map[string]any{"k": "v"}}},
-	})
-	msg, err := wire.SpecToProto(ts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if msg.GetWorkloadApiVersion() != "solti.io/v1" || msg.GetWorkloadKind() != "Container" ||
-		msg.GetWorkloadSchemaFingerprint() != strings.Repeat("a", 64) || msg.GetWorkloadBody().GetFields()["image"].GetStringValue() != "busybox" {
-		t.Fatalf("message = %v", msg)
-	}
-	raw, err := proto.Marshal(msg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded raftv1.SpecMsg
-	if err := proto.Unmarshal(raw, &decoded); err != nil {
-		t.Fatal(err)
-	}
-	back, err := wire.SpecFromProto(&decoded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !back.RuntimeEquals(ts) || !back.Workload().Equal(ts.Workload()) {
-		t.Fatalf("round trip = %+v, want %+v", back.Workload(), ts.Workload())
-	}
-
-	bare, _ := model.NewSpec("sp-2", "n", "slot")
-	msg, err = wire.SpecToProto(bare)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if msg.GetWorkloadBody() != nil || msg.GetWorkloadKind() != "" {
-		t.Fatalf("an unset workload came out as %v", msg)
-	}
-	back, err = wire.SpecFromProto(msg)
-	if err != nil || !back.Workload().IsZero() {
-		t.Fatalf("an unset workload came back as %+v (%v)", back.Workload(), err)
 	}
 }

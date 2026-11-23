@@ -93,7 +93,7 @@ func initServices(store storage.Storage, authModel *kit.Auth, historyCfg history
 		session:    session.New(store, logger),
 		agent:      agent.New(store, logger, agentOpts...),
 		workload:   workloadSVC,
-		spec:       spec.New(store, logger, spec.WithSchemaSource(workloadSVC)),
+		spec:       spec.New(store, logger),
 		role:       role.New(store, logger),
 		user:       user.New(store, logger),
 	}, nil

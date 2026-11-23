@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/soltiHQ/control-plane/internal/proxy"
-	"github.com/soltiHQ/control-plane/internal/service/workload"
-	"github.com/soltiHQ/control-plane/internal/workloadschema"
+	//__DEL__
+	//__DEL__
 
 	"github.com/rs/zerolog"
 	"github.com/soltiHQ/control-plane/domain/enum"
@@ -20,27 +20,13 @@ import (
 	"github.com/soltiHQ/control-plane/internal/storage"
 )
 
-// SchemaSource gives the compiled schema of a fingerprint in the workload
-// catalog. The bool is false when the catalog does not know the fingerprint. A
-// schema podium refuses is a *workload.RefusedError.
-type SchemaSource interface {
-	Compiled(ctx context.Context, fingerprint string) (*workloadschema.Schema, bool, error)
-}
-
 // Option configures a Service.
 type Option func(*Service)
 
-// WithSchemaSource sets the catalog the service validates workloads against.
-// Without one, the service refuses to create or change a spec.
-func WithSchemaSource(src SchemaSource) Option {
-	return func(s *Service) { s.schemas = src }
-}
-
 // Service provides task spec management operations.
 type Service struct {
-	logger  zerolog.Logger
-	store   storage.Storage
-	schemas SchemaSource
+	logger zerolog.Logger
+	store  storage.Storage
 }
 
 // New creates a new task spec service.
@@ -293,9 +279,7 @@ func (s *Service) RolloutsBySpec(ctx context.Context, specID string) ([]*model.R
 // `planTokens` are the plan tokens of the placements the caller reviewed (see [Service.PreviewPlacement]). Unless it
 // is nil, the token of the plan recomputed inside the transaction must be one of them, else Deploy writes nothing and
 // returns [ErrPlacementChanged]; an empty list names no plan. Pass nil to skip the token check (API clients that never
-// preview). Deploy validates the workload against the targets' schemas before its transaction opens: with or without
-// tokens, it returns [ErrPlacementChanged] and writes nothing when the spec's workload or runner labels changed in
-// between, and it refuses targets that are not compatible.
+// preview). Deploy refuses targets that are not compatible.
 func (s *Service) Deploy(ctx context.Context, specID string, planTokens []string) error {
 	if specID == "" {
 		return storage.ErrInvalidArgument
@@ -305,11 +289,7 @@ func (s *Service) Deploy(ctx context.Context, specID string, planTokens []string
 		generation                       int
 		install, update, uninstall, noop int
 	)
-	pre, err := s.prefetch(ctx, specID)
-	if err != nil {
-		return err
-	}
-	err = s.store.WithTx(ctx, func(tx storage.Storage) error {
+	err := s.store.WithTx(ctx, func(tx storage.Storage) error {
 		ts, err := tx.GetSpec(ctx, specID)
 		if err != nil {
 			return err
@@ -318,7 +298,7 @@ func (s *Service) Deploy(ctx context.Context, specID string, planTokens []string
 			return storage.ErrInvalidArgument
 		}
 		generation = ts.Generation()
-		plan, steps, err := loadPlacement(ctx, tx, nil, s.logger, ts, time.Now(), pre)
+		plan, steps, err := loadPlacement(ctx, tx, ts, time.Now())
 		if err != nil {
 			return err
 		}
@@ -423,27 +403,10 @@ func (s *Service) validateWorkload(ctx context.Context, w model.Workload) error 
 	if _, err := w.GVK(); err != nil {
 		return &WorkloadError{Message: err.Error()}
 	}
-	if s.schemas == nil {
-		return errors.New("spec: no workload schema source is configured")
-	}
-	schema, known, err := s.schemas.Compiled(ctx, w.SchemaFingerprint)
-	var refused *workload.RefusedError
-	switch {
-	case errors.As(err, &refused):
-		return &WorkloadError{Message: fmt.Sprintf("podium refused the workload schema %q: %s", refused.Fingerprint, refused.Reason)}
-	case err != nil:
-		return err
-	case !known:
-		return &WorkloadError{Message: fmt.Sprintf("the workload schema %q is not in the catalog", w.SchemaFingerprint)}
-	}
 	body := w.Body
 	if body == nil {
 		body = map[string]any{}
 	}
-	if err := workloadRefusal(schema.Validate(body)); err != nil {
-		return err
-	}
-	// After Validate, which bounds the digits and the exponent of every number.
 	return numberRefusal(wire.CheckWorkloadBody(body))
 }
 
@@ -462,22 +425,3 @@ func numberRefusal(err error) error {
 		return &WorkloadError{Message: err.Error()}
 	}
 }
-
-// workloadRefusal turns the result of validating a body into the error a save
-// returns: nil for a valid body, else a [WorkloadError] that says why.
-func workloadRefusal(err error) error {
-	var verr *workloadschema.ValidationError
-	switch {
-	case err == nil:
-		return nil
-	case errors.As(err, &verr):
-		return &WorkloadError{Message: problemsText(verr)}
-	case errors.Is(err, workloadschema.ErrValidationTooExpensive):
-		return &WorkloadError{Message: "the workload schema is too expensive to validate this body"}
-	default:
-		return &WorkloadError{Message: err.Error()}
-	}
-}
-
-// maxProblems is how many schema problems a refusal lists.
-const maxProblems = 20

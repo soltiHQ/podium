@@ -20,7 +20,6 @@ import (
 	"github.com/soltiHQ/control-plane/internal/event"
 	"github.com/soltiHQ/control-plane/internal/proxy"
 	agentsvc "github.com/soltiHQ/control-plane/internal/service/agent"
-	workloadsvc "github.com/soltiHQ/control-plane/internal/service/workload"
 	"github.com/soltiHQ/control-plane/internal/storage"
 	"github.com/soltiHQ/control-plane/internal/storage/inmemory"
 	"github.com/soltiHQ/control-plane/internal/transport/errkind"
@@ -172,13 +171,12 @@ func newFakeRunner(t *testing.T, fp *fakeProxy) (*Runner, *inmemory.Store, *even
 	store := inmemory.New()
 	hub := event.NewHub(zerolog.New(io.Discard))
 	r := &Runner{
-		pool:    &fakePool{ap: fp},
-		tokens:  agentsvc.New(store, zerolog.New(io.Discard)),
-		schemas: workloadsvc.New(store, zerolog.New(io.Discard)),
-		hub:     hub,
-		logger:  zerolog.New(io.Discard),
-		store:   store,
-		cfg:     Config{}.withDefaults(),
+		pool:   &fakePool{ap: fp},
+		tokens: agentsvc.New(store, zerolog.New(io.Discard)),
+		hub:    hub,
+		logger: zerolog.New(io.Discard),
+		store:  store,
+		cfg:    Config{}.withDefaults(),
 	}
 	return r, store, hub
 }
